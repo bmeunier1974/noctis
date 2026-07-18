@@ -23,9 +23,17 @@ The engine owns no toolbox state, so it is exercised in isolation with a fake LL
 6. When the retry budget is exhausted, raise :class:`AuthoringError` carrying the final
    validation error.
 
-Reference-adaptation and revision briefs (adapting a named library strategy, revising an
-existing file) are a follow-up (#7); :class:`StrategyBrief` carries a ``reference`` slot so
-the interface does not preclude them, but this engine does not compose them.
+Two composition modes ride the same loop, gate, and retry budget as plain authoring (#7):
+
+* **Reference adaptation** — when the brief names an existing library strategy in
+  ``reference``, that strategy's full source is folded into the prompt with a
+  translate-don't-invent instruction, so the coder adapts proven structure instead of
+  inventing from scratch. A ``reference`` that does not resolve in the library is rejected
+  *before* any coder completion is spent (a bad brief, not a coder failure).
+* **Revision** — when the target ``name`` already exists, its current source is folded in and
+  the brief becomes the change request. The validated result replaces the file through the
+  normal :func:`write_strategy` path; a revision that never validates leaves the previous
+  version untouched (the library's own guarantee).
 """
 
 from __future__ import annotations
@@ -78,8 +86,9 @@ class StrategyBrief:
 
     The four required fields are the division-of-labor guard: a brief that could degenerate
     to "write me something profitable" would mean research silently moved to the coder. The
-    optional slots steer provenance (``style``/``symbols``) and leave room for the follow-up
-    reference-adaptation path (``reference``) without this engine composing it.
+    optional slots steer provenance (``style``/``symbols``) and name a library strategy to
+    adapt (``reference``) — its source is composed into the prompt as proven structure to
+    translate, and an unknown reference is rejected before any coder completion.
     """
 
     thesis: str
@@ -158,14 +167,29 @@ class StrategyAuthor:
         on success. Raises :class:`AuthoringError` when the coder cannot produce a file that
         passes the write gate within the retry budget. Every private retry is invisible to
         the caller.
+
+        When ``brief.reference`` names a library strategy, its source is composed into the
+        prompt as structure to adapt; an unknown reference raises
+        :class:`~noctis.strategies.library.StrategyValidationError` *before* any coder
+        completion. When ``name`` already exists, its current source is composed in and the
+        brief becomes a revision request.
         """
+        reference_source = self._reference_source(brief)  # unknown ref → raise, no completion
+        current_source = self._current_source(name)  # non-None ⇒ this is a revision
         prior: tuple[str, str] | None = None
         last_error: Exception | None = None
         for _ in range(self._max_attempts):
+            content = self._user_prompt(
+                name,
+                brief,
+                prior,
+                reference_source=reference_source,
+                current_source=current_source,
+            )
             turn = self._client.complete(
                 system=self._system_prompt,
                 tools=[],
-                messages=[{"role": "user", "content": self._user_prompt(name, brief, prior)}],
+                messages=[{"role": "user", "content": content}],
                 max_tokens=self._max_tokens,
             )
             source = _extract_code_block(turn.text)
@@ -187,6 +211,37 @@ class StrategyAuthor:
             validation_error=last_error,
         ) from last_error
 
+    # ── reference / revision resolution ──────────────────────────────────────
+    def _reference_source(self, brief: StrategyBrief) -> str | None:
+        """The named reference strategy's source to adapt, or ``None`` when none was named.
+
+        An unknown reference is a bad brief, not a coder failure: it raises
+        :class:`~noctis.strategies.library.StrategyValidationError` here — *before* the loop —
+        so no completion is spent and the caller surfaces a repairable, actionable error.
+        """
+        if not brief.reference:
+            return None
+        try:
+            return library.strategy_source(self._strategies_dir, brief.reference)
+        except FileNotFoundError:
+            raise library.StrategyValidationError(
+                f"brief.reference names {brief.reference!r}, which is not in the strategy "
+                f"library; reference an existing strategy (list_strategies shows what exists) "
+                f"or drop the reference to author from scratch"
+            ) from None
+
+    def _current_source(self, name: str) -> str | None:
+        """The current source of ``name`` when it already exists, else ``None``.
+
+        A non-``None`` result makes this a *revision*: the brief is a change request against
+        the returned source, and the validated result replaces it through the normal write
+        path (a failed revision leaves it untouched — the library's own guarantee).
+        """
+        try:
+            return library.strategy_source(self._strategies_dir, name)
+        except FileNotFoundError:
+            return None
+
     # ── prompt composition ───────────────────────────────────────────────────
     def _build_system_prompt(self, template: str) -> str:
         parts = [_ROLE_RULES, _CONTRACT_RULES]
@@ -198,7 +253,15 @@ class StrategyAuthor:
         parts.append(_OUTPUT_RULES)
         return "\n\n".join(parts)
 
-    def _user_prompt(self, name: str, brief: StrategyBrief, prior: tuple[str, str] | None) -> str:
+    def _user_prompt(
+        self,
+        name: str,
+        brief: StrategyBrief,
+        prior: tuple[str, str] | None,
+        *,
+        reference_source: str | None = None,
+        current_source: str | None = None,
+    ) -> str:
         lines = [
             f"Author the strategy file for name: {name}",
             "",
@@ -215,6 +278,20 @@ class StrategyAuthor:
         if brief.reference:
             lines.append(f"Reference strategy to adapt: {brief.reference}")
         prompt = "\n".join(lines)
+        if reference_source:
+            prompt += (
+                f"\n\nREFERENCE STRATEGY ({brief.reference}) — proven structure to adapt, not "
+                "invent past. Translate this file's structure into the BRIEF above; keep only "
+                "the edge the brief specifies and add nothing the brief did not ask for:\n"
+                "```python\n" + reference_source + "```"
+            )
+        if current_source:
+            prompt += (
+                f"\n\nCURRENT VERSION of {name} — this strategy already exists; the BRIEF is a "
+                "change request against it. Revise this file to satisfy the brief, preserving "
+                "everything the brief does not ask you to change, and return the complete "
+                "revised file:\n```python\n" + current_source + "```"
+            )
         if prior is not None:
             source, error = prior
             prompt += (

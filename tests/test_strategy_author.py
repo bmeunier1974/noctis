@@ -39,6 +39,11 @@ def fenced(source: str) -> str:
     return f"Here is the file:\n```python\n{source}```\n"
 
 
+def named(source_name: str) -> str:
+    """PROBE re-pointed at a fresh file name (its `name` attribute must match the file)."""
+    return PROBE.replace('name = "probe"', f'name = "{source_name}"')
+
+
 class FakeCoder:
     """Plays a fixed list of text replies through the neutral ``complete()`` seam and
     records every call — mirrors the fake-LLM prior art in the agent/ideation tests, but
@@ -185,3 +190,71 @@ def test_a_fresh_authoring_job_carries_no_prior_state(tmp_path, families, fast_g
     second_call = client.calls[1]
     assert len(second_call["messages"]) == 1
     assert "probe_two" in second_call["messages"][0]["content"]
+
+
+# ── 6. Reference adaptation: a named library strategy's source enters the prompt ──────────
+def test_reference_source_is_composed_into_the_prompt(tmp_path, families, fast_gate):
+    library.write_strategy(tmp_path, "ref_strat", named("ref_strat"), families)
+    brief = StrategyBrief(
+        thesis="Adapt the reference's proven structure to a new symbol set.",
+        entry_exit="Long above the SMA, mirroring the reference.",
+        param_space="lookback int 5..40",
+        scenarios="A rally pulls long; a steady decline stays flat.",
+        reference="ref_strat",
+    )
+    engine, client = _author(tmp_path, families, [fenced(named("adapted"))])
+
+    result = engine.author("adapted", brief)
+
+    assert result["name"] == "adapted"
+    assert library.strategy_path(tmp_path, "adapted") == tmp_path / "__tmp" / "adapted.py"
+    # The reference's full source reached the coder to translate, not just its name.
+    assert named("ref_strat") in client.calls[0]["messages"][0]["content"]
+
+
+def test_unknown_reference_is_rejected_before_any_coder_completion(tmp_path, families, fast_gate):
+    brief = StrategyBrief(
+        thesis="Adapt a reference that does not exist.",
+        entry_exit="Long above the SMA.",
+        param_space="lookback int 5..40",
+        scenarios="A rally pulls long; a decline stays flat.",
+        reference="no_such_strategy",
+    )
+    engine, client = _author(tmp_path, families, [fenced(PROBE)])
+
+    with pytest.raises(library.StrategyValidationError) as excinfo:
+        engine.author("adapted", brief)
+
+    assert "no_such_strategy" in str(excinfo.value)
+    assert client.calls == []  # rejected before spending a completion
+    assert library.strategy_path(tmp_path, "adapted") is None
+
+
+# ── 7. Revision: an existing target name composes its current source as the change target ─
+def test_existing_name_composes_current_source_as_a_revision(tmp_path, families, fast_gate):
+    library.write_strategy(tmp_path, "probe", PROBE, families)
+    revised = PROBE.replace(
+        "Toy probe: long above its own moving average.",
+        "Revised probe: long above its own moving average.",
+    )
+    engine, client = _author(tmp_path, families, [fenced(revised)])
+
+    result = engine.author("probe", BRIEF)
+
+    assert result["name"] == "probe"
+    # The current version was composed into the prompt as the change target.
+    assert PROBE in client.calls[0]["messages"][0]["content"]
+    # The validated revision replaced the file via the normal write path.
+    assert library.strategy_source(tmp_path, "probe") == revised
+
+
+def test_failed_revision_leaves_the_existing_file_untouched(tmp_path, families, fast_gate):
+    library.write_strategy(tmp_path, "probe", PROBE, families)
+    engine, client = _author(tmp_path, families, [fenced(BROKEN)] * 3)
+
+    with pytest.raises(AuthoringError):
+        engine.author("probe", BRIEF)
+
+    assert len(client.calls) == 3
+    # The previous version is intact — the write gate never replaced it (library guarantee).
+    assert library.strategy_source(tmp_path, "probe") == PROBE

@@ -1037,6 +1037,13 @@ def test_market_context_character_matches_the_screen(toolbox):
 # deterministically ("class sets name=..."), so a coder that keeps emitting it never lands.
 BROKEN = PROBE.replace('name = "probe"', 'name = "mismatch"')
 
+# PROBE with only its thesis line changed — a valid revision whose distinct content proves
+# the file was actually replaced (and whose absence in the OLD source proves composition).
+REVISED_PROBE = PROBE.replace(
+    "Toy probe: long above its own moving average.",
+    "Revised probe: long above its own moving average.",
+)
+
 BRIEF_ARGS = {
     "thesis": "Long above a short moving average; the drift persists intraday.",
     "entry_exit": "Long when close > SMA(lookback); flat otherwise.",
@@ -1207,3 +1214,62 @@ def test_brief_mode_fixation_backstop_fires(tmp_path):
     out = box.dispatch("write_strategy", {"name": "fixated", "brief": BRIEF_ARGS})
     assert "consecutive write-gate rejections" in out["error"]
     assert "list_strategies" in out["error"]
+
+
+# ── brief mode: reference adaptation and revisions (#7) ────────────────────────────────────
+def test_brief_reference_composes_library_source_and_lands(tmp_path):
+    """A brief naming a library strategy in `reference` includes that strategy's source in the
+    coder prompt (translate-don't-invent); the adapted result validates and lands in __tmp."""
+    box, coder = _coder_box(tmp_path, [_fenced(_named("adapted"))])
+    out = box.dispatch(
+        "write_strategy",
+        {"name": "adapted", "brief": {**BRIEF_ARGS, "reference": "probe"}},
+    )
+    assert out.get("ok") is True
+    assert out["name"] == "adapted"
+    assert (
+        library.strategy_path(box.strategies_dir, "adapted")
+        == box.strategies_dir.tmp / "adapted.py"
+    )
+    # probe's full source (the reference) reached the coder for translation.
+    assert PROBE in coder.calls[0]["messages"][0]["content"]
+    assert len(coder.calls) == 1
+
+
+def test_brief_unknown_reference_rejected_without_coder_completion(tmp_path):
+    """A `reference` naming a strategy that isn't in the library is rejected before any coder
+    completion, with the driver-visible repairable error shape."""
+    box, coder = _coder_box(tmp_path, [_fenced(_named("adapted"))])
+    out = box.dispatch(
+        "write_strategy",
+        {"name": "adapted", "brief": {**BRIEF_ARGS, "reference": "ghost_strategy"}},
+    )
+    assert "error" in out
+    assert "ghost_strategy" in out["error"]  # names the missing reference
+    assert "validation failed" in out["error"] and "SAME name" in out["error"]  # repairable
+    assert coder.calls == []  # zero completions spent before the reject
+    assert library.strategy_path(box.strategies_dir, "adapted") is None
+
+
+def test_brief_revision_replaces_existing_file_via_normal_write(tmp_path):
+    """A brief whose target name already exists composes the current source as a revision
+    request; the validated result replaces the file via the normal write path (__tmp tier)."""
+    box, coder = _coder_box(tmp_path, [_fenced(REVISED_PROBE)])
+    out = box.dispatch("write_strategy", {"name": "probe", "brief": BRIEF_ARGS})
+    assert out.get("ok") is True
+    assert out["name"] == "probe"
+    # The current version was the change target in the coder prompt.
+    assert PROBE in coder.calls[0]["messages"][0]["content"]
+    # The validated revision replaced the file in place.
+    assert library.strategy_source(box.strategies_dir, "probe") == REVISED_PROBE
+    assert library.strategy_path(box.strategies_dir, "probe") == box.strategies_dir.tmp / "probe.py"
+
+
+def test_brief_failed_revision_leaves_existing_file_untouched(tmp_path):
+    """A revision whose validation never passes leaves the previous version untouched — the
+    existing library.write_strategy guarantee, proven end-to-end through the brief path."""
+    box, coder = _coder_box(tmp_path, [_fenced(BROKEN)] * 3)
+    out = box.dispatch("write_strategy", {"name": "probe", "brief": BRIEF_ARGS})
+    assert "error" in out and "validation failed" in out["error"]
+    assert len(coder.calls) == 3  # initial + 2 private retries
+    assert library.strategy_source(box.strategies_dir, "probe") == PROBE  # untouched
