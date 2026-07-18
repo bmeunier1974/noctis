@@ -4,6 +4,7 @@ holdout-capped previews, budget caps, and the new-strategy soft nudge."""
 from __future__ import annotations
 
 import json
+from collections import deque
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,7 @@ from noctis.config.settings import Settings
 from noctis.data.ingest import IngestResult
 from noctis.data.types import empty_bars
 from noctis.memory import InMemoryMemory
+from noctis.research import Capabilities, Turn
 from noctis.research.tools import ResearchToolbox
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
@@ -1028,3 +1030,180 @@ def test_market_context_character_matches_the_screen(toolbox):
         character = entry["character"]
         assert set(character) == {"trend_efficiency", "ann_volatility", "day_dollar_volume_m"}
         assert {k: screened[sym][k] for k in character} == character
+
+
+# ── brief mode: coder-model authoring (schema switch, shared guards, repairable failure) ──
+# A brief-carrying source that mismatches its own file name — the write gate rejects it
+# deterministically ("class sets name=..."), so a coder that keeps emitting it never lands.
+BROKEN = PROBE.replace('name = "probe"', 'name = "mismatch"')
+
+BRIEF_ARGS = {
+    "thesis": "Long above a short moving average; the drift persists intraday.",
+    "entry_exit": "Long when close > SMA(lookback); flat otherwise.",
+    "param_space": "lookback int 5..40",
+    "scenarios": "A rally pulls long; a steady decline stays flat.",
+    "style": "momentum",
+    "symbols": ["AAA", "BBB"],
+}
+
+
+def _fenced(source: str) -> str:
+    """Wrap strategy source in a python code fence, as a coder reply would."""
+    return f"Here is the file:\n```python\n{source}```\n"
+
+
+def _named(name: str) -> str:
+    """PROBE re-pointed at a fresh file name (its `name` attribute must match the file)."""
+    return PROBE.replace('name = "probe"', f'name = "{name}"')
+
+
+class _FakeCoder:
+    """A scripted coder client for the toolbox's brief path — no network, no API key.
+
+    Plays fixed text replies through the neutral ``complete()`` seam and records every call,
+    so tests can assert both the authored outcome and whether the coder was consulted at all
+    (the guards that fire before source exists must spend zero completions)."""
+
+    def __init__(self, replies):
+        self._replies = deque(replies)
+        self.capabilities = Capabilities()
+        self.calls: list[dict] = []
+
+    def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
+        self.calls.append({"system": system, "tools": tools, "messages": messages})
+        text = self._replies.popleft()
+        return Turn(
+            text=text,
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage={},
+            assistant_message={"role": "assistant", "content": text},
+        )
+
+
+def _coder_box(tmp_path, replies):
+    coder = _FakeCoder(replies)
+    return _make_toolbox(tmp_path, coder_client=coder), coder
+
+
+def _write_spec(box):
+    return next(s for s in box.tool_specs() if s["name"] == "write_strategy")
+
+
+def test_write_schema_requires_source_without_coder(toolbox):
+    """Default (no coder): the driver hand-writes source — schema unchanged, no `brief`."""
+    schema = _write_spec(toolbox)["input_schema"]
+    assert schema["required"] == ["name", "source"]
+    assert "brief" not in schema["properties"]
+
+
+def test_write_schema_switches_to_brief_with_coder(tmp_path):
+    """Coder configured: `brief` becomes required, `source` stays accepted-but-optional —
+    exactly one authoring mode is ever visible to the driver."""
+    box, _ = _coder_box(tmp_path, [])
+    schema = _write_spec(box)["input_schema"]
+    assert schema["required"] == ["name", "brief"]
+    assert "source" in schema["properties"]  # a capable driver may still hand-write
+    brief = schema["properties"]["brief"]
+    assert set(brief["required"]) == {"thesis", "entry_exit", "param_space", "scenarios"}
+    assert {
+        "thesis",
+        "entry_exit",
+        "param_space",
+        "scenarios",
+        "reference",
+        "style",
+        "symbols",
+    } <= set(brief["properties"])
+
+
+def test_brief_authors_validated_file_same_shape_as_source(tmp_path):
+    """A brief flows driver → toolbox → engine → validated file in the working tier, with
+    the same success-result shape (ok/name/path/header) as a source-based write."""
+    box, coder = _coder_box(tmp_path, [_fenced(_named("brief_probe"))])
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    assert out.get("ok") is True
+    assert out["name"] == "brief_probe"
+    assert {"ok", "name", "path", "header"} <= set(out)
+    assert (
+        library.strategy_path(box.strategies_dir, "brief_probe")
+        == box.strategies_dir.tmp / "brief_probe.py"
+    )
+    # Same post-write bookkeeping as the source path.
+    assert "brief_probe" in box.undecided
+    assert "brief_probe" in box.strategies_touched
+    assert len(coder.calls) == 1  # one completion for a first-try success
+
+
+def test_source_write_still_works_with_coder_configured(tmp_path):
+    """The hand-written revision path: a driver may still submit `source` in coder mode,
+    and the coder is never consulted for it."""
+    box, coder = _coder_box(tmp_path, [])
+    out = box.dispatch("write_strategy", {"name": "hand_written", "source": _named("hand_written")})
+    assert out.get("ok") is True
+    assert out["name"] == "hand_written"
+    assert coder.calls == []
+
+
+def test_brief_engine_failure_surfaces_repairable_bug_shape(tmp_path):
+    """The coder exhausts its private retries → the final validation error reaches the driver
+    in the existing repairable-code-bug shape (REPAIR, resubmit the SAME name)."""
+    box, coder = _coder_box(tmp_path, [_fenced(BROKEN)] * 3)
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    assert "error" in out
+    assert "validation failed" in out["error"]
+    assert "SAME name" in out["error"]
+    assert "class sets name" in out["error"]  # the gate's real message surfaces
+    assert len(coder.calls) == 3  # initial + 2 private retries, invisible to the driver
+    assert library.strategy_path(box.strategies_dir, "brief_probe") is None  # nothing landed
+    assert "brief_probe" not in box.undecided
+
+
+def test_brief_mode_exhausted_class_guard_fires_before_coder(tmp_path):
+    """The exhausted-class guard fires identically in brief mode — and before any coder
+    completion is spent, so delegation cannot reopen a proven dead end."""
+    box, coder = _coder_box(tmp_path, [_fenced(_named("brief_probe"))])
+    box.exhausted.record("per-symbol long/flat overlay", "forfeits drift", example="old")
+    out = box.dispatch(
+        "write_strategy",
+        {
+            "name": "brief_probe",
+            "brief": BRIEF_ARGS,
+            "class_tag": "Per-Symbol Long/Flat Overlay",
+        },
+    )
+    assert "error" in out and "exhausted-class guard" in out["error"]
+    assert coder.calls == []  # blocked before spending a single coder completion
+    # Naming a genuinely new lever lifts the block and authors through the coder.
+    ok = box.dispatch(
+        "write_strategy",
+        {
+            "name": "brief_probe",
+            "brief": BRIEF_ARGS,
+            "class_tag": "Per-Symbol Long/Flat Overlay",
+            "new_lever": "adds a short leg",
+        },
+    )
+    assert ok.get("ok") is True
+    assert len(coder.calls) == 1
+
+
+def test_brief_mode_undecided_warning_fires(tmp_path):
+    """The undecided-strategy soft nudge fires identically in brief mode."""
+    box, _ = _coder_box(tmp_path, [_fenced(_named("first_one")), _fenced(_named("second_one"))])
+    box.dispatch("write_strategy", {"name": "first_one", "brief": BRIEF_ARGS})
+    out = box.dispatch("write_strategy", {"name": "second_one", "brief": BRIEF_ARGS})
+    assert out.get("ok") is True  # soft nudge, not a block
+    assert "undecided" in out.get("warning", "")
+
+
+def test_brief_mode_fixation_backstop_fires(tmp_path):
+    """The write-fixation backstop fires identically in brief mode: three consecutive
+    write-gate rejections with no backtest yet gain the redirect toward the library."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN)] * 9)  # 3 completions per failing call
+    for _ in range(2):
+        out = box.dispatch("write_strategy", {"name": "fixated", "brief": BRIEF_ARGS})
+        assert "error" in out and "consecutive" not in out["error"]
+    out = box.dispatch("write_strategy", {"name": "fixated", "brief": BRIEF_ARGS})
+    assert "consecutive write-gate rejections" in out["error"]
+    assert "list_strategies" in out["error"]
