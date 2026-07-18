@@ -29,13 +29,13 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "typer>=0.27.0",
     "numpy>=2.4.6",
-    "pandas>=3.0.3",
+    "pandas>=2.2.3",
     "pyarrow>=25.0.0",
 ]
 
 [project.optional-dependencies]
 engine = ["nautilus_trader>=1.221.0"]
-research = ["vectorbt>=1.1.0", "optuna>=4.9.0", "quantstats-lumi>=1.1.5"]
+research = ["vectorbt>=1.0", "optuna>=4.9.0", "quantstats-lumi>=1.1.5"]
 data = [
     "databento>=0.81.0",
     "yfinance>=1.5.1",
