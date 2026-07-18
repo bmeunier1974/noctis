@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor (requires-python, ruff/mypy targets); 3.12 proves forward compat.
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      # `--locked` is the point: fail if pyproject.toml changed without regenerating uv.lock.
+      # Installs core + the default dev group only — no heavy extras, no API key. The suite
+      # is designed to pass on that install (tests/conftest.py isolates env vars).
+      - name: Sync (locked, core + dev)
+        run: uv sync --locked
+
+      - name: Tests
+        run: uv run --no-sync pytest
+
+      - name: Lint (ruff check)
+        run: uv run --no-sync ruff check .
+
+      - name: Format check (ruff format)
+        run: uv run --no-sync ruff format --check .
+
+      - name: Type check (mypy)
+        run: uv run --no-sync mypy
+
+      - name: Build package
+        run: uv build

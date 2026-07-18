@@ -1,0 +1,41 @@
+# Automated code-quality gates. One-time setup:
+#
+#   pre-commit install          # run hooks on every `git commit`
+#   pre-commit run --all-files  # run the whole suite on demand
+#
+# Hook versions are pinned to the versions in the dev extras; bump with
+# `pre-commit autoupdate`.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        # Keep the 500 KB guard against stray data/blobs, but exempt the uv lockfile:
+        # it is an auto-generated, intentionally-committed manifest that legitimately
+        # exceeds the limit and grows with the dependency graph.
+        args: [--maxkb=500]
+        exclude: ^uv\.lock$
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.1.0
+    hooks:
+      - id: mypy
+        # Scope + strictness come from [tool.mypy] in pyproject.toml.
+        pass_filenames: false
+        additional_dependencies:
+          - pydantic>=2.6
+          - pydantic-settings>=2.4
+          - types-PyYAML

@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/bmeunier1974/agent-trader/discussions
+    about: >-
+      Ask questions, share research ideas, or discuss strategies in Discussions —
+      please keep the issue tracker for actionable bugs, features, and research proposals.
+  - name: Report a security vulnerability
+    url: https://github.com/bmeunier1974/agent-trader/security/advisories/new
+    about: >-
+      Report security issues privately via GitHub Private Vulnerability Reporting,
+      never as a public issue. See SECURITY.md.

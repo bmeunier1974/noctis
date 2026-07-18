@@ -1,0 +1,21 @@
+---
+summary: Long/short trend-following on volatile US momentum stocks (risk-adjusted / Sortino)
+config:
+  promotion:
+    metric: sortino
+---
+<!--
+  PRESERVED EXAMPLE — a known-good working mandate: the high-risk volatile-US-stocks
+  trend-following brief this system ran under during large-model research sessions.
+  No selector ever loads a .example file (the loader reads MANDATE.md, profiles/<name>.md,
+  or mandate/<name>.md only), so this copy is inert documentation.
+
+  To reactivate it: copy this file over mandate/MANDATE.md and set
+  `research.mandate: MANDATE` in config.yaml.
+-->
+
+I want a trend-following system for high-volatility momentum stocks — names capable of large multi-day or multi-week moves (think RKLB or PLTR during strong momentum phases). Trade WITH the established trend, in BOTH directions: go long when a name is in a confirmed uptrend (buy pullbacks within the trend, or breakouts from consolidation when volume confirms), and go SHORT when it flips into a confirmed downtrend, so a sharp decline is a move to capture rather than one to sit out. That two-sided stance is deliberate: on these names the down-legs are as violent as the up-legs, so a long-only overlay that merely steps flat forfeits half the opportunity while never beating the up-drift you get from simply holding.
+
+This is trend-following, not mean-reversion. Enter in the direction the trend is already going, after a healthy pullback or a confirmed break — do not try to pick exact tops or bottoms. Exit or flip on a genuine regime change, not on noise. Risk management matters more than hit-rate: cut losers quickly — exit or flip to short on a genuine breakdown rather than hoping the trade comes back. (The engine takes a full position or none in a chosen direction, so what you control is direction and timing, not position size.)
+
+If an intraday horizon looks promising, you may restrict trading to the regular-hours session (derive the time of day from each bar's timestamp) so stale off-hours prints don't drive entries. Discover and fetch whatever volatile momentum names fit this character — you are not limited to any fixed watchlist.

@@ -1,0 +1,94 @@
+# ── Secrets & environment ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Local config (template + local copy, same pattern as .env) ───────────────
+/config.yaml
+!/config.example.yaml
+
+# ── The workspace: the ONE output root — everything the engine writes ────────
+workspace/
+
+# ── Legacy (pre-workspace) runtime state; kept for un-migrated checkouts ─────
+data_lake/
+reports/
+state/
+/MEMORY.md
+*.parquet
+*.db
+
+# ── Legacy strategy tier layout (pre-workspace); kept one release as protection ──
+# The tiers now live under workspace/ (covered above). These lines only protect a
+# checkout whose un-migrated __tmp/ and champions/ still sit beside the seeds.
+strategies/__tmp/
+strategies/champions/
+
+# ── Operator mandate: ship only the scaffold; personal input stays local ─────
+# The repo carries the template (MANDATE.md.example), the five shipped profiles, tune-first,
+# the README, and one reference example. An operator's own MANDATE.md, custom personalities
+# (mandate/<name>.md, profiles/<name>.md), and personal references are gitignored so editing
+# a mandate never pollutes the repo. Add a NEW shipped profile? re-include it below.
+mandate/*.md
+!mandate/README.md
+!mandate/tune-first.md
+mandate/profiles/*.md
+!mandate/profiles/aggressive.md
+!mandate/profiles/conservative.md
+!mandate/profiles/long-term.md
+!mandate/profiles/short-term.md
+!mandate/profiles/sector-specialist.md
+mandate/references/*
+!mandate/references/.gitkeep
+!mandate/references/example-watchlist.md
+
+# ── Byte-code & tool caches ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.hypothesis/
+.tox/
+.nox/
+.pyre/
+.pytype/
+
+# ── Packaging & build artifacts ──────────────────────────────────────────────
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+*.egg
+MANIFEST
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Coverage & test reports ──────────────────────────────────────────────────
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+junit*.xml
+
+# ── Notebooks ────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Editors & OS ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Claude Code local config & skills (not shared) ───────────────────────────
+.claude/

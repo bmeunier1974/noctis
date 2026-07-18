@@ -1,0 +1,56 @@
+name: Research proposal
+description: Propose a strategy or edge to research and validate
+title: "[Research]: "
+labels: ["research", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Noctis is research-first: an edge earns its place through evidence, not opinion. This
+        template mirrors the research-contribution requirements in
+        [CONTRIBUTING](../blob/main/.github/CONTRIBUTING.md) and the methodology in
+        [docs/research.md](../blob/main/docs/research.md). A candidate that only passes by
+        loosening a gate is a rejection, not a contribution.
+  - type: textarea
+    id: research-question
+    attributes:
+      label: Research question
+      description: The question you want the system to answer.
+    validations:
+      required: true
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      description: The specific, falsifiable edge you claim.
+      placeholder: e.g. Post-gap momentum on high-ATR names persists for N bars.
+    validations:
+      required: true
+  - type: textarea
+    id: dataset
+    attributes:
+      label: Dataset
+      description: Symbols and date range for tuning/validation, and which slices are held out (temporal + symbol holdout).
+    validations:
+      required: true
+  - type: textarea
+    id: validation-method
+    attributes:
+      label: Validation method
+      description: How it will be tested — walk-forward splits, the election metric, and the out-of-sample gates it must clear.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-result
+    attributes:
+      label: Expected result
+      description: What the scorecard should show, and why it is a genuine edge rather than an overfit.
+    validations:
+      required: true
+  - type: input
+    id: benchmark
+    attributes:
+      label: Benchmark
+      description: The baseline you compare against (e.g. buy-and-hold on the same panel, or the current weakest champion).
+    validations:
+      required: true

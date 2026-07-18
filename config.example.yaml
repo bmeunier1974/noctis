@@ -1,0 +1,43 @@
+# Noctis configuration. Your local copy is config.yaml (gitignored) — `noctis setup`
+# creates and edits it for you; `noctis init` just copies this file.
+# Every knob has a safe built-in default, so this file lists only the ones operators
+# actually touch. The full reference for every knob: docs/configuration.md
+# Secrets (API keys, the ALLOW_LIVE gate) live in .env, never here.
+
+mode: paper # "live" additionally requires ALLOW_LIVE=true in .env — see docs/safety.md
+
+# Symbols to research and trade. The first 6 are the tuning fit set, the next 2 the
+# out-of-sample symbol holdout, the rest round out the trading roster.
+universe: [AAPL, XOM, UNH, JPM, NVDA, WMT, CAT, GOOGL, SPY, IWM]
+
+research:
+  model: openai/gpt-5.4 # LiteLLM provider/model — `noctis setup` configures and verifies this
+  mandate: null # the research brief: a profile name, MANDATE (your own file), auto, or null
+  cost_profile: balanced # full | balanced | economy — spend ceilings, never quality gates
+  # A local $0 backend (e.g. noctis-ollama) replaces the model line and adds the agent block:
+  # model: ollama_chat/noctis-qwen3:14b
+  # agent:
+  #   max_tokens: 4096 # output cap for small-context backends
+  #   context_window: 32768 # the local model's num_ctx — trims prompts to fit
+
+promotion:
+  metric: sharpe # sharpe | sortino | total_return — the risk appetite every candidate is scored on
+  min_test_activity: 0.05 # reject candidates that almost never trade (lucky-window filter)
+
+risk: # trading-loop limits, percent of account equity
+  max_position_pct: 10.0
+  max_gross_exposure_pct: 100.0
+  max_daily_loss_pct: 3.0
+
+data:
+  provider: yfinance # TRADING feed: yfinance = free delayed live bars; anything else = replay
+  auto_backfill: true # first `run` backfills missing history (needs DATABENTO_API_KEY in .env)
+  history_days: 720 # lookback window for that one-time backfill
+  budget_usd: 125.0 # DataBento spend cap, enforced by the cost preflight
+
+research_time_budget_minutes: 60 # wall-clock cap on one nightly research session
+champion_count: 3 # champion board size
+time_limit_hours: null # overall run limit (null = run until stopped)
+
+# Everything Noctis writes lands under this one gitignored folder (env: NOCTIS_WORKSPACE).
+workspace_dir: workspace/

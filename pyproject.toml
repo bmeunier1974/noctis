@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noctis"
+version = "0.1.0"
+description = "Noctis — autonomous, paper-only trading agent: research strategies while the market is closed, trade champions while it is open, report at close."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Noctis Contributors", email = "maintainer@noctis-project.invalid" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+]
+
+# Core dependencies keep a minimal install light. The heavier engine / research /
+# data / llm stacks are optional extras so the package stays importable and the
+# full test suite runs without them (each lives behind a swappable seam).
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.4",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "typer>=0.12",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyarrow>=15.0",
+]
+
+[project.optional-dependencies]
+engine = ["nautilus_trader>=1.200"]
+research = ["vectorbt>=1.0", "optuna>=3.6", "quantstats-lumi>=0.3"]
+data = [
+    "databento>=0.34",
+    "yfinance>=0.2.40",
+    "exchange-calendars>=4.5",
+    "transitions>=0.9",
+    "apscheduler>=3.10",
+]
+llm = ["anthropic>=0.40", "litellm>=1.40"]
+
+# Dev tooling lives in a PEP 735 dependency-group (not an optional extra) so a bare
+# `uv sync` installs the test-suite-ready environment by default. The runtime seams
+# above stay optional extras on purpose — the core install must run paper-only with none
+# of them.
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "ruff>=0.5",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+]
+
+[project.scripts]
+noctis = "noctis.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["noctis*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["B008"]  # Typer uses function calls in argument defaults by design
+
+[tool.ruff.lint.per-file-ignores]
+# Agent-authored strategy artifacts: the one-sentence thesis line in the docstring
+# header routinely exceeds the line limit; length is not part of the strategy contract.
+"strategies/*.py" = ["E501"]
+# Tests deliberately import after registration side effects (E402) and assert broad
+# schema-rejection behavior with pytest.raises(Exception) (B017).
+"tests/*.py" = ["E402", "B017"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["noctis"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/noctis"]
+# The heavy stacks (nautilus_trader, vectorbt, databento, optuna, anthropic, ...)
+# are optional extras behind seams and mostly untyped; don't require their stubs.
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

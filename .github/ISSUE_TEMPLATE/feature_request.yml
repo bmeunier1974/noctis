@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a new capability or an improvement to Noctis
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For research ideas (a new strategy or edge to validate), use the **Research proposal**
+        template instead — it captures the hypothesis/validation shape those need.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do that Noctis makes hard or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should Noctis do? Sketch the behavior, not necessarily the code.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed and why you set them aside.
+    validations:
+      required: false
+  - type: dropdown
+    id: invariant-impact
+    attributes:
+      label: Does this touch a project invariant?
+      description: >-
+        The paper-only two-gate safety, the promotion gates / holdout discipline, the
+        no-lookahead rule, or secrets/data hygiene (see CONTRIBUTING §1).
+      options:
+        - "No — it does not touch any invariant"
+        - "Unsure — needs discussion"
+        - "Yes — it touches an invariant (expect extra scrutiny)"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true

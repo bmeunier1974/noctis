@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a defect in Noctis (not a security issue — see SECURITY.md)
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Do not report security issues here** — for anything that
+        weakens the paper-only gates, follow the [Security Policy](../blob/main/.github/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I run `python -m noctis ...`, I expected X but got Y.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps, config, or a short script. A failing test is ideal.
+      placeholder: |
+        1. `uv sync`
+        2. `uv run python -m noctis ...`
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: Paste the error and any relevant console output. This is rendered as code.
+      render: shell
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. Ubuntu 24.04 (WSL2), macOS 14, Windows 11
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+      placeholder: e.g. 3.11.9
+    validations:
+      required: true
+  - type: input
+    id: noctis-version
+    attributes:
+      label: Noctis version
+      description: Release tag or commit SHA.
+      placeholder: e.g. v0.1.0 or a git SHA
+    validations:
+      required: true
+  - type: input
+    id: uv-version
+    attributes:
+      label: uv version
+      description: Output of `uv --version`.
+      placeholder: e.g. 0.11.14
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: This is a bug, not a security vulnerability (those go through SECURITY.md).
+          required: true
