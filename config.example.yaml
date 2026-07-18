@@ -15,8 +15,9 @@ research:
   mandate: null # the research brief: a profile name, MANDATE (your own file), auto, or null
   cost_profile: balanced # full | balanced | economy — spend ceilings, never quality gates
   # A local $0 backend (e.g. noctis-ollama) replaces the model line and adds the agent block:
-  # model: ollama_chat/noctis-qwen3:14b
+  # model: ollama_chat/noctis-qwen3:14b # cheap driver runs the session…
   # agent:
+  #   coder_model: anthropic/claude-sonnet-5 # …a real coder authors the strategy files
   #   max_tokens: 4096 # output cap for small-context backends
   #   context_window: 32768 # the local model's num_ctx — trims prompts to fit
 

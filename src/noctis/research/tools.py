@@ -156,6 +156,7 @@ class ResearchToolbox:
         rules,
         mandate_source=None,
         mandate=None,
+        coder_client=None,
     ):
         self.settings = settings
         self.lake = lake
@@ -169,6 +170,11 @@ class ResearchToolbox:
         # The resolved mandate itself (or None): its declared symbols join the research
         # focus set (the prompt digest + holdout candidate pool enumeration).
         self.mandate = mandate
+        # The dedicated strategy-authoring ("coder") LLM client, or None (the default) when the
+        # driver authors full source itself. Built at the composition root from
+        # research.agent.coder_model. Inert in this story — the brief-authoring path that
+        # consumes it lands in a follow-up; it is threaded here so that wiring is settled.
+        self.coder_client = coder_client
         # The three library tier roots (seeds committed, __tmp/champions under the
         # workspace); every library call takes it opaquely, incl. the sweep workers.
         self.strategies_dir = library.LibraryPaths.from_settings(settings)

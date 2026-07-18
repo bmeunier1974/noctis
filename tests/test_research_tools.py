@@ -139,7 +139,9 @@ def toolbox(tmp_path):
     return _make_toolbox(tmp_path)
 
 
-def _make_toolbox(tmp_path, *, min_trials: int = 3, max_backtests: int = 50, sweep_workers=1):
+def _make_toolbox(
+    tmp_path, *, min_trials: int = 3, max_backtests: int = 50, sweep_workers=1, coder_client=None
+):
     strategies_dir = tmp_path / "strategies"
     settings = Settings(
         strategies_dir=str(strategies_dir),
@@ -172,11 +174,24 @@ def _make_toolbox(tmp_path, *, min_trials: int = 3, max_backtests: int = 50, swe
         families=FamilyRegistry(),
         memory=memory,
         rules=LENIENT,
+        coder_client=coder_client,
     )
     # Author through the toolbox's own tier paths (seeds + workspace tiers), exactly as a
     # session's write_strategy tool would.
     write_strategy(box.strategies_dir, "probe", PROBE, box.families)
     return box
+
+
+def test_coder_client_defaults_to_none(toolbox):
+    """The dedicated coder client is opt-in; unset means driver-authored (today's behavior)."""
+    assert toolbox.coder_client is None
+
+
+def test_coder_client_is_stored_when_supplied(tmp_path):
+    """A configured coder client reaches the toolbox as an optional field (inert this story)."""
+    coder = object()
+    box = _make_toolbox(tmp_path, coder_client=coder)
+    assert box.coder_client is coder
 
 
 def _journal_lines(box, name):

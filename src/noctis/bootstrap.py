@@ -18,12 +18,15 @@ and keeping test monkeypatching on the owning modules effective.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from noctis.config import Settings, load_settings, resolve_execution_mode
+
+logger = logging.getLogger("noctis.bootstrap")
 
 if TYPE_CHECKING:
     from noctis.champions.promotion import PromotionRules
@@ -356,6 +359,33 @@ class ResearchSession:
         )
 
 
+def _build_coder_client(settings):
+    """The dedicated strategy-authoring ("coder") client for ``research.agent.coder_model``, or
+    ``None`` — inert in this story, threaded into the toolbox for a follow-up to consume.
+
+    Unset (the default) ⇒ ``None``: the session driver authors full strategy source itself, and
+    session assembly is unchanged. Set ⇒ a second, stateless per-model client is built alongside
+    the driver via the shared :func:`~noctis.research.client_for` constructor (thinking off — one
+    completion per authored file). If that client can't be built (its provider's key or the
+    ``[llm]`` extra is missing) the degradation is loud, never silent: warn and fall back to
+    ``None`` (driver-authored mode), so the session still assembles — the same graceful-
+    degradation contract as the rest of the LLM seam, never a mid-session failure."""
+    from noctis.research import client_for
+
+    coder_model = settings.research.agent.coder_model
+    if not coder_model:
+        return None
+    coder = client_for(settings, coder_model, thinking="off")
+    if coder is None:
+        logger.warning(
+            "coder_model %r is configured but no coder client could be built (its provider's "
+            "API key or the [llm] extra is missing) — assembling in driver-authored mode; the "
+            "session driver will write full strategy source itself. See docs/configuration.md.",
+            coder_model,
+        )
+    return coder
+
+
 def build_research_session(
     *,
     settings,
@@ -385,6 +415,7 @@ def build_research_session(
         rules=rules if rules is not None else PromotionRules.from_settings(settings),
         mandate_source=mandate.source if mandate else None,
         mandate=mandate,
+        coder_client=_build_coder_client(settings),
     )
     return ResearchSession(
         settings=settings,

@@ -9,6 +9,7 @@ from settings, the agent research session bundle).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -199,17 +200,15 @@ def test_build_lake_with_key_uses_the_vendor_client(tmp_path, monkeypatch):
 
 
 # ── build_research_session: the one bundle both entrypoints run ───────────────────────────
-def _session_settings(tmp_path):
-    return load_settings(
-        config_path=_config(
-            tmp_path,
-            [
-                "research_time_budget_minutes: 42",
-                f"state_dir: {tmp_path}/state/",
-                f"strategies_dir: {tmp_path}/strategies/",
-            ],
-        )
-    )
+def _session_settings(tmp_path, *, coder_model: str | None = None):
+    lines = [
+        "research_time_budget_minutes: 42",
+        f"state_dir: {tmp_path}/state/",
+        f"strategies_dir: {tmp_path}/strategies/",
+    ]
+    if coder_model is not None:
+        lines += ["research:", "  agent:", f"    coder_model: {coder_model}"]
+    return load_settings(config_path=_config(tmp_path, lines))
 
 
 def test_build_research_session_none_without_client(tmp_path, monkeypatch):
@@ -281,3 +280,71 @@ def test_research_session_derives_rules_and_mandate_provenance(tmp_path, monkeyp
     assert session.toolbox.rules == PromotionRules.from_settings(settings)
     assert session.toolbox.mandate_source == "profile:spicy"
     assert session.mandate is mandate
+
+
+# ── the coder-model knob (#4): a dedicated authoring client, threaded here or None ─────────
+def test_coder_client_not_built_when_knob_unset(tmp_path, monkeypatch, caplog):
+    """Knob unset ⇒ no coder client built, no attempt, no new warning (today's behavior)."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    calls: list = []
+    monkeypatch.setattr(research_mod, "client_for", lambda *a, **k: calls.append((a, k)))
+    with caplog.at_level(logging.WARNING):
+        session = build_research_session(
+            settings=_session_settings(tmp_path),
+            lake=object(),
+            registry=object(),
+            families=object(),
+            memory=object(),
+        )
+    assert session is not None
+    assert session.toolbox.coder_client is None
+    assert calls == []  # the coder builder is never even consulted
+    assert not any("coder" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_coder_client_built_when_configured(tmp_path, monkeypatch):
+    """Knob set + provider available ⇒ a stateless coder client reaches the toolbox."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    coder = object()
+    seen: dict = {}
+
+    def fake_client_for(settings, model, **kwargs):
+        seen["model"] = model
+        seen["kwargs"] = kwargs
+        return coder
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    settings = _session_settings(tmp_path, coder_model="anthropic/claude-sonnet-5")
+    session = build_research_session(
+        settings=settings,
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    assert session is not None
+    assert session.toolbox.coder_client is coder
+    assert seen["model"] == "anthropic/claude-sonnet-5"
+    # Built stateless with thinking off — one completion per authored file.
+    assert seen["kwargs"].get("thinking") == "off"
+
+
+def test_coder_client_missing_key_degrades_loudly(tmp_path, monkeypatch, caplog):
+    """Knob set but provider key/extra missing ⇒ a loud warning, session still assembles in
+    driver-authored mode (coder client None) — never a mid-session failure."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    monkeypatch.setattr(research_mod, "client_for", lambda *a, **k: None)  # missing key/extra
+    settings = _session_settings(tmp_path, coder_model="anthropic/claude-sonnet-5")
+    with caplog.at_level(logging.WARNING):
+        session = build_research_session(
+            settings=settings,
+            lake=object(),
+            registry=object(),
+            families=object(),
+            memory=object(),
+        )
+    assert session is not None
+    assert session.toolbox.coder_client is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("coder" in msg.lower() for msg in warnings)
+    assert any("claude-sonnet-5" in msg for msg in warnings)
