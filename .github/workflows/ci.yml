@@ -21,10 +21,10 @@ jobs:
         # 3.11 is the floor (requires-python, ruff/mypy targets); 3.12 proves forward compat.
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
