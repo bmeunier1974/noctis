@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -23,27 +23,27 @@ classifiers = [
 # data / llm stacks are optional extras so the package stays importable and the
 # full test suite runs without them (each lives behind a swappable seam).
 dependencies = [
-    "pydantic>=2.6",
-    "pydantic-settings>=2.4",
-    "pyyaml>=6.0",
-    "python-dotenv>=1.0",
-    "typer>=0.12",
-    "numpy>=1.26",
-    "pandas>=2.1",
-    "pyarrow>=15.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "pyyaml>=6.0.3",
+    "python-dotenv>=1.2.2",
+    "typer>=0.27.0",
+    "numpy>=2.4.6",
+    "pandas>=2.2.3",
+    "pyarrow>=25.0.0",
 ]
 
 [project.optional-dependencies]
-engine = ["nautilus_trader>=1.200"]
-research = ["vectorbt>=1.0", "optuna>=3.6", "quantstats-lumi>=0.3"]
+engine = ["nautilus_trader>=1.221.0"]
+research = ["vectorbt>=1.0", "optuna>=4.9.0", "quantstats-lumi>=1.1.5"]
 data = [
-    "databento>=0.34",
-    "yfinance>=0.2.40",
-    "exchange-calendars>=4.5",
-    "transitions>=0.9",
-    "apscheduler>=3.10",
+    "databento>=0.81.0",
+    "yfinance>=1.5.1",
+    "exchange-calendars>=4.13.2",
+    "transitions>=0.9.3",
+    "apscheduler>=3.11.3",
 ]
-llm = ["anthropic>=0.40", "litellm>=1.40"]
+llm = ["anthropic>=0.117.0", "litellm>=1.92.0"]
 
 # Dev tooling lives in a PEP 735 dependency-group (not an optional extra) so a bare
 # `uv sync` installs the test-suite-ready environment by default. The runtime seams
@@ -51,11 +51,11 @@ llm = ["anthropic>=0.40", "litellm>=1.40"]
 # of them.
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
-    "hypothesis>=6.100",
-    "ruff>=0.5",
-    "mypy>=1.13",
-    "pre-commit>=4.0",
+    "pytest>=9.1.1",
+    "hypothesis>=6.156.7",
+    "ruff>=0.15.22",
+    "mypy>=2.3.0",
+    "pre-commit>=4.6.0",
 ]
 
 [project.scripts]
