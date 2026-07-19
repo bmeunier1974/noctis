@@ -96,6 +96,37 @@ journal stays the ground truth, so no gate or holdout is affected. A non-Ollama 
 (vLLM, a proxy) uses `research.base_url` plus its own model id. On a free/local provider
 the `cost_profile` automatically resolves to `full`.
 
+## The coder-model split
+
+`research.model` runs the whole session — the thesis, the tool orchestration, the judgment —
+but `write_strategy` also demands a complete, validation-passing ~200-line strategy file in one
+shot, the one thing a cheap or local driver thrashes on. `research.agent.coder_model` splits
+that role out: the driver keeps the session, a dedicated **coder** model does nothing but turn a
+structured brief into a validated file (the mechanics are in [research.md](research.md)).
+
+```yaml
+research:
+  model: ollama_chat/noctis-qwen3:14b # cheap driver runs the session…
+  agent:
+    coder_model: anthropic/claude-sonnet-5 # …a real coder authors the strategy files
+    max_author_calls: 12 # cap coder completions/session (null = cost_profile's 20/12/6)
+```
+
+- **`coder_model`** takes the same LiteLLM `provider/model` grammar as `research.model` — the
+  provider prefix resolves the API key from `.env` (`anthropic/claude-sonnet-5` reads
+  `ANTHROPIC_API_KEY`; a local driver still needs none). It defaults to `null` =
+  **driver-authored mode**: the driver writes full source itself, today's behavior bit for bit.
+  A configured coder whose provider key or `[llm]` extra is missing degrades *loudly* back to
+  that mode at startup — a warning, never a silent mid-session downgrade.
+- **`max_author_calls`** is the coder's Class-B budget: coder completions per session, private
+  validation retries included (one authored or revised file is nominally one call; a file that
+  needs a retry spends more). Like the other agent budgets it defaults to `null` = the active
+  `cost_profile`'s value (`20` / `12` / `6` for `full` / `balanced` / `economy`); a number here
+  **pins** it regardless of profile. Once spent, further brief authoring is refused — the driver
+  is told to revise by hand or proceed to a verdict — while the hand-written `source` path,
+  which spends no coder completion, always stays open. Inert without a `coder_model`: source
+  writes never touch this budget.
+
 ## Watching the model reason
 
 `research.agent.thinking` is a binary, provider-neutral watch switch, **off by default**. Turned
