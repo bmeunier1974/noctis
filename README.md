@@ -72,6 +72,26 @@ writes the config for you), and proves the model answers with one real call befo
 commit to an overnight run. Re-run it any time — it never overwrites your edits — and
 `noctis setup --check` audits an existing install without changing anything.
 
+**Adding the coder to an existing install** is two hand edits — the wizard wires the
+*driver*, not the coder. Name the model in `config.yaml` and put its provider's key in
+`.env`:
+
+```yaml
+# config.yaml — driver stays as-is; the coder goes under research.agent
+research:
+  agent:
+    coder_model: anthropic/claude-haiku-4-5 # or anthropic/claude-sonnet-5, openai/gpt-5.6-luna
+```
+
+```bash
+# .env — the coder's provider key (an openai/* coder reads OPENAI_API_KEY instead)
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+The next `noctis run` or `noctis research` picks it up. If the key or the `[llm]` extra is
+missing, startup warns loudly and the driver writes source itself — never a silent
+mid-session downgrade.
+
 Once it's running: `noctis status` (mode, market state, champions), `noctis report`
 (close-of-day report), `noctis research -v` (watch one research session live). Every
 command: [docs/cli.md](docs/cli.md)
