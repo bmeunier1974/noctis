@@ -258,3 +258,54 @@ def test_failed_revision_leaves_the_existing_file_untouched(tmp_path, families, 
     assert len(client.calls) == 3
     # The previous version is intact — the write gate never replaced it (library guarantee).
     assert library.strategy_source(tmp_path, "probe") == PROBE
+
+
+# ── 8. Per-attempt observability callback: one call per completion, carrying the outcome ───
+# The engine reports each coder completion — including each private retry — through an optional
+# on_attempt(attempt, error) hook, resolved AFTER that attempt's validation (error=None on
+# success, the StrategyValidationError otherwise). The toolbox adapts this into a session event;
+# the engine itself stays toolbox-state-free.
+def _seen_attempts(engine, name, brief) -> list[tuple[int, Exception | None]]:
+    seen: list[tuple[int, Exception | None]] = []
+    try:
+        engine.author(name, brief, on_attempt=lambda n, err: seen.append((n, err)))
+    except AuthoringError:
+        pass
+    return seen
+
+
+def test_on_attempt_fires_once_on_first_try_success(tmp_path, families, fast_gate):
+    engine, _ = _author(tmp_path, families, [fenced(PROBE)])
+    seen = _seen_attempts(engine, "probe", BRIEF)
+    assert seen == [(1, None)]  # exactly one completion: attempt 1, no validation error
+
+
+def test_on_attempt_reports_retry_then_success_with_outcomes(tmp_path, families, fast_gate):
+    engine, _ = _author(tmp_path, families, [fenced(BROKEN), fenced(PROBE)])
+    seen = _seen_attempts(engine, "probe", BRIEF)
+    assert [n for n, _ in seen] == [1, 2]  # one event per completion
+    assert isinstance(seen[0][1], library.StrategyValidationError)  # attempt 1 failed the gate
+    assert "class sets name" in str(seen[0][1])  # the real gate message is the outcome
+    assert seen[1][1] is None  # attempt 2 landed
+
+
+def test_on_attempt_fires_for_every_exhausted_retry(tmp_path, families, fast_gate):
+    engine, _ = _author(tmp_path, families, [fenced(BROKEN)] * 3)
+    seen = _seen_attempts(engine, "probe", BRIEF)
+    assert [n for n, _ in seen] == [1, 2, 3]  # initial + 2 private retries, each its own event
+    assert all(isinstance(err, library.StrategyValidationError) for _, err in seen)
+
+
+def test_on_attempt_reports_a_non_code_reply_as_a_failed_attempt(tmp_path, families, fast_gate):
+    engine, _ = _author(tmp_path, families, ["I think we should go long the dips.", fenced(PROBE)])
+    seen = _seen_attempts(engine, "probe", BRIEF)
+    assert seen[0][0] == 1 and isinstance(seen[0][1], library.StrategyValidationError)
+    assert "code block" in str(seen[0][1])  # the non-code reply is the attempt's outcome
+    assert seen[1] == (2, None)
+
+
+def test_author_without_on_attempt_is_unchanged(tmp_path, families, fast_gate):
+    # The callback is optional; omitting it changes nothing about authoring.
+    engine, client = _author(tmp_path, families, [fenced(BROKEN), fenced(PROBE)])
+    assert engine.author("probe", BRIEF)["name"] == "probe"
+    assert len(client.calls) == 2

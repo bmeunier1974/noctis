@@ -15,6 +15,7 @@ from noctis.config.settings import Settings
 from noctis.data.ingest import IngestResult
 from noctis.data.types import empty_bars
 from noctis.memory import InMemoryMemory
+from noctis.observability import Event
 from noctis.research import Capabilities, Turn
 from noctis.research.tools import ResearchToolbox
 from noctis.strategies import library
@@ -148,7 +149,9 @@ def _make_toolbox(
     max_backtests: int = 50,
     sweep_workers=1,
     coder_client=None,
+    coder_model: str | None = None,
     max_author_calls: int | None = None,
+    on_event=None,
 ):
     strategies_dir = tmp_path / "strategies"
     agent = {
@@ -158,6 +161,8 @@ def _make_toolbox(
     }
     if max_author_calls is not None:
         agent["max_author_calls"] = max_author_calls
+    if coder_model is not None:
+        agent["coder_model"] = coder_model
     settings = Settings(
         strategies_dir=str(strategies_dir),
         state_dir=str(tmp_path / "state"),
@@ -186,6 +191,7 @@ def _make_toolbox(
         memory=memory,
         rules=LENIENT,
         coder_client=coder_client,
+        on_event=on_event,
     )
     # Author through the toolbox's own tier paths (seeds + workspace tiers), exactly as a
     # session's write_strategy tool would.
@@ -1097,10 +1103,23 @@ class _FakeCoder:
         )
 
 
-def _coder_box(tmp_path, replies, *, max_author_calls: int | None = None):
+def _coder_box(
+    tmp_path,
+    replies,
+    *,
+    max_author_calls: int | None = None,
+    coder_model: str = "fake/coder-1",
+    on_event=None,
+):
     coder = _FakeCoder(replies)
     return (
-        _make_toolbox(tmp_path, coder_client=coder, max_author_calls=max_author_calls),
+        _make_toolbox(
+            tmp_path,
+            coder_client=coder,
+            coder_model=coder_model,
+            max_author_calls=max_author_calls,
+            on_event=on_event,
+        ),
         coder,
     )
 
@@ -1342,3 +1361,66 @@ def test_research_summary_surfaces_the_author_call_count(tmp_path):
     from noctis.engine.research import ResearchSummary
 
     assert ResearchSummary().author_calls == 0
+
+
+# ── brief mode: authoring observability — one on_event per coder completion (#9) ────────────
+def _author_events(events) -> list[Event]:
+    return [e for e in events if isinstance(e, Event) and e.kind == "author"]
+
+
+def test_brief_success_emits_one_author_event_through_on_event(tmp_path):
+    """Criterion 1+2+4: a first-try success emits exactly one `author` event through the same
+    on_event channel, carrying the coder model, strategy name, attempt number, and outcome."""
+    events: list = []
+    box, _ = _coder_box(
+        tmp_path,
+        [_fenced(_named("brief_probe"))],
+        coder_model="fake/coder-1",
+        on_event=events.append,
+    )
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    authored = _author_events(events)
+    assert len(authored) == 1
+    ev = authored[0]
+    assert ev.kind == "author"
+    assert ev.meta["model"] == "fake/coder-1"
+    assert ev.meta["strategy"] == "brief_probe"
+    assert ev.meta["attempt"] == 1
+    assert ev.meta["ok"] is True
+    assert "brief_probe" in ev.text and "fake/coder-1" in ev.text
+
+
+def test_brief_retry_then_success_emits_one_event_per_completion(tmp_path):
+    """Criterion 1: each private retry emits its own event — a failed first attempt (ok False)
+    then the completion that lands (ok True), both on the same channel."""
+    events: list = []
+    box, _ = _coder_box(
+        tmp_path,
+        [_fenced(BROKEN), _fenced(_named("brief_probe"))],
+        on_event=events.append,
+    )
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    authored = _author_events(events)
+    assert [e.meta["attempt"] for e in authored] == [1, 2]
+    assert [e.meta["ok"] for e in authored] == [False, True]
+    assert "class sets name" in authored[0].meta["outcome"]  # the gate error is the outcome
+
+
+def test_brief_exhausted_emits_one_failed_author_event_per_completion(tmp_path):
+    """Criterion 1: an exhausted job emits one event per completion (initial + 2 retries), each
+    carrying a failed outcome — the driver-visible error is separate from the watch feed."""
+    events: list = []
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN)] * 3, on_event=events.append)
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    authored = _author_events(events)
+    assert [e.meta["attempt"] for e in authored] == [1, 2, 3]
+    assert all(e.meta["ok"] is False for e in authored)
+
+
+def test_no_coder_configured_emits_no_author_events(tmp_path):
+    """Criterion 3: with no coder configured, a (source-based) write emits no `author` events —
+    the event channel is unchanged from today."""
+    events: list = []
+    box = _make_toolbox(tmp_path, on_event=events.append)
+    box.dispatch("write_strategy", {"name": "hand_written", "source": _named("hand_written")})
+    assert _author_events(events) == []

@@ -40,6 +40,7 @@ from noctis.data.aggregate import (
     validate_timeframe,
 )
 from noctis.data.types import ns_to_date, ns_to_timestamp, to_ns, to_ns_end_inclusive
+from noctis.observability.events import Event, render_plain
 from noctis.research import websearch
 from noctis.research.author import AuthoringError, StrategyAuthor, StrategyBrief
 from noctis.research.cost import resolve_budgets
@@ -181,6 +182,7 @@ class ResearchToolbox:
         mandate_source=None,
         mandate=None,
         coder_client=None,
+        on_event=None,
     ):
         self.settings = settings
         self.lake = lake
@@ -199,6 +201,13 @@ class ResearchToolbox:
         # research.agent.coder_model. When set, write_strategy switches to brief mode: the
         # driver commits a StrategyBrief and this client authors the file (see _author_source).
         self.coder_client = coder_client
+        # The coder model string that pairs with coder_client — stamped onto every authoring
+        # event so a watch session names the model that wrote (or failed to write) the file.
+        self.coder_model = settings.research.agent.coder_model
+        # The session event channel this toolbox emits authoring observability through (#9): the
+        # SAME on_event sink the agent loop and console already use, threaded in at the composition
+        # root. None (tests, bare loops) falls back to the logger, like the agent's default sink.
+        self.on_event = on_event
         # The three library tier roots (seeds committed, __tmp/champions under the
         # workspace); every library call takes it opaquely, incl. the sweep workers.
         self.strategies_dir = library.LibraryPaths.from_settings(settings)
@@ -1228,10 +1237,53 @@ class ResearchToolbox:
             symbols=tuple(brief.get("symbols") or ()),
         )
         try:
-            return engine.author(name, parsed)
+            return engine.author(name, parsed, on_attempt=self._author_attempt_sink(name))
         except AuthoringError as exc:
             error = exc.validation_error or library.StrategyValidationError(str(exc))
             raise error from exc
+
+    def _author_attempt_sink(self, name: str):
+        """Adapt the engine's per-attempt hook into a session authoring event for ``name``.
+
+        The engine calls this once per coder completion — private retries included — after that
+        attempt's validation resolves, so the toolbox (which owns the model string and the event
+        channel) can emit one observability event carrying model + strategy + attempt + outcome.
+        """
+        return lambda attempt, error: self._emit_author_event(name, attempt, error)
+
+    def _emit_author_event(self, name: str, attempt: int, error: Exception | None) -> None:
+        """Emit one ``author`` :class:`Event` for a resolved coder completion (#9).
+
+        ``error is None`` ⇒ the attempt landed (``ok``); otherwise the validation error (a gate
+        rejection or a non-code reply) is the attempt's outcome. So a watch session (``research
+        -v``) sees authoring happen instead of a silent gap where a file appears from nowhere.
+        """
+        ok = error is None
+        model = self.coder_model or "coder"
+        outcome = "ok" if ok else str(error)
+        text = f"author {name} · attempt {attempt} · {model} -> {outcome}"
+        self._emit(
+            Event(
+                "author",
+                text,
+                meta={
+                    "model": model,
+                    "strategy": name,
+                    "attempt": attempt,
+                    "ok": ok,
+                    "outcome": outcome,
+                },
+                level=1,
+            )
+        )
+
+    def _emit(self, event: Event) -> None:
+        """Hand one event to the session channel, or the logger when no sink is wired — the same
+        Event-or-log contract the agent loop's default ``on_event`` sink uses."""
+        if self.on_event is not None:
+            self.on_event(event)
+        else:
+            logger.info("%s", render_plain(event))
 
     def tool_run_backtest(self, name: str, symbols: list[str], params: dict | None = None) -> dict:
         blocked = self._spend_backtests(1)

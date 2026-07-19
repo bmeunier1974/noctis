@@ -39,6 +39,7 @@ Two composition modes ride the same loop, gate, and retry budget as plain author
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from noctis.research.llm import LLMClient
@@ -160,7 +161,13 @@ class StrategyAuthor:
         )
         self._system_prompt = self._build_system_prompt(template)
 
-    def author(self, name: str, brief: StrategyBrief) -> dict:
+    def author(
+        self,
+        name: str,
+        brief: StrategyBrief,
+        *,
+        on_attempt: Callable[[int, Exception | None], None] | None = None,
+    ) -> dict:
         """Turn ``brief`` into a validated ``name`` strategy file in the working tier.
 
         Returns the :func:`noctis.strategies.library.write_strategy` result (name/path/header)
@@ -173,12 +180,20 @@ class StrategyAuthor:
         :class:`~noctis.strategies.library.StrategyValidationError` *before* any coder
         completion. When ``name`` already exists, its current source is composed in and the
         brief becomes a revision request.
+
+        ``on_attempt`` — the observability seam — is called exactly once per coder completion,
+        *after* that attempt's validation resolves: ``on_attempt(attempt, None)`` on the
+        completion that lands, ``on_attempt(attempt, error)`` (a
+        :class:`~noctis.strategies.library.StrategyValidationError`) when a gate rejection or a
+        non-code reply fails an attempt. ``attempt`` is 1-based (1 = first, 2… = a private
+        retry). The engine holds no session state; the caller (the toolbox) adapts this into a
+        session event carrying the coder model and strategy name.
         """
         reference_source = self._reference_source(brief)  # unknown ref → raise, no completion
         current_source = self._current_source(name)  # non-None ⇒ this is a revision
         prior: tuple[str, str] | None = None
         last_error: Exception | None = None
-        for _ in range(self._max_attempts):
+        for attempt in range(1, self._max_attempts + 1):
             content = self._user_prompt(
                 name,
                 brief,
@@ -199,17 +214,32 @@ class StrategyAuthor:
                     "file as one fenced code block and nothing else"
                 )
                 prior = (turn.text or "", str(last_error))
+                self._report(on_attempt, attempt, last_error)
                 continue
             try:
-                return library.write_strategy(self._strategies_dir, name, source, self._families)
+                result = library.write_strategy(self._strategies_dir, name, source, self._families)
             except library.StrategyValidationError as exc:
                 last_error = exc
                 prior = (source, str(exc))
+                self._report(on_attempt, attempt, exc)
+                continue
+            self._report(on_attempt, attempt, None)
+            return result
         raise AuthoringError(
             f"the coder could not author a valid {name!r} strategy in {self._max_attempts} "
             f"attempts; last gate error: {last_error}",
             validation_error=last_error,
         ) from last_error
+
+    @staticmethod
+    def _report(
+        on_attempt: Callable[[int, Exception | None], None] | None,
+        attempt: int,
+        error: Exception | None,
+    ) -> None:
+        """Report one resolved attempt to the observability hook (a no-op when unset)."""
+        if on_attempt is not None:
+            on_attempt(attempt, error)
 
     # ── reference / revision resolution ──────────────────────────────────────
     def _reference_source(self, brief: StrategyBrief) -> str | None:

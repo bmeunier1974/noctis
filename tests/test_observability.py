@@ -175,9 +175,30 @@ def test_render_plain_collapses_multiline_and_prefixes_by_kind():
     assert render_plain(Event("say", "just narration", level=1)) == "just narration"  # no glyph
 
 
-@pytest.mark.parametrize("kind", ["think", "say", "tool", "result", "usage", "trade", "refuse"])
+@pytest.mark.parametrize(
+    "kind", ["think", "say", "tool", "result", "usage", "trade", "refuse", "author"]
+)
 def test_render_plain_is_single_line_for_every_kind(kind):
     assert "\n" not in render_plain(Event(kind, "a\nb\nc"))
+
+
+# ── author events (coder-authoring observability, #9) ──────────────────────────────────────────
+def test_author_event_renders_in_the_verbose_console():
+    # A coder completion surfaces at -v (level 1) so a watch session sees authoring happen.
+    con, out = _console(1)
+    con(Event("author", "author probe · attempt 1 · coder -> ok", meta={"ok": True}, level=1))
+    assert any("probe" in line for line in out)
+
+
+def test_author_failure_colors_red_like_a_failed_tool():
+    con, out = _console(1, color=True)
+    con(Event("author", "author probe · attempt 1 -> validation failed", meta={"ok": False}))
+    assert "\x1b[31m" in out[0] or "\x1b[91m" in out[0]  # a failed attempt is red
+
+
+def test_render_plain_prefixes_author_with_its_glyph():
+    line = render_plain(Event("author", "author probe attempt 1"))
+    assert line.startswith("✎ ")
 
 
 # ── P6: in-place activity heartbeat ────────────────────────────────────────────────────────────

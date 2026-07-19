@@ -36,6 +36,7 @@ _STYLE: dict[str, tuple[str, str | None, bool]] = {
     "think": ("🧠", typer.colors.CYAN, True),
     "say": ("", None, False),
     "tool": ("→", typer.colors.GREEN, False),
+    "author": ("✎", typer.colors.CYAN, False),
     "result": ("←", typer.colors.GREEN, False),
     "usage": ("·", None, True),
     "trade": ("$", typer.colors.GREEN, False),
@@ -250,7 +251,7 @@ class Console:
 
     def _format(self, ev: Event) -> str:
         glyph, color, dim = _STYLE.get(ev.kind, ("", None, False))
-        if ev.kind in ("tool", "result") and ev.meta.get("ok") is False:
+        if ev.kind in ("tool", "result", "author") and ev.meta.get("ok") is False:
             color = typer.colors.RED
         gutter = f"{glyph} " if glyph else ""
         wrapped = self._wrap(ev.text, gutter)

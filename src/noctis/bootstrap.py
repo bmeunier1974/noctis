@@ -416,6 +416,7 @@ def build_research_session(
         mandate_source=mandate.source if mandate else None,
         mandate=mandate,
         coder_client=_build_coder_client(settings),
+        on_event=on_event,
     )
     return ResearchSession(
         settings=settings,

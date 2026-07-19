@@ -18,10 +18,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 # The kinds the seam knows. think/say/tool/usage are emitted by the research loop (P1);
-# trade/refuse/feed/heartbeat are the trading feed (P4); phase frames both. `result` is the
-# outcome half of a tool interaction, reserved for a split feed later.
+# author marks one coder completion in the strategy-authoring split (#9); trade/refuse/feed/
+# heartbeat are the trading feed (P4); phase frames both. `result` is the outcome half of a
+# tool interaction, reserved for a split feed later.
 EVENT_KINDS = frozenset(
-    {"think", "say", "tool", "result", "usage", "trade", "refuse", "feed", "heartbeat", "phase"}
+    {
+        "think",
+        "say",
+        "tool",
+        "author",
+        "result",
+        "usage",
+        "trade",
+        "refuse",
+        "feed",
+        "heartbeat",
+        "phase",
+    }
 )
 
 # Plain one-character prefixes per kind (the log / --no-color path). The Console overlays the
@@ -30,6 +43,7 @@ _PREFIX = {
     "think": "🧠",
     "say": "",
     "tool": "→",
+    "author": "✎",
     "result": "←",
     "usage": "·",
     "trade": "$",
