@@ -108,6 +108,29 @@ def _tool(name: str, description: str, properties: dict | None = None, required=
     }
 
 
+class _CoderCallCounter:
+    """Counting proxy over the coder LLM client so the toolbox tallies every completion the
+    authoring engine spends — private validation retries included.
+
+    The :class:`~noctis.research.author.StrategyAuthor` engine stays toolbox-state-free: it drives
+    the coder through the plain ``complete()`` seam while this wrapper does the accounting the
+    toolbox owns (AGENTS.md: "the toolbox keeps the accounting"). Every ``complete()`` — the one
+    place a coder completion actually happens — bumps the count before the call, so a completion
+    that raises still counts as spend. Any other attribute forwards to the wrapped client.
+    """
+
+    def __init__(self, client, on_complete):
+        self._client = client
+        self._on_complete = on_complete
+
+    def __getattr__(self, item):
+        return getattr(self._client, item)
+
+    def complete(self, **kwargs):
+        self._on_complete()
+        return self._client.complete(**kwargs)
+
+
 class ResearchToolbox:
     """Session-scoped tool registry + dispatcher for the agent research loop.
 
@@ -179,12 +202,20 @@ class ResearchToolbox:
         # The three library tier roots (seeds committed, __tmp/champions under the
         # workspace); every library call takes it opaquely, incl. the sweep workers.
         self.strategies_dir = library.LibraryPaths.from_settings(settings)
+        # Coder completions spent this session (author path only): the counting proxy below bumps
+        # it on every engine completion, private retries included — the Class-B author budget
+        # meters on it and the session summary surfaces it. Source-based writes never move it.
+        self.author_calls = 0
         # The brief-authoring engine — built only in coder mode. Toolbox-state-free: it turns
         # a brief into validated source through the SAME library.write_strategy gate the source
         # path uses, so both authoring paths converge on one result shape and one set of guards.
+        # The coder client is wrapped so every completion the engine spends counts against the
+        # author budget (retries included) — the accounting stays toolbox-side.
         self.author_engine = (
             StrategyAuthor(
-                client=coder_client, strategies_dir=self.strategies_dir, families=self.families
+                client=_CoderCallCounter(coder_client, self._bump_author_calls),
+                strategies_dir=self.strategies_dir,
+                families=self.families,
             )
             if coder_client is not None
             else None
@@ -206,6 +237,10 @@ class ResearchToolbox:
         budgets = resolve_budgets(settings.research)
         self.max_backtests = budgets.max_backtests
         self.default_sweep_trials = budgets.sweep_trials
+        # Coder-model Class-B budget: every brief the coder authors (retries included) counts;
+        # once spent, brief authoring is refused (source-based writes stay open). Inert without
+        # a coder_model — no completion ever happens, so the count stays 0.
+        self.max_author_calls = budgets.max_author_calls
         self.sweep_workers = settings.research.agent.sweep_workers
         self.worker_bar_budget = settings.research.agent.worker_bar_budget
         # run_sweep's execution engine — sampler, fork pool, stall guard — behind its own
@@ -465,6 +500,28 @@ class ResearchToolbox:
             return (
                 f"backtest budget exhausted ({self.backtests_run}/{self.max_backtests} spent "
                 f"this session); reach a verdict with what the journal already shows"
+            )
+        return None
+
+    def _bump_author_calls(self) -> None:
+        """Count one coder completion (the counting proxy calls this per engine ``complete()``)."""
+        self.author_calls += 1
+
+    def _author_budget_block(self) -> str | None:
+        """Refuse to START a new brief-authoring job once the coder budget is spent.
+
+        Meters on completions, so a job already running may overrun the cap with its private
+        retries — this only refuses to begin a *new* one, mirroring the codebase's "check before
+        you start" budget idiom. A refusal with explicit driver guidance, never a silent failure;
+        the hand-written ``source`` path is deliberately not gated (it spends no coder completion).
+        """
+        if self.author_calls >= self.max_author_calls:
+            return (
+                f"author-call budget exhausted ({self.author_calls}/{self.max_author_calls} coder "
+                f"completions spent this session); further brief authoring is refused. Revise an "
+                f"existing strategy by hand (submit `source` — the hand-written path stays open) "
+                f"or proceed to a verdict (evaluate_vs_champion / reject_strategy) with what the "
+                f"journal already shows."
             )
         return None
 
@@ -1063,6 +1120,13 @@ class ResearchToolbox:
                         f"exactly what is materially new."
                     )
                 }
+        # The coder Class-B budget gates only the brief path (a coder completion is about to be
+        # spent). Checked before any completion — a refusal to START, source-based writes are
+        # never gated — so an exhausted budget still leaves the driver a hand-written escape.
+        if brief is not None and self.author_engine is not None:
+            over_budget = self._author_budget_block()
+            if over_budget:
+                return {"error": over_budget}
         warning = None
         if is_new:
             pending = sorted(

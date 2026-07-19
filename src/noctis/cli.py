@@ -643,10 +643,15 @@ def research(
     from noctis.research.distill import bump_research_session
 
     bump_research_session(settings.state_dir)
+    coder_calls = (
+        f" {session.toolbox.author_calls} coder authoring call(s),"
+        if session.toolbox.author_calls
+        else ""
+    )
     typer.echo(
         f"Session over ({summary.stopped_reason}): {summary.iterations} tool rounds, "
-        f"{session.toolbox.backtests_run} backtests, {summary.promotions} promotion(s), "
-        f"{summary.rejections} rejection(s)."
+        f"{session.toolbox.backtests_run} backtests,{coder_calls} "
+        f"{summary.promotions} promotion(s), {summary.rejections} rejection(s)."
     )
     if summary.candidates:
         typer.echo(f"Strategies worked on: {', '.join(summary.candidates)}")

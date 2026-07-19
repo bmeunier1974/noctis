@@ -49,6 +49,9 @@ class ResearchSummary:
     stopped_reason: str = ""
     candidates: list[str] = field(default_factory=list)
     minted_specs: list[str] = field(default_factory=list)
+    # Coder-model completions spent this session (0 without a configured coder_model). Surfaced
+    # alongside the backtest count so a session report shows how much authoring the split did.
+    author_calls: int = 0
 
 
 def _utcnow() -> datetime:

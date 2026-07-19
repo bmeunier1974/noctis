@@ -104,8 +104,9 @@ silently changes spend.
 ## One cost knob, never a hidden throttle
 
 `research.cost_profile` (`full` / `balanced` / `economy`) scales the research budgets — tool
-rounds, backtests, sweep trials, web searches, reasoning effort, prompt-prefix trim — together,
-and those ceilings live in a single profile table (`src/noctis/research/cost.py`), never
+rounds, backtests, sweep trials, coder-model author completions, web searches, reasoning effort,
+prompt-prefix trim — together, and those ceilings live in a single profile table
+(`src/noctis/research/cost.py`), never
 hardcoded lower anywhere else. `balanced` (the default) is exactly the standard ceilings;
 `economy` reduces spend; `full` restores the maximums and is the automatic choice on a
 free/local provider. The knob binds *resource ceilings only*: it can never lower the

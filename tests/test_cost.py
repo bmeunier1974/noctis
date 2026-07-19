@@ -19,7 +19,13 @@ from noctis.research.cost import (
 )
 
 # Class-B numeric/bool budgets (effort/prefix_trim handled separately — different types).
-_NUMERIC = ("max_iterations", "max_backtests", "sweep_trials", "max_web_searches")
+_NUMERIC = (
+    "max_iterations",
+    "max_backtests",
+    "sweep_trials",
+    "max_web_searches",
+    "max_author_calls",
+)
 
 
 def _research(**kw):
@@ -34,6 +40,7 @@ def test_balanced_is_default_and_reproduces_todays_ceilings():
     assert b.name == "balanced"
     assert (b.max_iterations, b.max_backtests, b.sweep_trials) == (40, 200, 20)
     assert b.web_search is True and b.max_web_searches == 8
+    assert b.max_author_calls == 12
     assert b.effort == "high" and b.prefix_trim is False
 
 
@@ -43,10 +50,12 @@ def test_named_profiles_select_reduced_or_max_ceilings():
     assert econ.name == "economy"
     assert (econ.max_iterations, econ.max_backtests, econ.sweep_trials) == (20, 80, 10)
     assert econ.max_web_searches == 4 and econ.effort == "medium" and econ.prefix_trim is True
+    assert econ.max_author_calls == 6
 
     full = resolve_budgets(_research(model="openai/gpt-5.4", cost_profile="full"))
     assert full.name == "full"
     assert (full.max_iterations, full.max_backtests) == (40, 200)
+    assert full.max_author_calls == 20
 
 
 def test_full_only_raises_never_lowers_a_floor_or_gate():
@@ -97,4 +106,14 @@ def test_explicit_per_knob_override_pins_one_budget():
     b = resolve_budgets(r)
     assert b.max_backtests == 999  # pinned override
     assert b.max_iterations == 20  # still the economy profile value
+    assert b.name == "economy"
+
+
+def test_max_author_calls_pin_override_resolves_through_the_budget_path():
+    """The coder Class-B budget honors the same per-knob pin the other budgets do: a non-null
+    ``research.agent.max_author_calls`` wins over the profile, the rest stay profile-sourced."""
+    r = _research(model="openai/gpt-5.4", cost_profile="economy", agent={"max_author_calls": 3})
+    b = resolve_budgets(r)
+    assert b.max_author_calls == 3  # pinned override
+    assert b.max_backtests == 80  # still the economy profile value
     assert b.name == "economy"

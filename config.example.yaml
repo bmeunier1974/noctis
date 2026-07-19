@@ -18,6 +18,7 @@ research:
   # model: ollama_chat/noctis-qwen3:14b # cheap driver runs the session…
   # agent:
   #   coder_model: anthropic/claude-sonnet-5 # …a real coder authors the strategy files
+  #   max_author_calls: 12 # cap coder completions/session (null = cost_profile's 20/12/6)
   #   max_tokens: 4096 # output cap for small-context backends
   #   context_window: 32768 # the local model's num_ctx — trims prompts to fit
 

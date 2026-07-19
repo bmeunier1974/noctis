@@ -142,9 +142,22 @@ def toolbox(tmp_path):
 
 
 def _make_toolbox(
-    tmp_path, *, min_trials: int = 3, max_backtests: int = 50, sweep_workers=1, coder_client=None
+    tmp_path,
+    *,
+    min_trials: int = 3,
+    max_backtests: int = 50,
+    sweep_workers=1,
+    coder_client=None,
+    max_author_calls: int | None = None,
 ):
     strategies_dir = tmp_path / "strategies"
+    agent = {
+        "max_backtests": max_backtests,
+        "sweep_trials": 3,
+        "sweep_workers": sweep_workers,
+    }
+    if max_author_calls is not None:
+        agent["max_author_calls"] = max_author_calls
     settings = Settings(
         strategies_dir=str(strategies_dir),
         state_dir=str(tmp_path / "state"),
@@ -152,11 +165,7 @@ def _make_toolbox(
         research={
             "min_trials": min_trials,
             "symbol_holdout_size": 1,
-            "agent": {
-                "max_backtests": max_backtests,
-                "sweep_trials": 3,
-                "sweep_workers": sweep_workers,
-            },
+            "agent": agent,
         },
     )
     lake = FakeLake(
@@ -1088,9 +1097,12 @@ class _FakeCoder:
         )
 
 
-def _coder_box(tmp_path, replies):
+def _coder_box(tmp_path, replies, *, max_author_calls: int | None = None):
     coder = _FakeCoder(replies)
-    return _make_toolbox(tmp_path, coder_client=coder), coder
+    return (
+        _make_toolbox(tmp_path, coder_client=coder, max_author_calls=max_author_calls),
+        coder,
+    )
 
 
 def _write_spec(box):
@@ -1273,3 +1285,60 @@ def test_brief_failed_revision_leaves_existing_file_untouched(tmp_path):
     assert "error" in out and "validation failed" in out["error"]
     assert len(coder.calls) == 3  # initial + 2 private retries
     assert library.strategy_source(box.strategies_dir, "probe") == PROBE  # untouched
+
+
+# ── brief mode: max_author_calls Class-B budget (#8) ────────────────────────────────────────
+def test_author_call_count_starts_at_zero_and_counts_every_completion(tmp_path):
+    """Criterion 2 + 4: every coder completion, private retries included, increments the
+    session author-call counter the summary surfaces — a first-try success is one, a failing
+    job that burns its full retry budget is three."""
+    box, _ = _coder_box(tmp_path, [_fenced(_named("ok_one")), *([_fenced(BROKEN)] * 3)])
+    assert box.author_calls == 0
+    box.dispatch("write_strategy", {"name": "ok_one", "brief": BRIEF_ARGS})
+    assert box.author_calls == 1  # one completion for a first-try success
+    box.dispatch("write_strategy", {"name": "fails", "brief": BRIEF_ARGS})
+    assert box.author_calls == 4  # + initial + 2 private retries on the failing job
+
+
+def test_source_write_never_touches_the_author_budget(tmp_path):
+    """Source-based writes are not coder completions — they never move the author-call count."""
+    box, _ = _coder_box(tmp_path, [])
+    box.dispatch("write_strategy", {"name": "hand_written", "source": _named("hand_written")})
+    assert box.author_calls == 0
+
+
+def test_exhausted_author_budget_refuses_brief_but_leaves_source_open(tmp_path):
+    """Criterion 3: once the author budget is spent, further brief authoring is refused with
+    driver guidance (revise by hand or reach a verdict) — a refusal, never a silent failure —
+    and a started job may still finish its private retries. Source-based writes stay available."""
+    box, coder = _coder_box(
+        tmp_path,
+        [_fenced(_named("first")), *([_fenced(BROKEN)] * 3)],
+        max_author_calls=2,
+    )
+    # First brief job succeeds on one completion (1/2 spent).
+    assert box.dispatch("write_strategy", {"name": "first", "brief": BRIEF_ARGS}).get("ok") is True
+    # A started job may overrun the cap with its private retries (2 -> 4): the check refuses to
+    # START, it does not abort a running job mid-retry.
+    box.dispatch("write_strategy", {"name": "over", "brief": BRIEF_ARGS})
+    assert box.author_calls == 4  # 1 + (initial + 2 retries), cap reached mid-job
+    spent = len(coder.calls)
+    # Now the count has reached the cap: a further brief is refused before any completion.
+    refused = box.dispatch("write_strategy", {"name": "late", "brief": BRIEF_ARGS})
+    assert "error" in refused
+    assert "author" in refused["error"] and "budget" in refused["error"]
+    assert "verdict" in refused["error"] and "hand" in refused["error"]
+    assert "validation failed" not in refused["error"]  # not a repairable-bug shape
+    assert len(coder.calls) == spent  # zero completions spent on the refusal
+    assert library.strategy_path(box.strategies_dir, "late") is None
+    # The hand-written source path remains open under an exhausted author budget.
+    ok = box.dispatch("write_strategy", {"name": "by_hand", "source": _named("by_hand")})
+    assert ok.get("ok") is True
+    assert len(coder.calls) == spent  # still no coder completion
+
+
+def test_research_summary_surfaces_the_author_call_count(tmp_path):
+    """Criterion 4: the session summary object carries the author-call count (default 0)."""
+    from noctis.engine.research import ResearchSummary
+
+    assert ResearchSummary().author_calls == 0
