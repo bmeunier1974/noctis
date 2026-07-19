@@ -42,6 +42,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from noctis.research.contract_sheet import CONTRACT_SHEET
 from noctis.research.llm import LLMClient
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
@@ -274,7 +275,10 @@ class StrategyAuthor:
 
     # ── prompt composition ───────────────────────────────────────────────────
     def _build_system_prompt(self, template: str) -> str:
-        parts = [_ROLE_RULES, _CONTRACT_RULES]
+        # The contract sheet grounds the coder in the exact helper signatures the write gate
+        # executes — the surface TEMPLATE.py deliberately elides — so it never hallucinates an
+        # API. Independent of the template, so a bare library still ships the full API surface.
+        parts = [_ROLE_RULES, _CONTRACT_RULES, CONTRACT_SHEET]
         if template:
             parts.append(
                 "Here is TEMPLATE.py — the canonical shape every strategy file follows. "

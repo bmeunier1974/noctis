@@ -16,6 +16,7 @@ from noctis.research.author import (
     StrategyAuthor,
     StrategyBrief,
 )
+from noctis.research.contract_sheet import CONTRACT_SHEET, SECTIONS
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 from tests.test_research_tools import PROBE
@@ -107,6 +108,54 @@ def test_engine_needs_no_api_key(tmp_path, families, fast_gate, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "")
     engine, _ = _author(tmp_path, families, [fenced(PROBE)])
     assert engine.author("probe", BRIEF)["name"] == "probe"
+
+
+# ── 1b. The coder's system prompt grounds it in the exact graded API surface ──────────────
+def test_system_prompt_carries_the_api_contract_sheet(tmp_path, families, fast_gate):
+    # External behavior: every completion's system prompt embeds the full contract sheet, so the
+    # coder sees the real signatures the write gate executes (not just TEMPLATE.py's elisions).
+    engine, client = _author(tmp_path, families, [fenced(PROBE)])
+    engine.author("probe", BRIEF)
+
+    system = client.calls[0]["system"]
+    assert CONTRACT_SHEET in system
+    # Spot-check the coverage the sheet promises — builders, expectations, tape rules, indicator
+    # State classes and tail functions with warmup semantics, and the exact ExitRules fields.
+    for marker in (
+        "flat(n)",
+        "vol_spike(n, amplitude=0.05)",
+        "gap(pct)",
+        "always_flat()",
+        "2-8",
+        "60-2000",
+        "sma(values, period)",
+        "SmaState(period)",
+        "ZScoreState(",
+        ".update(bar)",
+        "ExitRules(stop_pct=None, take_profit_pct=None, trail_pct=None)",
+    ):
+        assert marker in system, f"contract sheet missing {marker!r}"
+    assert "warmup" in system.lower() and "fraction" in system.lower()
+
+
+def test_system_prompt_lists_every_declared_api_signature(tmp_path, families, fast_gate):
+    # Stronger form of the coverage promise: the prompt names each row of the shared data table,
+    # so no builder/expectation/indicator/exit field is silently omitted from the coder's view.
+    engine, client = _author(tmp_path, families, [fenced(PROBE)])
+    engine.author("probe", BRIEF)
+
+    system = client.calls[0]["system"]
+    for section in SECTIONS:
+        for entry in section.entries:
+            assert entry.signature() in system, f"{entry.name} missing from the coder prompt"
+
+
+def test_contract_sheet_survives_a_missing_seed_template(tmp_path, families, fast_gate):
+    # Best-effort template behavior is preserved: with no TEMPLATE.py the engine still authors,
+    # and the contract sheet — which does not depend on the template — is still in the prompt.
+    engine, client = _author(tmp_path, families, [fenced(PROBE)])
+    assert engine.author("probe", BRIEF)["name"] == "probe"
+    assert CONTRACT_SHEET in client.calls[0]["system"]
 
 
 # ── 2. Validation error → private retry carrying the error → success lands ────────────────
