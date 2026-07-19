@@ -8,10 +8,14 @@ the same checks and error contract as the production subprocess runner, minus th
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import pytest
 
 from noctis.research import Capabilities, Turn
 from noctis.research.author import (
+    WORKED_EXAMPLE_NAME,
     AuthoringError,
     StrategyAuthor,
     StrategyBrief,
@@ -20,6 +24,15 @@ from noctis.research.contract_sheet import CONTRACT_SHEET, SECTIONS
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 from tests.test_research_tools import PROBE
+
+# The committed seed tier the author engine reads its worked example from (read-only input).
+_REPO_SEEDS = Path(__file__).resolve().parents[1] / "strategies"
+
+
+def _worked_example_source() -> str:
+    """The full source of the committed seed the coder prompt folds in as its worked example."""
+    return (_REPO_SEEDS / f"{WORKED_EXAMPLE_NAME}.py").read_text(encoding="utf-8")
+
 
 # PROBE authored under a class name that will not match the file name — the write gate
 # rejects it deterministically ("class sets name=...").
@@ -87,6 +100,19 @@ def _author(tmp_path, families, replies) -> tuple[StrategyAuthor, FakeCoder]:
 @pytest.fixture
 def families():
     return FamilyRegistry()
+
+
+@pytest.fixture
+def seeded_dir(tmp_path):
+    """An author seeds root carrying the committed worked-example seed (read-only input).
+
+    Mirrors a real install where the coder's system prompt can fold in one complete seed
+    strategy; the write target (__tmp/) still lives under this same throwaway path.
+    """
+    shutil.copyfile(
+        _REPO_SEEDS / f"{WORKED_EXAMPLE_NAME}.py", tmp_path / f"{WORKED_EXAMPLE_NAME}.py"
+    )
+    return tmp_path
 
 
 # ── 1. Happy path: a good brief → a validated file in the working tier ────────────────────
@@ -194,6 +220,72 @@ def test_feasibility_rules_survive_a_missing_seed_template(tmp_path, families, f
     low = client.calls[0]["system"].lower()
     assert "own tape construction" in low
     assert "scale-free" in low
+
+
+# ── 1d. The coder system prompt unconditionally folds in one complete worked example ──────
+def test_system_prompt_carries_a_complete_worked_example(seeded_dir, families, fast_gate):
+    # External behavior: every completion's system prompt embeds one complete seed strategy's
+    # full source — a real shipped file using the exact graded APIs — so the coder always sees a
+    # working example, not just TEMPLATE.py's skeleton.
+    engine, client = _author(seeded_dir, families, [fenced(PROBE)])
+    engine.author("probe", BRIEF)
+
+    assert _worked_example_source() in client.calls[0]["system"]
+
+
+def test_worked_example_is_present_when_the_brief_names_no_reference(
+    seeded_dir, families, fast_gate
+):
+    # The worked example is UNCONDITIONAL: BRIEF carries no reference, yet the seed source is
+    # still folded into the system prompt (the mechanism no longer depends on a referenced brief).
+    assert BRIEF.reference is None
+    engine, client = _author(seeded_dir, families, [fenced(PROBE)])
+    engine.author("probe", BRIEF)
+
+    assert _worked_example_source() in client.calls[0]["system"]
+
+
+def test_worked_example_and_reference_are_both_composed(seeded_dir, families, fast_gate):
+    # A referenced brief still gets the reference source in the USER prompt IN ADDITION to the
+    # unconditional worked example in the SYSTEM prompt — the two mechanisms stack, not replace.
+    library.write_strategy(seeded_dir, "ref_strat", named("ref_strat"), families)
+    brief = StrategyBrief(
+        thesis="Adapt the reference's proven structure to a new symbol set.",
+        entry_exit="Long above the SMA, mirroring the reference.",
+        param_space="lookback int 5..40",
+        scenarios="A rally pulls long; a steady decline stays flat.",
+        reference="ref_strat",
+    )
+    engine, client = _author(seeded_dir, families, [fenced(named("adapted"))])
+    engine.author("adapted", brief)
+
+    system = client.calls[0]["system"]
+    user = client.calls[0]["messages"][0]["content"]
+    assert _worked_example_source() in system  # the worked example still rides the system prompt
+    assert named("ref_strat") in user  # and the reference source is still composed in on top
+
+
+def test_chosen_worked_example_is_a_stateful_entry_exit_seed(seeded_dir, families, fast_gate):
+    # The chosen seed is a real stateful entry/exit example (not a stateless one-liner): it
+    # resets incremental state in on_start, latches a position across bars, and ends every bar
+    # with a target — the whole-file pattern the coder must reproduce.
+    src = _worked_example_source()
+    assert "def on_start(" in src and "def on_bar(" in src
+    assert "self._pos" in src  # a position latched across bars
+    assert "ctx.set_target(" in src  # every bar ends with a directional/flat target
+    assert "def scenarios(" in src and "always_flat()" in src  # its own known-outcome oracle
+
+
+def test_missing_worked_example_seed_still_authors_rules_only(tmp_path, families, fast_gate):
+    # Degraded install: with no seed on disk the engine still authors (best-effort, same graceful
+    # path as a missing TEMPLATE.py) and the API contract + rules still ground the coder — only
+    # the worked example is absent.
+    engine, client = _author(tmp_path, families, [fenced(PROBE)])
+    assert engine.author("probe", BRIEF)["name"] == "probe"
+
+    system = client.calls[0]["system"]
+    assert _worked_example_source() not in system  # no seed on disk → no worked example
+    assert CONTRACT_SHEET in system  # the rules-only prompt still carries the full API surface
 
 
 # ── 2. Validation error → private retry carrying the error → success lands ────────────────

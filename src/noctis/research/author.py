@@ -10,8 +10,9 @@ research, the coder is the typist.
 
 The engine owns no toolbox state, so it is exercised in isolation with a fake LLM client:
 
-1. Compose a **stateless** prompt from the strategy contract (``TEMPLATE.py`` + the
-   header/scenario rules) plus the brief.
+1. Compose a **stateless** prompt from the strategy contract (``TEMPLATE.py``, the API
+   contract sheet, one complete worked-example seed, and the header/scenario rules) plus the
+   brief.
 2. One completion against the injected coder client — a bare, single, tool-free codegen call
    (thinking is pinned off where the client is built, ``client_for(..., thinking="off")``).
 3. Extract the fenced code block; a reply carrying none is rejected and counts as an attempt.
@@ -56,6 +57,15 @@ _CODER_RETRIES = 2
 
 # The body of the first fenced code block in a reply (```python … ``` or a bare ``` … ```).
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+
+# The committed seed folded into EVERY coder system prompt as one complete worked example.
+# In the failure-census session the coder's one success was the single brief that carried a
+# reference — the one time it saw a whole working file built on the real APIs. This grounds
+# every prompt the same way, referenced or not. donchian_breakout is the richest stateful
+# entry/exit example the seed tier ships: two rolling deques plus a position latch, a breakout
+# entry read against strictly-prior history (no lookahead) and a breakdown exit, with its own
+# known-outcome scenarios. It is read-only input — never mutated, only shown to the coder.
+WORKED_EXAMPLE_NAME = "donchian_breakout"
 
 _ROLE_RULES = (
     "You are a strategy-authoring coder for the Noctis paper-trading research system. You "
@@ -152,6 +162,21 @@ def _seed_template(strategies_dir: library.LibrarySpec) -> str:
         return ""
 
 
+def _seed_example(strategies_dir: library.LibrarySpec) -> str:
+    """The committed worked-example seed source, or ``""`` when it is not on disk.
+
+    Best-effort, mirroring :func:`_seed_template`: a complete real-API strategy grounds the
+    coder, but a degraded install with no seed on disk still authors — the coder gets the
+    rules text and the API contract sheet. Read directly from the read-only ``seeds`` tier so
+    a working copy never shadows the committed example (and the seed is never mutated).
+    """
+    seeds = library.LibraryPaths.coerce(strategies_dir).seeds
+    try:
+        return (seeds / f"{WORKED_EXAMPLE_NAME}.py").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 class StrategyAuthor:
     """Brief in, validated strategy source out — the coder-model authoring engine.
 
@@ -178,7 +203,8 @@ class StrategyAuthor:
         template = (
             template_source if template_source is not None else _seed_template(strategies_dir)
         )
-        self._system_prompt = self._build_system_prompt(template)
+        example = _seed_example(strategies_dir)
+        self._system_prompt = self._build_system_prompt(template, example)
 
     def author(
         self,
@@ -292,7 +318,7 @@ class StrategyAuthor:
             return None
 
     # ── prompt composition ───────────────────────────────────────────────────
-    def _build_system_prompt(self, template: str) -> str:
+    def _build_system_prompt(self, template: str, example: str) -> str:
         # The contract sheet grounds the coder in the exact helper signatures the write gate
         # executes — the surface TEMPLATE.py deliberately elides — so it never hallucinates an
         # API. The feasibility rules make the coder own tape construction and kill the
@@ -303,6 +329,20 @@ class StrategyAuthor:
             parts.append(
                 "Here is TEMPLATE.py — the canonical shape every strategy file follows. "
                 "Mirror its structure:\n\n```python\n" + template + "```"
+            )
+        # One complete worked example, UNCONDITIONALLY — a real shipped strategy that wires the
+        # exact APIs above end to end (incremental state, no-lookahead indicator reads, a
+        # directional tape and a no-trade tape). In the failure census the coder converged only
+        # when it saw a full working file; every prompt now carries one, referenced or not.
+        # Best-effort like the template: a degraded install with no seed still authors rules-only.
+        if example:
+            parts.append(
+                "Here is a COMPLETE WORKED EXAMPLE — a real strategy file that uses the APIs "
+                "above end to end: it resets incremental state in on_start, reads its indicator "
+                "against strictly-prior history (no lookahead), ends every bar with a target, and "
+                "declares its own directional and no-trade scenarios. Study how the pieces wire "
+                "together and author your file the same way — but implement the BRIEF's edge, not "
+                "this one:\n\n```python\n" + example + "```"
             )
         parts.append(_OUTPUT_RULES)
         return "\n\n".join(parts)
