@@ -206,7 +206,9 @@ def test_coder_client_defaults_to_none(toolbox):
 
 def test_coder_client_is_stored_when_supplied(tmp_path):
     """A configured coder client reaches the toolbox as an optional field (inert this story)."""
-    coder = object()
+    from types import SimpleNamespace
+
+    coder = SimpleNamespace(capabilities=Capabilities())
     box = _make_toolbox(tmp_path, coder_client=coder)
     assert box.coder_client is coder
 
@@ -1155,6 +1157,20 @@ def test_write_schema_switches_to_brief_with_coder(tmp_path):
     } <= set(brief["properties"])
 
 
+def test_brief_scenarios_contract_states_intent_not_tape_dictation(tmp_path):
+    """The brief's `scenarios` field is intent (tape shape + expected behavior); the driver must
+    not dictate indicator-level tape properties the coder — which owns tape construction — cannot
+    honor. This is the driver side of the feasibility fix (the twin of the coder-prompt rules)."""
+    box, _ = _coder_box(tmp_path, [])
+    schema = _write_spec(box)["input_schema"]
+    scenarios = schema["properties"]["brief"]["properties"]["scenarios"]["description"].lower()
+    assert "intent" in scenarios
+    assert "behavior" in scenarios  # tape shape + expected behavior
+    # Do not dictate indicator-level tape properties the coder cannot honor.
+    assert "indicator-level" in scenarios
+    assert "coder" in scenarios  # tape construction is the coder's job
+
+
 def test_brief_authors_validated_file_same_shape_as_source(tmp_path):
     """A brief flows driver → toolbox → engine → validated file in the working tier, with
     the same success-result shape (ok/name/path/header) as a source-based write."""
@@ -1195,6 +1211,37 @@ def test_brief_engine_failure_surfaces_repairable_bug_shape(tmp_path):
     assert len(coder.calls) == 3  # initial + 2 private retries, invisible to the driver
     assert library.strategy_path(box.strategies_dir, "brief_probe") is None  # nothing landed
     assert "brief_probe" not in box.undecided
+
+
+def test_brief_mode_retry_exhaustion_points_at_the_brief_not_source(tmp_path):
+    """Brief-mode retry exhaustion: the driver holds no source, so the repair guidance tells it
+    to refine the BRIEF — calling out the scenario sketch, whose expectations may contradict the
+    entry rules — and resubmit the SAME name. It never asks for corrected source, because in
+    brief mode there is no source in the driver's hands to fix."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN)] * 3)
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    error = out["error"]
+    assert "refine the brief" in error.lower()
+    assert "scenario sketch" in error.lower()
+    assert "entry rules" in error.lower()
+    assert "SAME name" in error
+    # The driver holds no source in brief mode — no "fix the corrected source" guidance.
+    assert "corrected source" not in error
+
+
+def test_source_mode_repair_guidance_wording_is_unchanged(toolbox):
+    """The legacy full-source repair wording is untouched: a source-mode rejection still tells
+    the driver to fix the reported error and resubmit the full corrected source under the SAME
+    name — the brief-mode branch must not bleed into the hand-written source path."""
+    bad = PROBE.replace("mean = ind.sma", "mean = = ind.sma")
+    out = toolbox.dispatch("write_strategy", {"name": "probe_bad", "source": bad})
+    error = out["error"]
+    assert "Fix the reported error" in error
+    assert "full corrected source" in error
+    assert "SAME name" in error
+    # The brief-mode guidance never leaks into the source path.
+    assert "refine the brief" not in error.lower()
+    assert "scenario sketch" not in error.lower()
 
 
 def test_brief_mode_exhausted_class_guard_fires_before_coder(tmp_path):
@@ -1424,3 +1471,64 @@ def test_no_coder_configured_emits_no_author_events(tmp_path):
     box = _make_toolbox(tmp_path, on_event=events.append)
     box.dispatch("write_strategy", {"name": "hand_written", "source": _named("hand_written")})
     assert _author_events(events) == []
+
+
+# ── brief mode: rejected attempts persist to the capped failed/ area (#18) ──────────────────
+# The toolbox is the sole writer of the failed/ store; these tests assert only what lands on
+# disk under the working tier's failed/ area — never internal call structure.
+def _failed_files(box) -> list:
+    root = box.strategies_dir.tmp / "failed"
+    return sorted(root.glob("*.py")) if root.is_dir() else []
+
+
+def test_rejected_brief_attempt_persists_source_and_error_to_failed_area(tmp_path):
+    """A gate-rejected coder attempt lands one file under <__tmp>/failed/ carrying BOTH the
+    attempted source and the gate error — a bad session inspectable from disk, not scrollback."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN), _fenced(_named("brief_probe"))])
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    files = _failed_files(box)
+    assert len(files) == 1  # only the rejected attempt persisted; the landing one did not
+    body = files[0].read_text(encoding="utf-8")
+    assert BROKEN in body  # the exact attempted source
+    assert "class sets name" in body  # the gate error that rejected it
+    assert "brief_probe" in body  # attributed to the strategy
+
+
+def test_each_rejected_brief_attempt_persists_its_own_file(tmp_path):
+    """Every private retry that fails writes its own failure record — three rejections, three
+    files, so the whole failing job is on disk."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN)] * 3)
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    assert len(_failed_files(box)) == 3
+
+
+def test_successful_brief_persists_no_failure_record(tmp_path):
+    """A first-try success writes nothing to the failed/ area (only rejections are persisted)."""
+    box, _ = _coder_box(tmp_path, [_fenced(_named("brief_probe"))])
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    assert _failed_files(box) == []
+
+
+def test_non_code_reply_persists_the_raw_reply(tmp_path):
+    """A non-code coder reply is a rejected attempt too: its raw text is persisted so a session
+    that never produced code is still diagnosable from disk."""
+    box, _ = _coder_box(tmp_path, ["no code here, just chatter", _fenced(_named("brief_probe"))])
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    files = _failed_files(box)
+    assert len(files) == 1
+    assert "no code here, just chatter" in files[0].read_text(encoding="utf-8")
+
+
+def test_source_write_persists_no_failure_record(tmp_path):
+    """The failed/ area is coder-path only: a rejected hand-written source write (no coder)
+    never touches it — the attempt sink is the sole writer."""
+    box = _make_toolbox(tmp_path)  # no coder configured
+    out = box.dispatch("write_strategy", {"name": "handwritten_fail", "source": BROKEN})
+
+    assert "error" in out
+    root = box.strategies_dir.tmp / "failed"
+    assert not root.exists() or list(root.glob("*.py")) == []

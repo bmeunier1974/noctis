@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,7 +26,12 @@ from noctis.bootstrap import (
 from noctis.champions.promotion import PromotionRules
 from noctis.config import SafetyGateError, load_settings
 from noctis.engine.research import ResearchSummary
-from noctis.research import MandateError
+from noctis.research import Capabilities, MandateError
+
+
+def _fake_coder():
+    """A stand-in coder LLM client: only needs the ``capabilities`` the author engine reads."""
+    return SimpleNamespace(capabilities=Capabilities())
 
 
 def _config(tmp_path, lines: list[str], name: str = "config.yaml") -> str:
@@ -303,9 +309,11 @@ def test_coder_client_not_built_when_knob_unset(tmp_path, monkeypatch, caplog):
 
 
 def test_coder_client_built_when_configured(tmp_path, monkeypatch):
-    """Knob set + provider available ⇒ a stateless coder client reaches the toolbox."""
+    """Knob set + provider available ⇒ a stateless coder client reaches the toolbox, built with
+    thinking ON — authoring is the reasoning-heavy sub-task (#17). It is a *deliberate*, budgeted
+    thinking decision, so ``deliberate=True`` overrides the Sonnet cheap-path pin for the coder."""
     monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
-    coder = object()
+    coder = _fake_coder()
     seen: dict = {}
 
     def fake_client_for(settings, model, **kwargs):
@@ -325,8 +333,42 @@ def test_coder_client_built_when_configured(tmp_path, monkeypatch):
     assert session is not None
     assert session.toolbox.coder_client is coder
     assert seen["model"] == "anthropic/claude-sonnet-5"
-    # Built stateless with thinking off — one completion per authored file.
+    # Thinking flips ON at the composition root (default coder_thinking), deliberately — so even a
+    # Sonnet coder reasons through the scenario/warmup arithmetic instead of repeating an error.
+    assert seen["kwargs"].get("thinking") == "on"
+    assert seen["kwargs"].get("deliberate") is True
+
+
+def test_coder_thinking_setting_off_pins_the_coder_client_off(tmp_path, monkeypatch):
+    """``research.agent.coder_thinking: off`` is the operator's opt-out: the coder client is then
+    built thinking off (still a deliberate decision — the driver dial is a separate knob)."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    seen: dict = {}
+
+    def fake_client_for(settings, model, **kwargs):
+        seen["kwargs"] = kwargs
+        return _fake_coder()
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    settings = _session_settings(tmp_path, coder_model="anthropic/claude-sonnet-5")
+    settings.research.agent.coder_thinking = "off"
+    build_research_session(
+        settings=settings,
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
     assert seen["kwargs"].get("thinking") == "off"
+    assert seen["kwargs"].get("deliberate") is True
+
+
+def test_coder_thinking_defaults_on(tmp_path):
+    """The coder-thinking knob defaults ON (authoring is reasoning-heavy); the driver watch dial
+    (``research.agent.thinking``) stays independently OFF by default (untouched by this story)."""
+    settings = _session_settings(tmp_path, coder_model="anthropic/claude-sonnet-5")
+    assert settings.research.agent.coder_thinking == "on"
+    assert settings.research.agent.thinking == "off"
 
 
 def test_coder_client_missing_key_degrades_loudly(tmp_path, monkeypatch, caplog):

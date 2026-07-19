@@ -365,17 +365,26 @@ def _build_coder_client(settings):
 
     Unset (the default) ⇒ ``None``: the session driver authors full strategy source itself, and
     session assembly is unchanged. Set ⇒ a second, stateless per-model client is built alongside
-    the driver via the shared :func:`~noctis.research.client_for` constructor (thinking off — one
-    completion per authored file). If that client can't be built (its provider's key or the
-    ``[llm]`` extra is missing) the degradation is loud, never silent: warn and fall back to
-    ``None`` (driver-authored mode), so the session still assembles — the same graceful-
-    degradation contract as the rest of the LLM seam, never a mid-session failure."""
+    the driver via the shared :func:`~noctis.research.client_for` constructor. Thinking flips ON
+    here (``research.agent.coder_thinking``, default on) because authoring — the scenario-window
+    and warmup arithmetic — is the reasoning-heavy sub-task (#17); it is a *deliberate*, budgeted
+    decision (``deliberate=True``), so even a Sonnet coder reasons, while the driver loop's own
+    thinking pin is untouched (its cost stays bounded by the Class-B ``max_author_calls`` budget).
+    If that client can't be built (its provider's key or the ``[llm]`` extra is missing) the
+    degradation is loud, never silent: warn and fall back to ``None`` (driver-authored mode), so
+    the session still assembles — the same graceful-degradation contract as the rest of the LLM
+    seam, never a mid-session failure."""
     from noctis.research import client_for
 
     coder_model = settings.research.agent.coder_model
     if not coder_model:
         return None
-    coder = client_for(settings, coder_model, thinking="off")
+    coder = client_for(
+        settings,
+        coder_model,
+        thinking=settings.research.agent.coder_thinking,
+        deliberate=True,
+    )
     if coder is None:
         logger.warning(
             "coder_model %r is configured but no coder client could be built (its provider's "

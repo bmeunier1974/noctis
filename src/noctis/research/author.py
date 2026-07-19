@@ -10,10 +10,14 @@ research, the coder is the typist.
 
 The engine owns no toolbox state, so it is exercised in isolation with a fake LLM client:
 
-1. Compose a **stateless** prompt from the strategy contract (``TEMPLATE.py`` + the
-   header/scenario rules) plus the brief.
-2. One completion against the injected coder client — a bare, single, tool-free codegen call
-   (thinking is pinned off where the client is built, ``client_for(..., thinking="off")``).
+1. Compose a **stateless** prompt from the strategy contract (``TEMPLATE.py``, the API
+   contract sheet, one complete worked-example seed, and the header/scenario rules) plus the
+   brief.
+2. One completion against the injected coder client — a bare, single, tool-free codegen call.
+   Thinking rides on the client the composition root builds (``coder_thinking``, default on —
+   authoring is the reasoning-heavy sub-task, #17), and the byte-stable system prompt carries a
+   cache breakpoint (gated on the client's ``prompt_cache``) so private retries re-read, never
+   re-pay, the enlarged contract/worked-example prefix.
 3. Extract the fenced code block; a reply carrying none is rejected and counts as an attempt.
 4. Validate through the existing library write path
    (:func:`noctis.strategies.library.write_strategy`) — the same fresh-subprocess gate every
@@ -42,7 +46,8 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from noctis.research.llm import LLMClient
+from noctis.research.contract_sheet import CONTRACT_SHEET, hint_for_gate_error
+from noctis.research.llm import LLMClient, cached_system
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 
@@ -55,6 +60,15 @@ _CODER_RETRIES = 2
 
 # The body of the first fenced code block in a reply (```python … ``` or a bare ``` … ```).
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+
+# The committed seed folded into EVERY coder system prompt as one complete worked example.
+# In the failure-census session the coder's one success was the single brief that carried a
+# reference — the one time it saw a whole working file built on the real APIs. This grounds
+# every prompt the same way, referenced or not. donchian_breakout is the richest stateful
+# entry/exit example the seed tier ships: two rolling deques plus a position latch, a breakout
+# entry read against strictly-prior history (no lookahead) and a breakdown exit, with its own
+# known-outcome scenarios. It is read-only input — never mutated, only shown to the coder.
+WORKED_EXAMPLE_NAME = "donchian_breakout"
 
 _ROLE_RULES = (
     "You are a strategy-authoring coder for the Noctis paper-trading research system. You "
@@ -73,6 +87,24 @@ _CONTRACT_RULES = (
     "including at least one tape that demands a directional entry and one always_flat() "
     "no-trade tape, with windows derived from the Params defaults. Code that violates its own "
     "declared scenarios is rejected by the validation gate."
+)
+
+_FEASIBILITY_RULES = (
+    "You own tape construction. The brief's scenario sketch states INTENT — each tape's shape "
+    "and the behavior it must prove — not a literal tape to transcribe; when the sketch asks for "
+    "something a tape cannot honor, build the tape that proves the same intent. Apply these "
+    "feasibility rules BEFORE you place any expectation window:\n"
+    "  - Derive warmup from the Params defaults: find the longest lookback the on_bar path needs "
+    "to produce a non-None indicator, and start every directional expectation window strictly "
+    "AFTER that many bars — an indicator is None until it has seen enough history.\n"
+    "  - A higher-timeframe strategy (one that aggregates N base bars into each decision bar) "
+    "multiplies warmup by N: budget warmup in base bars, not decision bars.\n"
+    "  - A percentile-rank condition over an indicator's OWN rolling window is scale-free: the "
+    "rank depends only on ordering inside the window, so no amplitude — however small — silences "
+    "it. You CANNOT keep such a rule flat by shrinking chop amplitude; do not try.\n"
+    "  - Build the reliable no-trade tape by FALSIFYING the level condition, never by hoping "
+    "quiet chop stays below a threshold: e.g. under a long-only rule, a steady selloff drives the "
+    "condition the wrong way and provably never triggers an entry."
 )
 
 _OUTPUT_RULES = (
@@ -133,6 +165,21 @@ def _seed_template(strategies_dir: library.LibrarySpec) -> str:
         return ""
 
 
+def _seed_example(strategies_dir: library.LibrarySpec) -> str:
+    """The committed worked-example seed source, or ``""`` when it is not on disk.
+
+    Best-effort, mirroring :func:`_seed_template`: a complete real-API strategy grounds the
+    coder, but a degraded install with no seed on disk still authors — the coder gets the
+    rules text and the API contract sheet. Read directly from the read-only ``seeds`` tier so
+    a working copy never shadows the committed example (and the seed is never mutated).
+    """
+    seeds = library.LibraryPaths.coerce(strategies_dir).seeds
+    try:
+        return (seeds / f"{WORKED_EXAMPLE_NAME}.py").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 class StrategyAuthor:
     """Brief in, validated strategy source out — the coder-model authoring engine.
 
@@ -159,14 +206,23 @@ class StrategyAuthor:
         template = (
             template_source if template_source is not None else _seed_template(strategies_dir)
         )
-        self._system_prompt = self._build_system_prompt(template)
+        example = _seed_example(strategies_dir)
+        self._system_prompt = self._build_system_prompt(template, example)
+        # The coder's system prompt is byte-stable for the engine's life (contract sheet +
+        # feasibility rules + one worked example — enlarged by #14-#16). Wrap it in one cache
+        # breakpoint here, once, gated on the client's prompt_cache capability, and pass it by
+        # identity on every completion: on a caching provider the enlarged prefix is written to
+        # cache on the first attempt and re-read — never re-billed — by every private retry within
+        # a job. ``cached_system`` returns the plain string on a non-caching/auto-caching provider,
+        # so the breakpoint is a clean no-op there (the coder loop is otherwise unchanged).
+        self._system = cached_system(self._system_prompt, cache=client.capabilities.prompt_cache)
 
     def author(
         self,
         name: str,
         brief: StrategyBrief,
         *,
-        on_attempt: Callable[[int, Exception | None], None] | None = None,
+        on_attempt: Callable[[int, Exception | None, str], None] | None = None,
     ) -> dict:
         """Turn ``brief`` into a validated ``name`` strategy file in the working tier.
 
@@ -182,12 +238,15 @@ class StrategyAuthor:
         brief becomes a revision request.
 
         ``on_attempt`` — the observability seam — is called exactly once per coder completion,
-        *after* that attempt's validation resolves: ``on_attempt(attempt, None)`` on the
-        completion that lands, ``on_attempt(attempt, error)`` (a
+        *after* that attempt's validation resolves: ``on_attempt(attempt, None, source)`` on the
+        completion that lands, ``on_attempt(attempt, error, source)`` (a
         :class:`~noctis.strategies.library.StrategyValidationError`) when a gate rejection or a
         non-code reply fails an attempt. ``attempt`` is 1-based (1 = first, 2… = a private
-        retry). The engine holds no session state; the caller (the toolbox) adapts this into a
-        session event carrying the coder model and strategy name.
+        retry); ``source`` is the attempt's material — the extracted code block on a gate
+        rejection or success, the raw reply text on a non-code reply — carried so a toolbox-side
+        sink can persist the exact bytes the coder produced. The engine holds no session state
+        and keeps none of the source; the caller (the toolbox) adapts this into a session event
+        carrying the coder model and strategy name, and into the capped ``failed/`` record.
         """
         reference_source = self._reference_source(brief)  # unknown ref → raise, no completion
         current_source = self._current_source(name)  # non-None ⇒ this is a revision
@@ -202,7 +261,7 @@ class StrategyAuthor:
                 current_source=current_source,
             )
             turn = self._client.complete(
-                system=self._system_prompt,
+                system=self._system,
                 tools=[],
                 messages=[{"role": "user", "content": content}],
                 max_tokens=self._max_tokens,
@@ -214,16 +273,16 @@ class StrategyAuthor:
                     "file as one fenced code block and nothing else"
                 )
                 prior = (turn.text or "", str(last_error))
-                self._report(on_attempt, attempt, last_error)
+                self._report(on_attempt, attempt, last_error, turn.text or "")
                 continue
             try:
                 result = library.write_strategy(self._strategies_dir, name, source, self._families)
             except library.StrategyValidationError as exc:
                 last_error = exc
                 prior = (source, str(exc))
-                self._report(on_attempt, attempt, exc)
+                self._report(on_attempt, attempt, exc, source)
                 continue
-            self._report(on_attempt, attempt, None)
+            self._report(on_attempt, attempt, None, source)
             return result
         raise AuthoringError(
             f"the coder could not author a valid {name!r} strategy in {self._max_attempts} "
@@ -233,13 +292,19 @@ class StrategyAuthor:
 
     @staticmethod
     def _report(
-        on_attempt: Callable[[int, Exception | None], None] | None,
+        on_attempt: Callable[[int, Exception | None, str], None] | None,
         attempt: int,
         error: Exception | None,
+        source: str,
     ) -> None:
-        """Report one resolved attempt to the observability hook (a no-op when unset)."""
+        """Report one resolved attempt to the observability hook (a no-op when unset).
+
+        ``source`` is the attempt's material — the extracted code block on a gate rejection or
+        success, the raw reply text on a non-code reply — passed so a toolbox-side sink can
+        persist the exact bytes the coder produced. The engine itself keeps none of it.
+        """
         if on_attempt is not None:
-            on_attempt(attempt, error)
+            on_attempt(attempt, error, source)
 
     # ── reference / revision resolution ──────────────────────────────────────
     def _reference_source(self, brief: StrategyBrief) -> str | None:
@@ -273,12 +338,31 @@ class StrategyAuthor:
             return None
 
     # ── prompt composition ───────────────────────────────────────────────────
-    def _build_system_prompt(self, template: str) -> str:
-        parts = [_ROLE_RULES, _CONTRACT_RULES]
+    def _build_system_prompt(self, template: str, example: str) -> str:
+        # The contract sheet grounds the coder in the exact helper signatures the write gate
+        # executes — the surface TEMPLATE.py deliberately elides — so it never hallucinates an
+        # API. The feasibility rules make the coder own tape construction and kill the
+        # unsatisfiable-brief retry loop from the coder's end. Both are independent of the
+        # template, so a bare library still ships the full API surface and the discipline.
+        parts = [_ROLE_RULES, _CONTRACT_RULES, CONTRACT_SHEET, _FEASIBILITY_RULES]
         if template:
             parts.append(
                 "Here is TEMPLATE.py — the canonical shape every strategy file follows. "
                 "Mirror its structure:\n\n```python\n" + template + "```"
+            )
+        # One complete worked example, UNCONDITIONALLY — a real shipped strategy that wires the
+        # exact APIs above end to end (incremental state, no-lookahead indicator reads, a
+        # directional tape and a no-trade tape). In the failure census the coder converged only
+        # when it saw a full working file; every prompt now carries one, referenced or not.
+        # Best-effort like the template: a degraded install with no seed still authors rules-only.
+        if example:
+            parts.append(
+                "Here is a COMPLETE WORKED EXAMPLE — a real strategy file that uses the APIs "
+                "above end to end: it resets incremental state in on_start, reads its indicator "
+                "against strictly-prior history (no lookahead), ends every bar with a target, and "
+                "declares its own directional and no-trade scenarios. Study how the pieces wire "
+                "together and author your file the same way — but implement the BRIEF's edge, not "
+                "this one:\n\n```python\n" + example + "```"
             )
         parts.append(_OUTPUT_RULES)
         return "\n\n".join(parts)
@@ -328,6 +412,13 @@ class StrategyAuthor:
                 "\n\nYour previous attempt did not pass validation. Fix it and return the "
                 "complete corrected file.\n"
                 f"Validation error: {error}\n"
-                "Previous source:\n```python\n" + source + "\n```"
             )
+            # When the gate error names a helper the contract sheet declares (a State .update()
+            # arity slip, an unknown ExitRules field, a scenario-builder kwarg typo), append the
+            # true signature from that same table row — the coder is stateless across jobs, so the
+            # retry must carry the real API to fix the actual mistake. Unmatched errors add nothing.
+            hint = hint_for_gate_error(error)
+            if hint:
+                prompt += f"{hint}\n"
+            prompt += "Previous source:\n```python\n" + source + "\n```"
         return prompt

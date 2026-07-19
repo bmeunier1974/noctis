@@ -45,6 +45,7 @@ from noctis.research import websearch
 from noctis.research.author import AuthoringError, StrategyAuthor, StrategyBrief
 from noctis.research.cost import resolve_budgets
 from noctis.research.exhaustion_registry import ExhaustedClassRegistry
+from noctis.research.failed_store import FailedAttemptStore
 from noctis.research.journal import ExperimentJournal
 from noctis.research.sweep import SweepRunner
 from noctis.research.symbols import BANDS, SymbolScreener, screen, validate_profile
@@ -229,6 +230,13 @@ class ResearchToolbox:
             if coder_client is not None
             else None
         )
+        # Every coder attempt the write gate rejects is persisted here — a capped folder under
+        # the working tier (<__tmp>/failed/) — so a bad authoring session is inspectable from
+        # disk, not just terminal scrollback (#18). The attempt sink writes the attempted source
+        # + gate error on every rejection; a landing attempt writes nothing, and the store evicts
+        # oldest over its cap so observability never grows unbounded. Only the coder path reaches
+        # it (the engine's per-attempt seam is the sole caller); source-based writes never do.
+        self.failed_store = FailedAttemptStore(self.strategies_dir.tmp / "failed")
         self.state_dir = Path(settings.state_dir)
         # The durable evidence record every gate reads — see noctis.research.journal.
         self.journal = ExperimentJournal(self.state_dir)
@@ -821,7 +829,11 @@ class ResearchToolbox:
                 },
                 "scenarios": {
                     "type": "string",
-                    "description": "Sketch of the 2-8 known-outcome tapes the file must honor.",
+                    "description": "Sketch of the 2-8 known-outcome tapes the file must honor — "
+                    "INTENT, not tape dictation: state each tape's shape and the behavior it must "
+                    "prove, then leave tape construction to the coder. Do NOT dictate "
+                    "indicator-level tape properties (exact amplitudes, warmup lengths, or that a "
+                    "scale-free percentile rule 'stays quiet') the coder cannot honor.",
                 },
                 "reference": {
                     "type": "string",
@@ -1148,6 +1160,11 @@ class ResearchToolbox:
                     f"(evaluate_vs_champion / reject_strategy) before formulating a new one. "
                     f"Proceeding anyway; make sure this is deliberate."
                 )
+        # Which authoring path this write took, computed the SAME way _author_source routes it —
+        # a brief only goes to the coder when an engine exists. It steers the retry-exhaustion
+        # repair guidance below: the driver holds source in the hand-written path but not in
+        # brief mode, so "fix the source" is actionable in one and not the other.
+        brief_mode = brief is not None and self.author_engine is not None
         # Both authoring paths converge here on a validated write result: a driver-supplied
         # `source` goes straight to the write gate, while a `brief` (coder mode) is turned into
         # source and validated by the StrategyAuthor engine (its private retries invisible).
@@ -1169,6 +1186,19 @@ class ResearchToolbox:
                     "EXISTING library: pick a non-rejected strategy via list_strategies, "
                     "run_backtest its current params, then run_sweep it toward a verdict. "
                     "Revising a passing file is easier than writing one from scratch."
+                )
+            elif brief_mode:
+                # Brief mode: the coder authored (and privately retried) the source — the driver
+                # never sees it, so "fix the source" is not actionable. Point the driver at the
+                # one artifact it does hold: the brief, and the scenario sketch in particular,
+                # whose expected behavior most often contradicts the entry rules the coder honored.
+                error += (
+                    " REPAIR, don't abandon: the coder exhausted its private retries, but a "
+                    "write-gate rejection is a code bug, not a verdict on the thesis — and in "
+                    "brief mode you hold no source to fix. Refine the BRIEF and resubmit "
+                    "write_strategy with the SAME name; look hardest at the scenario sketch, "
+                    "whose expected behavior may contradict the entry rules the coder was given. "
+                    "Do not start a new strategy over a validation error."
                 )
             else:
                 error += (
@@ -1243,13 +1273,22 @@ class ResearchToolbox:
             raise error from exc
 
     def _author_attempt_sink(self, name: str):
-        """Adapt the engine's per-attempt hook into a session authoring event for ``name``.
+        """Adapt the engine's per-attempt hook into (a) a session authoring event and (b) an
+        on-disk failure record for ``name``.
 
         The engine calls this once per coder completion — private retries included — after that
-        attempt's validation resolves, so the toolbox (which owns the model string and the event
-        channel) can emit one observability event carrying model + strategy + attempt + outcome.
+        attempt's validation resolves, passing the attempt number, its outcome, and the attempted
+        source. The toolbox owns both the event channel (the #9 telemetry, unchanged) and the
+        capped ``failed/`` store: a rejected attempt's source and gate error are persisted so a
+        bad session is inspectable from disk, while a landing attempt writes no failure record.
         """
-        return lambda attempt, error: self._emit_author_event(name, attempt, error)
+
+        def sink(attempt: int, error: Exception | None, source: str) -> None:
+            self._emit_author_event(name, attempt, error)
+            if error is not None:
+                self.failed_store.record(name, attempt, source, str(error))
+
+        return sink
 
     def _emit_author_event(self, name: str, attempt: int, error: Exception | None) -> None:
         """Emit one ``author`` :class:`Event` for a resolved coder completion (#9).

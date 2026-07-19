@@ -125,9 +125,16 @@ class AgentResearchConfig(BaseModel):
     # research.model — the provider prefix picks the API key). ``None`` (the default) = the driver
     # writes full source itself, today's behavior bit for bit. Set it to pair a cheap/local driver
     # that runs the session with a strong hosted coder that only turns structured briefs into
-    # validated strategy files. Built stateless (thinking off) at the composition root; a missing
-    # provider key/extra degrades loudly back to driver-authored mode, never a mid-session failure.
+    # validated strategy files. Built stateless at the composition root; a missing provider
+    # key/extra degrades loudly back to driver-authored mode, never a mid-session failure.
     coder_model: str | None = None
+    # The coder's own thinking dial (#17), default ON — authoring (scenario-window + warmup
+    # arithmetic) is the reasoning-heavy sub-task, so the dedicated coder client reasons through it
+    # instead of repeating an error it was just shown. Separate from the driver's ``thinking`` watch
+    # dial below and marked a *deliberate* decision at the composition root, so it turns on even a
+    # Sonnet coder (whose driver-side thinking stays the cheap-path pin). Its cost is already
+    # bounded by ``max_author_calls``; set ``off`` to opt a coder out. Inert without a coder_model.
+    coder_thinking: Literal["off", "on"] = "on"
     # Provider-native reasoning dial (verbose-observability P2), default OFF. ``"on"`` opts a
     # *watch* session into provider-native reasoning where it exists: for the Anthropic (non-Sonnet)
     # fallback model it sends adaptive thinking with a summarized display, so the loop emits

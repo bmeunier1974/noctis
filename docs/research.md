@@ -56,7 +56,11 @@ Authoring is a stateless, single-completion loop. Each job gives the coder a fre
 strategy contract, the brief, and — when the brief names a `reference` — that library strategy's
 full source to adapt, or the current file's source when the name already exists, as a revision
 request), makes one tool-free completion, and flows its output through the exact same
-`library.write_strategy` gate every write passes. On a validation failure the coder is re-prompted
+`library.write_strategy` gate every write passes. The coder runs with **thinking on** by default
+(`research.agent.coder_thinking`) — authoring is the reasoning-heavy sub-task, so it reasons
+through the scenario-window and warmup arithmetic instead of repeating an error it was just shown;
+the (enlarged) system prompt is prompt-cached where the provider supports it, so the private
+retries below re-read it rather than re-paying it. On a validation failure the coder is re-prompted
 privately with the error, up to two retries; those retries are invisible to the driver. When the
 retries are spent the last gate error comes back as a **repairable code bug** — refine the brief
 and resubmit the *same* name — never as a verdict on the thesis. Validation stays the sole arbiter

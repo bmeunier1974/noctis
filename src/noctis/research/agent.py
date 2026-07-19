@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 
 from noctis.engine.research import ResearchSummary, StopEvent
 from noctis.observability.events import Event, render_plain
-from noctis.research.llm import WEB_SEARCH_TOOL_TYPE, effective_web_search
+from noctis.research.llm import WEB_SEARCH_TOOL_TYPE, cached_system, effective_web_search
 from noctis.research.misfire import classify_completion_error, classify_turn
 from noctis.research.prompt import build_system_prompt
 
@@ -74,22 +74,6 @@ def _accumulate_usage(totals: dict[str, int], usage: dict | None) -> None:
         return
     for field in _USAGE_FIELDS:
         totals[field] += int(usage.get(field, 0) or 0)
-
-
-def _cached_system(system_text: str, *, cache: bool = True) -> str | list[dict]:
-    """Wrap the static system prompt in one cached content block (Anthropic explicit caching).
-
-    A single ``cache_control: {"type": "ephemeral"}`` breakpoint on the last (only) system block
-    caches tools + system together — tools render earlier in the request prefix, so the breakpoint
-    covers both. Build this once before the loop and reuse it by identity every round; never
-    interpolate a timestamp, round counter, or other per-round variance into it.
-
-    ``cache=False`` (a provider whose caching is automatic, e.g. OpenAI, or unsupported, e.g. a
-    local model) returns the plain string, so the breakpoint is a clean no-op there.
-    """
-    if not cache:
-        return system_text
-    return [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
 
 
 def _with_moving_breakpoint(messages: list[dict], *, cache: bool = True) -> list[dict]:
@@ -417,7 +401,7 @@ def run_agent_research(
     )
     # The system prompt is byte-stable within a session; cache it once (gated on prompt_cache)
     # so tools + system are written to cache on round 1 and read, not re-billed, thereafter.
-    system_prompt = _cached_system(system, cache=caps.prompt_cache)
+    system_prompt = cached_system(system, cache=caps.prompt_cache)
     tools = list(toolbox.tool_specs())
     # Web search is one tool name with two implementations, chosen by provider. Anthropic
     # serves `web_search` server-side; every other provider (OpenAI, any $0 local/self-hosted
