@@ -38,8 +38,10 @@ to research — looping day after day.
   symbol holdout it never trained on before it can be promoted.
 - **A genuine forward track record.** Champions trade only bars no tuning ever saw, in
   one continuous paper account that carries equity and positions across sessions.
-- **Provider-neutral, free at the limit.** Any hosted or local LLM behind one seam — a
-  local backend costs $0/token. No model configured? A classic optimizer loop runs instead.
+- **Provider-neutral seam, free where it can be.** Driver and ideation run on any hosted or
+  local LLM — a local backend is $0/token — while strategy authoring needs a hosted *coder*
+  model for now, so a local driver pairs with an affordable hosted coder key. No model
+  configured? A classic optimizer loop runs instead.
 
 ## Getting started
 
@@ -48,9 +50,15 @@ You need three things:
 1. **Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).**
 2. **A [DataBento](https://databento.com) API key** — funds the research data lake; the
    free signup credit more than covers the default backfill.
-3. **An LLM** — either a hosted API key (OpenAI or Anthropic), or a free local backend:
-   [noctis-ollama](https://github.com/bmeunier1974/noctis-ollama) turns a GPU box into a
-   verified, agent-ready one with a single `./setup.sh`.
+3. **An LLM — one hosted key, or a local driver plus a hosted coder.** A single hosted key
+   does everything: set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` in `.env` (the model's
+   `provider/` prefix picks which; `noctis setup` writes it there). Or run the session driver
+   free and local — [noctis-ollama](https://github.com/bmeunier1974/noctis-ollama) makes a GPU
+   box agent-ready with one `./setup.sh` — and pair it with a hosted **coder** key: local
+   models can't yet author Python that clears validation, so strategy authoring needs a hosted
+   coder for now. Shipped pairing: `ollama_chat/noctis-qwen3:14b` + `anthropic/claude-sonnet-5`;
+   affordable coders like `anthropic/claude-haiku-4-5` or `openai/gpt-5.6-luna` work too.
+   → [docs/configuration.md](docs/configuration.md)
 
 ```bash
 uv sync --all-extras                # install everything, reproducible from uv.lock
