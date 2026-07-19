@@ -76,6 +76,24 @@ _CONTRACT_RULES = (
     "declared scenarios is rejected by the validation gate."
 )
 
+_FEASIBILITY_RULES = (
+    "You own tape construction. The brief's scenario sketch states INTENT — each tape's shape "
+    "and the behavior it must prove — not a literal tape to transcribe; when the sketch asks for "
+    "something a tape cannot honor, build the tape that proves the same intent. Apply these "
+    "feasibility rules BEFORE you place any expectation window:\n"
+    "  - Derive warmup from the Params defaults: find the longest lookback the on_bar path needs "
+    "to produce a non-None indicator, and start every directional expectation window strictly "
+    "AFTER that many bars — an indicator is None until it has seen enough history.\n"
+    "  - A higher-timeframe strategy (one that aggregates N base bars into each decision bar) "
+    "multiplies warmup by N: budget warmup in base bars, not decision bars.\n"
+    "  - A percentile-rank condition over an indicator's OWN rolling window is scale-free: the "
+    "rank depends only on ordering inside the window, so no amplitude — however small — silences "
+    "it. You CANNOT keep such a rule flat by shrinking chop amplitude; do not try.\n"
+    "  - Build the reliable no-trade tape by FALSIFYING the level condition, never by hoping "
+    "quiet chop stays below a threshold: e.g. under a long-only rule, a steady selloff drives the "
+    "condition the wrong way and provably never triggers an entry."
+)
+
 _OUTPUT_RULES = (
     "Reply with EXACTLY ONE fenced ```python code block containing the complete strategy "
     "file, and no prose outside that block. Do not omit or abbreviate any part of the file."
@@ -277,8 +295,10 @@ class StrategyAuthor:
     def _build_system_prompt(self, template: str) -> str:
         # The contract sheet grounds the coder in the exact helper signatures the write gate
         # executes — the surface TEMPLATE.py deliberately elides — so it never hallucinates an
-        # API. Independent of the template, so a bare library still ships the full API surface.
-        parts = [_ROLE_RULES, _CONTRACT_RULES, CONTRACT_SHEET]
+        # API. The feasibility rules make the coder own tape construction and kill the
+        # unsatisfiable-brief retry loop from the coder's end. Both are independent of the
+        # template, so a bare library still ships the full API surface and the discipline.
+        parts = [_ROLE_RULES, _CONTRACT_RULES, CONTRACT_SHEET, _FEASIBILITY_RULES]
         if template:
             parts.append(
                 "Here is TEMPLATE.py — the canonical shape every strategy file follows. "

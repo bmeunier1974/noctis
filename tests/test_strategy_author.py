@@ -158,6 +158,44 @@ def test_contract_sheet_survives_a_missing_seed_template(tmp_path, families, fas
     assert CONTRACT_SHEET in client.calls[0]["system"]
 
 
+# ── 1c. The coder owns tape construction and carries the feasibility rules ────────────────
+def test_system_prompt_states_coder_owned_tapes_and_feasibility_rules(
+    tmp_path, families, fast_gate
+):
+    # External behavior: every completion's system prompt tells the coder it owns tape
+    # construction (the brief's scenario sketch is intent, not a tape to transcribe) and carries
+    # the four feasibility rules that killed the unsatisfiable-brief retry loop.
+    engine, client = _author(tmp_path, families, [fenced(PROBE)])
+    engine.author("probe", BRIEF)
+
+    low = client.calls[0]["system"].lower()
+    # Coder owns tape construction; the scenario sketch is intent, not tape dictation.
+    assert "own tape construction" in low
+    assert "intent" in low
+    # Feasibility rule 1: derive warmup from the Params defaults before an expectation window.
+    assert "warmup" in low
+    assert "params default" in low
+    # Feasibility rule 2: higher-timeframe strategies multiply warmup.
+    assert "higher-timeframe" in low
+    assert "multipl" in low  # multiplies / multiply warmup
+    # Feasibility rule 3: a scale-free percentile-rank rule cannot be silenced by chop amplitude.
+    assert "percentile" in low
+    assert "scale-free" in low
+    assert "amplitude" in low
+    # Feasibility rule 4: falsify the level condition (a steady selloff under a long-only rule).
+    assert "falsif" in low
+    assert "selloff" in low
+
+
+def test_feasibility_rules_survive_a_missing_seed_template(tmp_path, families, fast_gate):
+    # The feasibility rules do not depend on TEMPLATE.py: a bare library still ships them.
+    engine, client = _author(tmp_path, families, [fenced(PROBE)])
+    assert engine.author("probe", BRIEF)["name"] == "probe"
+    low = client.calls[0]["system"].lower()
+    assert "own tape construction" in low
+    assert "scale-free" in low
+
+
 # ── 2. Validation error → private retry carrying the error → success lands ────────────────
 def test_validation_error_triggers_private_retry_that_lands(tmp_path, families, fast_gate):
     engine, client = _author(tmp_path, families, [fenced(BROKEN), fenced(PROBE)])

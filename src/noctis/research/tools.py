@@ -821,7 +821,11 @@ class ResearchToolbox:
                 },
                 "scenarios": {
                     "type": "string",
-                    "description": "Sketch of the 2-8 known-outcome tapes the file must honor.",
+                    "description": "Sketch of the 2-8 known-outcome tapes the file must honor — "
+                    "INTENT, not tape dictation: state each tape's shape and the behavior it must "
+                    "prove, then leave tape construction to the coder. Do NOT dictate "
+                    "indicator-level tape properties (exact amplitudes, warmup lengths, or that a "
+                    "scale-free percentile rule 'stays quiet') the coder cannot honor.",
                 },
                 "reference": {
                     "type": "string",

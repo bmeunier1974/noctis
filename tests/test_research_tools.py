@@ -1155,6 +1155,20 @@ def test_write_schema_switches_to_brief_with_coder(tmp_path):
     } <= set(brief["properties"])
 
 
+def test_brief_scenarios_contract_states_intent_not_tape_dictation(tmp_path):
+    """The brief's `scenarios` field is intent (tape shape + expected behavior); the driver must
+    not dictate indicator-level tape properties the coder — which owns tape construction — cannot
+    honor. This is the driver side of the feasibility fix (the twin of the coder-prompt rules)."""
+    box, _ = _coder_box(tmp_path, [])
+    schema = _write_spec(box)["input_schema"]
+    scenarios = schema["properties"]["brief"]["properties"]["scenarios"]["description"].lower()
+    assert "intent" in scenarios
+    assert "behavior" in scenarios  # tape shape + expected behavior
+    # Do not dictate indicator-level tape properties the coder cannot honor.
+    assert "indicator-level" in scenarios
+    assert "coder" in scenarios  # tape construction is the coder's job
+
+
 def test_brief_authors_validated_file_same_shape_as_source(tmp_path):
     """A brief flows driver → toolbox → engine → validated file in the working tier, with
     the same success-result shape (ok/name/path/header) as a source-based write."""
