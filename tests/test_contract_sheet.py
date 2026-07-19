@@ -123,3 +123,74 @@ def test_tape_constants_match_the_live_scenario_module():
         assert getattr(scenarios, const.live_name) == const.value, (
             f"tape constant {const.live_name} drifted from the sheet"
         )
+
+
+# ── retry-error enrichment: hints render from the same rows the sheet renders ─────────────
+def _entry(name: str) -> cs.Entry:
+    return next(e for section in cs.SECTIONS for e in section.entries if e.name == name)
+
+
+def test_state_update_arity_error_maps_to_the_state_row_signature():
+    # A State .update() arity mistake resolves the class name against the State-class rows and
+    # renders a hint from that row — its constructor signature and float/Bar update convention.
+    hint = cs.hint_for_gate_error("AtrState.update() takes 2 positional arguments but 4 were given")
+    assert hint is not None
+    entry = _entry("AtrState")
+    assert entry.signature() in hint  # AtrState(period)
+    assert f".update({entry.update_arg})" in hint  # .update(bar)
+
+
+def test_state_update_missing_argument_error_also_maps_to_the_state_row():
+    # The other arity shape (too few args) is the same class of mistake and the same hint.
+    hint = cs.hint_for_gate_error("AtrState.update() missing 1 required positional argument: 'bar'")
+    assert hint is not None
+    assert _entry("AtrState").signature() in hint
+
+
+def test_unknown_exit_rules_field_maps_to_the_exit_row_signature():
+    hint = cs.hint_for_gate_error(
+        "ExitRules.__init__() got an unexpected keyword argument 'target_pct'"
+    )
+    assert hint is not None
+    assert _entry("ExitRules").signature() in hint
+
+
+def test_scenario_builder_bad_kwarg_maps_to_the_builder_row_signature():
+    # The builder error arrives wrapped (scenarios() raised TypeError: trend() got ...); the
+    # enricher still resolves the builder name and renders that row's signature.
+    hint = cs.hint_for_gate_error(
+        "scenarios() raised TypeError: trend() got an unexpected keyword argument 'drift'"
+    )
+    assert hint is not None
+    assert _entry("trend").signature() in hint  # trend(n, pct)
+
+
+def test_unexpected_kwarg_resolves_any_table_row_not_just_exit_rules():
+    # The keyword-mismatch pattern is general: an expectation/tail-function name resolves too.
+    hint = cs.hint_for_gate_error(
+        "scenarios() raised TypeError: long_within() got an unexpected keyword argument 'bad'"
+    )
+    assert hint is not None
+    assert _entry("long_within").signature() in hint
+
+
+def test_unknown_pattern_yields_no_hint():
+    # Errors matching no known helper-API pattern get no hint — the retry keeps its raw behavior.
+    assert (
+        cs.hint_for_gate_error("class sets name='mismatch' but the strategy/file name is 'probe'")
+        is None
+    )
+    assert cs.hint_for_gate_error("on_bar replay produced a short target series") is None
+    assert cs.hint_for_gate_error("") is None
+
+
+def test_matched_shape_for_a_ghost_name_yields_no_hint():
+    # A well-formed pattern naming a callable that is NOT in the table stays unenriched (the
+    # single source of truth cannot invent a signature it does not hold).
+    assert (
+        cs.hint_for_gate_error("not_a_real_helper() got an unexpected keyword argument 'x'") is None
+    )
+    assert (
+        cs.hint_for_gate_error("GhostState.update() takes 2 positional arguments but 4 were given")
+        is None
+    )

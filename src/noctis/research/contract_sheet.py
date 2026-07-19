@@ -10,14 +10,17 @@ coder's system prompt.
 
 The table is the **single source of truth**: it is hand-written (not runtime introspection, so the
 prompt is deterministic and readable in tests) but shaped as data — ``name → signature → note`` —
-so the same rows can later drive retry-error enrichment (epic #13 story #20) without a second copy
-of the API surface. A drift-guard test (``tests/test_contract_sheet.py``) walks every row and
-asserts its signature against the live modules via :func:`inspect.signature`, so the sheet can
-never silently rot away from the code it grades against.
+so the same rows also drive retry-error enrichment (:func:`hint_for_gate_error`, epic #13 story
+#20): when an authoring attempt trips a known helper-API mistake, the retry prompt appends that
+row's true signature, no second copy of the API surface. A drift-guard test
+(``tests/test_contract_sheet.py``) walks every row and asserts its signature against the live
+modules via :func:`inspect.signature`, so the sheet — and every hint rendered from it — can never
+silently rot away from the code it grades against.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # Sentinel: a parameter that has no default (drift guard compares this to inspect's `empty`).
@@ -370,3 +373,61 @@ def render_contract_sheet() -> str:
 
 
 CONTRACT_SHEET: str = render_contract_sheet()
+
+
+# ── retry-error enrichment (epic #13 story #20) ───────────────────────────────────────────
+# When an authoring attempt fails validation and the gate error names a helper this table
+# declares, the retry prompt appends the helper's TRUE signature so attempt 2 fixes the actual
+# mistake instead of repeating it. The hints render from the same Entry rows the sheet renders
+# from, so the drift guard (tests/test_contract_sheet.py) covers them for free and no second
+# copy of the API surface exists. Only mistakes whose name resolves in the table are enriched;
+# anything else keeps the raw gate error alone.
+#
+# The two recognized error shapes (from the failure census / epic Implementation Decisions):
+#   - a State-class .update() called with the wrong arity, e.g.
+#       "AtrState.update() takes 2 positional arguments but 4 were given"
+#       "AtrState.update() missing 1 required positional argument: 'bar'"
+#   - an unexpected keyword argument to a declared callable — a class constructor (ExitRules)
+#     or a bare function (a scenario builder / expectation / tail function), e.g.
+#       "ExitRules.__init__() got an unexpected keyword argument 'target_pct'"
+#       "trend() got an unexpected keyword argument 'drift'"  (arriving wrapped by scenarios())
+_UPDATE_ARITY_RE = re.compile(
+    r"(?P<name>\w+)\.update\(\) (?:takes \d+ positional argument.*? given"
+    r"|missing \d+ required positional argument)"
+)
+_UNEXPECTED_KWARG_RE = re.compile(
+    r"(?P<name>\w+)(?:\.__init__)?\(\) got an unexpected keyword argument '\w+'"
+)
+
+
+def _entry_for(name: str) -> Entry | None:
+    """The declared table row named ``name``, or ``None`` — the enricher's single lookup."""
+    for section in SECTIONS:
+        for entry in section.entries:
+            if entry.name == name:
+                return entry
+    return None
+
+
+def hint_for_gate_error(error: str) -> str | None:
+    """A true-signature hint line for a known helper-API mistake in ``error``, else ``None``.
+
+    Matches the recognized error shapes above against a name the table declares; on a match,
+    renders a hint from that row (its signature, note, and — for a State class — the ``.update``
+    calling convention). A shape that resolves to no declared row, and any error matching no
+    shape, returns ``None`` so the retry keeps its raw-gate-error behavior unchanged.
+    """
+    m = _UPDATE_ARITY_RE.search(error)
+    if m:
+        entry = _entry_for(m.group("name"))
+        if entry is not None and entry.update_arg is not None:
+            return (
+                f"API hint: {entry.signature()} — {entry.note} "
+                f"Call .update({entry.update_arg}) with a single argument per bar, not several."
+            )
+    m = _UNEXPECTED_KWARG_RE.search(error)
+    if m:
+        entry = _entry_for(m.group("name"))
+        if entry is not None:
+            return f"API hint: {entry.signature()} — {entry.note}"
+    return None

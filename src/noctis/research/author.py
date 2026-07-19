@@ -46,7 +46,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from noctis.research.contract_sheet import CONTRACT_SHEET
+from noctis.research.contract_sheet import CONTRACT_SHEET, hint_for_gate_error
 from noctis.research.llm import LLMClient, cached_system
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
@@ -412,6 +412,13 @@ class StrategyAuthor:
                 "\n\nYour previous attempt did not pass validation. Fix it and return the "
                 "complete corrected file.\n"
                 f"Validation error: {error}\n"
-                "Previous source:\n```python\n" + source + "\n```"
             )
+            # When the gate error names a helper the contract sheet declares (a State .update()
+            # arity slip, an unknown ExitRules field, a scenario-builder kwarg typo), append the
+            # true signature from that same table row — the coder is stateless across jobs, so the
+            # retry must carry the real API to fix the actual mistake. Unmatched errors add nothing.
+            hint = hint_for_gate_error(error)
+            if hint:
+                prompt += f"{hint}\n"
+            prompt += "Previous source:\n```python\n" + source + "\n```"
         return prompt

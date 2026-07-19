@@ -20,7 +20,7 @@ from noctis.research.author import (
     StrategyAuthor,
     StrategyBrief,
 )
-from noctis.research.contract_sheet import CONTRACT_SHEET, SECTIONS
+from noctis.research.contract_sheet import CONTRACT_SHEET, SECTIONS, hint_for_gate_error
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 from tests.test_research_tools import PROBE
@@ -46,6 +46,35 @@ BRIEF = StrategyBrief(
     style="momentum",
     symbols=("AAA", "BBB"),
 )
+
+
+# Broken PROBE variants, each tripping exactly one known helper-API mistake the retry enricher
+# recognizes (see noctis.research.contract_sheet.hint_for_gate_error).
+_ON_BAR_BODY = (
+    "        mean = ind.sma(self._closes, self.params.lookback)\n"
+    "        ctx.set_target(0 if mean is None else int(bar.close > mean * self.params.edge))"
+)
+
+# A State-class .update() called with three floats instead of one Bar — the AtrState arity
+# mistake the failure census counted 7x across independent jobs.
+UPDATE_ARITY = PROBE.replace(
+    _ON_BAR_BODY,
+    "        atr = ind.AtrState(self.params.lookback)\n"
+    "        atr.update(bar.high, bar.low, bar.close)\n"
+    "        ctx.set_target(0)",
+)
+
+# An ExitRules field that does not exist (target_pct — the real fields are stop/take_profit/trail).
+EXIT_UNKNOWN_FIELD = PROBE.replace(
+    "from noctis.strategies.base import Bar, Context, ParamSpec, TraderStrategy",
+    "from noctis.strategies.base import Bar, Context, ExitRules, ParamSpec, TraderStrategy",
+).replace(
+    _ON_BAR_BODY,
+    "        ctx.set_target(0, exits=ExitRules(target_pct=0.02))",
+)
+
+# A scenario-DSL builder called with an unexpected keyword (trend takes n, pct — not drift).
+SCENARIO_BAD_KWARG = PROBE.replace("sc.trend(30, 0.10)", "sc.trend(30, drift=0.10)")
 
 
 def fenced(source: str) -> str:
@@ -301,6 +330,72 @@ def test_validation_error_triggers_private_retry_that_lands(tmp_path, families, 
     # The retry carried the gate's error context to the coder.
     retry_msg = client.calls[1]["messages"][0]["content"]
     assert "class sets name" in retry_msg
+
+
+# ── 2b. Retry-error enrichment: a known helper-API mistake carries a true-signature hint ──
+# When the gate error names a helper the contract-sheet table declares, the retry prompt appends
+# a true-signature hint line ALONGSIDE the raw gate error, so attempt 2 fixes the actual problem.
+def test_state_update_arity_error_enriches_retry_with_true_signature(tmp_path, families, fast_gate):
+    engine, client = _author(tmp_path, families, [fenced(UPDATE_ARITY), fenced(PROBE)])
+
+    result = engine.author("probe", BRIEF)
+
+    assert result["name"] == "probe"
+    assert len(client.calls) == 2
+    retry = client.calls[1]["messages"][0]["content"]
+    # The raw gate error still drives the retry, unchanged.
+    assert "AtrState.update() takes 2 positional arguments but 4 were given" in retry
+    # And the true-signature hint — rendered from the AtrState contract-sheet row — rides alongside.
+    hint = hint_for_gate_error("AtrState.update() takes 2 positional arguments but 4 were given")
+    assert hint is not None
+    assert hint in retry
+    assert "AtrState(period)" in retry and ".update(bar)" in retry
+
+
+def test_unknown_exit_rules_field_enriches_retry_with_true_signature(tmp_path, families, fast_gate):
+    engine, client = _author(tmp_path, families, [fenced(EXIT_UNKNOWN_FIELD), fenced(PROBE)])
+
+    engine.author("probe", BRIEF)
+
+    assert len(client.calls) == 2
+    retry = client.calls[1]["messages"][0]["content"]
+    assert "unexpected keyword argument 'target_pct'" in retry  # raw gate error preserved
+    hint = hint_for_gate_error(
+        "ExitRules.__init__() got an unexpected keyword argument 'target_pct'"
+    )
+    assert hint is not None
+    assert hint in retry
+    assert "ExitRules(stop_pct=None, take_profit_pct=None, trail_pct=None)" in retry
+
+
+def test_scenario_builder_bad_kwarg_enriches_retry_with_true_signature(
+    tmp_path, families, fast_gate
+):
+    engine, client = _author(tmp_path, families, [fenced(SCENARIO_BAD_KWARG), fenced(PROBE)])
+
+    engine.author("probe", BRIEF)
+
+    assert len(client.calls) == 2
+    retry = client.calls[1]["messages"][0]["content"]
+    assert "unexpected keyword argument 'drift'" in retry  # raw gate error preserved
+    hint = hint_for_gate_error(
+        "scenarios() raised TypeError: trend() got an unexpected keyword argument 'drift'"
+    )
+    assert hint is not None
+    assert hint in retry
+    assert "trend(n, pct)" in retry
+
+
+def test_unmatched_gate_error_keeps_the_raw_retry_behavior(tmp_path, families, fast_gate):
+    # BROKEN trips the class-name gate — not a known helper-API mistake — so the retry carries the
+    # raw gate error alone, with NO hint line appended (current behavior, unchanged).
+    engine, client = _author(tmp_path, families, [fenced(BROKEN), fenced(PROBE)])
+
+    engine.author("probe", BRIEF)
+
+    retry = client.calls[1]["messages"][0]["content"]
+    assert "class sets name" in retry  # the raw gate error still drives the retry
+    assert "API hint:" not in retry  # nothing enriched — no known pattern matched
 
 
 # ── 3. Retries exhausted (2) → typed error carrying the final validation error ────────────
