@@ -31,7 +31,6 @@ import pandas as pd
 
 from noctis.backtest import Candidate, PipelineConfig, evaluate
 from noctis.backtest.pool import evaluation_time_limit, scale_workers
-from noctis.backtest.validate import ValidationConfig
 from noctis.data.aggregate import (
     NATIVE_TIMEFRAME,
     TIMEFRAMES,
@@ -88,10 +87,13 @@ def _offending_line(source: str, error: str) -> str | None:
     return lines[n - 1].strip() or None
 
 
-def _round_trip_cost_bp() -> float:
-    """Cost of one full trade (enter + exit) in bp, from the simulator's fee model."""
-    cfg = ValidationConfig()
-    return 2.0 * (cfg.fee_bps + cfg.slippage_bps)
+def _round_trip_cost_bp(fee_bps: float, slippage_bps: float) -> float:
+    """Cost of one full trade (enter + exit) in bp from the configured per-side fill costs.
+
+    Both sides pay ``fee_bps + slippage_bps``, so a round trip is ``2 ×`` that. The caller
+    passes the operator-configured ``backtest`` costs, so the agent's hint reflects exactly
+    what the pipeline and paper fills charge — never a stale hardcoded default."""
+    return 2.0 * (fee_bps + slippage_bps)
 
 
 def _round(value, digits: int = 4):
@@ -419,7 +421,12 @@ class ResearchToolbox:
             "test_activity": _round(card.test_activity),
             "avg_test_exposure": _round(self._test_split_mean(card, "exposure")),
             "avg_test_turnover": _round(self._test_split_mean(card, "turnover"), 6),
-            "round_trip_cost_bp": _round(_round_trip_cost_bp(), 2),
+            "round_trip_cost_bp": _round(
+                _round_trip_cost_bp(
+                    self.settings.backtest.fee_bps, self.settings.backtest.slippage_bps
+                ),
+                2,
+            ),
         }
         if bars:
             # The do-nothing benchmark over the same evaluated window (full window, not
@@ -455,7 +462,8 @@ class ResearchToolbox:
         code-computed ratio the agent would otherwise redo by hand, never a verdict."""
         from noctis.engine.runtime import research_focus
 
-        round_trip_bp = _round_trip_cost_bp()
+        backtest = self.settings.backtest
+        round_trip_bp = _round_trip_cost_bp(backtest.fee_bps, backtest.slippage_bps)
         timeframes = sorted(TIMEFRAMES, key=lambda t: TIMEFRAMES[t])
         symbols: dict[str, dict] = {}
         # Per timeframe: how many focus symbols' median abs bar move exceeds the round trip.
@@ -491,12 +499,11 @@ class ResearchToolbox:
                 median_bp = float(agg_close.pct_change().dropna().abs().median()) * 1e4
                 if median_bp > round_trip_bp:
                     clears[tf] += 1
-        cfg = ValidationConfig()
         return {
             "bar_schema": self.schema,
             "supported_timeframes": timeframes,
-            "fee_bps_per_side": cfg.fee_bps,
-            "slippage_bps_per_side": cfg.slippage_bps,
+            "fee_bps_per_side": backtest.fee_bps,
+            "slippage_bps_per_side": backtest.slippage_bps,
             "round_trip_cost_bp": _round(round_trip_bp, 2),
             "symbols": symbols,
             # Neutral arithmetic, not advice: per timeframe, the fraction of the focus

@@ -26,9 +26,9 @@ from ._session_helpers import (
 )
 
 
-def _settings(tmp_path, *, provider="databento", execution="auto"):
+def _settings(tmp_path, *, provider="databento", execution="auto", fee_bps=None, slippage_bps=None):
     cfg = tmp_path / "config.yaml"
-    cfg.write_text(
+    body = (
         "mode: paper\n"
         "universe: [AAPL]\n"
         f"state_dir: {tmp_path}/state/\n"
@@ -36,13 +36,34 @@ def _settings(tmp_path, *, provider="databento", execution="auto"):
         f"data:\n  provider: {provider}\n"
         f"trading:\n  execution: {execution}\n"
     )
+    if fee_bps is not None or slippage_bps is not None:
+        body += "backtest:\n"
+        if fee_bps is not None:
+            body += f"  fee_bps: {fee_bps}\n"
+        if slippage_bps is not None:
+            body += f"  slippage_bps: {slippage_bps}\n"
+    cfg.write_text(body)
     return load_settings(config_path=cfg)
 
 
-def _runtime(tmp_path, *, provider="databento", execution="auto", feed_factory=None):
+def _runtime(
+    tmp_path,
+    *,
+    provider="databento",
+    execution="auto",
+    feed_factory=None,
+    fee_bps=None,
+    slippage_bps=None,
+):
     lake = _FakeLake({"AAPL": _bars_local(date(2026, 3, 9), _uptrend())})
     return build_runtime(
-        _settings(tmp_path, provider=provider, execution=execution),
+        _settings(
+            tmp_path,
+            provider=provider,
+            execution=execution,
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
+        ),
         market_lake=lake,
         memory=MemoryStore(tmp_path / "MEMORY.md"),
         registry=_FakeRegistry(),
@@ -115,3 +136,57 @@ def test_fill_rationale_labels_exit_fills_by_reason():
     assert _fill_rationale(trail, orphaned=set()) == "protective exit (trail)"
     # An orphan symbol has no strategy this session — any fill on it IS the flatten.
     assert _fill_rationale(stop, orphaned={"AAPL"}) == "orphan flatten"
+
+
+# ── configured fill costs reach the paper account (#23) ──────────────────────────────────
+def test_trading_phase_builds_paper_broker_at_configured_costs(tmp_path):
+    """The paper-fill broker for the TRADING phase is built from backtest.fee_bps/slippage_bps,
+    so paper fills charge the same cost the backtest promoted the champion under."""
+    runtime = _runtime(tmp_path, provider="databento", fee_bps=2.5, slippage_bps=3.0)
+    outcome = _run_phase(runtime)
+    assert outcome.broker is not None
+    assert outcome.broker.fee_model.bps == 2.5
+    assert outcome.broker.slippage_model.bps == 3.0
+
+
+def test_trading_phase_broker_defaults_to_shipped_costs(tmp_path):
+    """Unset config keeps the paper account on the shipped 1bp/1bp baseline — no behavior drift."""
+    runtime = _runtime(tmp_path, provider="databento")
+    outcome = _run_phase(runtime)
+    assert outcome.broker is not None
+    assert outcome.broker.fee_model.bps == 1.0
+    assert outcome.broker.slippage_model.bps == 1.0
+
+
+def test_trading_day_threads_configured_costs_into_session_config(tmp_path):
+    """TradingDay threads the configured per-side costs onto the phase-wide SessionConfig, so
+    a fresh-broker fallback and the composition agree with the account the phase carries."""
+    from noctis.broker.persistence import AccountStore
+    from noctis.broker.seam import FeeModel, SlippageModel
+    from noctis.engine.forward_ledger import ForwardLedger
+    from noctis.engine.sessions import SessionLedger
+    from noctis.engine.trading_day import TradingDay
+    from noctis.live.risk import RiskLimits
+    from noctis.strategies.families import FamilyRegistry
+
+    class _EmptyRegistry:
+        def list(self):
+            return []
+
+    store = AccountStore(tmp_path / "acct.json")
+    broker = store.load(fee_model=FeeModel(2.5), slippage_model=SlippageModel(3.0))
+    forward = ForwardLedger(tmp_path / "fwd.json")
+    forward.load()
+    day = TradingDay(
+        broker=broker,
+        store=store,
+        ledger=SessionLedger(tmp_path / "sessions.json"),
+        forward=forward,
+        registry=_EmptyRegistry(),
+        families=FamilyRegistry(),
+        limits=RiskLimits(),
+        fee_bps=2.5,
+        slippage_bps=3.0,
+    )
+    assert day.config.fee_bps == 2.5
+    assert day.config.slippage_bps == 3.0

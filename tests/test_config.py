@@ -201,3 +201,67 @@ def test_example_config_ships_the_driver_coder_pairing():
 def test_settings_is_the_public_type():
     """load_settings returns a Settings instance."""
     assert isinstance(load_settings(), Settings)
+
+
+# ── backtest fill costs (#23) ─────────────────────────────────────────────────────────────
+def test_backtest_costs_default_to_the_shipped_baseline(tmp_path):
+    """Unset config behaves exactly as today: 1bp fee + 1bp slippage per side."""
+    settings = load_settings(config_path=tmp_path / "missing.yaml")
+    assert settings.backtest.fee_bps == 1.0
+    assert settings.backtest.slippage_bps == 1.0
+
+
+def test_backtest_costs_load_from_yaml(tmp_path):
+    """Operators can raise the assumed cost structure toward per-venue realism."""
+    cfg = _write_yaml(
+        tmp_path / "config.yaml",
+        """
+        backtest:
+          fee_bps: 2.5
+          slippage_bps: 3.0
+        """,
+    )
+    settings = load_settings(config_path=cfg)
+    assert settings.backtest.fee_bps == 2.5
+    assert settings.backtest.slippage_bps == 3.0
+
+
+def test_backtest_costs_at_the_floor_are_accepted(tmp_path):
+    """The floor is inclusive — the shipped baseline itself is a legal value."""
+    cfg = _write_yaml(
+        tmp_path / "config.yaml",
+        """
+        backtest:
+          fee_bps: 1.0
+          slippage_bps: 1.0
+        """,
+    )
+    settings = load_settings(config_path=cfg)
+    assert settings.backtest.fee_bps == 1.0
+    assert settings.backtest.slippage_bps == 1.0
+
+
+def test_backtest_fee_below_floor_refused_at_load(tmp_path):
+    """A fee below the baseline is a hard startup error naming the floor — never a silent
+    clamp. Dialing costs below the shipped baseline is the cheapest way to manufacture
+    champions that would die on real fills."""
+    cfg = _write_yaml(tmp_path / "config.yaml", "backtest:\n  fee_bps: 0.5\n")
+    with pytest.raises(ValidationError, match="fee_bps"):
+        load_settings(config_path=cfg)
+    with pytest.raises(ValidationError, match="minimum"):
+        load_settings(config_path=cfg)
+
+
+def test_backtest_slippage_below_floor_refused_at_load(tmp_path):
+    """The slippage side is floored identically."""
+    cfg = _write_yaml(tmp_path / "config.yaml", "backtest:\n  slippage_bps: 0.25\n")
+    with pytest.raises(ValidationError, match="slippage_bps"):
+        load_settings(config_path=cfg)
+
+
+def test_backtest_costs_env_override_still_floored(monkeypatch, tmp_path):
+    """The env source is subject to the same floor as YAML — no source escapes it."""
+    cfg = _write_yaml(tmp_path / "config.yaml", "mode: paper\n")
+    monkeypatch.setenv("BACKTEST__FEE_BPS", "0.1")
+    with pytest.raises(ValidationError, match="fee_bps"):
+        load_settings(config_path=cfg)

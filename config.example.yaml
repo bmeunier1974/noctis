@@ -26,6 +26,15 @@ promotion:
   metric: sharpe # sharpe | sortino | total_return — the risk appetite every candidate is scored on
   min_test_activity: 0.05 # reject candidates that almost never trade (lucky-window filter)
 
+# Simulated fill costs, charged per side (the shipped 1bp+1bp = a 4bp round trip). The one
+# value is threaded to the pre-filter, walk-forward validation, the agent's cost hint, and
+# paper fills alike, so they can never disagree. The baseline is ALSO the enforced minimum:
+# the knob may only be RAISED toward per-venue realism, never lowered (a cheaper arena just
+# manufactures champions that die on real fills). Uncomment only to model a harsher venue.
+# backtest:
+#   fee_bps: 1.0 # per side; must be >= 1.0
+#   slippage_bps: 1.0 # per side; must be >= 1.0
+
 risk: # trading-loop limits, percent of account equity
   max_position_pct: 10.0
   max_gross_exposure_pct: 100.0
