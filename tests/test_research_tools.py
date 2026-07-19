@@ -1213,6 +1213,37 @@ def test_brief_engine_failure_surfaces_repairable_bug_shape(tmp_path):
     assert "brief_probe" not in box.undecided
 
 
+def test_brief_mode_retry_exhaustion_points_at_the_brief_not_source(tmp_path):
+    """Brief-mode retry exhaustion: the driver holds no source, so the repair guidance tells it
+    to refine the BRIEF — calling out the scenario sketch, whose expectations may contradict the
+    entry rules — and resubmit the SAME name. It never asks for corrected source, because in
+    brief mode there is no source in the driver's hands to fix."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN)] * 3)
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    error = out["error"]
+    assert "refine the brief" in error.lower()
+    assert "scenario sketch" in error.lower()
+    assert "entry rules" in error.lower()
+    assert "SAME name" in error
+    # The driver holds no source in brief mode — no "fix the corrected source" guidance.
+    assert "corrected source" not in error
+
+
+def test_source_mode_repair_guidance_wording_is_unchanged(toolbox):
+    """The legacy full-source repair wording is untouched: a source-mode rejection still tells
+    the driver to fix the reported error and resubmit the full corrected source under the SAME
+    name — the brief-mode branch must not bleed into the hand-written source path."""
+    bad = PROBE.replace("mean = ind.sma", "mean = = ind.sma")
+    out = toolbox.dispatch("write_strategy", {"name": "probe_bad", "source": bad})
+    error = out["error"]
+    assert "Fix the reported error" in error
+    assert "full corrected source" in error
+    assert "SAME name" in error
+    # The brief-mode guidance never leaks into the source path.
+    assert "refine the brief" not in error.lower()
+    assert "scenario sketch" not in error.lower()
+
+
 def test_brief_mode_exhausted_class_guard_fires_before_coder(tmp_path):
     """The exhausted-class guard fires identically in brief mode — and before any coder
     completion is spent, so delegation cannot reopen a proven dead end."""

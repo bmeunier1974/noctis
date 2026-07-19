@@ -1160,6 +1160,11 @@ class ResearchToolbox:
                     f"(evaluate_vs_champion / reject_strategy) before formulating a new one. "
                     f"Proceeding anyway; make sure this is deliberate."
                 )
+        # Which authoring path this write took, computed the SAME way _author_source routes it —
+        # a brief only goes to the coder when an engine exists. It steers the retry-exhaustion
+        # repair guidance below: the driver holds source in the hand-written path but not in
+        # brief mode, so "fix the source" is actionable in one and not the other.
+        brief_mode = brief is not None and self.author_engine is not None
         # Both authoring paths converge here on a validated write result: a driver-supplied
         # `source` goes straight to the write gate, while a `brief` (coder mode) is turned into
         # source and validated by the StrategyAuthor engine (its private retries invisible).
@@ -1181,6 +1186,19 @@ class ResearchToolbox:
                     "EXISTING library: pick a non-rejected strategy via list_strategies, "
                     "run_backtest its current params, then run_sweep it toward a verdict. "
                     "Revising a passing file is easier than writing one from scratch."
+                )
+            elif brief_mode:
+                # Brief mode: the coder authored (and privately retried) the source — the driver
+                # never sees it, so "fix the source" is not actionable. Point the driver at the
+                # one artifact it does hold: the brief, and the scenario sketch in particular,
+                # whose expected behavior most often contradicts the entry rules the coder honored.
+                error += (
+                    " REPAIR, don't abandon: the coder exhausted its private retries, but a "
+                    "write-gate rejection is a code bug, not a verdict on the thesis — and in "
+                    "brief mode you hold no source to fix. Refine the BRIEF and resubmit "
+                    "write_strategy with the SAME name; look hardest at the scenario sketch, "
+                    "whose expected behavior may contradict the entry rules the coder was given. "
+                    "Do not start a new strategy over a validation error."
                 )
             else:
                 error += (
