@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import textwrap
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from noctis.config import DataConfig, Settings, load_settings
+
+REPO_EXAMPLE_CONFIG = Path(__file__).resolve().parent.parent / "config.example.yaml"
 
 
 def _write_yaml(path, body: str):
@@ -149,6 +152,50 @@ def test_unknown_election_metric_rejected(tmp_path):
     cfg = _write_yaml(tmp_path / "config.yaml", "promotion:\n  metric: profitz\n")
     with pytest.raises(ValidationError):
         load_settings(config_path=cfg)
+
+
+def test_coder_model_defaults_to_none(tmp_path):
+    """The dedicated authoring model is off by default — the driver writes full source."""
+    settings = load_settings(config_path=tmp_path / "missing.yaml")
+    assert settings.research.agent.coder_model is None
+
+
+def test_coder_model_loads_from_yaml(tmp_path):
+    """The cheap-driver + hosted-coder pairing comes from the agent block."""
+    cfg = _write_yaml(
+        tmp_path / "config.yaml",
+        """
+        research:
+          model: ollama_chat/noctis-qwen3:14b
+          agent:
+            coder_model: anthropic/claude-sonnet-5
+        """,
+    )
+    settings = load_settings(config_path=cfg)
+    assert settings.research.model == "ollama_chat/noctis-qwen3:14b"
+    assert settings.research.agent.coder_model == "anthropic/claude-sonnet-5"
+
+
+def test_coder_model_env_overrides_yaml(monkeypatch, tmp_path):
+    """Env wins over YAML for the coder knob, like the other agent-research knobs."""
+    cfg = _write_yaml(
+        tmp_path / "config.yaml",
+        "research:\n  agent:\n    coder_model: anthropic/claude-sonnet-5\n",
+    )
+    monkeypatch.setenv("RESEARCH__AGENT__CODER_MODEL", "anthropic/claude-opus-4-8")
+    settings = load_settings(config_path=cfg)
+    assert settings.research.agent.coder_model == "anthropic/claude-opus-4-8"
+
+
+def test_example_config_ships_the_driver_coder_pairing():
+    """The example config carries the commented local-driver + hosted-coder pairing (#4) —
+    the whole point of the knob — under research.agent, still fully commented out."""
+    lines = REPO_EXAMPLE_CONFIG.read_text(encoding="utf-8").splitlines()
+    coder_lines = [ln for ln in lines if "coder_model" in ln]
+    assert coder_lines, "example config should mention coder_model"
+    assert all(ln.lstrip().startswith("#") for ln in coder_lines)  # inert example, not active
+    assert any("anthropic/claude-sonnet-5" in ln for ln in coder_lines)
+    assert any("ollama_chat/noctis-qwen3:14b" in ln for ln in lines)
 
 
 def test_settings_is_the_public_type():

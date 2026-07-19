@@ -40,7 +40,9 @@ from noctis.data.aggregate import (
     validate_timeframe,
 )
 from noctis.data.types import ns_to_date, ns_to_timestamp, to_ns, to_ns_end_inclusive
+from noctis.observability.events import Event, render_plain
 from noctis.research import websearch
+from noctis.research.author import AuthoringError, StrategyAuthor, StrategyBrief
 from noctis.research.cost import resolve_budgets
 from noctis.research.exhaustion_registry import ExhaustedClassRegistry
 from noctis.research.journal import ExperimentJournal
@@ -107,6 +109,29 @@ def _tool(name: str, description: str, properties: dict | None = None, required=
     }
 
 
+class _CoderCallCounter:
+    """Counting proxy over the coder LLM client so the toolbox tallies every completion the
+    authoring engine spends — private validation retries included.
+
+    The :class:`~noctis.research.author.StrategyAuthor` engine stays toolbox-state-free: it drives
+    the coder through the plain ``complete()`` seam while this wrapper does the accounting the
+    toolbox owns (AGENTS.md: "the toolbox keeps the accounting"). Every ``complete()`` — the one
+    place a coder completion actually happens — bumps the count before the call, so a completion
+    that raises still counts as spend. Any other attribute forwards to the wrapped client.
+    """
+
+    def __init__(self, client, on_complete):
+        self._client = client
+        self._on_complete = on_complete
+
+    def __getattr__(self, item):
+        return getattr(self._client, item)
+
+    def complete(self, **kwargs):
+        self._on_complete()
+        return self._client.complete(**kwargs)
+
+
 class ResearchToolbox:
     """Session-scoped tool registry + dispatcher for the agent research loop.
 
@@ -156,6 +181,8 @@ class ResearchToolbox:
         rules,
         mandate_source=None,
         mandate=None,
+        coder_client=None,
+        on_event=None,
     ):
         self.settings = settings
         self.lake = lake
@@ -169,9 +196,39 @@ class ResearchToolbox:
         # The resolved mandate itself (or None): its declared symbols join the research
         # focus set (the prompt digest + holdout candidate pool enumeration).
         self.mandate = mandate
+        # The dedicated strategy-authoring ("coder") LLM client, or None (the default) when the
+        # driver authors full source itself. Built at the composition root from
+        # research.agent.coder_model. When set, write_strategy switches to brief mode: the
+        # driver commits a StrategyBrief and this client authors the file (see _author_source).
+        self.coder_client = coder_client
+        # The coder model string that pairs with coder_client — stamped onto every authoring
+        # event so a watch session names the model that wrote (or failed to write) the file.
+        self.coder_model = settings.research.agent.coder_model
+        # The session event channel this toolbox emits authoring observability through (#9): the
+        # SAME on_event sink the agent loop and console already use, threaded in at the composition
+        # root. None (tests, bare loops) falls back to the logger, like the agent's default sink.
+        self.on_event = on_event
         # The three library tier roots (seeds committed, __tmp/champions under the
         # workspace); every library call takes it opaquely, incl. the sweep workers.
         self.strategies_dir = library.LibraryPaths.from_settings(settings)
+        # Coder completions spent this session (author path only): the counting proxy below bumps
+        # it on every engine completion, private retries included — the Class-B author budget
+        # meters on it and the session summary surfaces it. Source-based writes never move it.
+        self.author_calls = 0
+        # The brief-authoring engine — built only in coder mode. Toolbox-state-free: it turns
+        # a brief into validated source through the SAME library.write_strategy gate the source
+        # path uses, so both authoring paths converge on one result shape and one set of guards.
+        # The coder client is wrapped so every completion the engine spends counts against the
+        # author budget (retries included) — the accounting stays toolbox-side.
+        self.author_engine = (
+            StrategyAuthor(
+                client=_CoderCallCounter(coder_client, self._bump_author_calls),
+                strategies_dir=self.strategies_dir,
+                families=self.families,
+            )
+            if coder_client is not None
+            else None
+        )
         self.state_dir = Path(settings.state_dir)
         # The durable evidence record every gate reads — see noctis.research.journal.
         self.journal = ExperimentJournal(self.state_dir)
@@ -189,6 +246,10 @@ class ResearchToolbox:
         budgets = resolve_budgets(settings.research)
         self.max_backtests = budgets.max_backtests
         self.default_sweep_trials = budgets.sweep_trials
+        # Coder-model Class-B budget: every brief the coder authors (retries included) counts;
+        # once spent, brief authoring is refused (source-based writes stay open). Inert without
+        # a coder_model — no completion ever happens, so the count stays 0.
+        self.max_author_calls = budgets.max_author_calls
         self.sweep_workers = settings.research.agent.sweep_workers
         self.worker_bar_budget = settings.research.agent.worker_bar_budget
         # run_sweep's execution engine — sampler, fork pool, stall guard — behind its own
@@ -451,6 +512,28 @@ class ResearchToolbox:
             )
         return None
 
+    def _bump_author_calls(self) -> None:
+        """Count one coder completion (the counting proxy calls this per engine ``complete()``)."""
+        self.author_calls += 1
+
+    def _author_budget_block(self) -> str | None:
+        """Refuse to START a new brief-authoring job once the coder budget is spent.
+
+        Meters on completions, so a job already running may overrun the cap with its private
+        retries — this only refuses to begin a *new* one, mirroring the codebase's "check before
+        you start" budget idiom. A refusal with explicit driver guidance, never a silent failure;
+        the hand-written ``source`` path is deliberately not gated (it spends no coder completion).
+        """
+        if self.author_calls >= self.max_author_calls:
+            return (
+                f"author-call budget exhausted ({self.author_calls}/{self.max_author_calls} coder "
+                f"completions spent this session); further brief authoring is refused. Revise an "
+                f"existing strategy by hand (submit `source` — the hand-written path stays open) "
+                f"or proceed to a verdict (evaluate_vs_champion / reject_strategy) with what the "
+                f"journal already shows."
+            )
+        return None
+
     # ── tool definitions (Anthropic tool-use schema) ─────────────────────────
     def tool_specs(self) -> list[dict]:
         sym_array = {"type": "array", "items": {"type": "string"}, "description": "Ticker symbols."}
@@ -573,47 +656,7 @@ class ResearchToolbox:
                 },
                 ["symbols", "start", "end"],
             ),
-            _tool(
-                "write_strategy",
-                "Submit a strategy .py (new, or a revision of an existing one). Validated in "
-                "an isolated interpreter: clean import, exactly one TraderStrategy subclass "
-                "whose `name` equals the file name, docstring header, smoke replay on a "
-                "synthetic fixture, signals/on_bar parity, and a replay of the file's own "
-                "known-outcome scenarios: a `scenarios()` classmethod returning 2-8 Scenario "
-                "objects built from the noctis.strategies.scenarios DSL (segments: flat/"
-                "trend/selloff/recovery/chop/vol_spike/gap; expectations: flat_until/"
-                "long_within/holds_long_through/short_within/holds_short_through/flat_by/"
-                "always_flat). Targets are signed (+1 long, -1 short, 0 flat); include at "
-                "least one tape demanding a directional entry (long OR short) and one "
-                "always_flat() no-trade tape. Derive the tapes and windows from the THESIS "
-                "(and from your Params defaults) before writing on_bar — code that violates "
-                "its own declared scenarios is rejected. "
-                "Rejected sources leave no file, and a rejection is a repairable code bug, NOT "
-                "a verdict on the thesis: fix the reported error and resubmit the SAME name "
-                "rather than authoring a new strategy. Tag every submission with a short "
-                "`class_tag` "
-                "naming the approach (e.g. 'per-symbol long/flat MA-cross overlay'); if that "
-                "class was already declared exhausted (see MARKET REALITY exhausted_classes), the "
-                "write is refused unless you pass `new_lever` naming what is materially new "
-                "(a short leg, a session-time gate, a different symbol character).",
-                {
-                    "name": {"type": "string", "description": "lower_snake_case strategy name."},
-                    "source": {"type": "string", "description": "Complete Python source."},
-                    "class_tag": {
-                        "type": "string",
-                        "description": "Short label for this strategy's CLASS/approach — the "
-                        "governor keys on it to prevent re-mining a proven dead end. Reuse an "
-                        "existing exhausted_classes tag verbatim when you deliberately extend it.",
-                    },
-                    "new_lever": {
-                        "type": "string",
-                        "description": "Only when class_tag names an exhausted class: the "
-                        "materially-new dimension this attempt adds that the post-mortem did "
-                        "not cover (short leg / session-time gate / different symbol character).",
-                    },
-                },
-                ["name", "source"],
-            ),
+            self._write_strategy_spec(),
             _tool(
                 "run_backtest",
                 "Evaluate one parameter set over the symbols (walk-forward + forward holdout); "
@@ -699,6 +742,119 @@ class ResearchToolbox:
                 ["name", "reason"],
             ),
         ]
+
+    def _write_strategy_spec(self) -> dict:
+        """The write_strategy tool spec, switched by whether a coder model is configured.
+
+        Exactly one authoring mode is ever visible to the driver. Default (no coder): the
+        driver hand-writes ``source`` (required) — today's behavior, bit-for-bit. Coder mode:
+        ``source`` is replaced as the required input by a ``brief`` object, so the driver must
+        commit thesis/rules/params/scenarios before any code exists; ``source`` stays
+        accepted-but-optional so a capable driver can still hand-write a revision. ``name`` /
+        ``class_tag`` / ``new_lever`` and every write guard are shared by both modes.
+        """
+        base = (
+            "Submit a strategy .py (new, or a revision of an existing one). Validated in "
+            "an isolated interpreter: clean import, exactly one TraderStrategy subclass "
+            "whose `name` equals the file name, docstring header, smoke replay on a "
+            "synthetic fixture, signals/on_bar parity, and a replay of the file's own "
+            "known-outcome scenarios: a `scenarios()` classmethod returning 2-8 Scenario "
+            "objects built from the noctis.strategies.scenarios DSL (segments: flat/"
+            "trend/selloff/recovery/chop/vol_spike/gap; expectations: flat_until/"
+            "long_within/holds_long_through/short_within/holds_short_through/flat_by/"
+            "always_flat). Targets are signed (+1 long, -1 short, 0 flat); include at "
+            "least one tape demanding a directional entry (long OR short) and one "
+            "always_flat() no-trade tape. Derive the tapes and windows from the THESIS "
+            "(and from your Params defaults) before writing on_bar — code that violates "
+            "its own declared scenarios is rejected. "
+            "Rejected sources leave no file, and a rejection is a repairable code bug, NOT "
+            "a verdict on the thesis: fix the reported error and resubmit the SAME name "
+            "rather than authoring a new strategy. Tag every submission with a short "
+            "`class_tag` "
+            "naming the approach (e.g. 'per-symbol long/flat MA-cross overlay'); if that "
+            "class was already declared exhausted (see MARKET REALITY exhausted_classes), the "
+            "write is refused unless you pass `new_lever` naming what is materially new "
+            "(a short leg, a session-time gate, a different symbol character)."
+        )
+        class_tag = {
+            "type": "string",
+            "description": "Short label for this strategy's CLASS/approach — the "
+            "governor keys on it to prevent re-mining a proven dead end. Reuse an "
+            "existing exhausted_classes tag verbatim when you deliberately extend it.",
+        }
+        new_lever = {
+            "type": "string",
+            "description": "Only when class_tag names an exhausted class: the "
+            "materially-new dimension this attempt adds that the post-mortem did "
+            "not cover (short leg / session-time gate / different symbol character).",
+        }
+        name = {"type": "string", "description": "lower_snake_case strategy name."}
+        if self.coder_client is None:
+            return _tool(
+                "write_strategy",
+                base,
+                {
+                    "name": name,
+                    "source": {"type": "string", "description": "Complete Python source."},
+                    "class_tag": class_tag,
+                    "new_lever": new_lever,
+                },
+                ["name", "source"],
+            )
+        brief = {
+            "type": "object",
+            "description": "The research judgment a dedicated coder model turns into the file. "
+            "It IS the research — commit thesis, rules, parameters, and expected scenario "
+            "behavior here; the coder translates, never invents.",
+            "properties": {
+                "thesis": {
+                    "type": "string",
+                    "description": "The market inefficiency, in one paragraph.",
+                },
+                "entry_exit": {
+                    "type": "string",
+                    "description": "Precise long/short/flat rules.",
+                },
+                "param_space": {
+                    "type": "string",
+                    "description": "Tunable knobs + sensible ranges.",
+                },
+                "scenarios": {
+                    "type": "string",
+                    "description": "Sketch of the 2-8 known-outcome tapes the file must honor.",
+                },
+                "reference": {
+                    "type": "string",
+                    "description": "Optional: a library strategy to adapt.",
+                },
+                "style": {"type": "string"},
+                "symbols": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["thesis", "entry_exit", "param_space", "scenarios"],
+        }
+        coder_desc = (
+            base + " A dedicated coder model is configured: submit a `brief` (thesis, "
+            "entry_exit, param_space, scenarios) and it authors the file for you — you never "
+            "write source. A gate rejection after its private retries comes back as a "
+            "repairable bug: refine the brief and resubmit the SAME name. `source` stays "
+            "optional if you would rather hand-write a revision."
+        )
+        return _tool(
+            "write_strategy",
+            coder_desc,
+            {
+                "name": name,
+                "brief": brief,
+                "source": {
+                    "type": "string",
+                    "description": "Optional complete Python source — hand-write a revision "
+                    "instead of briefing the coder.",
+                },
+                "class_tag": class_tag,
+                "new_lever": new_lever,
+            },
+            ["name", "brief"],
+        )
 
     def result_brief(self, result) -> dict:
         """The gate-facing slice of one tool result, in :data:`TOOL_LINE_KEYS` order — what
@@ -949,9 +1105,17 @@ class ResearchToolbox:
 
     # ── write / experiment tools ─────────────────────────────────────────────
     def tool_write_strategy(
-        self, name: str, source: str, class_tag: str | None = None, new_lever: str | None = None
+        self,
+        name: str,
+        source: str | None = None,
+        brief: dict | None = None,
+        class_tag: str | None = None,
+        new_lever: str | None = None,
     ) -> dict:
         is_new = library.strategy_path(self.strategies_dir, name) is None
+        # The guards that fire before any source exists (exhausted-class, undecided nudge) run
+        # first for BOTH authoring paths — so the exhausted-class block spends zero coder
+        # completions and delegation to the coder can never reopen a proven dead end.
         if class_tag and not new_lever:
             dead = self.exhausted.is_exhausted(class_tag)
             if dead is not None:
@@ -965,6 +1129,13 @@ class ResearchToolbox:
                         f"exactly what is materially new."
                     )
                 }
+        # The coder Class-B budget gates only the brief path (a coder completion is about to be
+        # spent). Checked before any completion — a refusal to START, source-based writes are
+        # never gated — so an exhausted budget still leaves the driver a hand-written escape.
+        if brief is not None and self.author_engine is not None:
+            over_budget = self._author_budget_block()
+            if over_budget:
+                return {"error": over_budget}
         warning = None
         if is_new:
             pending = sorted(
@@ -977,13 +1148,18 @@ class ResearchToolbox:
                     f"(evaluate_vs_champion / reject_strategy) before formulating a new one. "
                     f"Proceeding anyway; make sure this is deliberate."
                 )
+        # Both authoring paths converge here on a validated write result: a driver-supplied
+        # `source` goes straight to the write gate, while a `brief` (coder mode) is turned into
+        # source and validated by the StrategyAuthor engine (its private retries invisible).
+        # Both surface a StrategyValidationError on a gate rejection, so the fixation/REPAIR
+        # handling below and the success bookkeeping are shared, never duplicated.
         try:
-            result = library.write_strategy(self.strategies_dir, name, source, self.families)
+            result = self._author_source(name, source, brief)
         except library.StrategyValidationError as exc:
             self._write_gate_failures += 1
             self._last_failed_write = name
             error = f"validation failed: {exc}"
-            offending = _offending_line(source, str(exc))
+            offending = _offending_line(source or "", str(exc))
             if offending:
                 error += f" | offending line: {offending!r}"
             if self.backtests_run == 0 and self._write_gate_failures >= _WRITE_FIXATION_THRESHOLD:
@@ -1022,6 +1198,92 @@ class ResearchToolbox:
         if warning:
             out["warning"] = warning
         return out
+
+    def _author_source(self, name: str, source: str | None, brief: dict | None) -> dict:
+        """Materialize a validated write result from a brief (coder mode) or hand-written source.
+
+        Returns the :func:`library.write_strategy` result (name/path/header) either path lands,
+        so :meth:`tool_write_strategy` runs one shared set of guards and one bookkeeping block.
+        A brief authors through the coder engine; anything else requires source. Raises
+        :class:`library.StrategyValidationError` on a gate rejection (brief mode re-surfaces the
+        engine's final validation error), routing both paths through the shared REPAIR handling.
+        """
+        if brief is not None and self.author_engine is not None:
+            return self._author_from_brief(name, brief)
+        if not source:
+            raise library.StrategyValidationError(
+                "write_strategy needs `source` (or a `brief` when a coder model is configured)"
+            )
+        return library.write_strategy(self.strategies_dir, name, source, self.families)
+
+    def _author_from_brief(self, name: str, brief: dict) -> dict:
+        """Delegate to the coder engine: the driver's brief in, a validated file out.
+
+        The engine makes stateless coder completions with private retries and lands the file
+        through the same ``library.write_strategy`` gate the source path uses. Its
+        :class:`AuthoringError` (retries exhausted) re-surfaces as the final
+        :class:`library.StrategyValidationError`, so the caller's shared fixation/REPAIR path
+        steers the driver to refine the brief and resubmit the same name.
+        """
+        engine = self.author_engine
+        assert engine is not None  # only reached in coder mode (guarded by _author_source)
+        parsed = StrategyBrief(
+            thesis=brief["thesis"],
+            entry_exit=brief["entry_exit"],
+            param_space=brief["param_space"],
+            scenarios=brief["scenarios"],
+            reference=brief.get("reference"),
+            style=brief.get("style"),
+            symbols=tuple(brief.get("symbols") or ()),
+        )
+        try:
+            return engine.author(name, parsed, on_attempt=self._author_attempt_sink(name))
+        except AuthoringError as exc:
+            error = exc.validation_error or library.StrategyValidationError(str(exc))
+            raise error from exc
+
+    def _author_attempt_sink(self, name: str):
+        """Adapt the engine's per-attempt hook into a session authoring event for ``name``.
+
+        The engine calls this once per coder completion — private retries included — after that
+        attempt's validation resolves, so the toolbox (which owns the model string and the event
+        channel) can emit one observability event carrying model + strategy + attempt + outcome.
+        """
+        return lambda attempt, error: self._emit_author_event(name, attempt, error)
+
+    def _emit_author_event(self, name: str, attempt: int, error: Exception | None) -> None:
+        """Emit one ``author`` :class:`Event` for a resolved coder completion (#9).
+
+        ``error is None`` ⇒ the attempt landed (``ok``); otherwise the validation error (a gate
+        rejection or a non-code reply) is the attempt's outcome. So a watch session (``research
+        -v``) sees authoring happen instead of a silent gap where a file appears from nowhere.
+        """
+        ok = error is None
+        model = self.coder_model or "coder"
+        outcome = "ok" if ok else str(error)
+        text = f"author {name} · attempt {attempt} · {model} -> {outcome}"
+        self._emit(
+            Event(
+                "author",
+                text,
+                meta={
+                    "model": model,
+                    "strategy": name,
+                    "attempt": attempt,
+                    "ok": ok,
+                    "outcome": outcome,
+                },
+                level=1,
+            )
+        )
+
+    def _emit(self, event: Event) -> None:
+        """Hand one event to the session channel, or the logger when no sink is wired — the same
+        Event-or-log contract the agent loop's default ``on_event`` sink uses."""
+        if self.on_event is not None:
+            self.on_event(event)
+        else:
+            logger.info("%s", render_plain(event))
 
     def tool_run_backtest(self, name: str, symbols: list[str], params: dict | None = None) -> dict:
         blocked = self._spend_backtests(1)

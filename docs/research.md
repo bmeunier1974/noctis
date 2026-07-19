@@ -35,6 +35,48 @@ A champion file is immutable after that — improving one means authoring a new 
 seed files at the `strategies/` root are never mutated in place. The strategy-file contract and
 the three-tier layout are documented in `strategies/README.md`.
 
+## The coder-model split: brief in, validated file out
+
+`write_strategy` demands a complete strategy file that survives fresh-subprocess validation in
+one shot — the one job a cheap or local driver thrashes on. Setting `research.agent.coder_model`
+(see [configuration.md](configuration.md)) splits the role: the **driver** keeps the thesis and
+the protocol, and a dedicated **coder** model does nothing but turn a structured *brief* into one
+validated file. The driver never writes source; the coder never invents edge.
+
+The brief is the division-of-labor guard. In coder mode `write_strategy` swaps its `source`
+field for a required `brief` object whose required parts — `thesis`, `entry_exit`, `param_space`,
+and a `scenarios` sketch — force the driver to commit the research *before* any code exists. A
+brief can't degenerate to "write me something profitable"; if it could, research would have
+silently moved to the coder and the split would be fake. The schema switch is total: the driver
+only ever sees **one** authoring mode. Without a coder, `source` stays required and nothing
+changes; with one, `brief` is required and `source` stays optional — a capable driver can still
+hand-write a revision.
+
+Authoring is a stateless, single-completion loop. Each job gives the coder a fresh prompt (the
+strategy contract, the brief, and — when the brief names a `reference` — that library strategy's
+full source to adapt, or the current file's source when the name already exists, as a revision
+request), makes one tool-free completion, and flows its output through the exact same
+`library.write_strategy` gate every write passes. On a validation failure the coder is re-prompted
+privately with the error, up to two retries; those retries are invisible to the driver. When the
+retries are spent the last gate error comes back as a **repairable code bug** — refine the brief
+and resubmit the *same* name — never as a verdict on the thesis. Validation stays the sole arbiter
+of what lands: a revision that never validates leaves the previous version untouched, and an
+unknown `reference` is rejected before any completion is spent.
+
+Coder completions are Class-B spend, bounded by `research.agent.max_author_calls` (per profile
+`20` / `12` / `6`; the `cost_profile` scales it with the rest). The toolbox counts every
+completion — private retries included — and refuses to *start* a new brief-authoring job once the
+budget is spent, telling the driver to revise by hand or proceed to a verdict; the hand-written
+`source` path is never gated. Each completion emits an `author` event (`✎`) — coder model,
+strategy name, attempt number, validation outcome — so `noctis research -v` shows authoring
+happen instead of a silent gap where a file appears from nowhere, and the coder-call count lands
+in the session summary beside the backtest count.
+
+If the coder's provider key or `[llm]` extra is missing, the split degrades **loudly** to
+driver-authored mode at composition time — a warning, and the session still assembles with the
+driver writing source itself. Nothing else moves: this is purely an authoring seam, so the
+promotion gates, the exhaustion floor, journaling, and both out-of-sample holdouts are untouched.
+
 ## Panel research: out-of-sample on two axes
 
 Research is cross-sectional, not single-symbol. Every candidate is tuned and validated on a
@@ -104,8 +146,9 @@ silently changes spend.
 ## One cost knob, never a hidden throttle
 
 `research.cost_profile` (`full` / `balanced` / `economy`) scales the research budgets — tool
-rounds, backtests, sweep trials, web searches, reasoning effort, prompt-prefix trim — together,
-and those ceilings live in a single profile table (`src/noctis/research/cost.py`), never
+rounds, backtests, sweep trials, coder-model author completions, web searches, reasoning effort,
+prompt-prefix trim — together, and those ceilings live in a single profile table
+(`src/noctis/research/cost.py`), never
 hardcoded lower anywhere else. `balanced` (the default) is exactly the standard ceilings;
 `economy` reduces spend; `full` restores the maximums and is the automatic choice on a
 free/local provider. The knob binds *resource ceilings only*: it can never lower the

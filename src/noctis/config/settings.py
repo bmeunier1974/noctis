@@ -121,6 +121,13 @@ class AgentResearchConfig(BaseModel):
     """
 
     model: str = "claude-opus-4-8"
+    # Dedicated authoring model for write_strategy (same LiteLLM ``provider/model`` grammar as
+    # research.model — the provider prefix picks the API key). ``None`` (the default) = the driver
+    # writes full source itself, today's behavior bit for bit. Set it to pair a cheap/local driver
+    # that runs the session with a strong hosted coder that only turns structured briefs into
+    # validated strategy files. Built stateless (thinking off) at the composition root; a missing
+    # provider key/extra degrades loudly back to driver-authored mode, never a mid-session failure.
+    coder_model: str | None = None
     # Provider-native reasoning dial (verbose-observability P2), default OFF. ``"on"`` opts a
     # *watch* session into provider-native reasoning where it exists: for the Anthropic (non-Sonnet)
     # fallback model it sends adaptive thinking with a summarized display, so the loop emits
@@ -136,6 +143,12 @@ class AgentResearchConfig(BaseModel):
     max_iterations: int | None = None  # tool-use rounds per session
     max_backtests: int | None = None  # run_backtest calls + individual run_sweep trials
     sweep_trials: int | None = None  # default Optuna trials for one run_sweep call
+    # Coder-model completions per session (coder-model split): every write_strategy brief the
+    # coder authors — private validation retries included — spends one; one authored or revised
+    # file ≈ one call. Bounds coder spend so an unbounded driver can't run up the bill. ``None`` ⇒
+    # the active cost_profile's value (20/12/6 full/balanced/economy); a number here pins it.
+    # Inert without a configured coder_model (source-based writes never touch this budget).
+    max_author_calls: int | None = None
     # Worker processes for parallel evaluation (1 = fully sequential): sweep trials run
     # concurrently, and a panel run_backtest/evaluate_vs_champion evaluates its symbols
     # concurrently. Capped by CPU/task count; falls back to sequential if the pool breaks.

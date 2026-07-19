@@ -4,9 +4,9 @@ research budgets together.
 The throttle values live *here*, in a profile table — never hardcoded lower in the defaults.
 "Reset to full research" is a single config line (``research.cost_profile: full``); nothing
 about a throttled run is baked in anywhere else. The knob binds *resource ceilings* only —
-rounds, backtests/sweep-trials, web searches, reasoning effort, prompt-prefix trim — and
-**never** touches a promotion gate or the ``research.min_trials`` exhaustion floor (those are
-quality, not cost; AGENTS.md rules 2/4).
+rounds, backtests/sweep-trials, coder-model author completions, web searches, reasoning effort,
+prompt-prefix trim — and **never** touches a promotion gate or the ``research.min_trials``
+exhaustion floor (those are quality, not cost; AGENTS.md rules 2/4).
 
 Three profiles (all provider-neutral; provider-specific levers like ``effort`` stay additionally
 capability-gated at send time):
@@ -33,6 +33,7 @@ class CostProfile:
     max_iterations: int  # tool-use rounds per session
     max_backtests: int  # run_backtest calls + individual run_sweep trials
     sweep_trials: int  # default trials for one run_sweep call
+    max_author_calls: int  # coder-model completions per session (one authored/revised file ≈ 1)
     web_search: bool  # offer server-side web_search (still capability-gated per provider)
     max_web_searches: int  # cap on server web searches per session
     effort: str  # reasoning effort ("high" | "medium"); capability-gated at send
@@ -47,6 +48,7 @@ FULL = CostProfile(
     max_iterations=40,
     max_backtests=200,
     sweep_trials=20,
+    max_author_calls=20,
     web_search=True,
     max_web_searches=8,
     effort="high",
@@ -57,6 +59,7 @@ BALANCED = CostProfile(
     max_iterations=40,
     max_backtests=200,
     sweep_trials=20,
+    max_author_calls=12,
     web_search=True,
     max_web_searches=8,
     effort="high",
@@ -67,6 +70,7 @@ ECONOMY = CostProfile(
     max_iterations=20,
     max_backtests=80,
     sweep_trials=10,
+    max_author_calls=6,
     web_search=True,
     max_web_searches=4,
     effort="medium",
@@ -116,6 +120,7 @@ def resolve_budgets(research) -> CostProfile:
         max_iterations=pinned("max_iterations", profile.max_iterations),
         max_backtests=pinned("max_backtests", profile.max_backtests),
         sweep_trials=pinned("sweep_trials", profile.sweep_trials),
+        max_author_calls=pinned("max_author_calls", profile.max_author_calls),
         web_search=pinned("web_search", profile.web_search),
         max_web_searches=pinned("max_web_searches", profile.max_web_searches),
     )

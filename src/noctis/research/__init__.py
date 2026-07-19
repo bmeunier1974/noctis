@@ -15,6 +15,7 @@ no-ops without the ``[llm]`` extra or a key for the configured provider.
 from __future__ import annotations
 
 from .agent import run_agent_research
+from .author import AuthoringError, StrategyAuthor, StrategyBrief
 from .cost import CostProfile, resolve_budgets, resolve_cost_profile
 from .ideation import IdeationContext, Ideator, build_ideator, propose_specs
 from .llm import (
@@ -25,6 +26,7 @@ from .llm import (
     ToolCall,
     Turn,
     build_llm_client,
+    client_for,
     client_status,
     effective_web_search,
     provider_of,
@@ -48,10 +50,14 @@ __all__ = [
     "build_ideator",
     "propose_specs",
     "ResearchToolbox",
+    "StrategyAuthor",
+    "StrategyBrief",
+    "AuthoringError",
     "SweepRunner",
     "run_agent_research",
     "build_system_prompt",
     "build_llm_client",
+    "client_for",
     "client_status",
     "ClientStatus",
     "LLMClient",

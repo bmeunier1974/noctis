@@ -38,8 +38,10 @@ to research — looping day after day.
   symbol holdout it never trained on before it can be promoted.
 - **A genuine forward track record.** Champions trade only bars no tuning ever saw, in
   one continuous paper account that carries equity and positions across sessions.
-- **Provider-neutral, free at the limit.** Any hosted or local LLM behind one seam — a
-  local backend costs $0/token. No model configured? A classic optimizer loop runs instead.
+- **Provider-neutral seam, free where it can be.** Driver and ideation run on any hosted or
+  local LLM — a local backend is $0/token — while strategy authoring needs a hosted *coder*
+  model for now, so a local driver pairs with an affordable hosted coder key. No model
+  configured? A classic optimizer loop runs instead.
 
 ## Getting started
 
@@ -48,9 +50,10 @@ You need three things:
 1. **Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).**
 2. **A [DataBento](https://databento.com) API key** — funds the research data lake; the
    free signup credit more than covers the default backfill.
-3. **An LLM** — either a hosted API key (OpenAI or Anthropic), or a free local backend:
-   [noctis-ollama](https://github.com/bmeunier1974/noctis-ollama) turns a GPU box into a
-   verified, agent-ready one with a single `./setup.sh`.
+3. **An LLM API key** — OpenAI or Anthropic. We're working hard toward a fully free
+   setup — the optional local [noctis-ollama](https://github.com/bmeunier1974/noctis-ollama)
+   backend already runs the session driver at $0/token — but strategy authoring still needs
+   a hosted key for now. Model setup is a paragraph below.
 
 ```bash
 uv sync --all-extras                # install everything, reproducible from uv.lock
@@ -63,6 +66,33 @@ key if it's missing, connects the LLM (paste an API key, or it detects a local b
 writes the config for you), and proves the model answers with one real call before you
 commit to an overnight run. Re-run it any time — it never overwrites your edits — and
 `noctis setup --check` audits an existing install without changing anything.
+
+**Model setup.** One hosted key is the simplest: drop it in `.env` (`OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY` — the model's `provider/` prefix picks which), or paste it when `setup`
+asks, and that model runs everything. To cut the bill, split the roles: a free local driver
+runs the session, and an affordable hosted **coder** writes the strategy files — local
+models can't yet author Python that clears validation, so this part stays hosted for now.
+The coder is a hand edit; the wizard wires the driver only:
+
+```yaml
+# config.yaml — the shipped local pairing
+research:
+  model: ollama_chat/noctis-qwen3:14b # local driver: runs the session, $0/token
+  agent:
+    coder_model: anthropic/claude-sonnet-5 # hosted coder: writes the strategy files
+```
+
+```bash
+# .env — the coder provider's key
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Affordable coders work fine: `anthropic/claude-haiku-4-5`, or `openai/gpt-5.6-luna` (its
+key is `OPENAI_API_KEY`). The next `noctis run` picks the pairing up; a missing key or
+`[llm]` extra degrades loudly at startup — the driver writes source itself, never a silent
+mid-session downgrade. The full commented config file:
+[config.example.yaml](config.example.yaml) · every knob explained:
+[docs/configuration.md](docs/configuration.md)
 
 Once it's running: `noctis status` (mode, market state, champions), `noctis report`
 (close-of-day report), `noctis research -v` (watch one research session live). Every

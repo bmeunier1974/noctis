@@ -565,11 +565,13 @@ def run_agent_research(
     summary.promotions = toolbox.promotions
     summary.rejections = toolbox.rejections
     summary.candidates = list(toolbox.strategies_touched)
+    summary.author_calls = toolbox.author_calls
     logger.info(
-        "agent research session finished: %d rounds, %d backtests, %d promotions, "
+        "agent research session finished: %d rounds, %d backtests, %d coder calls, %d promotions, "
         "%d rejections, strategies=%s (%s)",
         summary.iterations,
         toolbox.backtests_run,
+        toolbox.author_calls,
         summary.promotions,
         summary.rejections,
         ",".join(summary.candidates) or "-",
