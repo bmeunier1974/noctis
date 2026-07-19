@@ -222,7 +222,7 @@ class StrategyAuthor:
         name: str,
         brief: StrategyBrief,
         *,
-        on_attempt: Callable[[int, Exception | None], None] | None = None,
+        on_attempt: Callable[[int, Exception | None, str], None] | None = None,
     ) -> dict:
         """Turn ``brief`` into a validated ``name`` strategy file in the working tier.
 
@@ -238,12 +238,15 @@ class StrategyAuthor:
         brief becomes a revision request.
 
         ``on_attempt`` — the observability seam — is called exactly once per coder completion,
-        *after* that attempt's validation resolves: ``on_attempt(attempt, None)`` on the
-        completion that lands, ``on_attempt(attempt, error)`` (a
+        *after* that attempt's validation resolves: ``on_attempt(attempt, None, source)`` on the
+        completion that lands, ``on_attempt(attempt, error, source)`` (a
         :class:`~noctis.strategies.library.StrategyValidationError`) when a gate rejection or a
         non-code reply fails an attempt. ``attempt`` is 1-based (1 = first, 2… = a private
-        retry). The engine holds no session state; the caller (the toolbox) adapts this into a
-        session event carrying the coder model and strategy name.
+        retry); ``source`` is the attempt's material — the extracted code block on a gate
+        rejection or success, the raw reply text on a non-code reply — carried so a toolbox-side
+        sink can persist the exact bytes the coder produced. The engine holds no session state
+        and keeps none of the source; the caller (the toolbox) adapts this into a session event
+        carrying the coder model and strategy name, and into the capped ``failed/`` record.
         """
         reference_source = self._reference_source(brief)  # unknown ref → raise, no completion
         current_source = self._current_source(name)  # non-None ⇒ this is a revision
@@ -270,16 +273,16 @@ class StrategyAuthor:
                     "file as one fenced code block and nothing else"
                 )
                 prior = (turn.text or "", str(last_error))
-                self._report(on_attempt, attempt, last_error)
+                self._report(on_attempt, attempt, last_error, turn.text or "")
                 continue
             try:
                 result = library.write_strategy(self._strategies_dir, name, source, self._families)
             except library.StrategyValidationError as exc:
                 last_error = exc
                 prior = (source, str(exc))
-                self._report(on_attempt, attempt, exc)
+                self._report(on_attempt, attempt, exc, source)
                 continue
-            self._report(on_attempt, attempt, None)
+            self._report(on_attempt, attempt, None, source)
             return result
         raise AuthoringError(
             f"the coder could not author a valid {name!r} strategy in {self._max_attempts} "
@@ -289,13 +292,19 @@ class StrategyAuthor:
 
     @staticmethod
     def _report(
-        on_attempt: Callable[[int, Exception | None], None] | None,
+        on_attempt: Callable[[int, Exception | None, str], None] | None,
         attempt: int,
         error: Exception | None,
+        source: str,
     ) -> None:
-        """Report one resolved attempt to the observability hook (a no-op when unset)."""
+        """Report one resolved attempt to the observability hook (a no-op when unset).
+
+        ``source`` is the attempt's material — the extracted code block on a gate rejection or
+        success, the raw reply text on a non-code reply — passed so a toolbox-side sink can
+        persist the exact bytes the coder produced. The engine itself keeps none of it.
+        """
         if on_attempt is not None:
-            on_attempt(attempt, error)
+            on_attempt(attempt, error, source)
 
     # ── reference / revision resolution ──────────────────────────────────────
     def _reference_source(self, brief: StrategyBrief) -> str | None:

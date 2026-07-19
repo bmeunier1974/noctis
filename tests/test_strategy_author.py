@@ -395,7 +395,7 @@ def test_authoring_telemetry_unchanged_when_prompt_caching_is_on(tmp_path, famil
     )
     engine = StrategyAuthor(client=client, strategies_dir=tmp_path, families=families)
     seen: list[tuple[int, Exception | None]] = []
-    engine.author("probe", BRIEF, on_attempt=lambda n, err: seen.append((n, err)))
+    engine.author("probe", BRIEF, on_attempt=lambda n, err, src: seen.append((n, err)))
 
     assert [n for n, _ in seen] == [1, 2]  # one event per completion, retries included
     assert isinstance(seen[0][1], library.StrategyValidationError)  # attempt 1 failed the gate
@@ -502,13 +502,13 @@ def test_failed_revision_leaves_the_existing_file_untouched(tmp_path, families, 
 
 # ── 8. Per-attempt observability callback: one call per completion, carrying the outcome ───
 # The engine reports each coder completion — including each private retry — through an optional
-# on_attempt(attempt, error) hook, resolved AFTER that attempt's validation (error=None on
-# success, the StrategyValidationError otherwise). The toolbox adapts this into a session event;
-# the engine itself stays toolbox-state-free.
+# on_attempt(attempt, error, source) hook, resolved AFTER that attempt's validation (error=None
+# on success, the StrategyValidationError otherwise). The toolbox adapts this into a session event
+# and an on-disk failure record; the engine itself stays toolbox-state-free.
 def _seen_attempts(engine, name, brief) -> list[tuple[int, Exception | None]]:
     seen: list[tuple[int, Exception | None]] = []
     try:
-        engine.author(name, brief, on_attempt=lambda n, err: seen.append((n, err)))
+        engine.author(name, brief, on_attempt=lambda n, err, src: seen.append((n, err)))
     except AuthoringError:
         pass
     return seen
@@ -549,3 +549,39 @@ def test_author_without_on_attempt_is_unchanged(tmp_path, families, fast_gate):
     engine, client = _author(tmp_path, families, [fenced(BROKEN), fenced(PROBE)])
     assert engine.author("probe", BRIEF)["name"] == "probe"
     assert len(client.calls) == 2
+
+
+# ── 8b. The callback additively carries the attempted source (#18) ─────────────────────────
+# The engine passes each attempt's material as a third argument — the extracted code block on a
+# gate rejection or success, the raw reply text on a non-code reply — so a toolbox-side sink can
+# persist the exact bytes the coder produced. The engine keeps none of it (stateless across jobs).
+def _seen_with_source(engine, name, brief) -> list[tuple[int, Exception | None, str]]:
+    seen: list[tuple[int, Exception | None, str]] = []
+    try:
+        engine.author(name, brief, on_attempt=lambda n, err, src: seen.append((n, err, src)))
+    except AuthoringError:
+        pass
+    return seen
+
+
+def test_on_attempt_carries_the_extracted_source_on_a_gate_rejection(tmp_path, families, fast_gate):
+    engine, _ = _author(tmp_path, families, [fenced(BROKEN), fenced(PROBE)])
+    seen = _seen_with_source(engine, "probe", BRIEF)
+
+    # Attempt 1 failed the gate; the callback carries the exact rejected source (the code block).
+    assert seen[0][0] == 1
+    assert isinstance(seen[0][1], library.StrategyValidationError)
+    assert seen[0][2] == BROKEN
+    # Attempt 2 landed; the source it carries is the file that passed.
+    assert seen[1][1] is None
+    assert seen[1][2] == PROBE
+
+
+def test_on_attempt_carries_the_raw_reply_when_no_code_block(tmp_path, families, fast_gate):
+    reply = "I think we should go long the dips."
+    engine, _ = _author(tmp_path, families, [reply, fenced(PROBE)])
+    seen = _seen_with_source(engine, "probe", BRIEF)
+
+    # A non-code reply has no code block: the callback carries the raw reply text to persist.
+    assert isinstance(seen[0][1], library.StrategyValidationError)
+    assert seen[0][2] == reply

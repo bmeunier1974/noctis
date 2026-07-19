@@ -1440,3 +1440,64 @@ def test_no_coder_configured_emits_no_author_events(tmp_path):
     box = _make_toolbox(tmp_path, on_event=events.append)
     box.dispatch("write_strategy", {"name": "hand_written", "source": _named("hand_written")})
     assert _author_events(events) == []
+
+
+# ── brief mode: rejected attempts persist to the capped failed/ area (#18) ──────────────────
+# The toolbox is the sole writer of the failed/ store; these tests assert only what lands on
+# disk under the working tier's failed/ area — never internal call structure.
+def _failed_files(box) -> list:
+    root = box.strategies_dir.tmp / "failed"
+    return sorted(root.glob("*.py")) if root.is_dir() else []
+
+
+def test_rejected_brief_attempt_persists_source_and_error_to_failed_area(tmp_path):
+    """A gate-rejected coder attempt lands one file under <__tmp>/failed/ carrying BOTH the
+    attempted source and the gate error — a bad session inspectable from disk, not scrollback."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN), _fenced(_named("brief_probe"))])
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    files = _failed_files(box)
+    assert len(files) == 1  # only the rejected attempt persisted; the landing one did not
+    body = files[0].read_text(encoding="utf-8")
+    assert BROKEN in body  # the exact attempted source
+    assert "class sets name" in body  # the gate error that rejected it
+    assert "brief_probe" in body  # attributed to the strategy
+
+
+def test_each_rejected_brief_attempt_persists_its_own_file(tmp_path):
+    """Every private retry that fails writes its own failure record — three rejections, three
+    files, so the whole failing job is on disk."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN)] * 3)
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    assert len(_failed_files(box)) == 3
+
+
+def test_successful_brief_persists_no_failure_record(tmp_path):
+    """A first-try success writes nothing to the failed/ area (only rejections are persisted)."""
+    box, _ = _coder_box(tmp_path, [_fenced(_named("brief_probe"))])
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    assert _failed_files(box) == []
+
+
+def test_non_code_reply_persists_the_raw_reply(tmp_path):
+    """A non-code coder reply is a rejected attempt too: its raw text is persisted so a session
+    that never produced code is still diagnosable from disk."""
+    box, _ = _coder_box(tmp_path, ["no code here, just chatter", _fenced(_named("brief_probe"))])
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    files = _failed_files(box)
+    assert len(files) == 1
+    assert "no code here, just chatter" in files[0].read_text(encoding="utf-8")
+
+
+def test_source_write_persists_no_failure_record(tmp_path):
+    """The failed/ area is coder-path only: a rejected hand-written source write (no coder)
+    never touches it — the attempt sink is the sole writer."""
+    box = _make_toolbox(tmp_path)  # no coder configured
+    out = box.dispatch("write_strategy", {"name": "handwritten_fail", "source": BROKEN})
+
+    assert "error" in out
+    root = box.strategies_dir.tmp / "failed"
+    assert not root.exists() or list(root.glob("*.py")) == []
