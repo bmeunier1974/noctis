@@ -341,14 +341,75 @@ def test_all_non_code_replies_exhaust_the_attempt_budget(tmp_path, families, fas
     assert len(client.calls) == 3  # three non-code replies, capped at the retry budget
 
 
-# ── 5. Coder calls are stateless single completions (thinking off) ────────────────────────
+# ── 4b. Prompt caching lands on the coder's enlarged system prompt (#17) ──────────────────
+def test_system_prompt_is_one_cached_block_when_client_supports_prompt_cache(
+    tmp_path, families, fast_gate
+):
+    # External behavior: on a caching-capable client, the coder's system prompt reaches
+    # complete() as ONE cached content block, so retries within a job re-read (never re-pay) the
+    # enlarged contract-sheet + worked-example system prompt (#14-#16).
+    client = FakeCoder([fenced(PROBE)], capabilities=Capabilities(prompt_cache=True))
+    engine = StrategyAuthor(client=client, strategies_dir=tmp_path, families=families)
+    engine.author("probe", BRIEF)
+
+    system = client.calls[0]["system"]
+    assert isinstance(system, list) and len(system) == 1
+    block = system[0]
+    assert block["type"] == "text"
+    assert CONTRACT_SHEET in block["text"]  # the enlarged system prompt is the cached content
+    assert block["cache_control"] == {"type": "ephemeral"}
+
+
+def test_cached_system_prompt_is_reused_by_identity_across_attempts(tmp_path, families, fast_gate):
+    # The cache breakpoint is built once and reused by identity on every retry within a job — the
+    # "cache once, read thereafter" contract, so a retried job never rewrites the system prefix.
+    client = FakeCoder(
+        [fenced(BROKEN), fenced(PROBE)], capabilities=Capabilities(prompt_cache=True)
+    )
+    engine = StrategyAuthor(client=client, strategies_dir=tmp_path, families=families)
+    engine.author("probe", BRIEF)
+
+    assert len(client.calls) == 2
+    assert client.calls[1]["system"] is client.calls[0]["system"]
+
+
+def test_no_prompt_cache_capability_leaves_the_system_prompt_a_plain_string(
+    tmp_path, families, fast_gate
+):
+    # A provider whose caching is automatic (OpenAI) or unsupported (local): no breakpoint — the
+    # system prompt reaches complete() as the plain string, exactly as before.
+    client = FakeCoder([fenced(PROBE)], capabilities=Capabilities(prompt_cache=False))
+    engine = StrategyAuthor(client=client, strategies_dir=tmp_path, families=families)
+    engine.author("probe", BRIEF)
+
+    system = client.calls[0]["system"]
+    assert isinstance(system, str)
+    assert CONTRACT_SHEET in system
+
+
+def test_authoring_telemetry_unchanged_when_prompt_caching_is_on(tmp_path, families, fast_gate):
+    # Wiring the cache breakpoint does not disturb the per-completion authoring telemetry (#9):
+    # on a caching-capable client every attempt still reports its outcome, one event per completion.
+    client = FakeCoder(
+        [fenced(BROKEN), fenced(PROBE)], capabilities=Capabilities(prompt_cache=True)
+    )
+    engine = StrategyAuthor(client=client, strategies_dir=tmp_path, families=families)
+    seen: list[tuple[int, Exception | None]] = []
+    engine.author("probe", BRIEF, on_attempt=lambda n, err: seen.append((n, err)))
+
+    assert [n for n, _ in seen] == [1, 2]  # one event per completion, retries included
+    assert isinstance(seen[0][1], library.StrategyValidationError)  # attempt 1 failed the gate
+    assert seen[1][1] is None  # attempt 2 landed
+
+
+# ── 5. Coder calls are stateless single completions ───────────────────────────────────────
 def test_coder_calls_are_stateless_single_completions(tmp_path, families, fast_gate):
     engine, client = _author(tmp_path, families, [fenced(BROKEN), fenced(PROBE)])
     engine.author("probe", BRIEF)
 
     for call in client.calls:
-        # A bare codegen completion: no tool-use loop, no forced tool, no streaming
-        # (thinking is pinned off where the client is built, client_for(thinking="off")).
+        # A bare codegen completion: no tool-use loop, no forced tool, no streaming (the
+        # coder's thinking dial rides on the client built at the composition root, not here).
         assert call["tools"] == []
         assert call["tool_choice"] is None
         assert call["on_delta"] is None

@@ -13,8 +13,11 @@ The engine owns no toolbox state, so it is exercised in isolation with a fake LL
 1. Compose a **stateless** prompt from the strategy contract (``TEMPLATE.py``, the API
    contract sheet, one complete worked-example seed, and the header/scenario rules) plus the
    brief.
-2. One completion against the injected coder client — a bare, single, tool-free codegen call
-   (thinking is pinned off where the client is built, ``client_for(..., thinking="off")``).
+2. One completion against the injected coder client — a bare, single, tool-free codegen call.
+   Thinking rides on the client the composition root builds (``coder_thinking``, default on —
+   authoring is the reasoning-heavy sub-task, #17), and the byte-stable system prompt carries a
+   cache breakpoint (gated on the client's ``prompt_cache``) so private retries re-read, never
+   re-pay, the enlarged contract/worked-example prefix.
 3. Extract the fenced code block; a reply carrying none is rejected and counts as an attempt.
 4. Validate through the existing library write path
    (:func:`noctis.strategies.library.write_strategy`) — the same fresh-subprocess gate every
@@ -44,7 +47,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from noctis.research.contract_sheet import CONTRACT_SHEET
-from noctis.research.llm import LLMClient
+from noctis.research.llm import LLMClient, cached_system
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 
@@ -205,6 +208,14 @@ class StrategyAuthor:
         )
         example = _seed_example(strategies_dir)
         self._system_prompt = self._build_system_prompt(template, example)
+        # The coder's system prompt is byte-stable for the engine's life (contract sheet +
+        # feasibility rules + one worked example — enlarged by #14-#16). Wrap it in one cache
+        # breakpoint here, once, gated on the client's prompt_cache capability, and pass it by
+        # identity on every completion: on a caching provider the enlarged prefix is written to
+        # cache on the first attempt and re-read — never re-billed — by every private retry within
+        # a job. ``cached_system`` returns the plain string on a non-caching/auto-caching provider,
+        # so the breakpoint is a clean no-op there (the coder loop is otherwise unchanged).
+        self._system = cached_system(self._system_prompt, cache=client.capabilities.prompt_cache)
 
     def author(
         self,
@@ -247,7 +258,7 @@ class StrategyAuthor:
                 current_source=current_source,
             )
             turn = self._client.complete(
-                system=self._system_prompt,
+                system=self._system,
                 tools=[],
                 messages=[{"role": "user", "content": content}],
                 max_tokens=self._max_tokens,

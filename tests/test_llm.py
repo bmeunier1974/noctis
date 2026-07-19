@@ -18,7 +18,9 @@ from noctis.research.llm import (
     _turn_from_openai,
     _usage_from_openai,
     build_llm_client,
+    cached_system,
     capabilities_for,
+    client_for,
     client_status,
     effective_web_search,
     provider_of,
@@ -253,6 +255,62 @@ def test_thinking_dial_opts_in_anthropic_nonsonnet_only():
     for m in ("openai/gpt-5.4", "openai/gpt-5.5", "ollama/llama3"):
         assert thinking_for(m, "off") is None
         assert thinking_for(m, "on") is None
+
+
+def test_deliberate_thinking_turns_on_sonnet_without_moving_the_watch_dial():
+    """#17: the coder makes a *deliberate*, budgeted thinking decision — ``deliberate=True`` opts
+    a Sonnet-class coder into adaptive summarized thinking under ``thinking="on"``, overriding the
+    cheap-path pin. The observability watch dial (``deliberate`` unset) is untouched: a Sonnet
+    DRIVER still stays pinned off under both settings (issue #10), and the on-shape never carries
+    ``budget_tokens`` (the ``{type: enabled, budget_tokens}`` shape Opus 4.8 rejects with a 400)."""
+    # Deliberate + on → Sonnet thinks (adaptive summarized), no budget_tokens.
+    on = thinking_for("anthropic/claude-sonnet-5", "on", deliberate=True)
+    assert on == {"type": "adaptive", "display": "summarized"}
+    assert "budget_tokens" not in on
+    # Deliberate + off → still the cheap path (thinking off is a real coder setting).
+    assert thinking_for("anthropic/claude-sonnet-5", "off", deliberate=True) == {"type": "disabled"}
+    # The watch dial (deliberate unset) is UNCHANGED — a Sonnet driver stays pinned off.
+    assert thinking_for("anthropic/claude-sonnet-5", "on") == {"type": "disabled"}
+    assert thinking_for("anthropic/claude-sonnet-5", "off") == {"type": "disabled"}
+    # A deliberate non-Sonnet Anthropic model matches the watch dial (adaptive on / None off);
+    # a deliberate non-Anthropic model still has no thinking dial.
+    assert thinking_for("anthropic/claude-opus-4-8", "on", deliberate=True) == {
+        "type": "adaptive",
+        "display": "summarized",
+    }
+    assert thinking_for("openai/gpt-5.4", "on", deliberate=True) is None
+
+
+def test_client_for_deliberate_threads_coder_thinking_to_completion_kwargs(monkeypatch):
+    """The shared ``client_for`` builder threads ``deliberate`` to ``thinking_for``, so a Sonnet
+    coder client actually carries the adaptive-thinking config onto its ``litellm.completion``
+    kwargs — the driver path (no ``deliberate``) still pins the same Sonnet client off."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "litellm", types.ModuleType("litellm"))
+    s = Settings(anthropic_api_key="ak")
+
+    coder = client_for(s, "anthropic/claude-sonnet-5", thinking="on", deliberate=True)
+    assert coder._thinking == {"type": "adaptive", "display": "summarized"}
+    kwargs = coder._completion_kwargs(
+        system="sys", tools=[], messages=[{"role": "user", "content": "go"}], max_tokens=64
+    )
+    assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+    # The same model built the driver way (no deliberate) stays pinned off.
+    driver = client_for(s, "anthropic/claude-sonnet-5", thinking="on")
+    assert driver._thinking == {"type": "disabled"}
+
+
+def test_cached_system_wraps_only_when_caching_is_supported():
+    """The shared static-system cache helper: a ``prompt_cache`` provider gets one cached content
+    block; an auto-caching/no-caching provider gets the plain string (a clean no-op breakpoint)."""
+    wrapped = cached_system("SYSTEM TEXT", cache=True)
+    assert wrapped == [
+        {"type": "text", "text": "SYSTEM TEXT", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert cached_system("SYSTEM TEXT", cache=False) == "SYSTEM TEXT"
 
 
 def test_completion_kwargs_pin_thinking_only_for_sonnet():

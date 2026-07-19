@@ -23,6 +23,7 @@ alternate file.
 | `research.min_trials` | Exhaustion floor — verdict tools refuse before this many journaled trials |
 | `research.max_iterations`, `max_backtests`, `sweep_trials`, `web_search` | Agent session budgets |
 | `research.agent.coder_model`, `max_author_calls` | Dedicated authoring model + its Class-B budget: coder completions/session (retries included); exhausted → brief authoring refused, hand-written `source` stays open |
+| `research.agent.coder_thinking` | `on` (default) / `off` — the coder reasons through scenario-window/warmup arithmetic (deliberate, budgeted by `max_author_calls`); separate from the driver `thinking` dial |
 | `research.cost_profile` | `full` / `balanced` / `economy` — resource ceilings only, never quality gates |
 | `research.agent.thinking` | `off` (default) / `on` — opt a **watch** session into provider-native reasoning; costs output tokens (see below) |
 | `research.agent.max_tokens`, `context_window` | Small-context-backend compatibility levers (see **Local backends** below) — not cost budgets |
@@ -126,6 +127,14 @@ research:
   is told to revise by hand or proceed to a verdict — while the hand-written `source` path,
   which spends no coder completion, always stays open. Inert without a `coder_model`: source
   writes never touch this budget.
+- **`coder_thinking`** is the coder's own thinking dial, **on by default**. Authoring — the
+  scenario-window and warmup arithmetic — is the reasoning-heavy sub-task, so the coder reasons
+  through it instead of repeating an error it was just shown. It is a *deliberate*, budgeted
+  decision made where the coder client is built, so it turns thinking on even for a Sonnet coder
+  (whose driver-side thinking stays the cheap-path pin below); the extra spend is already bounded
+  by `max_author_calls`. Set it `off` to run a cheaper coder. The coder's (enlarged) system prompt
+  is prompt-cached, so private validation retries within a job re-read it rather than re-paying it.
+  Inert without a `coder_model`. Separate from the driver's `thinking` watch dial (next section).
 
 ## Watching the model reason
 

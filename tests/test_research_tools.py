@@ -206,7 +206,9 @@ def test_coder_client_defaults_to_none(toolbox):
 
 def test_coder_client_is_stored_when_supplied(tmp_path):
     """A configured coder client reaches the toolbox as an optional field (inert this story)."""
-    coder = object()
+    from types import SimpleNamespace
+
+    coder = SimpleNamespace(capabilities=Capabilities())
     box = _make_toolbox(tmp_path, coder_client=coder)
     assert box.coder_client is coder
 

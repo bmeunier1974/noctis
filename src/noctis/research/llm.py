@@ -266,16 +266,16 @@ def _key_for(provider: str, settings) -> str | None:
     return None
 
 
-def thinking_for(model: str, thinking: str = "off") -> dict | None:
+def thinking_for(model: str, thinking: str = "off", *, deliberate: bool = False) -> dict | None:
     """The Anthropic ``thinking`` parameter to pin for a model, or ``None`` to send nothing.
 
-    Two independent concerns collapse into one return value:
+    Three concerns collapse into one return value:
 
     - **The thinking trap (issue #10):** a *Sonnet* model runs **adaptive** thinking when
       ``thinking`` is omitted — spending output tokens the gated research loop doesn't need — so we
       pin an explicit ``{"type": "disabled"}`` for ``anthropic/claude-sonnet-*``. That pin holds
-      under *both* dial settings: turning Sonnet's thinking back on is a separate, deliberate cost
-      decision, never a side effect of an observability knob.
+      under *both* dial settings of the observability watch dial: turning Sonnet's thinking back on
+      is a separate, deliberate cost decision, never a side effect of an observability knob.
     - **The watch dial (P2):** Opus 4.8 runs *without* thinking when the parameter is omitted, so an
       operator who wants to watch the Anthropic fallback model reason sets ``thinking="on"``. For a
       non-Sonnet Anthropic model that returns ``{"type": "adaptive", "display": "summarized"}`` —
@@ -283,16 +283,39 @@ def thinking_for(model: str, thinking: str = "off") -> dict | None:
       is a 400), and ``display: "summarized"`` is required or the thinking blocks stream with empty
       text (``display`` defaults to ``"omitted"`` on this family). LiteLLM maps the summarized
       blocks into ``reasoning_content`` → ``Turn.reasoning`` → the ``think`` event feed.
+    - **The deliberate coder decision (issue #17):** ``deliberate=True`` marks a caller making the
+      separate, budgeted cost decision the Sonnet pin defers to — the dedicated strategy-authoring
+      ("coder") client, whose reasoning-heavy job (scenario-window and warmup arithmetic) warrants
+      thinking even on Sonnet. Under ``thinking="on"`` it opts Sonnet into the same adaptive
+      summarized thinking as a non-Sonnet model; under ``thinking="off"`` the cheap path still
+      wins. It is never set by the observability watch dial, so a Sonnet *driver* stays pinned off.
 
     OpenAI has no ``thinking`` dial (it uses effort) and local backends surface reasoning for free,
-    so both return ``None`` under either setting (``None`` → the kwarg is never added)."""
+    so both return ``None`` under any setting (``None`` → the kwarg is never added)."""
     if provider_of(model) != "anthropic":
         return None
-    if "sonnet" in model.lower():
+    if "sonnet" in model.lower() and not (deliberate and thinking == "on"):
         return {"type": "disabled"}
     if thinking == "on":
         return {"type": "adaptive", "display": "summarized"}
     return None
+
+
+def cached_system(system_text: str, *, cache: bool = True) -> str | list[dict]:
+    """Wrap a static system prompt in one cached content block (Anthropic explicit caching).
+
+    A single ``cache_control: {"type": "ephemeral"}`` breakpoint on the last (only) system block
+    caches tools + system together — tools render earlier in the request prefix, so the breakpoint
+    covers both. Build this once before a completion loop and reuse it by identity every round;
+    never interpolate a timestamp, round counter, or other per-round variance into it.
+
+    ``cache=False`` (a provider whose caching is automatic, e.g. OpenAI, or unsupported, e.g. a
+    local model) returns the plain string, so the breakpoint is a clean no-op there. The one
+    shared home for the static-system breakpoint the agent loop and the coder client both use,
+    gated on the client's ``Capabilities.prompt_cache``."""
+    if not cache:
+        return system_text
+    return [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -437,13 +460,24 @@ def client_status(settings) -> ClientStatus:
     return ClientStatus(ok=reason is None, model=model, provider=provider, reason=reason)
 
 
-def client_for(settings, model: str, *, thinking: str = "off", effort: str | None = None):
+def client_for(
+    settings,
+    model: str,
+    *,
+    thinking: str = "off",
+    deliberate: bool = False,
+    effort: str | None = None,
+):
     """Build a :class:`LiteLLMClient` for ``model`` (``provider/model`` grammar), or ``None``
     when the ``[llm]`` extra (litellm) is missing or the resolved provider needs a key that
     ``.env`` doesn't carry. The one client builder every LLM consumer (agent research,
-    ideation) shares, so key resolution, capabilities, and the Sonnet thinking pin can't
-    drift between them. ``research.base_url`` applies here too — it accompanies a
-    local/OpenAI-compatible model by config contract."""
+    ideation, the coder authoring client) shares, so key resolution, capabilities, and the
+    Sonnet thinking pin can't drift between them. ``research.base_url`` applies here too — it
+    accompanies a local/OpenAI-compatible model by config contract.
+
+    ``deliberate`` marks the coder's deliberate, budgeted thinking decision (issue #17): it opts a
+    Sonnet-class coder into adaptive thinking under ``thinking="on"``, overriding the cheap-path
+    pin the observability watch dial defers to (see :func:`thinking_for`)."""
     provider = provider_of(model)
     blocked = _client_blocked(provider, settings)
     if blocked is not None:
@@ -454,7 +488,7 @@ def client_for(settings, model: str, *, thinking: str = "off", effort: str | Non
         capabilities=capabilities_for(provider),
         api_key=_key_for(provider, settings),
         base_url=getattr(settings.research, "base_url", None),
-        thinking=thinking_for(model, thinking),
+        thinking=thinking_for(model, thinking, deliberate=deliberate),
         effort=effort,
     )
 
