@@ -158,8 +158,9 @@ class ResearchToolbox:
     # The result keys worth one feed line: the gate-facing numbers a promotion/rejection
     # actually turns on — the train/test overfit `gap`, the temporal `holdout_metric`, the
     # cross-sectional `symbol_holdout_metric` — so the -v feed alone tells the story
-    # without -vv. Neutral numbers only; no verdict-shaped editorializing (AGENTS.md
-    # rule 2 / the honesty spirit).
+    # without -vv. `n_failed` rides alongside `n_trials` so a sweep's burned budget shows
+    # on the same line (only sweep results carry it). Neutral numbers only; no
+    # verdict-shaped editorializing (AGENTS.md rule 2 / the honesty spirit).
     TOOL_LINE_KEYS: ClassVar[tuple[str, ...]] = (
         "promoted",
         "rationale",
@@ -169,6 +170,7 @@ class ResearchToolbox:
         "holdout_metric",
         "symbol_holdout_metric",
         "n_trials",
+        "n_failed",
         "status",
         "ok",
     )
@@ -1388,10 +1390,12 @@ class ResearchToolbox:
         window = self._window(bars)
 
         results = []
+        n_failed = 0
         config = self._pipeline_config(bars, self._timeframe_for(name))
         for params, card in self.sweep_runner.run(name, space, bars, n, config=config):
             self.backtests_run += 1
             if card is None:  # the trial itself errored; spend budget, learn nothing
+                n_failed += 1
                 continue
             self.journal.record_trial(
                 name,
@@ -1422,6 +1426,7 @@ class ResearchToolbox:
             "strategy": name,
             "symbols": sorted(bars),
             "n_trials": len(results),
+            "n_failed": n_failed,  # trials that errored: budget spent, nothing learned
             "sweep_completed": True,
             "top_trials": results[:10],
             "journal": {

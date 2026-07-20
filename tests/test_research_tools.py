@@ -753,6 +753,7 @@ def test_run_sweep_fake_runner_budget_journal_and_ranking(tmp_path):
     )
     out = box.dispatch("run_sweep", {"name": "probe", "symbols": ["AAA"], "n_trials": 3})
     assert out["sweep_completed"] and out["n_trials"] == 2
+    assert out["n_failed"] == 1  # the single errored trial is counted, not hidden
     assert box.backtests_run == 3
     assert out["backtests_remaining"] == 50 - 3
     assert [t["test"] for t in out["top_trials"]] == [1.5, 0.5]
@@ -761,6 +762,32 @@ def test_run_sweep_fake_runner_budget_journal_and_ranking(tmp_path):
     assert len(trials) == 2 and all(t["source"] == "sweep" for t in trials)
     # A completed sweep satisfies the exhaustion gate no matter how its trials ran.
     assert box.dispatch("reject_strategy", {"name": "probe", "reason": "done"})["ok"] is True
+
+
+def test_run_sweep_reports_exact_n_failed_on_partial_errors(tmp_path):
+    """A sweep whose trials partially error reports the exact count of burned trials —
+    budget spent with nothing learned is surfaced, never swallowed (AGENTS.md rule 2)."""
+    box = _make_toolbox(tmp_path)
+    box.sweep_runner = _FakeRunner(
+        [
+            ({"lookback": 10}, _StubCard(0.5)),
+            ({"lookback": 20}, None),
+            ({"lookback": 30}, None),
+            ({"lookback": 40}, _StubCard(1.5)),
+        ]
+    )
+    out = box.dispatch("run_sweep", {"name": "probe", "symbols": ["AAA"], "n_trials": 4})
+    assert out["n_trials"] == 2 and out["n_failed"] == 2
+    assert box.backtests_run == 4  # every trial, failed or not, cost its budget
+
+
+def test_run_sweep_clean_reports_zero_failed(tmp_path):
+    """A fully clean sweep reports ``n_failed=0`` — the key is always present, not only
+    when something burned."""
+    box = _make_toolbox(tmp_path)
+    out = box.dispatch("run_sweep", {"name": "probe", "symbols": ["AAA"], "n_trials": 3})
+    assert out["sweep_completed"] and out["n_trials"] == 3
+    assert out["n_failed"] == 0
 
 
 def test_panel_backtest_parallel_matches_sequential(tmp_path):
@@ -1012,6 +1039,15 @@ def test_result_brief_extracts_the_gate_facing_slice(toolbox):
     assert brief["test_activity"] == 0.4
     assert toolbox.result_brief("not a dict") == {}
     assert toolbox.result_brief({"unrelated": 1}) == {}
+
+
+def test_result_brief_sweep_line_includes_n_failed(toolbox):
+    """The verbose console line for a sweep carries ``n_failed`` right after ``n_trials`` —
+    the epic's one deliberate visible console change so burned budget can't stay silent."""
+    out = toolbox.dispatch("run_sweep", {"name": "probe", "symbols": ["AAA"], "n_trials": 3})
+    brief = toolbox.result_brief(out)
+    assert "n_failed" in brief and brief["n_failed"] == 0
+    assert list(brief).index("n_failed") == list(brief).index("n_trials") + 1
 
 
 # ── structural symbol screen (thesis picks the kind, data picks the tickers) ─────────────
