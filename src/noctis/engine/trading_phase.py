@@ -147,8 +147,15 @@ class TradingPhase:
         # refuses to trade rather than silently restarting at 100k — that file is the
         # cumulative forward track record.
         store = AccountStore(Path(self.settings.state_dir) / "paper_account.json")
+        # Paper fills charge the operator-configured cost (#23) — the same fee/slippage the
+        # backtest promoted the champion under, so a live-holdout fill can never be cheaper
+        # than the arena the strategy earned its slot in.
+        fee_bps = self.settings.backtest.fee_bps
+        slippage_bps = self.settings.backtest.slippage_bps
         try:
-            broker = store.load(fee_model=FeeModel(1.0), slippage_model=SlippageModel(1.0))
+            broker = store.load(
+                fee_model=FeeModel(fee_bps), slippage_model=SlippageModel(slippage_bps)
+            )
         except RuntimeError as exc:
             logger.error("trading refused: %s", exc)
             outcome.events.append(f"Trading refused — {exc}")
@@ -164,6 +171,8 @@ class TradingPhase:
             registry=self.registry,
             families=self.families,
             limits=self.limits,
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
             min_order_notional=self.settings.trading.min_order_notional,
             rebalance_band_pct=self.settings.trading.rebalance_band_pct,
             # The inline console feed (feed/trade/refuse/heartbeat; None on a bare run so

@@ -150,6 +150,8 @@ class PipelineConfig:
         prefilter_min_score: float | None = 0.0,
         annualization_cap: int | None = DEFAULT_ANNUALIZATION_CAP,
         max_period_ratio: float | None = DEFAULT_MAX_PERIOD_RATIO,
+        fee_bps: float = 1.0,
+        slippage_bps: float = 1.0,
     ) -> PipelineConfig:
         """The single home of the split-geometry heuristic and metric threading.
 
@@ -158,7 +160,10 @@ class PipelineConfig:
         the forward holdout when enough remain to still form a full walk-forward split —
         small data degrades to no gate rather than starving the search. The election
         ``metric`` and ``periods_per_year`` are stated once here and threaded into the
-        prefilter and validation stages, so no stage can disagree on units.
+        prefilter and validation stages, so no stage can disagree on units. The per-side
+        fill costs (``fee_bps`` / ``slippage_bps``, defaulting to the shipped baseline) ride
+        the same path into both stages, so the coarse screen and the execution-realistic
+        stage charge one identical cost.
         """
         elected = Metric.parse(metric)
         train = max(40, min(120, n_bars // 3))
@@ -166,12 +171,16 @@ class PipelineConfig:
         holdout = test if n_bars - test >= train + test else 0
         return cls(
             prefilter=PrefilterConfig(
+                fee_bps=fee_bps,
+                slippage_bps=slippage_bps,
                 metric=elected,
                 periods_per_year=periods_per_year,
                 annualization_cap=annualization_cap,
                 max_period_ratio=max_period_ratio,
             ),
             validation=ValidationConfig(
+                fee_bps=fee_bps,
+                slippage_bps=slippage_bps,
                 periods_per_year=periods_per_year,
                 annualization_cap=annualization_cap,
                 max_period_ratio=max_period_ratio,
@@ -198,11 +207,13 @@ class PipelineConfig:
         new promotion knob is a one-site edit.
 
         ``settings`` is duck-typed (anything with ``promotion.metric`` /
-        ``promotion.annualization_cap`` / ``promotion.max_period_ratio``) so this module
-        stays config-free. Per-call geometry — bar count, timeframe annualization, the
-        prefilter kill — stays explicit at the call site.
+        ``promotion.annualization_cap`` / ``promotion.max_period_ratio`` /
+        ``backtest.fee_bps`` / ``backtest.slippage_bps``) so this module stays config-free.
+        Per-call geometry — bar count, timeframe annualization, the prefilter kill — stays
+        explicit at the call site.
         """
         promotion = settings.promotion
+        backtest = settings.backtest
         return cls.auto(
             n_bars,
             metric=promotion.metric,
@@ -210,6 +221,8 @@ class PipelineConfig:
             prefilter_min_score=prefilter_min_score,
             annualization_cap=promotion.annualization_cap,
             max_period_ratio=promotion.max_period_ratio,
+            fee_bps=backtest.fee_bps,
+            slippage_bps=backtest.slippage_bps,
         )
 
 

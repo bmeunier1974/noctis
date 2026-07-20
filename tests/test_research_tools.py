@@ -290,6 +290,25 @@ def test_market_context_digest(toolbox):
     assert "viable" not in json.dumps(ctx)
 
 
+def test_market_context_reflects_configured_fill_costs(toolbox):
+    """The agent's cost hint tracks backtest.fee_bps/slippage_bps — its round-trip arithmetic
+    reflects what the pipeline and paper fills actually charge, never a stale hardcoded 4bp."""
+    toolbox.settings.backtest.fee_bps = 3.0
+    toolbox.settings.backtest.slippage_bps = 2.0
+    ctx = toolbox.market_context()
+    assert ctx["fee_bps_per_side"] == 3.0
+    assert ctx["slippage_bps_per_side"] == 2.0
+    assert ctx["round_trip_cost_bp"] == pytest.approx(10.0)  # 2 × (3 + 2), both sides
+
+
+def test_trade_economics_round_trip_reflects_configured_costs(toolbox):
+    """run_backtest's trade-economics hint uses the same configured round-trip cost."""
+    toolbox.settings.backtest.fee_bps = 3.0
+    toolbox.settings.backtest.slippage_bps = 2.0
+    out = toolbox.dispatch("run_backtest", {"name": "probe", "symbols": ["AAA", "BBB"]})
+    assert out["trade_economics"]["round_trip_cost_bp"] == pytest.approx(10.0)
+
+
 def test_market_context_enumerates_the_capped_focus_set(tmp_path):
     """P2 (context plan): the digest enumerates the capped research focus set, so the prompt
     stops growing with every discovered symbol; unfocused names stay ready in the lake."""

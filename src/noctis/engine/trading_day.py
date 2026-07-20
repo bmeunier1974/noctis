@@ -84,6 +84,8 @@ class TradingDay:
         registry,
         families: FamilyRegistry,
         limits: RiskLimits,
+        fee_bps: float = 1.0,
+        slippage_bps: float = 1.0,
         min_order_notional: float = 0.0,
         rebalance_band_pct: float = 0.0,
         on_event=None,
@@ -104,6 +106,11 @@ class TradingDay:
             scores=scores,
             broker=broker,
             limits=limits,
+            # The configured per-side fill costs (#23). The carried ``broker`` above already
+            # embeds them in its fee/slippage models, so these are the fresh-broker fallback's
+            # copy of the same one source of truth — the two can never disagree.
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
             min_order_notional=min_order_notional,
             rebalance_band_pct=rebalance_band_pct,
             on_event=on_event,

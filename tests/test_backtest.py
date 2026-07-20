@@ -279,6 +279,21 @@ def test_pipeline_auto_threads_metric_caps_into_both_stages():
     assert cfg.validation.annualization_cap == 252 and cfg.validation.max_period_ratio == 0.5
 
 
+def test_pipeline_auto_threads_fill_costs_into_both_stages():
+    """The configured fee/slippage ride PipelineConfig.auto into the prefilter AND validation
+    configs, so the coarse screen and the execution-realistic stage charge one identical cost."""
+    cfg = PipelineConfig.auto(2000, fee_bps=2.5, slippage_bps=3.0)
+    assert cfg.prefilter.fee_bps == 2.5 and cfg.prefilter.slippage_bps == 3.0
+    assert cfg.validation.fee_bps == 2.5 and cfg.validation.slippage_bps == 3.0
+
+
+def test_pipeline_auto_defaults_to_the_shipped_fill_costs():
+    """Unset costs behave bit-for-bit as today: 1bp fee + 1bp slippage per side."""
+    cfg = PipelineConfig.auto(2000)
+    assert cfg.prefilter.fee_bps == 1.0 and cfg.prefilter.slippage_bps == 1.0
+    assert cfg.validation.fee_bps == 1.0 and cfg.validation.slippage_bps == 1.0
+
+
 def test_pool_stall_guard_raises_on_no_progress_but_not_on_completion():
     """The hang fix: wait_or_stall raises PoolStalled when the pool makes zero progress within
     the timeout (an OOM-killed worker leaves future.result() futex-blocked forever), but returns

@@ -368,6 +368,29 @@ def test_overlay_refuses_invalid_metric_value(tmp_path):
     assert lines == []
 
 
+def test_overlay_cannot_touch_backtest_costs(tmp_path):
+    """The mandate config: overlay stays promotion.metric-only — it may steer WHAT to look
+    for, never how forgiving the arena is (#23). A backtest cost override is refused and the
+    section is left on its floored default."""
+    settings = _settings(tmp_path, tmp_path / "mandate")
+    assert settings.backtest.fee_bps == 1.0
+    assert settings.backtest.slippage_bps == 1.0
+    mandate = Mandate(
+        text="x",
+        source="profile:test",
+        summary="x",
+        references=[],
+        config_overrides={
+            "backtest.fee_bps": 0.1,  # a cost-cheapening attempt via the overlay
+            "backtest.slippage_bps": 0.1,
+        },
+    )
+    lines = apply_overrides(settings, mandate)
+    assert settings.backtest.fee_bps == 1.0  # untouched
+    assert settings.backtest.slippage_bps == 1.0
+    assert lines == []  # nothing applied
+
+
 def test_apply_overrides_none_is_noop(tmp_path):
     settings = _settings(tmp_path, tmp_path / "mandate")
     assert apply_overrides(settings, None) == []

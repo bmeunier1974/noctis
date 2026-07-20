@@ -181,6 +181,32 @@ def test_pipeline_config_auto_from_settings_threads_promotion_knobs(tmp_path):
     assert built.validation.max_period_ratio == 2.5
 
 
+def test_pipeline_config_auto_from_settings_threads_fill_costs(tmp_path):
+    """The one config→pipeline mapping pulls backtest.fee_bps/slippage_bps from settings into
+    BOTH stages, so prefilter and validation charge exactly the operator-configured cost."""
+    from noctis.backtest import PipelineConfig
+
+    settings = load_settings(
+        config_path=_config(
+            tmp_path,
+            ["backtest:", "  fee_bps: 2.5", "  slippage_bps: 3.0"],
+        )
+    )
+    built = PipelineConfig.auto_from_settings(settings, 400)
+    assert built.prefilter.fee_bps == 2.5 and built.prefilter.slippage_bps == 3.0
+    assert built.validation.fee_bps == 2.5 and built.validation.slippage_bps == 3.0
+
+
+def test_pipeline_config_auto_from_settings_defaults_to_shipped_costs(tmp_path):
+    """Unset config threads the shipped baseline — default-equivalence with today."""
+    from noctis.backtest import PipelineConfig
+
+    settings = load_settings(config_path=_config(tmp_path, ["mode: paper"]))
+    built = PipelineConfig.auto_from_settings(settings, 400)
+    assert built.prefilter.fee_bps == 1.0 and built.prefilter.slippage_bps == 1.0
+    assert built.validation.fee_bps == 1.0 and built.validation.slippage_bps == 1.0
+
+
 # ── build_lake: vendor selection from credentials ─────────────────────────────────────────
 def test_build_lake_without_key_is_read_only(tmp_path):
     settings = load_settings(config_path=_config(tmp_path, [f"data:\n  lake_dir: {tmp_path}/lake"]))

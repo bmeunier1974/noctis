@@ -45,6 +45,7 @@ alternate file.
 | `promotion.max_gap`, `min_test_metric`, `min_test_activity` | Overfit-gap guard, OOS bar, and the almost-never-trades activity floor |
 | `promotion.min_holdout_metric`, `min_symbol_holdout_metric`, `min_symbol_consistency` | The out-of-sample promotion gates |
 | `promotion.annualization_cap`, `max_period_ratio`, `max_reverse_gap`, `max_test_metric` | Metric-robustness caps + degeneracy backstops (sub-daily Sharpe inflation, too-good-to-be-true OOS) |
+| `backtest.fee_bps`, `backtest.slippage_bps` | Simulated fill costs **per side** (default `1.0`/`1.0` — a 4bp round trip). One value threaded to the pre-filter, validation, the agent's cost hint, and paper fills. Enforced minimum `1.0` each — see **Fill costs** below |
 | `ideation` | The legacy StrategySpec path |
 | `champion_count` | Champion board size |
 | `time_limit_hours` | Global stop from any phase |
@@ -72,6 +73,24 @@ session, `--mandate <name>` or `--directive "<text>"` (mutually exclusive) overr
 `research.mandate` selector. The whole chain resolves in one place — `resolve_session` in
 `src/noctis/bootstrap.py`, the composition root — so the ordering can never drift between
 commands. Details: [research.md](research.md) and `mandate/README.md`.
+
+## Fill costs (the enforced floor)
+
+`backtest.fee_bps` and `backtest.slippage_bps` set the simulated trading cost **per side**
+(enter and exit each pay), so the round trip the research agent reasons about is `2 ×
+(fee_bps + slippage_bps)`. The default is the shipped baseline — `1.0`/`1.0`, a 4bp round
+trip — and an unset `backtest:` section behaves bit-for-bit as before. The single value is
+threaded from the composition root into the coarse pre-filter, walk-forward validation, the
+agent's cost hint (the market digest's `round_trip_cost_bp`), and the paper-fill broker, so
+those four can never disagree on what a trade costs.
+
+The baseline is **also the enforced minimum**: a value below `1.0` per side is a hard
+startup error (like `mode: live` without `ALLOW_LIVE`), never a silent clamp. The cost model
+is the system's main difficulty knob — dialing it below the baseline is the cheapest way to
+manufacture champions that would die on real fills — so the knob may only be raised toward
+per-venue realism, never lowered. For the same reason this section is **not** in the mandate
+`config:` overlay allowlist (which stays `promotion.metric`-only): a research personality
+steers *what* to look for, never how forgiving the arena is.
 
 ## Local backends (noctis-ollama)
 

@@ -42,6 +42,47 @@ class SessionConfig(BaseModel):
     timezone: str = "America/New_York"
 
 
+# The shipped baseline — 1bp fee + 1bp slippage per side (a 4bp round trip) — is also the
+# enforced minimum. See :class:`BacktestConfig` for why the knob may only be raised.
+_COST_FLOOR_BPS = 1.0
+
+
+class BacktestConfig(BaseModel):
+    """Simulated fill costs — the ONE source every consumer shares.
+
+    ``fee_bps`` and ``slippage_bps`` are charged **per side** (enter and exit each pay), so
+    the round-trip cost the research agent reasons about is ``2 × (fee_bps + slippage_bps)``.
+    The single value is threaded from the composition root into the coarse pre-filter,
+    walk-forward validation, the agent's cost hint, and the paper-fill broker, so those four
+    can never disagree on what a trade costs.
+
+    **The floor is load-bearing.** The cost model is the system's main difficulty knob:
+    dialing it below the shipped baseline is the cheapest way to manufacture champions that
+    would die on real fills, so the knob may only make the world *harsher* (or per-venue
+    realistic), never cheaper than the baseline. A value below ``_COST_FLOOR_BPS`` is a hard
+    startup error (like ``mode: live`` without ``ALLOW_LIVE``), never a silent clamp. This
+    section is deliberately **not** in the mandate ``config:`` overlay allowlist — a research
+    personality steers what to look for, never how forgiving the arena is.
+    """
+
+    fee_bps: float = _COST_FLOOR_BPS
+    slippage_bps: float = _COST_FLOOR_BPS
+
+    @field_validator("fee_bps", "slippage_bps")
+    @classmethod
+    def _enforce_floor(cls, value: float, info) -> float:
+        if value < _COST_FLOOR_BPS:
+            raise ValueError(
+                f"backtest.{info.field_name}={value} is below the enforced minimum of "
+                f"{_COST_FLOOR_BPS} bp per side (the shipped baseline). The simulated cost "
+                f"model is the system's main difficulty knob; it may only be raised toward "
+                f"per-venue realism, never lowered below the baseline (that is overfitting "
+                f"with extra steps). Set backtest.{info.field_name} to at least "
+                f"{_COST_FLOOR_BPS}."
+            )
+        return value
+
+
 class RiskConfig(BaseModel):
     """Risk limits enforced in the TRADING loop (percent of account equity)."""
 
@@ -376,6 +417,7 @@ class Settings(BaseSettings):
     live_feed: LiveFeedConfig = Field(default_factory=LiveFeedConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     promotion: PromotionConfig = Field(default_factory=PromotionConfig)
+    backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     ideation: IdeationConfig = Field(default_factory=IdeationConfig)
     champion_count: int = 3
     time_limit_hours: float | None = None
