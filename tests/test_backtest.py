@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+import multiprocessing
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -318,34 +321,347 @@ def test_pool_stall_guard_raises_on_no_progress_but_not_on_completion():
         assert sorted(f.result() for f in quick) == [0, 2, 4, 6]
 
 
-def _sleep_forever(_task):
+def _double(i):
+    return i * 2
+
+
+def _wedge_one_worker(marker_dir):
+    """Pool initializer that hangs forever in exactly ONE worker.
+
+    Models the fork-poisoned worker: the first worker to claim the marker (an atomic
+    O_EXCL create) deadlocks in its initializer, *before it ever dequeues a task*, and
+    records its pid for the test. Every sibling initializes normally and drains the queue.
+    """
+    import os
     import time
 
-    time.sleep(3600)  # a wedged worker: never finishes within any sane test window
+    path = os.path.join(marker_dir, "wedged.pid")
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    while True:  # the worker that never exits: only teardown ever meets it
+        time.sleep(3600)
 
 
-def test_shutdown_wedged_returns_promptly_and_kills_the_workers():
-    """The re-freeze fix: wait_or_stall raised PoolStalled, but tearing the pool down with
-    shutdown(wait=True) (the `with` form) JOINS the workers — a wedged worker never exits, so
-    the parent froze again right after the stall guard fired. shutdown_wedged must never wait
-    on a worker: it returns promptly and SIGKILLs survivors so no futex-blocked child lingers."""
-    import multiprocessing
+def _await_wedged_pid(path, timeout=30.0):
     import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return int(path.read_text())
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.05)
+    raise AssertionError(f"no worker wedged itself within {timeout:.0f}s")
+
+
+def _teardown_in_daemon_thread(pool, *, grace_s, bound_s=30.0):
+    """Run the teardown off the main thread and return whether it finished within ``bound_s``.
+
+    The dev deps carry no test-timeout plugin: a teardown that joins a wedged worker would
+    hang the suite forever. Bounding it here turns that regression into a failed assertion.
+    """
+    import threading
+
+    from noctis.backtest.pool import shutdown_pool
+
+    thread = threading.Thread(
+        target=shutdown_pool, args=(pool,), kwargs={"grace_s": grace_s}, daemon=True
+    )
+    thread.start()
+    thread.join(timeout=bound_s)
+    return not thread.is_alive()
+
+
+def _child_state(pid):
+    """``'gone' | 'zombie' | 'alive'`` for a child pid, read straight from the OS.
+
+    ``Process.is_alive()`` is not usable here: the executor's own management thread reaps the
+    workers too, and whichever thread loses that ``waitpid`` race gets ECHILD — after which the
+    Process object reports "alive" forever. ``waitpid`` on the pid answers what the test
+    actually cares about: killed (not ``alive``) and reaped by somebody (not ``zombie``).
+    """
+    import os
+
+    try:
+        seen, _status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return "gone"
+    return "zombie" if seen == pid else "alive"
+
+
+def _kill_leftovers(procs):
+    import os
+    import signal
+
+    for proc in procs:
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+            os.waitpid(proc.pid, 0)
+        except (ChildProcessError, ProcessLookupError):  # already gone
+            pass
+
+
+_needs_fork = pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="the fork start method is unavailable on this platform",
+)
+
+
+@_needs_fork
+def test_shutdown_pool_is_bounded_and_reaps_a_birth_wedged_worker(tmp_path):
+    """The overnight-freeze fix: a worker wedged at birth stalls no batch — its healthy sibling
+    drains the queue, every future completes, and the in-flight guards rightly stay quiet — so
+    teardown is the only path that meets it. A joining shutdown() waits on it forever; the
+    bounded teardown returns within its grace and leaves the wedged pid dead AND reaped."""
+    from concurrent.futures import ProcessPoolExecutor, wait
+
+    procs = []
+    pool = ProcessPoolExecutor(
+        max_workers=2,
+        mp_context=multiprocessing.get_context("fork"),
+        initializer=_wedge_one_worker,
+        initargs=(str(tmp_path),),
+    )
+    try:
+        futures = [pool.submit(_double, i) for i in range(4)]
+        wedged_pid = _await_wedged_pid(tmp_path / "wedged.pid")
+        procs = list(pool._processes.values())
+        assert len(procs) == 2  # one wedged at birth, one healthy
+        done, pending = wait(futures, timeout=60)
+        assert not pending  # the healthy sibling drained the whole queue
+        assert sorted(f.result() for f in done) == [0, 2, 4, 6]
+        assert wedged_pid in {p.pid for p in procs}
+
+        assert _teardown_in_daemon_thread(pool, grace_s=0.5)  # never joins the wedged worker
+        # Killed (not "alive" — it would have slept out the hour) AND reaped (not "zombie").
+        assert _child_state(wedged_pid) == "gone"
+    finally:
+        _kill_leftovers(procs)
+
+
+@_needs_fork
+def test_shutdown_pool_grace_lets_healthy_workers_exit_without_a_kill_warning(caplog):
+    """A kill is the observable trace of a fork-poisoned worker, so it must stay rare: healthy
+    workers exit on their shutdown sentinels inside the grace window, and no warning fires."""
+    import logging
     from concurrent.futures import ProcessPoolExecutor
 
-    from noctis.backtest.pool import shutdown_wedged
+    procs = []
+    pool = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("fork"))
+    try:
+        futures = [pool.submit(_double, i) for i in range(4)]
+        assert sorted(f.result() for f in futures) == [0, 2, 4, 6]
+        procs = list(pool._processes.values())
+        assert procs
 
-    pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("fork"))
-    pool.submit(_sleep_forever, None)
-    procs = list(pool._processes.values())
-    assert procs  # the submit spawned a worker to wedge
-    start = time.monotonic()
-    shutdown_wedged(pool)
-    assert time.monotonic() - start < 30  # a waiting shutdown would sleep out the hour
-    deadline = time.monotonic() + 10
-    while any(p.is_alive() for p in procs) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert not any(p.is_alive() for p in procs)
+        with caplog.at_level(logging.WARNING, logger="noctis.backtest.pool"):
+            assert _teardown_in_daemon_thread(pool, grace_s=5.0)
+        # They exited on their own shutdown sentinels inside the grace, and were reaped.
+        assert [_child_state(p.pid) for p in procs] == ["gone"] * len(procs)
+        assert [r.getMessage() for r in caplog.records] == []  # no kill warning on a clean pool
+    finally:
+        _kill_leftovers(procs)
+
+
+def test_shutdown_pool_logs_an_empty_process_snapshot_only_when_workers_are_believable():
+    """The residual broken-pool race: the executor can clear its process table before teardown
+    reads it, putting those pids beyond reach. Log it so the leak is visible — but stay quiet
+    for a pool that simply never ran anything, where an empty table is the honest answer."""
+    import logging
+    from typing import Any, cast
+
+    from noctis.backtest.pool import shutdown_pool
+
+    class _EmptyTablePool:
+        def __init__(self, queue_count):
+            self._processes: dict = {}
+            self._queue_count = queue_count
+
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            self._processes = {}
+
+    logger = logging.getLogger("noctis.backtest.pool")
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append  # type: ignore[method-assign]
+    logger.addHandler(handler)
+    try:
+        shutdown_pool(cast(Any, _EmptyTablePool(queue_count=0)))
+        assert records == []  # a pool that never submitted work never had workers
+        shutdown_pool(cast(Any, _EmptyTablePool(queue_count=3)))
+        assert len(records) == 1  # ran work, yet no workers to guard: say so
+        assert records[0].levelno == logging.WARNING
+    finally:
+        logger.removeHandler(handler)
+
+
+# ── the teardown contract, read off the source tree ───────────────────────────────────────
+# The invariant is tree-wide, not module-local, so it is checked by reading the code: no pool
+# anywhere may be torn down by a call that joins its workers. Parsed rather than grepped, so
+# prose about ``shutdown()`` (of which there is a lot, deliberately) never trips it.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_POOL_FACTORIES = ("ProcessPoolExecutor", "Pool")  # concurrent.futures, multiprocessing
+
+
+def _dotted(node) -> str | None:
+    """``self._pool`` for a Name/Attribute chain, else ``None``."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _builds_a_pool(node) -> bool:
+    name = _dotted(node.func) if isinstance(node, ast.Call) else None
+    return name is not None and name.rsplit(".", 1)[-1] in _POOL_FACTORIES
+
+
+def _pool_bindings(tree) -> set[str]:
+    """Every name in a module that was assigned a process pool — ``pool``, ``self._pool``, …"""
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _builds_a_pool(node.value):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value and _builds_a_pool(node.value):
+            targets = [node.target]
+        else:
+            continue
+        bound.update(name for t in targets if (name := _dotted(t)) is not None)
+    return bound
+
+
+def _waits_on_workers(call) -> bool:
+    """A ``shutdown()`` joins unless it explicitly says ``wait=False``."""
+    for kw in call.keywords:
+        if kw.arg == "wait":
+            return not (isinstance(kw.value, ast.Constant) and kw.value.value is False)
+    if call.args and isinstance(call.args[0], ast.Constant) and call.args[0].value is False:
+        return False
+    return True
+
+
+def _joining_pool_teardowns(root: Path) -> list[str]:
+    """``path:line: why`` for every teardown under ``root`` that would join a worker."""
+    findings = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        pools = _pool_bindings(tree)
+        rel = path.relative_to(root)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "shutdown"
+                and _waits_on_workers(node)
+            ):
+                findings.append(f"{rel}:{node.lineno}: joining shutdown() — pass wait=False")
+            elif isinstance(node, ast.With | ast.AsyncWith):
+                for item in node.items:
+                    expr = item.context_expr
+                    if _builds_a_pool(expr) or _dotted(expr) in pools:
+                        findings.append(
+                            f"{rel}:{node.lineno}: pool as a `with` block — its __exit__ joins"
+                        )
+    return sorted(findings, key=lambda f: (f.split(":")[0], int(f.split(":")[1])))
+
+
+def _tracked_sources() -> list[Path]:
+    """The code and prose a reader could copy a retired primitive out of."""
+    roots = (_REPO_ROOT / "src", _REPO_ROOT / "tests", _REPO_ROOT / "docs")
+    files = [p for root in roots for p in root.rglob("*") if p.suffix in {".py", ".md"}]
+    return sorted(files + list(_REPO_ROOT.glob("*.md")))
+
+
+def test_pool_teardown_scan_flags_every_joining_form(tmp_path):
+    """The scanner's own oracle: the three shapes that join a worker must all be caught.
+
+    A bare ``shutdown()`` and ``shutdown(wait=True)`` are the same call, and a ``with`` block
+    over a pool is that call again in its ``__exit__`` — including when the pool was built on
+    an earlier line and only entered later. Each of them waits on a worker that a fork-poisoned
+    sibling has made unjoinable, so the scan has to see all three.
+    """
+    (tmp_path / "offender.py").write_text(
+        "from concurrent.futures import ProcessPoolExecutor\n"
+        "\n"
+        "def bare():\n"
+        "    pool = ProcessPoolExecutor(max_workers=2)\n"
+        "    pool.shutdown()\n"
+        "\n"
+        "def waiting(pool):\n"
+        "    pool.shutdown(wait=True)\n"
+        "\n"
+        "def constructed_in_the_with():\n"
+        "    with ProcessPoolExecutor(max_workers=2) as pool:\n"
+        "        pool.submit(len, [])\n"
+        "\n"
+        "def entered_later():\n"
+        "    pool = ProcessPoolExecutor(max_workers=2)\n"
+        "    with pool:\n"
+        "        pool.submit(len, [])\n",
+        encoding="utf-8",
+    )
+
+    found = _joining_pool_teardowns(tmp_path)
+
+    assert [f.split(":")[1] for f in found] == ["5", "8", "11", "16"]
+    assert all("offender.py" in f for f in found)
+
+
+def test_pool_teardown_scan_accepts_the_bounded_form(tmp_path):
+    """It must stay quiet on what the contract actually allows, or nobody will keep it green:
+    the non-waiting shutdown inside the bounded helper, and thread pools — a thread pool has no
+    fork-inherited lock to deadlock on, which is why the ban is on *process* pools."""
+    (tmp_path / "clean.py").write_text(
+        "from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor\n"
+        "\n"
+        "def shutdown_pool(pool):\n"
+        "    pool.shutdown(wait=False, cancel_futures=True)\n"
+        "\n"
+        "def teardown():\n"
+        "    pool = ProcessPoolExecutor(max_workers=2)\n"
+        "    try:\n"
+        "        pool.submit(len, [])\n"
+        "    finally:\n"
+        "        shutdown_pool(pool)\n"
+        "\n"
+        "def threads():\n"
+        "    with ThreadPoolExecutor(max_workers=2) as ex:\n"
+        "        ex.submit(len, [])\n",
+        encoding="utf-8",
+    )
+
+    assert _joining_pool_teardowns(tmp_path) == []
+
+
+def test_no_joining_pool_teardown_anywhere_in_src():
+    """The epic's contract, enforced over the whole tree rather than the two modules that own a
+    pool today: teardown never joins a worker unboundedly, on ANY path. A fully drained pool is
+    not a pool whose every worker is joinable — a fork-poisoned worker deadlocks before it ever
+    dequeues a task, so its healthy siblings complete every future while it never exits. Any new
+    pool anywhere in ``src`` inherits that contract, and this fails until it routes through the
+    bounded helper."""
+    assert _joining_pool_teardowns(_REPO_ROOT / "src") == []
+
+
+def test_the_bounded_helper_is_the_only_teardown_primitive():
+    """One primitive, no second door: the retired non-waiting teardown must be gone from source,
+    tests, and prose alike, so nothing can be reintroduced by copying a stale name out of docs."""
+    retired = "shutdown_" + "wedged"  # split so this guard never matches itself
+    hits = [
+        f"{path.relative_to(_REPO_ROOT)}:{i}"
+        for path in _tracked_sources()
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if retired in line
+    ]
+    assert hits == []
 
 
 def test_scale_workers_sheds_workers_on_large_1m_panels_but_not_coarse_ones():
@@ -871,6 +1187,45 @@ def test_evaluation_time_limit_is_a_noop_off_the_main_thread():
 
 def _raise_in_worker(_task):
     raise ValueError("boom in worker")
+
+
+def _healthy_in_worker(task):
+    return task
+
+
+@_needs_fork
+def test_panel_pool_close_tears_down_with_the_bounded_helper(monkeypatch):
+    """Regression for the clean-path freeze: every task completed, so the stall guard rightly
+    stayed quiet — and close() then joined a fork-poisoned worker that never exits, freezing a
+    finished run for hours. A fully drained panel pool is not a pool whose every worker is
+    joinable, so the clean close must route through the bounded teardown too, at its full grace.
+    """
+    import time
+
+    from noctis.backtest.pipeline import _PanelPool
+    from noctis.backtest.pool import POOL_TEARDOWN_GRACE_S, shutdown_pool
+
+    graces: list[float] = []
+
+    def recording_shutdown(pool, *, grace_s=POOL_TEARDOWN_GRACE_S):
+        graces.append(grace_s)
+        shutdown_pool(pool, grace_s=grace_s)
+
+    monkeypatch.setattr("noctis.backtest.pipeline.shutdown_pool", recording_shutdown)
+
+    pool = _PanelPool(workers=2, tasks=2)
+    assert pool._pool is not None  # a real fork pool, or the test proves nothing
+    assert pool.map(_healthy_in_worker, [1, 2]) == [1, 2]  # the pool drained every task
+    procs = list((pool._pool._processes or {}).values())
+
+    start = time.monotonic()
+    pool.close()
+    assert time.monotonic() - start < 30  # bounded: the old join would still be waiting
+    assert graces == [POOL_TEARDOWN_GRACE_S]  # bounded teardown, clean-path grace (5.0s)
+    deadline = time.monotonic() + 10
+    while any(p.is_alive() for p in procs) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not any(p.is_alive() for p in procs)
 
 
 def test_panel_pool_abort_never_joins_and_close_is_a_noop_after():

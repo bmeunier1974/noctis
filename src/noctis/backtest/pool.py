@@ -1,4 +1,4 @@
-"""Shared process-pool result collection with a stall guard.
+"""Shared pool guards — the catalogue of known pool hangs, one guard each.
 
 A ``ProcessPoolExecutor`` worker killed by the OOM killer can leave the parent blocked in
 ``future.result()`` / ``pool.map()`` **forever**: ``BrokenProcessPool`` is not always raised
@@ -10,15 +10,31 @@ back to sequential evaluation — which also uses far less memory and usually co
 ``workers=1`` panel) evaluates **in-process**, where no pool guard can fire — a strategy whose
 ``on_bar`` loop never terminates on a pathological param set would hang the research loop
 forever. The alarm turns that into a bounded :class:`EvaluationTimeout`.
+
+The third failure mode shows no in-flight symptom at all, which is why it needs its own guard.
+The pool forks from a parent with many live threads (HTTP clients, an allocator thread, …), so a
+worker can inherit a lock some other thread held at the instant of ``fork()`` and deadlock in its
+initializer — **before it ever dequeues a task**. Its healthy siblings drain the whole queue, so
+every future completes and the stall guard rightly stays quiet; only teardown ever meets that
+worker, and a joining ``shutdown()`` waits on it forever (observed live: an overnight session
+frozen for hours *after* its sweep had finished its work; SIGKILLing the one wedged pid unfroze
+it instantly). :func:`shutdown_pool` is that mode's guard — every teardown path is bounded, and
+the kill warning it logs is the observable trace of a fork-poisoned worker.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import logging
+import multiprocessing.connection
 import signal
 import threading
+import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from typing import Any
+
+logger = logging.getLogger("noctis.backtest.pool")
 
 # Seconds to wait for ANY pending future to make progress before declaring the pool wedged.
 # Generous on purpose: a single 1m-bar trial/symbol is seconds to ~a minute, so whole minutes of
@@ -100,22 +116,100 @@ def scale_workers(
     return max(1, min(configured, budget // total_bars))
 
 
-def shutdown_wedged(pool: concurrent.futures.ProcessPoolExecutor) -> None:
-    """Tear down a pool presumed wedged, never waiting on its workers.
+# Grace given to the WHOLE worker snapshot (one shared deadline, not per worker) to exit on
+# its shutdown sentinels before the kill. Healthy workers take milliseconds, so this costs a
+# clean teardown nothing; it exists so an ordinary exit stays ordinary — SIGKILL never becomes
+# the routine path, which is what keeps the kill warning meaningful as a fork-poisoning signal.
+POOL_TEARDOWN_GRACE_S = 5.0
 
-    ``shutdown(wait=True)`` — including the ``with`` form's ``__exit__`` — joins the worker
-    processes. A worker deadlocked on a fork-inherited lock never exits, so that join freezes
-    the parent forever (observed live: the stall guard raised :class:`PoolStalled`, then the
-    sweep pool's ``with`` block re-froze the run while unwinding it). Shut down without
-    waiting, then SIGKILL any worker still alive so a wedged child doesn't linger
-    futex-blocked holding its full copy of the panel.
+# Ceiling on the reap-join of a process we just SIGKILLed. A killed child is reaped in
+# microseconds; the bound is here so even this join can never be the thing that hangs.
+POOL_REAP_JOIN_S = 5.0
+
+
+def _reap(proc: multiprocessing.process.BaseProcess, *, timeout: float) -> None:
+    """Bounded ``join`` of an exited worker so it leaves no zombie; never raises.
+
+    The executor's management thread joins the same workers, so this join can find the child
+    already reaped (``waitpid`` → ECHILD, swallowed by multiprocessing) — either way the pid is
+    collected and this returns within ``timeout``.
+    """
+    try:
+        proc.join(timeout=timeout)
+    except (ValueError, AssertionError, OSError):  # not started / already closed out
+        pass
+
+
+def shutdown_pool(
+    pool: concurrent.futures.ProcessPoolExecutor, *, grace_s: float = POOL_TEARDOWN_GRACE_S
+) -> None:
+    """Tear down a process pool without ever joining a worker unboundedly.
+
+    The only pool-teardown primitive in the codebase. ``shutdown(wait=True)`` — including the
+    ``with`` form's ``__exit__`` — joins the worker processes, and a worker deadlocked on a
+    fork-inherited lock never exits, so that join freezes the parent forever (see the module
+    docstring's third failure mode). Instead: snapshot the workers, shut down *without* waiting,
+    give the snapshot one shared ``grace_s`` window to exit on its sentinels, then SIGKILL every
+    survivor and reap it with a bounded join so no zombie — and no futex-blocked child still
+    holding its full copy of the panel — is left behind. ``grace_s=0.0`` kills immediately.
+
+    The executor's management thread is deliberately left alone: with the workers dead it
+    finishes and exits on its own, whereas joining it is exactly the unbounded wait being fixed.
     """
     # shutdown() drops the process table — snapshot the workers first so they can be killed.
     procs = list((pool._processes or {}).values())
+    submitted = getattr(pool, "_queue_count", None)  # work items ever handed to this pool
+    if not procs and submitted:
+        # The pool ran work, so it HAD workers; an empty table means the executor cleared it
+        # first (the residual broken-pool race) and those pids are now beyond our reach. There
+        # is nothing left to guard here — log it rather than let the leak be silent.
+        logger.warning(
+            "pool teardown found no worker processes on a pool that ran work; any surviving "
+            "worker is beyond reach (the executor cleared its process table first)"
+        )
     pool.shutdown(wait=False, cancel_futures=True)
+
+    # Aliveness is read from each worker's sentinel (readable the moment the process exits),
+    # never from ``Process.is_alive()``: the executor's own management thread reaps the workers
+    # too, and whichever ``waitpid`` loses that race gets ECHILD — after which the Process object
+    # claims "alive" forever. Killing on that lie would signal a recycled pid.
+    pending: dict[Any, multiprocessing.process.BaseProcess] = {}
     for proc in procs:
-        if proc.is_alive():
-            proc.kill()
+        try:
+            pending[proc.sentinel] = proc
+        except ValueError:  # already closed out — nothing to wait on
+            continue
+
+    # ONE deadline for the whole snapshot: healthy workers exit on their shutdown sentinels in
+    # milliseconds, so the grace is free on a clean teardown and never multiplies by worker
+    # count on a wedged one. ``grace_s=0.0`` degenerates to a single non-blocking poll.
+    deadline = time.monotonic() + grace_s
+    while pending:
+        remaining = max(0.0, deadline - time.monotonic())
+        exited = multiprocessing.connection.wait(list(pending), timeout=remaining)
+        for sentinel in exited:
+            _reap(pending.pop(sentinel), timeout=0.0)
+        if not exited and remaining <= 0:
+            break
+
+    killed = []
+    for survivor in pending.values():
+        try:
+            survivor.kill()
+        except (ValueError, ProcessLookupError):  # closed out / exited under us
+            continue
+        killed.append(survivor.pid)
+        _reap(survivor, timeout=POOL_REAP_JOIN_S)  # bounded reap: kill, don't leave a zombie
+    if killed:
+        # Named pids on purpose: with a real grace window, a worker that outlives its shutdown
+        # sentinel is a fork-poisoned worker, and this line is the only trace it ever leaves.
+        logger.warning(
+            "pool teardown killed %d worker(s) still alive %.1fs after a non-waiting "
+            "shutdown: pids %s",
+            len(killed),
+            grace_s,
+            ", ".join(str(pid) for pid in killed),
+        )
 
 
 def wait_or_stall(

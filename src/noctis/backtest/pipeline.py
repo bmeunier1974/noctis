@@ -29,7 +29,12 @@ from statistics import median
 import pandas as pd
 
 from noctis.backtest.candidate import Candidate
-from noctis.backtest.pool import PoolStalled, shutdown_wedged, wait_or_stall
+from noctis.backtest.pool import (
+    POOL_TEARDOWN_GRACE_S,
+    PoolStalled,
+    shutdown_pool,
+    wait_or_stall,
+)
 from noctis.backtest.prefilter import PrefilterConfig, coarse_score
 from noctis.backtest.scorecard import (
     DEFAULT_ANNUALIZATION_CAP,
@@ -105,21 +110,33 @@ class _PanelPool:
                 return [f.result() for f in futures]
             except (BrokenExecutor, PoolStalled) as exc:
                 logger.warning("panel pool broke (%s); evaluating sequentially", exc)
-                shutdown_wedged(self._pool)
+                shutdown_pool(self._pool, grace_s=0.0)
                 self._pool = None
         return [fn(args) for args in args_list]
 
     def close(self) -> None:
+        """Tear down on the clean path — bounded, and never a joining ``shutdown()``.
+
+        Teardown must never join a worker unboundedly, on ANY path. A fully drained pool is
+        not a pool whose every worker is joinable: a fork-poisoned worker deadlocks before it
+        ever dequeues a task, so its healthy siblings complete every future while it never
+        exits (that clean-path join froze a finished session for 142 minutes). The grace here
+        is the full one — an ordinary exit gives the workers their whole window to leave on
+        their own sentinels, so SIGKILL never becomes the routine path.
+        """
         if self._pool is not None:
-            self._pool.shutdown()
+            shutdown_pool(self._pool, grace_s=POOL_TEARDOWN_GRACE_S)
             self._pool = None
 
     def abort(self) -> None:
-        """Tear down without joining the workers — the unwind path. ``shutdown()`` joins, and a
-        wedged (OOM'd) worker never exits, so joining while an exception unwinds would trade
-        that exception for an infinite hang. After this, :meth:`close` is a no-op."""
+        """The same bounded teardown at zero grace — the wedged/unwind path.
+
+        An exception is already in flight (or the pool is known broken), so there is nothing
+        to wait out: kill the workers at once rather than spend a grace window on processes
+        the run has given up on. After this, :meth:`close` is a no-op.
+        """
         if self._pool is not None:
-            shutdown_wedged(self._pool)
+            shutdown_pool(self._pool, grace_s=0.0)
             self._pool = None
 
 
@@ -344,9 +361,10 @@ def evaluate(
             )
             symbol_holdout_metric = round(sum(held) / len(held), 10)
     except BaseException:
-        # Unwinding (a raising task, an evaluation timeout, an interrupt): tear down without
-        # joining — a wedged worker never exits, and close()'s join would re-freeze the run
-        # right as the exception tried to save it. abort() leaves close() a no-op below.
+        # Unwinding (a raising task, an evaluation timeout, an interrupt): abort() kills the
+        # workers at once instead of granting close()'s grace window, because spending it
+        # here only delays the exception that is trying to save the run. Both paths are
+        # bounded — neither ever joins a worker. abort() leaves close() a no-op below.
         pool.abort()
         raise
     finally:
