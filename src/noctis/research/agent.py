@@ -593,7 +593,16 @@ def _tool_event(name: str, args: dict, result: dict, brief: dict) -> Event:
     plus a compact outcome; ``brief`` — the toolbox's own gate-facing slice of the result
     (:meth:`~noctis.research.tools.ResearchToolbox.result_brief`) — carries the numbers, both
     printed and structured into ``meta``, plus an ``ok`` flag the renderer colors on (green
-    success / red error)."""
+    success / red error).
+
+    ``meta`` also carries the structured call itself — ``meta["tool"]`` (the name) and
+    ``meta["args"]`` (the *same* per-arg-truncated ``brief_args`` shown in ``text``) — so a
+    downstream consumer (the QA feed this epic builds later) reads the call off the metadata
+    instead of reparsing the prose. Truncation happens *before* the args enter ``meta``, so a
+    strategy-source-sized string surfaces only as a ``<N chars>`` placeholder and never leaks
+    whole. The console renderer reads only ``meta["ok"]``, so this widening is invisible to
+    ``-v`` output. ``tool``/``args`` are set last, after any ``meta.update(brief)``, so the
+    structured keys win deterministically over a same-named brief key."""
     brief_args = {
         k: (f"<{len(v)} chars>" if isinstance(v, str) and len(v) > 80 else v)
         for k, v in (args or {}).items()
@@ -606,6 +615,8 @@ def _tool_event(name: str, args: dict, result: dict, brief: dict) -> Event:
         meta["ok"] = True
         meta.update(brief)
         outcome = ", ".join(f"{k}={v}" for k, v in brief.items()) or "ok"
+    meta["tool"] = name
+    meta["args"] = brief_args
     text = f"{name}({json.dumps(brief_args, default=str)}) -> {outcome}"
     return Event("tool", text, meta=meta, level=1)
 
