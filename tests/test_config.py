@@ -6,6 +6,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from noctis.config import DataConfig, Settings, load_settings
@@ -196,6 +197,34 @@ def test_example_config_ships_the_driver_coder_pairing():
     assert all(ln.lstrip().startswith("#") for ln in coder_lines)  # inert example, not active
     assert any("anthropic/claude-sonnet-5" in ln for ln in coder_lines)
     assert any("ollama_chat/noctis-qwen3:14b" in ln for ln in lines)
+
+
+def test_example_config_ships_mandate_auto(tmp_path):
+    """The example config ships research.mandate: auto (#27) — a fresh install that copies it
+    runs research under agent profile selection — while the typed default on a bare install (no
+    config file) stays null/unconstrained. The two must not drift together (criterion 3)."""
+    parsed = yaml.safe_load(REPO_EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+    assert parsed["research"]["mandate"] == "auto"
+    assert load_settings(config_path=tmp_path / "missing.yaml").research.mandate is None
+
+
+def test_example_config_mandate_comment_explains_auto():
+    """The comment beside research.mandate spells out what auto does, the alternatives, and why
+    it ships as the default: auto sessions score on the base promotion.metric (criterion 2)."""
+    lines = REPO_EXAMPLE_CONFIG.read_text(encoding="utf-8").splitlines()
+    mandate_idx = next(i for i, ln in enumerate(lines) if ln.lstrip().startswith("mandate:"))
+    # the inline comment plus any adjacent comment lines directly above the key
+    block = [lines[mandate_idx]]
+    j = mandate_idx - 1
+    while j >= 0 and lines[j].lstrip().startswith("#"):
+        block.insert(0, lines[j])
+        j -= 1
+    comment = "\n".join(block).lower()
+    assert "auto" in comment  # what the default is
+    assert "mandate" in comment  # the your-own-file alternative
+    assert "null" in comment  # the unconstrained alternative
+    assert "profile" in comment  # a profile name / agent picks a profile
+    assert "metric" in comment  # why auto is safe: scored on the base promotion.metric
 
 
 def test_settings_is_the_public_type():
