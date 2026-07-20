@@ -1022,6 +1022,45 @@ def _raise_in_worker(_task):
     raise ValueError("boom in worker")
 
 
+def _healthy_in_worker(task):
+    return task
+
+
+@_needs_fork
+def test_panel_pool_close_tears_down_with_the_bounded_helper(monkeypatch):
+    """Regression for the clean-path freeze: every task completed, so the stall guard rightly
+    stayed quiet — and close() then joined a fork-poisoned worker that never exits, freezing a
+    finished run for hours. A fully drained panel pool is not a pool whose every worker is
+    joinable, so the clean close must route through the bounded teardown too, at its full grace.
+    """
+    import time
+
+    from noctis.backtest.pipeline import _PanelPool
+    from noctis.backtest.pool import POOL_TEARDOWN_GRACE_S, shutdown_pool
+
+    graces: list[float] = []
+
+    def recording_shutdown(pool, *, grace_s=POOL_TEARDOWN_GRACE_S):
+        graces.append(grace_s)
+        shutdown_pool(pool, grace_s=grace_s)
+
+    monkeypatch.setattr("noctis.backtest.pipeline.shutdown_pool", recording_shutdown)
+
+    pool = _PanelPool(workers=2, tasks=2)
+    assert pool._pool is not None  # a real fork pool, or the test proves nothing
+    assert pool.map(_healthy_in_worker, [1, 2]) == [1, 2]  # the pool drained every task
+    procs = list((pool._pool._processes or {}).values())
+
+    start = time.monotonic()
+    pool.close()
+    assert time.monotonic() - start < 30  # bounded: the old join would still be waiting
+    assert graces == [POOL_TEARDOWN_GRACE_S]  # bounded teardown, clean-path grace (5.0s)
+    deadline = time.monotonic() + 10
+    while any(p.is_alive() for p in procs) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not any(p.is_alive() for p in procs)
+
+
 def test_panel_pool_abort_never_joins_and_close_is_a_noop_after():
     """The unwind fix: a task exception propagates out of _PanelPool.map (only pool failures
     fall back), and evaluate()'s cleanup must then tear down via abort() — shutdown()'s join
