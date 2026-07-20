@@ -41,6 +41,7 @@ mandate/profiles/*.md
 mandate/references/*
 !mandate/references/.gitkeep
 !mandate/references/example-watchlist.md
+!mandate/references/high-vol-momentum-brief.md
 
 # ── Byte-code & tool caches ──────────────────────────────────────────────────
 __pycache__/

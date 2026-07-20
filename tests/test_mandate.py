@@ -584,9 +584,10 @@ def test_shipped_mandate_md_resolves_to_sortino(tmp_path):
     mandate = resolve_mandate(settings)
     assert mandate is not None
     assert mandate.source == "mandate/MANDATE.md"
-    # The migrated high-risk brief survived into the body.
-    assert "volatile" in mandate.text.lower()
+    # The balanced Sortino brief survived into the body.
+    assert "liquid us large- and mid-cap" in mandate.text.lower()
     assert settings.promotion.metric == "sharpe"  # the base dial, before the overlay
     apply_overrides(settings, mandate)
-    # The shipped mandate binds sortino (f2a3a60: "risk management matters more than hit-rate").
+    # The shipped mandate binds sortino ("Score on Sortino: ... downside deviation is what to
+    # minimise").
     assert settings.promotion.metric == "sortino"

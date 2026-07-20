@@ -238,7 +238,7 @@ pre-workspace layout in; a startup guard refuses to run beside un-migrated legac
 | `config.example.yaml` → `config.yaml` | Every operating knob: committed template → your local copy (optional; defaults apply without it) | template **committed**; local copy ignored |
 | `.env.example` → `.env` | Secrets + the `ALLOW_LIVE` gate | template **committed**; local copy ignored |
 | `strategies/*.py` | The seed library — `TEMPLATE.py` + three worked examples, one reviewable `.py` per strategy with its research record in the header (see `strategies/README.md`) | **committed** |
-| `mandate/` | Operator mandate scaffold — `MANDATE.md.example`, five shipped profiles, `tune-first` (see `mandate/README.md`) | **committed** (scaffold only) |
+| `mandate/` | Operator mandate scaffold — `MANDATE.md.example` (a balanced Sortino swing brief), five shipped profiles, `tune-first`, `references/` (see `mandate/README.md`) | **committed** (scaffold only) |
 | `mandate/MANDATE.md` + custom personalities + personal `references/` | The operator's own steering input | ignored |
 | `MEMORY.seed.md` | Curated starting lessons — copied into the live memory on first run | **committed** |
 

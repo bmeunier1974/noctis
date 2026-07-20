@@ -12,7 +12,8 @@ universe: [AAPL, XOM, UNH, JPM, NVDA, WMT, CAT, GOOGL, SPY, IWM]
 
 research:
   model: openai/gpt-5.4 # LiteLLM provider/model — `noctis setup` configures and verifies this
-  mandate: null # the research brief: a profile name, MANDATE (your own file), auto, or null
+  # research brief: MANDATE (your own mandate/MANDATE.md), a profile name, or null (unconstrained).
+  mandate: auto # default: agent picks a shipped profile per session, scored on the base promotion.metric
   cost_profile: balanced # full | balanced | economy — spend ceilings, never quality gates
   # A local $0 backend (e.g. noctis-ollama) replaces the model line and adds the agent block:
   # model: ollama_chat/noctis-qwen3:14b # cheap driver runs the session…
