@@ -24,6 +24,7 @@ import pandas as pd
 
 from noctis.backtest import Candidate, PipelineConfig, evaluate
 from noctis.backtest.pool import (
+    POOL_TEARDOWN_GRACE_S,
     EvaluationTimeout,
     PoolStalled,
     scale_workers,
@@ -212,15 +213,15 @@ class SweepRunner:
                 # Either way, continue from where the pool died — never re-run yielded trials.
                 logger.warning("sweep pool unavailable (%s); continuing sequentially", exc)
             finally:
-                # Not a `with` block: its __exit__ is shutdown(wait=True), which JOINS the
-                # workers — a wedged worker never exits, so that join re-froze the run right
-                # after the stall guard raised. Only a fully-drained pool (every batch
-                # completed) may be waited on; any other exit tears down without waiting.
+                # Not a `with` block, and never a joining shutdown() on ANY path: teardown
+                # must never join a worker unboundedly. A fully-drained pool is not a pool
+                # whose every worker is joinable — a fork-poisoned worker deadlocks before it
+                # ever dequeues a task, so its healthy siblings complete every future while it
+                # never exits (that clean-path join froze a finished session for 142 minutes).
+                # `clean` only picks the grace: an ordinary exit gives the workers their full
+                # window to leave on their own sentinels, a wedged/unwound one kills at once.
                 if pool is not None:
-                    if clean:
-                        pool.shutdown()
-                    else:
-                        shutdown_pool(pool, grace_s=0.0)
+                    shutdown_pool(pool, grace_s=POOL_TEARDOWN_GRACE_S if clean else 0.0)
 
         while done < n:
             ((handle, params),) = sampler.ask(1)

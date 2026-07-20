@@ -11,7 +11,7 @@ import time
 
 import pandas as pd
 
-from noctis.backtest.pool import PoolStalled
+from noctis.backtest.pool import POOL_TEARDOWN_GRACE_S, PoolStalled, shutdown_pool
 from noctis.research.sweep import SweepRunner
 from noctis.strategies.base import ParamSpec
 from noctis.strategies.library import LibraryPaths
@@ -53,6 +53,10 @@ def _raising_eval(task):
 
 def _dying_eval(_task):
     os._exit(1)  # simulates an OOM-killed worker: the process vanishes mid-trial
+
+
+def _healthy_eval(_task):
+    return _Card()  # a worker that completes its trial normally — the clean-exit path
 
 
 def _raise_stall(futures, **kwargs):
@@ -130,6 +134,33 @@ def test_stalled_pool_falls_back_without_joining_the_wedged_worker(tmp_path):
     while multiprocessing.active_children() and time.monotonic() < deadline:
         time.sleep(0.1)
     assert not multiprocessing.active_children()
+
+
+def test_clean_pool_exit_tears_down_with_the_bounded_helper(tmp_path, monkeypatch):
+    """Regression for the 2026-07-20 freeze: every trial completed, so the stall guard
+    rightly stayed quiet — and the CLEAN teardown then joined a fork-poisoned worker that
+    never exits, freezing a finished session for hours. A fully drained pool is not a pool
+    whose every worker is joinable, so the clean exit must route through the bounded
+    teardown too, at its full grace."""
+    graces: list[float] = []
+
+    def recording_shutdown(pool, *, grace_s=POOL_TEARDOWN_GRACE_S):
+        graces.append(grace_s)
+        shutdown_pool(pool, grace_s=grace_s)
+
+    monkeypatch.setattr("noctis.research.sweep.shutdown_pool", recording_shutdown)
+
+    seq_calls: list[dict] = []
+
+    def evaluate_fn(name, params, bars):
+        seq_calls.append(params)
+        return _Card()
+
+    runner = _runner(tmp_path, evaluate_fn, worker_eval=_healthy_eval)
+    out = list(runner.run("probe", _SPACE, _bars(), 4, config=None))
+    assert len(out) == 4 and all(card is not None for _, card in out)
+    assert seq_calls == []  # the pool drained every trial — no fallback engaged
+    assert graces == [POOL_TEARDOWN_GRACE_S]  # bounded teardown, clean-path grace (5.0s)
 
 
 def test_sequential_trial_timeout_ends_the_sweep_early(tmp_path):
