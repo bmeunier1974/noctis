@@ -19,7 +19,7 @@ alternate file.
 | `research_time_budget_minutes` | Wall-clock cap on a research session |
 | `research.mode` | `agent` (default) or `legacy` |
 | `research.model`, `research.base_url` | LiteLLM `provider/model` string; base URL for local/self-hosted backends |
-| `research.mandate` | Mandate selector: a profile name, `MANDATE`, `auto`, or `null` |
+| `research.mandate` | Mandate selector: a profile name, `MANDATE`, `auto`, or `null` — code default `null` (unconstrained); **shipped config ships `auto`** (agent picks a profile per session) |
 | `research.min_trials` | Exhaustion floor — verdict tools refuse before this many journaled trials |
 | `research.max_iterations`, `max_backtests`, `sweep_trials`, `web_search` | Agent session budgets |
 | `research.agent.coder_model`, `max_author_calls` | Dedicated authoring model + its Class-B budget: coder completions/session (retries included); exhausted → brief authoring refused, hand-written `source` stays open |

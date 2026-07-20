@@ -3,12 +3,12 @@
 This folder is where a human steers the research agent. It is skill-shaped: an entry file
 (`MANDATE.md`), a library of ready-made personalities (`profiles/`), and optional supporting
 notes (`references/`). One config selector, `research.mandate`, chooses which mandate governs
-a run. See `docs/operator-mandate.md` for the full design.
+a run. See `docs/research.md` ("Mandates + a growing universe") for the full design.
 
 ```
 mandate/
 ├─ README.md              # this file                                    (committed)
-├─ MANDATE.md.example     # preserved known-good brief; copy over MANDATE.md to use (committed)
+├─ MANDATE.md.example     # balanced Sortino swing brief; copy over MANDATE.md to use (committed)
 ├─ MANDATE.md             # YOUR own input — edit the prose to steer research    (LOCAL, gitignored)
 ├─ tune-first.md          # conduct mandate: tune/decide the existing library     (committed)
 ├─ profiles/              # five shipped personalities; pick one or copy one to start
@@ -20,11 +20,12 @@ mandate/
 │  └─ <your-name>.md      # custom personalities you author              (LOCAL, gitignored)
 └─ references/            # small supporting notes a mandate can pull in
    ├─ example-watchlist.md                                               (committed)
+   ├─ high-vol-momentum-brief.md                                         (committed)
    └─ <your-notes>.md     # your own reference notes                     (LOCAL, gitignored)
 ```
 
 **Committed vs local.** The repo ships only the *scaffold* — this README, the `.example`
-template, `tune-first.md`, the five shipped profiles, and one reference example. Your own
+template, `tune-first.md`, the five shipped profiles, and two reference examples. Your own
 `MANDATE.md`, any custom personality (`mandate/<name>.md` or `profiles/<name>.md`), and your
 personal `references/` are **gitignored**, so steering the agent never shows up as a repo
 change. Start from the template: `cp mandate/MANDATE.md.example mandate/MANDATE.md`.
@@ -117,7 +118,10 @@ References are confined to this folder (no `..` escapes, no absolute paths) and 
 small** (~2 KB per file, ~6 KB total). A reference that wants to be bigger is a signal it
 should be a **link the agent follows with web_search**, not an embed — every kilobyte of
 loaded reference prose is context the agent can't spend on its own reasoning. `references/`
-ships with one worked example, `example-watchlist.md`, that no shipped mandate wires in.
+ships two inert examples that no shipped mandate wires in: `example-watchlist.md` and
+`high-vol-momentum-brief.md` — the high-volatility momentum brief this system once ran under,
+kept here as documentation after the balanced Sortino brief became the scaffolded
+`MANDATE.md.example`.
 
 ## The `auto` caveat (why a profile's overlay can look inert)
 

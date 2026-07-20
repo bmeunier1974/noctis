@@ -162,11 +162,13 @@ free/local provider. The knob binds *resource ceilings only*: it can never lower
 
 A human steers agent sessions through the `mandate/` folder — the ownable input surface:
 `MANDATE.md` (your own first-person brief, gitignored — copy it from the committed
-`MANDATE.md.example`), five shipped `profiles/` personalities (`aggressive`, `conservative`,
-`long-term`, `short-term`, `sector-specialist`), and small supporting `references/`. Only the
+`MANDATE.md.example`, a balanced Sortino swing brief for liquid US large/mid-caps), five
+shipped `profiles/` personalities (`aggressive`, `conservative`, `long-term`, `short-term`,
+`sector-specialist`), and small supporting `references/`. Only the
 scaffold is committed; your own mandate, custom personalities, and personal references stay
 local so steering never pollutes the repo. `research.mandate` selects which governs a run — a profile name,
-`MANDATE`, `auto` (the agent picks per session), or `null` (unconstrained). For one session,
+`MANDATE`, `auto` (the agent picks per session — the shipped example config's default), or
+`null` (unconstrained). For one session,
 `--mandate <name>` or an inline `--directive "<text>"` wins over the config selector (the two
 flags are mutually exclusive).
 
