@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import multiprocessing
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -495,6 +497,171 @@ def test_shutdown_pool_logs_an_empty_process_snapshot_only_when_workers_are_beli
         assert records[0].levelno == logging.WARNING
     finally:
         logger.removeHandler(handler)
+
+
+# ── the teardown contract, read off the source tree ───────────────────────────────────────
+# The invariant is tree-wide, not module-local, so it is checked by reading the code: no pool
+# anywhere may be torn down by a call that joins its workers. Parsed rather than grepped, so
+# prose about ``shutdown()`` (of which there is a lot, deliberately) never trips it.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_POOL_FACTORIES = ("ProcessPoolExecutor", "Pool")  # concurrent.futures, multiprocessing
+
+
+def _dotted(node) -> str | None:
+    """``self._pool`` for a Name/Attribute chain, else ``None``."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _builds_a_pool(node) -> bool:
+    name = _dotted(node.func) if isinstance(node, ast.Call) else None
+    return name is not None and name.rsplit(".", 1)[-1] in _POOL_FACTORIES
+
+
+def _pool_bindings(tree) -> set[str]:
+    """Every name in a module that was assigned a process pool — ``pool``, ``self._pool``, …"""
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _builds_a_pool(node.value):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value and _builds_a_pool(node.value):
+            targets = [node.target]
+        else:
+            continue
+        bound.update(name for t in targets if (name := _dotted(t)) is not None)
+    return bound
+
+
+def _waits_on_workers(call) -> bool:
+    """A ``shutdown()`` joins unless it explicitly says ``wait=False``."""
+    for kw in call.keywords:
+        if kw.arg == "wait":
+            return not (isinstance(kw.value, ast.Constant) and kw.value.value is False)
+    if call.args and isinstance(call.args[0], ast.Constant) and call.args[0].value is False:
+        return False
+    return True
+
+
+def _joining_pool_teardowns(root: Path) -> list[str]:
+    """``path:line: why`` for every teardown under ``root`` that would join a worker."""
+    findings = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        pools = _pool_bindings(tree)
+        rel = path.relative_to(root)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "shutdown"
+                and _waits_on_workers(node)
+            ):
+                findings.append(f"{rel}:{node.lineno}: joining shutdown() — pass wait=False")
+            elif isinstance(node, ast.With | ast.AsyncWith):
+                for item in node.items:
+                    expr = item.context_expr
+                    if _builds_a_pool(expr) or _dotted(expr) in pools:
+                        findings.append(
+                            f"{rel}:{node.lineno}: pool as a `with` block — its __exit__ joins"
+                        )
+    return sorted(findings, key=lambda f: (f.split(":")[0], int(f.split(":")[1])))
+
+
+def _tracked_sources() -> list[Path]:
+    """The code and prose a reader could copy a retired primitive out of."""
+    roots = (_REPO_ROOT / "src", _REPO_ROOT / "tests", _REPO_ROOT / "docs")
+    files = [p for root in roots for p in root.rglob("*") if p.suffix in {".py", ".md"}]
+    return sorted(files + list(_REPO_ROOT.glob("*.md")))
+
+
+def test_pool_teardown_scan_flags_every_joining_form(tmp_path):
+    """The scanner's own oracle: the three shapes that join a worker must all be caught.
+
+    A bare ``shutdown()`` and ``shutdown(wait=True)`` are the same call, and a ``with`` block
+    over a pool is that call again in its ``__exit__`` — including when the pool was built on
+    an earlier line and only entered later. Each of them waits on a worker that a fork-poisoned
+    sibling has made unjoinable, so the scan has to see all three.
+    """
+    (tmp_path / "offender.py").write_text(
+        "from concurrent.futures import ProcessPoolExecutor\n"
+        "\n"
+        "def bare():\n"
+        "    pool = ProcessPoolExecutor(max_workers=2)\n"
+        "    pool.shutdown()\n"
+        "\n"
+        "def waiting(pool):\n"
+        "    pool.shutdown(wait=True)\n"
+        "\n"
+        "def constructed_in_the_with():\n"
+        "    with ProcessPoolExecutor(max_workers=2) as pool:\n"
+        "        pool.submit(len, [])\n"
+        "\n"
+        "def entered_later():\n"
+        "    pool = ProcessPoolExecutor(max_workers=2)\n"
+        "    with pool:\n"
+        "        pool.submit(len, [])\n",
+        encoding="utf-8",
+    )
+
+    found = _joining_pool_teardowns(tmp_path)
+
+    assert [f.split(":")[1] for f in found] == ["5", "8", "11", "16"]
+    assert all("offender.py" in f for f in found)
+
+
+def test_pool_teardown_scan_accepts_the_bounded_form(tmp_path):
+    """It must stay quiet on what the contract actually allows, or nobody will keep it green:
+    the non-waiting shutdown inside the bounded helper, and thread pools — a thread pool has no
+    fork-inherited lock to deadlock on, which is why the ban is on *process* pools."""
+    (tmp_path / "clean.py").write_text(
+        "from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor\n"
+        "\n"
+        "def shutdown_pool(pool):\n"
+        "    pool.shutdown(wait=False, cancel_futures=True)\n"
+        "\n"
+        "def teardown():\n"
+        "    pool = ProcessPoolExecutor(max_workers=2)\n"
+        "    try:\n"
+        "        pool.submit(len, [])\n"
+        "    finally:\n"
+        "        shutdown_pool(pool)\n"
+        "\n"
+        "def threads():\n"
+        "    with ThreadPoolExecutor(max_workers=2) as ex:\n"
+        "        ex.submit(len, [])\n",
+        encoding="utf-8",
+    )
+
+    assert _joining_pool_teardowns(tmp_path) == []
+
+
+def test_no_joining_pool_teardown_anywhere_in_src():
+    """The epic's contract, enforced over the whole tree rather than the two modules that own a
+    pool today: teardown never joins a worker unboundedly, on ANY path. A fully drained pool is
+    not a pool whose every worker is joinable — a fork-poisoned worker deadlocks before it ever
+    dequeues a task, so its healthy siblings complete every future while it never exits. Any new
+    pool anywhere in ``src`` inherits that contract, and this fails until it routes through the
+    bounded helper."""
+    assert _joining_pool_teardowns(_REPO_ROOT / "src") == []
+
+
+def test_the_bounded_helper_is_the_only_teardown_primitive():
+    """One primitive, no second door: the retired non-waiting teardown must be gone from source,
+    tests, and prose alike, so nothing can be reintroduced by copying a stale name out of docs."""
+    retired = "shutdown_" + "wedged"  # split so this guard never matches itself
+    hits = [
+        f"{path.relative_to(_REPO_ROOT)}:{i}"
+        for path in _tracked_sources()
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if retired in line
+    ]
+    assert hits == []
 
 
 def test_scale_workers_sheds_workers_on_large_1m_panels_but_not_coarse_ones():
