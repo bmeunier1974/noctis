@@ -27,7 +27,7 @@ from noctis.backtest.pool import (
     EvaluationTimeout,
     PoolStalled,
     scale_workers,
-    shutdown_wedged,
+    shutdown_pool,
     wait_or_stall,
 )
 from noctis.strategies import library
@@ -220,7 +220,7 @@ class SweepRunner:
                     if clean:
                         pool.shutdown()
                     else:
-                        shutdown_wedged(pool)
+                        shutdown_pool(pool, grace_s=0.0)
 
         while done < n:
             ((handle, params),) = sampler.ask(1)

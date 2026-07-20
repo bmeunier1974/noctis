@@ -29,7 +29,7 @@ from statistics import median
 import pandas as pd
 
 from noctis.backtest.candidate import Candidate
-from noctis.backtest.pool import PoolStalled, shutdown_wedged, wait_or_stall
+from noctis.backtest.pool import PoolStalled, shutdown_pool, wait_or_stall
 from noctis.backtest.prefilter import PrefilterConfig, coarse_score
 from noctis.backtest.scorecard import (
     DEFAULT_ANNUALIZATION_CAP,
@@ -105,7 +105,7 @@ class _PanelPool:
                 return [f.result() for f in futures]
             except (BrokenExecutor, PoolStalled) as exc:
                 logger.warning("panel pool broke (%s); evaluating sequentially", exc)
-                shutdown_wedged(self._pool)
+                shutdown_pool(self._pool, grace_s=0.0)
                 self._pool = None
         return [fn(args) for args in args_list]
 
@@ -119,7 +119,7 @@ class _PanelPool:
         wedged (OOM'd) worker never exits, so joining while an exception unwinds would trade
         that exception for an infinite hang. After this, :meth:`close` is a no-op."""
         if self._pool is not None:
-            shutdown_wedged(self._pool)
+            shutdown_pool(self._pool, grace_s=0.0)
             self._pool = None
 
 
