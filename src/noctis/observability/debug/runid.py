@@ -17,11 +17,17 @@ do not reach into config, engine, or any heavy package from this module.
 
 from __future__ import annotations
 
+import re
 import secrets
 from datetime import UTC, datetime
 
 # ``Z`` is a literal here (UTC marker), not a strftime directive — the timestamp is always UTC.
 _TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+
+# The one definition of the run-id shape ``20260720T144233Z-a3f9c1`` (UTC compact timestamp, a
+# ``Z`` literal, dash, 6 lowercase hex). Lives here beside the minter so callers that must
+# *recognize* a run id (e.g. QA-area retention) share this pattern instead of re-deriving it.
+RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{6}$")
 
 
 def new_run_id(now: datetime | None = None) -> str:

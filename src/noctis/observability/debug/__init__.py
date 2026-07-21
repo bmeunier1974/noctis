@@ -16,6 +16,7 @@ from noctis.observability.debug.funnel import (
     build_ledger,
     phase_durations,
 )
+from noctis.observability.debug.prune import prune_qa_dir
 from noctis.observability.debug.render import (
     LEGACY_NOTICE,
     render_counts_json,
@@ -23,10 +24,11 @@ from noctis.observability.debug.render import (
     render_errors_markdown,
     render_summary_markdown,
 )
-from noctis.observability.debug.runid import new_run_id
+from noctis.observability.debug.runid import RUN_ID_RE, new_run_id
 
 __all__ = [
     "LEGACY_NOTICE",
+    "RUN_ID_RE",
     "FunnelCounts",
     "Ledger",
     "StampedEvent",
@@ -34,6 +36,7 @@ __all__ = [
     "build_ledger",
     "new_run_id",
     "phase_durations",
+    "prune_qa_dir",
     "render_counts_json",
     "render_counts_markdown",
     "render_errors_markdown",

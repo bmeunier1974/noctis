@@ -302,6 +302,19 @@ class ObservabilityConfig(BaseModel):
     heartbeat_polls: int = 60
 
 
+class QAConfig(BaseModel):
+    """Retention for the ``--debug`` QA run tree (``workspace/qa/``; epic #36, story #42).
+
+    Purely a housekeeping knob — nothing here is read by a decision path. The QA area holds one
+    folder per debug-recorded run; left unbounded it grows forever, so the only policy is
+    prune-on-start (see :func:`noctis.observability.debug.prune_qa_dir`), keeping the newest N.
+    """
+
+    # On the start of a debug-recorded run, prune the QA area to the newest this-many run
+    # folders (by run-id name order). 0 keeps nothing; the pruner clamps a negative to 0.
+    keep_last_runs: int = 20
+
+
 class PromotionConfig(BaseModel):
     """Scoring metric + challenger→champion promotion thresholds (all in the metric's units)."""
 
@@ -416,6 +429,7 @@ class Settings(BaseSettings):
     data: DataConfig = Field(default_factory=DataConfig)
     live_feed: LiveFeedConfig = Field(default_factory=LiveFeedConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    qa: QAConfig = Field(default_factory=QAConfig)
     promotion: PromotionConfig = Field(default_factory=PromotionConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     ideation: IdeationConfig = Field(default_factory=IdeationConfig)
