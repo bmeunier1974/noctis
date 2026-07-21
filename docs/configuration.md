@@ -41,6 +41,7 @@ alternate file.
 | `data.auto_backfill`, `data.history_days` | Pre-loop backfill of missing history (code default off; **shipped config enables it**, `history_days: 720`) |
 | `live_feed.poll_interval_s` | Live-feed poll pacing (the feed self-throttles regardless) |
 | `observability.heartbeat_polls` | `-vv` live-trading heartbeat cadence in polls (0 disables; default `60` ≈ every ~2 min) |
+| `qa.keep_last_runs` | `--debug` QA-report retention: prune-on-start keeps the newest N run folders under `qa_dir` (default `20`; `0` keeps none). Housekeeping only — no decision path reads it. See [development.md → Reading a QA report](development.md#reading-a-qa-report) |
 | `promotion.metric` | `sharpe` \| `sortino` \| `total_return` — changing it reinterprets every threshold below in the new metric's units |
 | `promotion.max_gap`, `min_test_metric`, `min_test_activity` | Overfit-gap guard, OOS bar, and the almost-never-trades activity floor |
 | `promotion.min_holdout_metric`, `min_symbol_holdout_metric`, `min_symbol_consistency` | The out-of-sample promotion gates |
