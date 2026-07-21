@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from typing import Any
 
 from noctis.observability.console import Console
 from noctis.observability.events import Event
@@ -99,9 +100,11 @@ class EventTee:
                     "observability secondary sink raised; primary path unaffected", exc_info=True
                 )
 
-    def __getattr__(self, name: str) -> object:
+    def __getattr__(self, name: str) -> Any:
         # Reached only for attributes the tee does not define itself — i.e. the console surface a
         # caller duck-types (delta, hint, activity, verbose, show_reasoning, saw_think, …).
-        # Delegate to the primary, or to the safe no-op stand-in when there is no console.
+        # Delegate to the primary, or to the safe no-op stand-in when there is no console. The
+        # return is ``Any`` — the honest type for a delegating proxy — so a caller can invoke the
+        # proxied methods (``console.hint(...)``) without the type checker rejecting the call.
         target = self.__dict__.get("_primary") or _NULL_CONSOLE
         return getattr(target, name)

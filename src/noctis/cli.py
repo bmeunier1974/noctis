@@ -159,13 +159,22 @@ def run(
         "without -vv. Only providers that return chain-of-thought over the API show reasoning; "
         "narration always shows.",
     ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Record an hour-segmented QA report of the whole run under qa_dir "
+        "(funnel counts, per-strategy fates, phase timing, events.jsonl, a stamped manifest). "
+        "Records silently — it never turns on the -v console feed. Off by default.",
+    ),
 ) -> None:
     """Start Noctis. Loads config + memory, resolves the safety gate, runs the loop."""
     import signal
+    import sys
 
-    from noctis.bootstrap import build_console, build_lake, build_memory
+    from noctis.bootstrap import build_event_sink, build_lake, build_memory, build_recorder
     from noctis.engine import MarketClock, build_runtime, initial_phase_for
     from noctis.engine.runtime import trading_roster
+    from noctis.research import client_status
 
     # Off by default (WARNING) so a bare run stays quiet; the -v feed rides the Console below,
     # -vv drops stdlib logging to DEBUG. One ladder shared with `noctis research`.
@@ -195,57 +204,79 @@ def run(
     typer.echo(f"Initial phase: {initial_phase_for(clock).value}")
     _echo_mandate(active_mandate, inputs.overrides)
 
-    memory = build_memory(settings)
-    lake = build_lake(settings)
+    # --debug assembles the QA recorder in the composition root (prune-on-start → run tree →
+    # stamped manifest), echoes the run id + report path here at start, and — when the legacy
+    # loop will drive research — marks the funnel uninstrumented so a zero-fill can't read as
+    # "nothing happened". Off by default: recorder stays None and the run is byte-identical.
+    recorder = None
+    if debug:
+        recorder = build_recorder(settings, argv=sys.argv[1:], mode=mode)
+        typer.echo(f"QA run: {recorder.run_id}")
+        typer.echo(f"QA report: {recorder.run_dir}")
+        if not client_status(settings).ok:
+            recorder.mark_legacy_research()
 
-    # Optional, opt-in auto-backfill: before the readiness check, fetch missing history for
-    # any not-yet-ready universe symbol (budget-gated). Off by default → zero fetches.
-    missing = [s for s in settings.universe if not lake.check_symbol_ready(s)]
-    if missing and settings.data.auto_backfill:
-        if not settings.databento_api_key:
-            typer.secho(
-                "auto_backfill is on but no DATABENTO_API_KEY — skipping backfill.",
-                fg=typer.colors.YELLOW,
-                err=True,
+    # The recorder wraps the whole run: a between-phases stop (SIGINT/SIGTERM/time limit returns
+    # normally through runtime.run()) AND a hard error both reach close() via the finally, so an
+    # interrupted run still lands a readable final segment and a stamped manifest.
+    try:
+        memory = build_memory(settings)
+        lake = build_lake(settings)
+
+        # Optional, opt-in auto-backfill: before the readiness check, fetch missing history for
+        # any not-yet-ready universe symbol (budget-gated). Off by default → zero fetches.
+        missing = [s for s in settings.universe if not lake.check_symbol_ready(s)]
+        if missing and settings.data.auto_backfill:
+            if not settings.databento_api_key:
+                typer.secho(
+                    "auto_backfill is on but no DATABENTO_API_KEY — skipping backfill.",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
+            else:
+                _auto_backfill(settings, lake, missing)
+
+        # Readiness spans the trading roster (the growing universe): the config seed plus every
+        # symbol the research agent has fetched into the lake.
+        ready = [s for s in trading_roster(settings, lake) if lake.check_symbol_ready(s)]
+        if not ready:
+            typer.echo(
+                "No catalog data yet — ingest history first (e.g. `noctis data ingest AAPL "
+                "--start 2024-01-01 --end 2024-12-31`), then run again. Exiting cleanly."
             )
-        else:
-            _auto_backfill(settings, lake, missing)
+            return
 
-    # Readiness spans the trading roster (the growing universe): the config seed plus every symbol
-    # the research agent has fetched into the lake.
-    ready = [s for s in trading_roster(settings, lake) if lake.check_symbol_ready(s)]
-    if not ready:
-        typer.echo(
-            "No catalog data yet — ingest history first (e.g. `noctis data ingest AAPL "
-            "--start 2024-01-01 --end 2024-12-31`), then run again. Exiting cleanly."
+        # One level-aware sink renders the loop's typed events (phase banners + the research feed,
+        # and the trading feed once P4 lands) and, under --debug, tees them into the recorder even
+        # when the console is absent (quiet --debug records silently). A bare run passes the plain
+        # console (or None), so the runtime stays byte-identical to today.
+        runtime = build_runtime(
+            settings,
+            market_lake=lake,
+            memory=memory,
+            clock=clock,
+            mandate=active_mandate,
+            on_event=build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder),
         )
-        return
 
-    # One level-aware console renders the loop's typed events (phase banners + the research feed,
-    # and the trading feed once P4 lands). Wired only when asked for — a bare run passes None, so
-    # the runtime stays byte-identical to today: research falls back to its logger, no banners.
-    runtime = build_runtime(
-        settings,
-        market_lake=lake,
-        memory=memory,
-        clock=clock,
-        mandate=active_mandate,
-        on_event=build_console(verbose, show_reasoning=show_reasoning),
-    )
+        # SIGINT/SIGTERM route through one clean shutdown path (stops between phases).
+        def _shutdown(signum, _frame):
+            typer.echo(f"\nReceived signal {signum}; stopping cleanly after this phase…")
+            runtime.request_stop()
 
-    # SIGINT/SIGTERM route through one clean shutdown path (stops between phases).
-    def _shutdown(signum, _frame):
-        typer.echo(f"\nReceived signal {signum}; stopping cleanly after this phase…")
-        runtime.request_stop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, _shutdown)
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _shutdown)
-
-    result = runtime.run()
-    typer.echo(
-        f"Stopped ({result.stopped_reason}): {result.cycles_completed} cycle(s), "
-        f"{result.research_iterations} candidates researched, {result.trades} paper orders."
-    )
+        result = runtime.run()
+        typer.echo(
+            f"Stopped ({result.stopped_reason}): {result.cycles_completed} cycle(s), "
+            f"{result.research_iterations} candidates researched, {result.trades} paper orders."
+        )
+    finally:
+        if recorder is not None:
+            recorder.close()
+            typer.echo(f"QA report: {recorder.run_dir} (run {recorder.run_id})")
+            typer.echo(f"QA funnel: {recorder.funnel_line()}")
 
 
 @app.command()
@@ -566,6 +597,13 @@ def research(
         "Only providers that return chain-of-thought over the API show reasoning (OpenAI's "
         "reasoning models do not); narration always shows.",
     ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Record an hour-segmented QA report of this session under qa_dir (funnel counts, "
+        "per-strategy fates, phase timing, events.jsonl, a stamped manifest). Records silently — "
+        "it never turns on the -v console feed. Off by default.",
+    ),
 ) -> None:
     """Run one agent research session against the current lake, observably.
 
@@ -574,15 +612,18 @@ def research(
     [llm] extra and an API key for the configured ``research.model`` provider (OPENAI_API_KEY for
     ``openai/*``, ANTHROPIC_API_KEY for ``anthropic/*``; a local backend needs none).
     """
+    import sys
+
     from noctis.bootstrap import (
-        build_console,
+        build_event_sink,
         build_families,
         build_lake,
         build_memory,
+        build_recorder,
         build_research_session,
     )
     from noctis.champions import build_registry
-    from noctis.research import provider_of
+    from noctis.research import client_status, provider_of
 
     logging.basicConfig(
         level=_logging_level(verbose), format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -594,10 +635,22 @@ def research(
     settings, active_mandate = inputs.settings, inputs.mandate
     _guard_legacy_or_exit(settings)
 
-    # One level-aware console renders the loop's typed events; --show-reasoning opens the
-    # think/say streams without the full -vv DEBUG noise. Quiet (no -v, no flag) ⇒ None ⇒
-    # the loop's own logging default handles events.
-    console = build_console(verbose, show_reasoning=show_reasoning)
+    # --debug opens the QA recorder only once the agent session is known to be buildable
+    # (``client_status.ok`` mirrors ``build_research_session is not None``), so an early exit —
+    # research never records a legacy session — leaves no orphaned half-written run tree. The
+    # recorder is then teed alongside the console below so it records even on a quiet run.
+    recorder = None
+    if debug and client_status(settings).ok:
+        recorder = build_recorder(settings, argv=sys.argv[1:], mode=None)
+        typer.echo(f"QA run: {recorder.run_id}")
+        typer.echo(f"QA report: {recorder.run_dir}")
+
+    # One level-aware sink renders the loop's typed events, teed into the recorder under --debug;
+    # --show-reasoning opens the think/say streams without the full -vv DEBUG noise. Quiet (no -v,
+    # no --debug) ⇒ None ⇒ the loop's own logging default handles events. The command duck-types
+    # console.saw_think/hint off this sink — the EventTee proxies both to the primary (or a
+    # no-op stand-in when --debug runs without -v), so -v output stays byte-identical.
+    console = build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder)
     session = build_research_session(
         settings=settings,
         lake=build_lake(settings),
@@ -608,6 +661,8 @@ def research(
         on_event=console,
     )
     if session is None:
+        if recorder is not None:  # defensive: no orphaned run tree if a session went missing
+            recorder.close()
         resolved_model = settings.research.model or settings.research.agent.model
         provider = provider_of(resolved_model)
         key_env = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider)
@@ -628,37 +683,45 @@ def research(
         f"exhaustion gate={settings.research.min_trials} trials"
     )
     _echo_mandate(active_mandate, inputs.overrides)
-    summary = session.run(max_iterations=max_iterations)
-    # Graceful degradation: a reasoning view (-vv or --show-reasoning) that surfaced no `think`
-    # events almost always means the provider returns no chain-of-thought over the API — the
-    # default OpenAI reasoning models are exactly this case. Say so once, so silence reads as
-    # "expected for this provider", not "the feature is broken". Narration (say) is unaffected.
-    if console is not None and (verbose >= 2 or show_reasoning) and not console.saw_think:
-        console.hint(
-            f"reasoning not surfaced by {provider_of(session.model)} — its reasoning models "
-            f"return no raw chain-of-thought over the API; narration still shows"
-        )
-    # A standalone session counts toward periodic memory distillation too (the distillation
-    # itself only ever runs at the day loop's CLOSE).
-    from noctis.research.distill import bump_research_session
+    # The recorder wraps the session so a hard error still stamps the manifest and finalizes the
+    # open segment (recording is secondary — close in the finally, then let the error propagate).
+    try:
+        summary = session.run(max_iterations=max_iterations)
+        # Graceful degradation: a reasoning view (-vv or --show-reasoning) that surfaced no `think`
+        # events almost always means the provider returns no chain-of-thought over the API — the
+        # default OpenAI reasoning models are exactly this case. Say so once, so silence reads as
+        # "expected for this provider", not "the feature is broken". Narration (say) is unaffected.
+        if console is not None and (verbose >= 2 or show_reasoning) and not console.saw_think:
+            console.hint(
+                f"reasoning not surfaced by {provider_of(session.model)} — its reasoning models "
+                f"return no raw chain-of-thought over the API; narration still shows"
+            )
+        # A standalone session counts toward periodic memory distillation too (the distillation
+        # itself only ever runs at the day loop's CLOSE).
+        from noctis.research.distill import bump_research_session
 
-    bump_research_session(settings.state_dir)
-    coder_calls = (
-        f" {session.toolbox.author_calls} coder authoring call(s),"
-        if session.toolbox.author_calls
-        else ""
-    )
-    typer.echo(
-        f"Session over ({summary.stopped_reason}): {summary.iterations} tool rounds, "
-        f"{session.toolbox.backtests_run} backtests,{coder_calls} "
-        f"{summary.promotions} promotion(s), {summary.rejections} rejection(s)."
-    )
-    if summary.candidates:
-        typer.echo(f"Strategies worked on: {', '.join(summary.candidates)}")
-        typer.echo(
-            f"Inspect: noctis strategies; {settings.state_dir}/experiments/<name>.jsonl; "
-            f"{settings.memory_path}"
+        bump_research_session(settings.state_dir)
+        coder_calls = (
+            f" {session.toolbox.author_calls} coder authoring call(s),"
+            if session.toolbox.author_calls
+            else ""
         )
+        typer.echo(
+            f"Session over ({summary.stopped_reason}): {summary.iterations} tool rounds, "
+            f"{session.toolbox.backtests_run} backtests,{coder_calls} "
+            f"{summary.promotions} promotion(s), {summary.rejections} rejection(s)."
+        )
+        if summary.candidates:
+            typer.echo(f"Strategies worked on: {', '.join(summary.candidates)}")
+            typer.echo(
+                f"Inspect: noctis strategies; {settings.state_dir}/experiments/<name>.jsonl; "
+                f"{settings.memory_path}"
+            )
+    finally:
+        if recorder is not None:
+            recorder.close()
+            typer.echo(f"QA report: {recorder.run_dir} (run {recorder.run_id})")
+            typer.echo(f"QA funnel: {recorder.funnel_line()}")
 
 
 @app.command()

@@ -20,6 +20,7 @@ from noctis.bootstrap import (
     MissingVendorKey,
     UsageError,
     build_lake,
+    build_recorder,
     build_research_session,
     resolve_session,
 )
@@ -229,6 +230,75 @@ def test_build_lake_with_key_uses_the_vendor_client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABENTO_API_KEY", "db-test-key")
     settings = load_settings(config_path=_config(tmp_path, [f"data:\n  lake_dir: {tmp_path}/lake"]))
     assert build_lake(settings).vendor is sentinel
+
+
+# ── build_recorder: the one --debug recorder assembly (story #45) ─────────────────────────
+def _qa_settings(tmp_path, *, keep_last_runs: int | None = None):
+    lines = [f"qa_dir: {tmp_path}/qa"]
+    if keep_last_runs is not None:
+        lines += ["qa:", f"  keep_last_runs: {keep_last_runs}"]
+    return load_settings(config_path=_config(tmp_path, lines))
+
+
+def test_build_recorder_mints_run_tree_and_stamps_the_manifest(tmp_path):
+    """A recorder built through the composition root files its report tree and a manifest carrying
+    the injected argv/mode plus a config digest and the noctis/python versions."""
+    import json
+    import platform
+
+    settings = _qa_settings(tmp_path)
+    rec = build_recorder(settings, argv=["run", "--debug"], mode="paper")
+
+    assert rec.run_dir.is_dir()
+    assert rec.run_dir == Path(f"{tmp_path}/qa") / rec.run_id
+    manifest = json.loads((rec.run_dir / "run.json").read_text())
+    assert manifest["run_id"] == rec.run_id
+    assert manifest["argv"] == ["run", "--debug"]
+    assert manifest["mode"] == "paper"
+    assert isinstance(manifest["config_digest"], str) and manifest["config_digest"]
+    assert manifest["versions"]["python"] == platform.python_version()
+    assert manifest["versions"]["noctis"]  # populated (installed version or __version__ fallback)
+    assert manifest["stopped"] is None  # not closed yet
+
+
+def test_build_recorder_prunes_the_qa_area_to_keep_last_runs(tmp_path):
+    """Prune-on-start: building a recorder first evicts all but the newest ``keep_last_runs``
+    existing run folders, then adds this run."""
+    from noctis.observability.debug import RUN_ID_RE
+
+    qa = tmp_path / "qa"
+    qa.mkdir(parents=True)
+    older = [f"2026010{i}T000000Z-00000{i}" for i in range(1, 6)]  # 5 sortable run-id folders
+    for name in older:
+        (qa / name).mkdir()
+
+    settings = _qa_settings(tmp_path, keep_last_runs=2)
+    rec = build_recorder(settings, argv=["run", "--debug"], mode="paper")
+
+    remaining = sorted(p.name for p in qa.iterdir() if p.is_dir() and RUN_ID_RE.match(p.name))
+    # the two newest pre-existing folders survive, the oldest three are pruned, plus this new run
+    assert older[-2:] == ["20260104T000000Z-000004", "20260105T000000Z-000005"]
+    assert set(remaining) == {*older[-2:], rec.run_id}
+    assert older[0] not in remaining
+
+
+def test_build_recorder_config_digest_excludes_secrets(tmp_path):
+    """The manifest digest is over the resolved settings with API keys excluded (AGENTS.md rule 6):
+    two configs that differ only by a secret produce the identical digest."""
+    import json
+
+    settings = _qa_settings(tmp_path)
+    base = json.loads(
+        (build_recorder(settings, argv=[], mode=None).run_dir / "run.json").read_text()
+    )["config_digest"]
+
+    settings.anthropic_api_key = "sk-super-secret"
+    settings.openai_api_key = "sk-other-secret"
+    with_secret = json.loads(
+        (build_recorder(settings, argv=[], mode=None).run_dir / "run.json").read_text()
+    )["config_digest"]
+
+    assert base == with_secret  # a secret never perturbs the digest
 
 
 # ── build_research_session: the one bundle both entrypoints run ───────────────────────────

@@ -39,7 +39,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from noctis.observability.debug.funnel import StampedEvent
+from noctis.observability.debug.funnel import StampedEvent, build_ledger
 from noctis.observability.debug.render import (
     render_counts_json,
     render_counts_markdown,
@@ -161,6 +161,39 @@ class Recorder:
         a truncated run passing for a complete one.
         """
         return self._disabled
+
+    @property
+    def run_id(self) -> str:
+        """This run's id (the report-tree folder name) — the CLI echoes it at start and stop."""
+        return self._run_id
+
+    @property
+    def run_dir(self) -> Path:
+        """The per-run report tree ``<qa_dir>/<run-id>/`` — the CLI echoes it as the report path."""
+        return self._run_dir
+
+    def funnel_line(self) -> str:
+        """A compact one-line whole-run funnel for the CLI's stop echo (story #45).
+
+        Honest by contract (AGENTS.md rule 2): a self-disabled recorder or a legacy
+        (uninstrumented) research loop says so instead of printing a comforting all-zeros funnel.
+        Pure over the in-memory event stream — no disk touch — and defensive: if the pure ledger
+        somehow raised it degrades to the disabled note rather than crashing the run's stop path.
+        """
+        disabled_note = "recording disabled after an internal failure — funnel unavailable"
+        if self._disabled:
+            return disabled_note
+        if not self._funnel_instrumented:
+            return "legacy research loop — funnel not instrumented"
+        try:
+            counts = build_ledger(self._all).counts
+        except Exception:  # a debug helper must never crash the run's stop path
+            return disabled_note
+        return (
+            f"written={counts.written} backtested={counts.backtested} "
+            f"swept={counts.swept} compared={counts.compared} "
+            f"champions={counts.champion} rejected={counts.rejected}"
+        )
 
     def __call__(self, ev: Event | str) -> None:
         """Record one event: arrival-stamp it, roll the segment if the hour advanced, buffer it.

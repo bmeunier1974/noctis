@@ -423,6 +423,69 @@ def test_mark_legacy_research_suppresses_the_funnel_in_renders(tmp_path):
     assert "funnel not instrumented" in summary
 
 
+# ── story #45 surface: run_id / run_dir properties + the compact funnel one-liner ─────────────
+
+
+def test_run_id_and_run_dir_are_read_only_properties(tmp_path):
+    clock = FakeClock(START)
+    rec = _make(tmp_path, clock)
+    assert rec.run_id == _RUN_ID
+    assert rec.run_dir == _run_dir(tmp_path)
+
+
+def test_funnel_line_reports_compact_whole_run_counts(tmp_path):
+    clock = FakeClock(START)
+    rec = _make(tmp_path, clock)
+
+    def drive(dt: datetime, ev: Event) -> None:
+        clock.at(dt)
+        rec(ev)
+
+    drive(_at(14, 10), _tool("write_strategy", name="alpha"))
+    drive(_at(14, 20), _tool("run_backtest", name="alpha"))
+    drive(_at(14, 30), _tool("run_sweep", name="alpha", n_trials=40, n_failed=3))
+    drive(
+        _at(14, 40),
+        _tool("evaluate_vs_champion", name="alpha", promoted=True, rationale="clears the bar"),
+    )
+    drive(_at(14, 50), _tool("write_strategy", name="beta"))
+    drive(_at(14, 55), _tool("reject_strategy", name="beta", reason="no edge"))
+
+    line = rec.funnel_line()
+    assert line == "written=2 backtested=1 swept=1 compared=1 champions=1 rejected=1"
+
+
+def test_funnel_line_is_available_before_close(tmp_path):
+    """The stop echo reads it before or after close — a still-open recorder answers honestly."""
+    clock = FakeClock(START)
+    rec = _make(tmp_path, clock)
+    clock.at(_at(14, 10))
+    rec(_tool("write_strategy", name="alpha"))
+    assert rec.funnel_line() == "written=1 backtested=0 swept=0 compared=0 champions=0 rejected=0"
+
+
+def test_funnel_line_says_legacy_when_marked(tmp_path):
+    clock = FakeClock(START)
+    rec = _make(tmp_path, clock)
+    rec.mark_legacy_research()
+    clock.at(_at(14, 10))
+    rec(_tool("write_strategy", name="alpha"))
+    line = rec.funnel_line()
+    assert "legacy" in line.lower()
+    assert "written=" not in line  # no fake zero-filled funnel for an uninstrumented loop
+
+
+def test_funnel_line_is_honest_when_the_latch_has_tripped(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    _patch_write_raises_on(monkeypatch, run_dir, 1)  # trip on construction's run.json write
+    clock = FakeClock(START)
+    rec = _make(tmp_path, clock)
+    assert rec.disabled is True
+    line = rec.funnel_line()
+    assert "written=" not in line  # never a comforting all-zeros funnel after a failure
+    assert "disabled" in line.lower() or "unavailable" in line.lower()
+
+
 # ── errors document carries this hour's failures, untruncated ─────────────────────────────────
 
 

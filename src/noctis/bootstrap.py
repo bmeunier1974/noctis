@@ -346,6 +346,56 @@ def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | No
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# The --debug QA recorder
+# ─────────────────────────────────────────────────────────────────────────────
+# API keys the config digest must never fold in: the manifest lands under workspace/qa (gitignored),
+# but digesting a vendor/LLM credential would still be leaking a secret (AGENTS.md rule 6).
+_DIGEST_SECRET_FIELDS = frozenset({"databento_api_key", "anthropic_api_key", "openai_api_key"})
+
+
+def build_recorder(settings, *, argv: list[str], mode: str | None):
+    """Assemble the ``--debug`` QA recorder — the one place the run tree is minted (story #45).
+
+    Prune-on-start first (retention per ``qa.keep_last_runs``), then mint a fresh run id and
+    construct a :class:`~noctis.observability.debug.Recorder` under ``settings.qa_dir`` with a UTC
+    wall-clock and the manifest fields the recorder cannot know itself: the CLI ``argv``, the run
+    ``mode``, a deterministic config digest, and the noctis/python versions. The recorder owns run
+    id and the started/stopped/duration stamps; everything else is injected here. The digest is
+    taken over the *resolved* settings with API keys excluded (:data:`_DIGEST_SECRET_FIELDS`) so a
+    credential can never ride into the report tree.
+    """
+    import hashlib
+    import platform
+    from datetime import UTC, datetime
+    from importlib import metadata
+
+    from noctis.observability.debug import Recorder, new_run_id, prune_qa_dir
+
+    prune_qa_dir(settings.qa_dir, settings.qa.keep_last_runs)
+
+    dump = settings.model_dump_json(exclude=set(_DIGEST_SECRET_FIELDS))
+    config_digest = hashlib.sha256(dump.encode("utf-8")).hexdigest()[:12]
+
+    try:
+        noctis_version = metadata.version("noctis")
+    except Exception:  # not pip-installed (editable/source tree) — fall back to the package literal
+        from noctis import __version__ as noctis_version
+
+    manifest = {
+        "argv": list(argv),
+        "mode": mode,
+        "config_digest": config_digest,
+        "versions": {"noctis": noctis_version, "python": platform.python_version()},
+    }
+    return Recorder(
+        settings.qa_dir,
+        run_id=new_run_id(),
+        clock=lambda: datetime.now(UTC),
+        manifest=manifest,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # The agent research session
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
