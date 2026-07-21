@@ -19,6 +19,7 @@ from noctis.research.author import (
     AuthoringError,
     StrategyAuthor,
     StrategyBrief,
+    _extract_code_block,
 )
 from noctis.research.contract_sheet import CONTRACT_SHEET, SECTIONS, hint_for_gate_error
 from noctis.strategies import library
@@ -82,6 +83,11 @@ def fenced(source: str) -> str:
     return f"Here is the file:\n```python\n{source}```\n"
 
 
+def truncated(text: str) -> tuple[str, str]:
+    """A reply the transport cut off at the output-token limit (``stop_reason == "length"``)."""
+    return (text, "length")
+
+
 def named(source_name: str) -> str:
     """PROBE re-pointed at a fresh file name (its `name` attribute must match the file)."""
     return PROBE.replace('name = "probe"', f'name = "{source_name}"')
@@ -93,7 +99,10 @@ class FakeCoder:
     for the coder's plain-text (no-tool) completion shape."""
 
     def __init__(self, replies, capabilities=None):
-        self._replies = list(replies)
+        # A reply is either a plain string (the transport ended it cleanly, stop_reason
+        # "end_turn") or a ``(text, stop_reason)`` tuple — see ``truncated()`` for the "length"
+        # case. The bare-string default keeps every existing script byte-for-byte unchanged.
+        self._replies = [r if isinstance(r, tuple) else (r, "end_turn") for r in replies]
         self.capabilities = capabilities or Capabilities()
         self.calls: list[dict] = []
 
@@ -110,11 +119,11 @@ class FakeCoder:
         )
         if not self._replies:
             raise AssertionError("coder script exhausted — the engine should have stopped")
-        text = self._replies.pop(0)
+        text, stop_reason = self._replies.pop(0)
         return Turn(
             text=text,
             tool_calls=[],
-            stop_reason="end_turn",
+            stop_reason=stop_reason,
             usage={},
             assistant_message={"role": "assistant", "content": text},
         )
@@ -434,6 +443,92 @@ def test_all_non_code_replies_exhaust_the_attempt_budget(tmp_path, families, fas
         engine.author("probe", BRIEF)
 
     assert len(client.calls) == 3  # three non-code replies, capped at the retry budget
+
+
+# ── 4c. Output-limit truncation is a first-class retry cause (#50) ────────────────────────
+# The prose-only correction the extraction-failure branch has always sent when a reply carries
+# no code block ("return the complete strategy file as one fenced code block") — asserted
+# byte-for-byte here so the truncation branch can only diverge from it, never rewrite it.
+_NO_CODE_CORRECTION = (
+    "the reply carried no ```python code block; return the complete strategy "
+    "file as one fenced code block and nothing else"
+)
+
+
+def test_unterminated_fence_extracts_no_code_block():
+    # The invariant the truncation branch depends on: a fence that opens but never closes (an
+    # output-limit cut lands mid-file, before the closing ```) carries no complete code block,
+    # so the extractor returns None. Without a closed fence there is nothing to extract.
+    reply = "Here is the file:\n```python\n" + PROBE  # fence opens, never closes
+    assert _extract_code_block(reply) is None
+
+
+def test_truncated_reply_retries_with_a_truncation_correction(tmp_path, families, fast_gate):
+    # A completion the transport cut off at the output-token limit (stop_reason "length") with no
+    # extractable code block retries with a correction that names truncation and asks for a terser
+    # complete file — NOT the misleading "no code block" wording that says redo the same attempt.
+    cutoff = "```python\n" + PROBE  # cut off before the closing fence arrives
+    engine, client = _author(tmp_path, families, [truncated(cutoff), fenced(PROBE)])
+    seen = _seen_with_source(engine, "probe", BRIEF)
+
+    assert len(client.calls) == 2
+    retry_msg = client.calls[1]["messages"][0]["content"]
+    assert "cut off by the output-token limit" in retry_msg  # names the real cause
+    assert "tersely" in retry_msg  # asks for a terser complete regeneration
+    assert _NO_CODE_CORRECTION not in retry_msg  # not the prose-only "no code block" wording
+    # The attempt hook received the truncation error with the RAW reply as the attempt's material.
+    assert isinstance(seen[0][1], library.StrategyValidationError)
+    assert seen[0][2] == cutoff
+
+
+def test_prose_only_reply_keeps_the_no_code_correction_byte_for_byte(tmp_path, families, fast_gate):
+    # A non-truncated reply that genuinely carries no code (prose only, stop_reason "end_turn")
+    # keeps the existing correction byte-identical — truncation classification touches only the
+    # "length" case, checked only after extraction fails.
+    engine, client = _author(
+        tmp_path, families, ["I think we should go long the dips.", fenced(PROBE)]
+    )
+    engine.author("probe", BRIEF)
+
+    retry_msg = client.calls[1]["messages"][0]["content"]
+    assert _NO_CODE_CORRECTION in retry_msg  # the exact current string, unchanged
+    assert "cut off by the output-token limit" not in retry_msg  # not the truncation wording
+
+
+def test_trailing_prose_truncation_extracts_and_reaches_the_gate(tmp_path, families, fast_gate):
+    # A "length"-stopped reply whose code block is COMPLETE (the fence closed; the cut landed in
+    # trailing prose AFTER it) extracts normally — no special case — and proceeds to the
+    # validation gate, which passes, so the file lands on the first completion (no retry).
+    reply = fenced(PROBE) + "That completes the file; here is why it wo"  # cut in trailing prose
+    engine, client = _author(tmp_path, families, [truncated(reply)])
+
+    result = engine.author("probe", BRIEF)
+
+    assert result["name"] == "probe"
+    assert library.strategy_path(tmp_path, "probe") == tmp_path / "__tmp" / "probe.py"
+    assert len(client.calls) == 1  # the closed fence extracted and passed the gate — no retry
+
+
+def test_truncate_then_land_succeeds_with_two_ordered_attempt_reports(
+    tmp_path, families, fast_gate
+):
+    # A job whose first completion truncates and whose second lands succeeds, with two attempt
+    # reports in order: attempt 1 the truncation error carrying the raw reply, attempt 2 success
+    # carrying the extracted source.
+    cutoff = "```python\n" + PROBE  # cut off before the closing fence
+    engine, client = _author(tmp_path, families, [truncated(cutoff), fenced(PROBE)])
+    seen = _seen_with_source(engine, "probe", BRIEF)
+
+    assert [n for n, _, _ in seen] == [1, 2]
+    # Attempt 1: the truncation error, raw reply as material.
+    assert isinstance(seen[0][1], library.StrategyValidationError)
+    assert "output-token limit" in str(seen[0][1])
+    assert seen[0][2] == cutoff
+    # Attempt 2: success, extracted source as material.
+    assert seen[1][1] is None
+    assert seen[1][2] == PROBE
+    # And the file actually landed via the normal write path.
+    assert library.strategy_path(tmp_path, "probe") == tmp_path / "__tmp" / "probe.py"
 
 
 # ── 4b. Prompt caching lands on the coder's enlarged system prompt (#17) ──────────────────

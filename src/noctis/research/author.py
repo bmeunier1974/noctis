@@ -155,6 +155,30 @@ def _extract_code_block(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _extraction_error(stop_reason: str) -> library.StrategyValidationError:
+    """The retry correction for a reply whose code block would not extract — keyed on why.
+
+    Two causes wear the same symptom (no closing fence, so :func:`_extract_code_block` returns
+    ``None``) but need opposite corrections. When the transport truncated the completion at the
+    output-token limit (``stop_reason == "length"``), the closing fence never arrived: telling
+    the coder it "returned no code block" would send it to repeat the exact attempt at the same
+    cap. Name the real cause and ask for a *terser* complete file instead — the only actionable
+    move. Otherwise the reply genuinely carried no code (prose only), and the
+    return-one-code-block correction stands byte-for-byte. Classification is keyed ONLY on the
+    stop reason and reached ONLY after extraction has already failed."""
+    if stop_reason == "length":
+        return library.StrategyValidationError(
+            "the reply was cut off by the output-token limit before the closing ``` fence "
+            "arrived, so no complete code block landed; regenerate the ENTIRE strategy file more "
+            "tersely — a shorter docstring, fewer inline comments, and no prose outside the code "
+            "block — so the whole file fits under the limit"
+        )
+    return library.StrategyValidationError(
+        "the reply carried no ```python code block; return the complete strategy "
+        "file as one fenced code block and nothing else"
+    )
+
+
 def _seed_template(strategies_dir: library.LibrarySpec) -> str:
     """The committed ``TEMPLATE.py`` seed source, or ``""`` when it is not on disk.
 
@@ -243,13 +267,14 @@ class StrategyAuthor:
         ``on_attempt`` — the observability seam — is called exactly once per coder completion,
         *after* that attempt's validation resolves: ``on_attempt(attempt, None, source)`` on the
         completion that lands, ``on_attempt(attempt, error, source)`` (a
-        :class:`~noctis.strategies.library.StrategyValidationError`) when a gate rejection or a
-        non-code reply fails an attempt. ``attempt`` is 1-based (1 = first, 2… = a private
-        retry); ``source`` is the attempt's material — the extracted code block on a gate
-        rejection or success, the raw reply text on a non-code reply — carried so a toolbox-side
-        sink can persist the exact bytes the coder produced. The engine holds no session state
-        and keeps none of the source; the caller (the toolbox) adapts this into a session event
-        carrying the coder model and strategy name, and into the capped ``failed/`` record.
+        :class:`~noctis.strategies.library.StrategyValidationError`) when a gate rejection, a
+        non-code reply, or an output-limit truncation fails an attempt. ``attempt`` is 1-based
+        (1 = first, 2… = a private retry); ``source`` is the attempt's material — the extracted
+        code block on a gate rejection or success, the raw reply text on a non-code reply or a
+        truncated completion — carried so a toolbox-side sink can persist the exact bytes the
+        coder produced. The engine holds no session state and keeps none of the source; the
+        caller (the toolbox) adapts this into a session event carrying the coder model and
+        strategy name, and into the capped ``failed/`` record.
         """
         reference_source = self._reference_source(brief)  # unknown ref → raise, no completion
         current_source = self._current_source(name)  # non-None ⇒ this is a revision
@@ -271,10 +296,10 @@ class StrategyAuthor:
             )
             source = _extract_code_block(turn.text)
             if source is None:
-                last_error = library.StrategyValidationError(
-                    "the reply carried no ```python code block; return the complete strategy "
-                    "file as one fenced code block and nothing else"
-                )
+                # No closing fence to extract. Classify why on the turn's own stop reason: an
+                # output-limit truncation ("length") gets a name-the-cause, regenerate-terser
+                # correction; a genuine no-code reply keeps the prose-only correction unchanged.
+                last_error = _extraction_error(turn.stop_reason)
                 prior = (turn.text or "", str(last_error))
                 self._report(on_attempt, attempt, last_error, turn.text or "")
                 continue
@@ -303,8 +328,9 @@ class StrategyAuthor:
         """Report one resolved attempt to the observability hook (a no-op when unset).
 
         ``source`` is the attempt's material — the extracted code block on a gate rejection or
-        success, the raw reply text on a non-code reply — passed so a toolbox-side sink can
-        persist the exact bytes the coder produced. The engine itself keeps none of it.
+        success, the raw reply text on a non-code reply or a truncated completion — passed so a
+        toolbox-side sink can persist the exact bytes the coder produced. The engine itself keeps
+        none of it.
         """
         if on_attempt is not None:
             on_attempt(attempt, error, source)
