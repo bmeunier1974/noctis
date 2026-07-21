@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from noctis.champions.promotion import PromotionRules
     from noctis.data.seam import MarketDataLake
     from noctis.engine.research import ResearchSummary
-    from noctis.observability import Console
+    from noctis.observability import Console, Event, EventTee
     from noctis.research import CostProfile, Mandate, ResearchToolbox
     from noctis.strategies.families import FamilyRegistry
 
@@ -305,7 +305,7 @@ class _ReadOnlyVendor:
         raise RuntimeError("read-only: no vendor configured")
 
 
-def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | None:
+def _build_console(verbose: int, *, show_reasoning: bool = False) -> Console | None:
     """The level-aware console for ``-v``/``-vv``/``--show-reasoning``, or ``None`` on a
     quiet run — so downstream ``on_event=None`` keeps the loops on their own logger sinks."""
     if not verbose and not show_reasoning:
@@ -313,6 +313,36 @@ def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | No
     from noctis.observability import Console
 
     return Console(verbose, show_reasoning=show_reasoning)
+
+
+def build_event_sink(
+    verbose: int,
+    *,
+    show_reasoning: bool = False,
+    secondary: Callable[[Event | str], None] | None = None,
+) -> Console | EventTee | None:
+    """The session's ``on_event`` sink: the level-aware console, optionally teed to a recorder.
+
+    With no ``secondary`` this is exactly the old console builder — a :class:`Console` when
+    ``-v``/``-vv``/``--show-reasoning`` asks for one, else ``None`` so the loops fall back to their
+    own logger sinks. With a ``secondary`` (a recorder-style event sink) it returns an
+    :class:`~noctis.observability.EventTee` that renders on the console *and* feeds the recorder —
+    **even when the console is absent**, so a quiet ``--debug`` run (no ``-v``, primary ``None``)
+    still records every event. The secondary is typed generically as any event callable, so no
+    recorder needs to exist yet."""
+    console = _build_console(verbose, show_reasoning=show_reasoning)
+    if secondary is None:
+        return console
+    from noctis.observability import EventTee
+
+    return EventTee(console, secondary)
+
+
+def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | None:
+    """Thin back-compat alias for :func:`build_event_sink` with no secondary — the level-aware
+    console for ``-v``/``-vv``/``--show-reasoning``, or ``None`` on a quiet run. Existing callers
+    and tests that only want a console keep this exact name, signature, and behavior."""
+    return _build_console(verbose, show_reasoning=show_reasoning)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
