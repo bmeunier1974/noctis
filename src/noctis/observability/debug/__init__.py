@@ -17,6 +17,7 @@ from noctis.observability.debug.funnel import (
     phase_durations,
 )
 from noctis.observability.debug.prune import prune_qa_dir
+from noctis.observability.debug.recorder import Recorder
 from noctis.observability.debug.render import (
     LEGACY_NOTICE,
     render_counts_json,
@@ -31,6 +32,7 @@ __all__ = [
     "RUN_ID_RE",
     "FunnelCounts",
     "Ledger",
+    "Recorder",
     "StampedEvent",
     "StrategyFate",
     "build_ledger",
