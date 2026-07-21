@@ -33,6 +33,7 @@ class TestWorkspaceDerivation:
         assert Path(settings.state_dir) == Path("workspace/state")
         assert Path(settings.reports_dir) == Path("workspace/reports")
         assert Path(settings.memory_path) == Path("workspace/memory/MEMORY.md")
+        assert Path(settings.qa_dir) == Path("workspace/qa")
         assert Path(settings.data.lake_dir) == Path("workspace/data_lake")
 
     def test_env_noctis_workspace_rebases_every_derived_path(self, monkeypatch, tmp_path):
@@ -43,6 +44,7 @@ class TestWorkspaceDerivation:
         assert Path(settings.state_dir) == out / "state"
         assert Path(settings.reports_dir) == out / "reports"
         assert Path(settings.memory_path) == out / "memory" / "MEMORY.md"
+        assert Path(settings.qa_dir) == out / "qa"
         assert Path(settings.data.lake_dir) == out / "data_lake"
 
     def test_yaml_workspace_dir_rebases_every_derived_path(self, tmp_path):
@@ -51,6 +53,7 @@ class TestWorkspaceDerivation:
         assert Path(settings.state_dir) == Path("my-out/state")
         assert Path(settings.reports_dir) == Path("my-out/reports")
         assert Path(settings.memory_path) == Path("my-out/memory/MEMORY.md")
+        assert Path(settings.qa_dir) == Path("my-out/qa")
         assert Path(settings.data.lake_dir) == Path("my-out/data_lake")
 
     def test_explicit_yaml_knobs_beat_derivation(self, tmp_path):

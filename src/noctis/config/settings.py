@@ -434,6 +434,8 @@ class Settings(BaseSettings):
     reports_dir: str = "workspace/reports"
     # The agent's long-term memory file (seeded from the committed MEMORY.seed.md).
     memory_path: str = "workspace/memory/MEMORY.md"
+    # Hour-segmented QA run reports (the --debug tree); gitignored like everything under workspace/.
+    qa_dir: str = "workspace/qa"
     # The one-file strategy library root: committed seeds + TEMPLATE.py, plus the gitignored
     # __tmp/ (working files) and champions/ (local champions) tiers. See strategies/README.md.
     strategies_dir: str = "strategies/"
@@ -469,6 +471,7 @@ class Settings(BaseSettings):
         data.setdefault("state_dir", _workspace_subpath(workspace, "state"))
         data.setdefault("reports_dir", _workspace_subpath(workspace, "reports"))
         data.setdefault("memory_path", _workspace_subpath(workspace, "memory", "MEMORY.md"))
+        data.setdefault("qa_dir", _workspace_subpath(workspace, "qa"))
         derived_lake = _workspace_subpath(workspace, "data_lake")
         raw_data = data.get("data")
         if raw_data is None:
