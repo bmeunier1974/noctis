@@ -1238,3 +1238,46 @@ def test_tool_event_surfaces_gate_facing_numbers(tmp_path):
     # A failed dispatch (unknown strategy) is an ok=False event the renderer colors red.
     err = next(e for e in typed if e.kind == "tool" and "ghost" in e.text)
     assert err.meta["ok"] is False and "ERROR" in err.text
+
+    # #37: every tool event — success or error — also carries structured tool/args meta, so a
+    # downstream consumer reads the call off the metadata instead of reparsing the prose text.
+    assert bt.meta["tool"] == "run_backtest" and bt.meta["args"]["name"] == "probe"
+    assert err.meta["tool"] == "run_backtest" and err.meta["args"]["name"] == "ghost"
+
+
+def test_tool_event_meta_carries_tool_and_truncated_args():
+    """#37: a tool event's structured meta names the tool and its brief args, and a long string
+    argument (strategy source) is truncated to ``<N chars>`` *before* it enters ``meta`` — so a
+    downstream QA consumer that reads ``meta["args"]`` can never see whole source code."""
+    from noctis.research.agent import _tool_event
+
+    source = "x = 1\n" * 1000  # strategy-source-sized: far past the 80-char brief cap
+    ev = _tool_event(
+        "write_strategy",
+        {"name": "probe", "source": source},
+        {"status": "drafted"},
+        {"status": "drafted"},
+    )
+    assert ev.meta["tool"] == "write_strategy"
+    assert ev.meta["args"]["name"] == "probe"
+    # The long argument is replaced by a length placeholder before reaching meta…
+    assert ev.meta["args"]["source"] == f"<{len(source)} chars>"
+    # …and the raw source never appears whole anywhere in the event (meta or prose text).
+    assert source not in json.dumps(ev.meta, default=str)
+    assert source not in ev.text
+
+
+def test_tool_event_structured_keys_survive_a_colliding_brief():
+    """#37: the structured ``tool``/``args`` keys win deterministically over any same-named key a
+    result brief might carry — the caller can trust ``meta["tool"]``/``meta["args"]`` regardless."""
+    from noctis.research.agent import _tool_event
+
+    ev = _tool_event(
+        "run_backtest",
+        {"name": "probe"},
+        {"gap": 0.1},
+        {"tool": "not-the-tool", "args": "not-the-args", "gap": 0.1},
+    )
+    assert ev.meta["tool"] == "run_backtest"
+    assert ev.meta["args"] == {"name": "probe"}
+    assert ev.meta["gap"] == 0.1  # unrelated brief numbers still ride along

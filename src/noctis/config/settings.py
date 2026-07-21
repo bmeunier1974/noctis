@@ -302,6 +302,19 @@ class ObservabilityConfig(BaseModel):
     heartbeat_polls: int = 60
 
 
+class QAConfig(BaseModel):
+    """Retention for the ``--debug`` QA run tree (``workspace/qa/``; epic #36, story #42).
+
+    Purely a housekeeping knob — nothing here is read by a decision path. The QA area holds one
+    folder per debug-recorded run; left unbounded it grows forever, so the only policy is
+    prune-on-start (see :func:`noctis.observability.debug.prune_qa_dir`), keeping the newest N.
+    """
+
+    # On the start of a debug-recorded run, prune the QA area to the newest this-many run
+    # folders (by run-id name order). 0 keeps nothing; the pruner clamps a negative to 0.
+    keep_last_runs: int = 20
+
+
 class PromotionConfig(BaseModel):
     """Scoring metric + challenger→champion promotion thresholds (all in the metric's units)."""
 
@@ -416,6 +429,7 @@ class Settings(BaseSettings):
     data: DataConfig = Field(default_factory=DataConfig)
     live_feed: LiveFeedConfig = Field(default_factory=LiveFeedConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    qa: QAConfig = Field(default_factory=QAConfig)
     promotion: PromotionConfig = Field(default_factory=PromotionConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     ideation: IdeationConfig = Field(default_factory=IdeationConfig)
@@ -434,6 +448,8 @@ class Settings(BaseSettings):
     reports_dir: str = "workspace/reports"
     # The agent's long-term memory file (seeded from the committed MEMORY.seed.md).
     memory_path: str = "workspace/memory/MEMORY.md"
+    # Hour-segmented QA run reports (the --debug tree); gitignored like everything under workspace/.
+    qa_dir: str = "workspace/qa"
     # The one-file strategy library root: committed seeds + TEMPLATE.py, plus the gitignored
     # __tmp/ (working files) and champions/ (local champions) tiers. See strategies/README.md.
     strategies_dir: str = "strategies/"
@@ -469,6 +485,7 @@ class Settings(BaseSettings):
         data.setdefault("state_dir", _workspace_subpath(workspace, "state"))
         data.setdefault("reports_dir", _workspace_subpath(workspace, "reports"))
         data.setdefault("memory_path", _workspace_subpath(workspace, "memory", "MEMORY.md"))
+        data.setdefault("qa_dir", _workspace_subpath(workspace, "qa"))
         derived_lake = _workspace_subpath(workspace, "data_lake")
         raw_data = data.get("data")
         if raw_data is None:

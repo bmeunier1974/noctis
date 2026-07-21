@@ -43,6 +43,7 @@ python -m noctis run -vv --show-reasoning  # narrate each research session's rea
 python -m noctis run --time-limit-hours 8  # override the time limit
 python -m noctis run --mandate aggressive  # one-session mandate override
 python -m noctis run --directive "..."     # one-session inline directive (excludes --mandate)
+python -m noctis run --debug               # also record an hour-segmented QA report under workspace/qa/
 ```
 
 `run` loads config + memory, resolves the safety gate, enters the correct phase for the current
@@ -61,6 +62,24 @@ reasoning; narration always shows). Purely observability — it never changes wh
 decides. In `run` the research feed is narrated per session and each RESEARCH → TRADING → CLOSE
 transition announces itself inline.
 
+### QA report (`--debug`)
+
+`run` and `research` both accept `--debug`, which records an hour-segmented QA report of the whole
+run under `qa_dir` (default `workspace/qa/<run-id>/`): a stamped manifest, funnel counts,
+per-strategy fates, phase timing, and a raw `events.jsonl`. It is a diagnostic, not a verbosity
+level — it **records silently** and never turns on the `-v` console feed, so `-v --debug` prints
+byte-for-byte what `-v` alone prints (just the additive `QA …` framing lines on top). Off by
+default; a bare run is byte-identical to today.
+
+At start `--debug` echoes the minted run id and the report path; at stop it echoes the report path
+again plus a one-line funnel (`written=… backtested=… swept=… compared=… champions=… rejected=…`),
+or, if the recorder self-disabled mid-run, a note that says so instead of a comforting all-zeros
+line. Retention is prune-on-start: the newest `qa.keep_last_runs` runs survive (default `20`), and
+everything QA lands under the gitignored `workspace/` — nothing reaches git. To read the tree it
+produces — the manifest, the cumulative summary, the hour segments, counts vs. detail documents,
+plus `jq` one-liners over `events.jsonl` — see
+[development.md → Reading a QA report](development.md#reading-a-qa-report).
+
 ## Observability
 
 ```bash
@@ -75,11 +94,15 @@ python -m noctis champions [--reset]       # the champion board; --reset re-fill
 ```bash
 python -m noctis research -v               # one observable agent research session (needs a configured LLM)
 python -m noctis research --metric total_return   # override the promotion metric for this session
+python -m noctis research --debug          # record this session's QA report under workspace/qa/
 python -m noctis strategies                # the strategy library: status / style / thesis / tuned
 python -m noctis backtest <name>           # replay a library strategy on its shipped Params defaults
 ```
 
-`research` accepts the same `--mandate` / `--directive` one-session overrides as `run`.
+`research` accepts the same `--mandate` / `--directive` one-session overrides as `run`, and the
+same `--debug` QA recorder (see [QA report (`--debug`)](#qa-report---debug) above). A `research`
+session only records when the agent loop is actually buildable — it never opens a report tree for a
+legacy session that would immediately exit.
 
 ## Data
 

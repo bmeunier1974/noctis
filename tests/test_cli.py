@@ -431,3 +431,258 @@ def test_data_ingest_prints_per_symbol_progress(tmp_path, monkeypatch):
     assert "ingesting MSFT (2/2)" in progress
     assert "AAPL: ingested" in result.output
     assert "MSFT: ingested" in result.output
+
+
+# --- --debug: the QA recorder wiring on run and research (story #45) ------------------
+
+
+def _debug_run_config(tmp_path, *, keep_last_runs: int | None = None) -> str:
+    """A paper config with a ready two-symbol lake and a tmp QA area — so ``run`` enters the loop
+    (and, with ``--time-limit-hours 0``, stops immediately) instead of the no-data early return."""
+    from noctis.data import MarketDataLake
+    from noctis.data.types import to_ns
+
+    from ._data_helpers import MockVendor
+
+    lake_dir = tmp_path / "lake"
+    md = MarketDataLake(lake_dir, MockVendor(), budget_usd=10_000.0, calendar="XNYS")
+    md.ensure_coverage(
+        "EQUS.MINI", "ohlcv-1m", ["AAPL", "MSFT"], to_ns("2026-01-01"), to_ns("2026-12-31")
+    )
+    lines = [
+        "mode: paper",
+        "universe: [AAPL, MSFT]",
+        "research_time_budget_minutes: 0",
+        "data:",
+        f"  lake_dir: {lake_dir}",
+        "  dataset: EQUS.MINI",
+        f"state_dir: {tmp_path}/state/",
+        f"qa_dir: {tmp_path}/qa",
+    ]
+    if keep_last_runs is not None:
+        lines += ["qa:", f"  keep_last_runs: {keep_last_runs}"]
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("\n".join(lines) + "\n")
+    return str(cfg)
+
+
+def _one_qa_run(tmp_path) -> Path:
+    """The single QA run folder minted under the tmp QA area."""
+    from noctis.observability.debug import RUN_ID_RE
+
+    qa = tmp_path / "qa"
+    runs = [p for p in qa.iterdir() if p.is_dir() and RUN_ID_RE.match(p.name)]
+    assert len(runs) == 1, [p.name for p in qa.iterdir()]
+    return runs[0]
+
+
+def _strip_qa_lines(output: str) -> str:
+    """Drop the additive ``QA …`` framing lines so the event/console feed can be compared."""
+    return "".join(line + "\n" for line in output.splitlines() if not line.startswith("QA "))
+
+
+def test_run_debug_creates_report_tree_and_echoes_start_and_stop(tmp_path):
+    import json
+
+    cfg = _debug_run_config(tmp_path)
+    result = runner.invoke(app, ["run", "--config", cfg, "--debug", "--time-limit-hours", "0"])
+    assert result.exit_code == 0, result.output
+
+    run_dir = _one_qa_run(tmp_path)
+    manifest = json.loads((run_dir / "run.json").read_text())
+    assert manifest["stopped"] is not None  # closed cleanly via the finally
+    assert manifest["duration_s"] is not None
+
+    run_id = run_dir.name
+    # start echo (run id + report path) AND stop echo (again + the funnel one-liner)
+    assert result.output.count(run_id) >= 2
+    assert result.output.count("QA report:") >= 2
+    assert "QA funnel:" in result.output
+
+
+def test_run_debug_without_v_records_silently(tmp_path):
+    """--debug alone records but never turns on the -v console feed: the phase banners the loop
+    emits reach the recorder's events.jsonl, not stdout."""
+    import json
+
+    cfg = _debug_run_config(tmp_path)
+    result = runner.invoke(app, ["run", "--config", cfg, "--debug", "--time-limit-hours", "0"])
+    assert result.exit_code == 0, result.output
+
+    # no event feed on stdout (those are the -v console renderings, gated off here)
+    assert "# RESEARCH" not in result.output
+    assert "# STOPPED" not in result.output
+
+    # but the events WERE recorded: the phase frames are in the run's events.jsonl
+    run_dir = _one_qa_run(tmp_path)
+    lines = (run_dir / "h00" / "events.jsonl").read_text().splitlines()
+    kinds = [json.loads(line)["kind"] for line in lines if line.strip()]
+    assert "phase" in kinds
+
+
+def test_run_debug_v_output_is_byte_identical_to_v_alone(tmp_path):
+    """Recording never perturbs the console: -v with --debug renders the same event feed as -v
+    alone (the only difference is the additive QA framing lines)."""
+    cfg = _debug_run_config(tmp_path)
+    plain = runner.invoke(app, ["run", "--config", cfg, "-v", "--time-limit-hours", "0"])
+    debug = runner.invoke(app, ["run", "--config", cfg, "-v", "--debug", "--time-limit-hours", "0"])
+    assert plain.exit_code == 0 and debug.exit_code == 0, debug.output
+    assert "QA report:" in debug.output  # the framing IS present under --debug
+    assert "QA report:" not in plain.output
+    # ...and stripped of that framing, the two feeds are byte-for-byte the same.
+    assert _strip_qa_lines(debug.output) == plain.output
+
+
+def test_run_debug_prunes_qa_area_on_start(tmp_path):
+    from noctis.observability.debug import RUN_ID_RE
+
+    qa = tmp_path / "qa"
+    qa.mkdir(parents=True)
+    older = [f"2026010{i}T000000Z-00000{i}" for i in range(1, 6)]  # five old run folders
+    for name in older:
+        (qa / name).mkdir()
+
+    cfg = _debug_run_config(tmp_path, keep_last_runs=2)
+    result = runner.invoke(app, ["run", "--config", cfg, "--debug", "--time-limit-hours", "0"])
+    assert result.exit_code == 0, result.output
+
+    remaining = {p.name for p in qa.iterdir() if p.is_dir() and RUN_ID_RE.match(p.name)}
+    # the 2 newest old folders survive + this run's folder; the oldest 3 are pruned
+    assert older[0] not in remaining and older[2] not in remaining
+    assert older[3] in remaining and older[4] in remaining
+    assert len(remaining) == 3
+
+
+def test_run_debug_time_limit_leaves_readable_segment_and_stamped_manifest(tmp_path):
+    """The time-limit interruption case: a clean between-phases stop still lands a readable final
+    segment and a stamped manifest (the finally reaches the recorder's close)."""
+    import json
+
+    cfg = _debug_run_config(tmp_path)
+    result = runner.invoke(app, ["run", "--config", cfg, "--debug", "--time-limit-hours", "0"])
+    assert result.exit_code == 0, result.output
+
+    run_dir = _one_qa_run(tmp_path)
+    manifest = json.loads((run_dir / "run.json").read_text())
+    assert manifest["stopped"] is not None
+    # the open segment was finalized on close → its counts document is on disk and readable
+    assert (run_dir / "h00" / "counts.md").read_text().startswith("# QA counts")
+
+
+def test_run_debug_hard_exception_still_stamps_manifest(tmp_path, monkeypatch):
+    """A hard failure inside the run still closes the recorder (try/finally), so the manifest is
+    stamped and no run tree is orphaned; recording is secondary, the error still propagates."""
+    import json
+
+    cfg = _debug_run_config(tmp_path)
+
+    class _Boom:
+        def request_stop(self):  # pragma: no cover - never reached in this path
+            pass
+
+        def run(self):
+            raise RuntimeError("boom mid-run")
+
+    monkeypatch.setattr("noctis.engine.build_runtime", lambda *a, **k: _Boom())
+    result = runner.invoke(app, ["run", "--config", cfg, "--debug", "--time-limit-hours", "0"])
+    assert result.exit_code != 0  # the exception propagated
+
+    run_dir = _one_qa_run(tmp_path)
+    manifest = json.loads((run_dir / "run.json").read_text())
+    assert manifest["stopped"] is not None  # closed via the finally despite the crash
+
+
+def test_run_no_debug_writes_no_qa_tree(tmp_path):
+    """The default (no --debug) is byte-identical to today: no recorder, no QA writes, no echoes."""
+    cfg = _debug_run_config(tmp_path)
+    result = runner.invoke(app, ["run", "--config", cfg, "--time-limit-hours", "0"])
+    assert result.exit_code == 0, result.output
+    assert "QA report:" not in result.output
+    qa = tmp_path / "qa"
+    assert not qa.exists() or not any(qa.iterdir())
+
+
+# --- research --debug -----------------------------------------------------------------
+
+
+class _FakeSession:
+    """A stand-in agent session: it emits a couple of events into the wired sink, then reports a
+    summary — enough to drive the research command's echoes and the recorder's funnel."""
+
+    def __init__(self, on_event):
+        from types import SimpleNamespace
+
+        self.model = "anthropic/claude-fake"
+        self.budgets = SimpleNamespace(name="balanced", max_iterations=5)
+        self.toolbox = SimpleNamespace(author_calls=0, backtests_run=1)
+        self._on_event = on_event
+
+    def run(self, *, max_iterations=None):
+        from noctis.engine import ResearchSummary
+        from noctis.observability import Event
+
+        if self._on_event is not None:
+            self._on_event(Event("phase", "RESEARCH · cycle 0", meta={"phase": "RESEARCH"}))
+            self._on_event(
+                Event(
+                    "tool",
+                    "write_strategy(alpha) -> ok",
+                    meta={"ok": True, "tool": "write_strategy", "args": {"name": "alpha"}},
+                )
+            )
+        return ResearchSummary(
+            iterations=1, promotions=0, rejections=0, stopped_reason="done", candidates=["alpha"]
+        )
+
+
+def _patch_research_agent(monkeypatch):
+    """Make the research command believe an agent session is available and hand it the fake one,
+    capturing the wired ``on_event`` so the fake can emit into it."""
+    from noctis.research.llm import ClientStatus
+
+    monkeypatch.setattr(
+        "noctis.research.client_status",
+        lambda settings: ClientStatus(
+            ok=True, model="anthropic/claude-fake", provider="anthropic", reason=None
+        ),
+    )
+
+    def fake_build(**kwargs):
+        return _FakeSession(kwargs.get("on_event"))
+
+    monkeypatch.setattr("noctis.bootstrap.build_research_session", fake_build)
+
+
+def test_research_debug_records_and_echoes(tmp_path, monkeypatch):
+    import json
+
+    _patch_research_agent(monkeypatch)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\nqa_dir: {tmp_path}/qa\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg), "--debug"])
+    assert result.exit_code == 0, result.output
+
+    run_dir = _one_qa_run(tmp_path)
+    manifest = json.loads((run_dir / "run.json").read_text())
+    assert manifest["stopped"] is not None
+
+    run_id = run_dir.name
+    assert result.output.count(run_id) >= 2  # echoed at start and again at stop
+    assert "QA report:" in result.output
+    # the funnel one-liner reflects the recorded write_strategy event
+    assert "QA funnel: written=1" in result.output
+    # --debug without -v stays silent: the emitted feed events never hit stdout
+    assert "write_strategy(alpha)" not in result.output
+
+
+def test_research_debug_without_session_writes_no_run_tree(tmp_path):
+    """When the agent can't run (no key/extra), research exits before any recorder is opened —
+    no orphaned half-written QA tree."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\nqa_dir: {tmp_path}/qa\n")
+    result = runner.invoke(app, ["research", "--config", str(cfg), "--debug"])
+    assert result.exit_code != 0
+    assert "[llm] extra" in result.output
+    qa = tmp_path / "qa"
+    assert not qa.exists() or not any(qa.iterdir())

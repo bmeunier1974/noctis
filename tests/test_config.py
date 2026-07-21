@@ -155,6 +155,27 @@ def test_unknown_election_metric_rejected(tmp_path):
         load_settings(config_path=cfg)
 
 
+def test_qa_keep_last_runs_defaults_to_20(tmp_path):
+    """QA-area retention (story #42): keep the newest 20 debug run folders by default."""
+    settings = load_settings(config_path=tmp_path / "missing.yaml")
+    assert settings.qa.keep_last_runs == 20
+
+
+def test_qa_keep_last_runs_loads_from_yaml(tmp_path):
+    """The retention count is configurable under the ``qa`` block."""
+    cfg = _write_yaml(tmp_path / "config.yaml", "qa:\n  keep_last_runs: 5\n")
+    settings = load_settings(config_path=cfg)
+    assert settings.qa.keep_last_runs == 5
+
+
+def test_qa_keep_last_runs_env_overrides_yaml(monkeypatch, tmp_path):
+    """Env wins over YAML for the retention knob, via pydantic's nested delimiter."""
+    cfg = _write_yaml(tmp_path / "config.yaml", "qa:\n  keep_last_runs: 5\n")
+    monkeypatch.setenv("QA__KEEP_LAST_RUNS", "7")
+    settings = load_settings(config_path=cfg)
+    assert settings.qa.keep_last_runs == 7
+
+
 def test_coder_model_defaults_to_none(tmp_path):
     """The dedicated authoring model is off by default — the driver writes full source."""
     settings = load_settings(config_path=tmp_path / "missing.yaml")
