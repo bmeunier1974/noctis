@@ -633,6 +633,21 @@ def test_builtin_output_ceiling_is_threaded_to_the_coder_completion(tmp_path, fa
     assert client.calls[0]["max_tokens"] == 16000
 
 
+def test_explicit_max_tokens_override_is_threaded_to_the_coder_completion(
+    tmp_path, families, fast_gate
+):
+    # External behavior: an explicit max_tokens override (the seam config's
+    # research.agent.coder_max_tokens threads here) is the value the coder client is asked for —
+    # a compat/sizing lever for a new backend, not the built-in 16000 ceiling.
+    client = FakeCoder([fenced(PROBE)])
+    engine = StrategyAuthor(
+        client=client, strategies_dir=tmp_path, families=families, max_tokens=8192
+    )
+    engine.author("probe", BRIEF)
+
+    assert client.calls[0]["max_tokens"] == 8192
+
+
 # ── 6. Reference adaptation: a named library strategy's source enters the prompt ──────────
 def test_reference_source_is_composed_into_the_prompt(tmp_path, families, fast_gate):
     library.write_strategy(tmp_path, "ref_strat", named("ref_strat"), families)

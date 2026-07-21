@@ -225,11 +225,16 @@ class ResearchToolbox:
         # path uses, so both authoring paths converge on one result shape and one set of guards.
         # The coder client is wrapped so every completion the engine spends counts against the
         # author budget (retries included) — the accounting stays toolbox-side.
+        # ``coder_max_tokens`` (the config's compat/sizing lever) is threaded only when set, so
+        # ``None`` keeps the engine's built-in output ceiling untouched.
+        coder_max_tokens = settings.research.agent.coder_max_tokens
+        author_kwargs = {} if coder_max_tokens is None else {"max_tokens": coder_max_tokens}
         self.author_engine = (
             StrategyAuthor(
                 client=_CoderCallCounter(coder_client, self._bump_author_calls),
                 strategies_dir=self.strategies_dir,
                 families=self.families,
+                **author_kwargs,
             )
             if coder_client is not None
             else None

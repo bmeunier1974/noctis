@@ -24,6 +24,7 @@ alternate file.
 | `research.max_iterations`, `max_backtests`, `sweep_trials`, `web_search` | Agent session budgets |
 | `research.agent.coder_model`, `max_author_calls` | Dedicated authoring model + its Class-B budget: coder completions/session (retries included); exhausted → brief authoring refused, hand-written `source` stays open |
 | `research.agent.coder_thinking` | `on` (default) / `off` — the coder reasons through scenario-window/warmup arithmetic (deliberate, budgeted by `max_author_calls`); separate from the driver `thinking` dial |
+| `research.agent.coder_max_tokens` | The coder's output-token ceiling — `null` (default) defers to the built-in `16000`; a number resizes it for a different coder backend. A compat/sizing lever, **not** a cost budget (unused headroom is never billed); inert without a `coder_model` |
 | `research.cost_profile` | `full` / `balanced` / `economy` — resource ceilings only, never quality gates |
 | `research.agent.thinking` | `off` (default) / `on` — opt a **watch** session into provider-native reasoning; costs output tokens (see below) |
 | `research.agent.max_tokens`, `context_window` | Small-context-backend compatibility levers (see **Local backends** below) — not cost budgets |
@@ -155,6 +156,13 @@ research:
   by `max_author_calls`. Set it `off` to run a cheaper coder. The coder's (enlarged) system prompt
   is prompt-cached, so private validation retries within a job re-read it rather than re-paying it.
   Inert without a `coder_model`. Separate from the driver's `thinking` watch dial (next section).
+- **`coder_max_tokens`** is the coder's output-token ceiling. It defaults to `null` = the author
+  engine's built-in ceiling (`16000`), sized so a full ~200-line strategy file *and* the reasoning
+  that authors it never truncate mid-source; a number **pins** it. This is a compatibility/sizing
+  lever — resize it for a coder backend whose output window differs — **not** a cost budget: output
+  tokens are billed only as they are generated, so unused headroom costs nothing (the coder's spend
+  is bounded by `max_author_calls`, not by this ceiling). Like the other `coder_*` knobs it is inert
+  without a `coder_model`.
 
 ## Watching the model reason
 
