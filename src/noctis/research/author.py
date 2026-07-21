@@ -51,9 +51,12 @@ from noctis.research.llm import LLMClient, cached_system
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 
-# The coder's output-token ceiling — the same default the agent loop sizes completions at
-# (agent._MAX_TOKENS), chosen so a full ~200-line strategy file never truncates mid-source.
-_MAX_TOKENS = 8000
+# The coder's output-token ceiling — sized for a thinking-enabled hosted coder (on Anthropic
+# models the cap bounds thinking + text together) plus the current tokenizer, so a full ~200-line
+# strategy file AND the reasoning that authors it never truncate mid-source. It deliberately
+# diverges from — sits above — the driver loop's smaller ceiling (agent._MAX_TOKENS); unused
+# output headroom is billed as generated, so the slack costs nothing.
+_MAX_TOKENS = 16000
 # Private re-prompts after the first attempt: initial + _CODER_RETRIES ≤ 3 coder completions
 # per authoring job, whether an attempt failed as a non-code reply or a validation error.
 _CODER_RETRIES = 2

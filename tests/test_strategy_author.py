@@ -527,6 +527,17 @@ def test_a_fresh_authoring_job_carries_no_prior_state(tmp_path, families, fast_g
     assert "probe_two" in second_call["messages"][0]["content"]
 
 
+# ── 5b. The built-in output ceiling is sized for a thinking-enabled hosted coder ──────────
+def test_builtin_output_ceiling_is_threaded_to_the_coder_completion(tmp_path, families, fast_gate):
+    # External behavior: the engine's built-in default max_tokens (16000, raised from the driver
+    # loop's smaller ceiling so a full strategy file plus the coder's thinking never truncates
+    # mid-source) is the value the coder client is actually asked for on a completion.
+    engine, client = _author(tmp_path, families, [fenced(PROBE)])
+    engine.author("probe", BRIEF)
+
+    assert client.calls[0]["max_tokens"] == 16000
+
+
 # ── 6. Reference adaptation: a named library strategy's source enters the prompt ──────────
 def test_reference_source_is_composed_into_the_prompt(tmp_path, families, fast_gate):
     library.write_strategy(tmp_path, "ref_strat", named("ref_strat"), families)
