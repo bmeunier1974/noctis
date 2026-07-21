@@ -150,6 +150,7 @@ def _make_toolbox(
     sweep_workers=1,
     coder_client=None,
     coder_model: str | None = None,
+    coder_max_tokens: int | None = None,
     max_author_calls: int | None = None,
     on_event=None,
 ):
@@ -163,6 +164,8 @@ def _make_toolbox(
         agent["max_author_calls"] = max_author_calls
     if coder_model is not None:
         agent["coder_model"] = coder_model
+    if coder_max_tokens is not None:
+        agent["coder_max_tokens"] = coder_max_tokens
     settings = Settings(
         strategies_dir=str(strategies_dir),
         state_dir=str(tmp_path / "state"),
@@ -1149,7 +1152,9 @@ class _FakeCoder:
         self.calls: list[dict] = []
 
     def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
-        self.calls.append({"system": system, "tools": tools, "messages": messages})
+        self.calls.append(
+            {"system": system, "tools": tools, "messages": messages, "max_tokens": max_tokens}
+        )
         text = self._replies.popleft()
         return Turn(
             text=text,
@@ -1166,6 +1171,7 @@ def _coder_box(
     *,
     max_author_calls: int | None = None,
     coder_model: str = "fake/coder-1",
+    coder_max_tokens: int | None = None,
     on_event=None,
 ):
     coder = _FakeCoder(replies)
@@ -1174,6 +1180,7 @@ def _coder_box(
             tmp_path,
             coder_client=coder,
             coder_model=coder_model,
+            coder_max_tokens=coder_max_tokens,
             max_author_calls=max_author_calls,
             on_event=on_event,
         ),
@@ -1242,6 +1249,25 @@ def test_brief_authors_validated_file_same_shape_as_source(tmp_path):
     assert "brief_probe" in box.undecided
     assert "brief_probe" in box.strategies_touched
     assert len(coder.calls) == 1  # one completion for a first-try success
+
+
+def test_coder_max_tokens_config_threads_to_the_authoring_completion(tmp_path):
+    """External behavior: with research.agent.coder_max_tokens set, an authoring completion asks
+    the coder client for exactly that ceiling — the compat/sizing lever threads through the single
+    engine construction site to the completion the coder is asked for."""
+    box, coder = _coder_box(tmp_path, [_fenced(_named("brief_probe"))], coder_max_tokens=8192)
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    assert out.get("ok") is True
+    assert coder.calls[0]["max_tokens"] == 8192
+
+
+def test_coder_max_tokens_unset_uses_the_builtin_ceiling(tmp_path):
+    """Unset (the default): the authoring completion falls through to the engine's built-in
+    16000 output ceiling — the knob defers to the built-in when None."""
+    box, coder = _coder_box(tmp_path, [_fenced(_named("brief_probe"))])
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    assert out.get("ok") is True
+    assert coder.calls[0]["max_tokens"] == 16000
 
 
 def test_source_write_still_works_with_coder_configured(tmp_path):

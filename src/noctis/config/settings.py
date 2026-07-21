@@ -176,6 +176,13 @@ class AgentResearchConfig(BaseModel):
     # Sonnet coder (whose driver-side thinking stays the cheap-path pin). Its cost is already
     # bounded by ``max_author_calls``; set ``off`` to opt a coder out. Inert without a coder_model.
     coder_thinking: Literal["off", "on"] = "on"
+    # The coder's output-token ceiling. ``None`` (the default) defers to the author engine's
+    # built-in ceiling (``StrategyAuthor._MAX_TOKENS``, sized so a full strategy file plus the
+    # coder's thinking never truncates mid-source); a number pins it. A compatibility/sizing lever
+    # — resize it for a coder backend whose output window differs — NOT a cost budget: output tokens
+    # are billed as generated, so unused headroom costs nothing (spend is bounded by
+    # ``max_author_calls``, not this). Inert without a configured ``coder_model``.
+    coder_max_tokens: int | None = None
     # Provider-native reasoning dial (verbose-observability P2), default OFF. ``"on"`` opts a
     # *watch* session into provider-native reasoning where it exists: for the Anthropic (non-Sonnet)
     # fallback model it sends adaptive thinking with a summarized display, so the loop emits
