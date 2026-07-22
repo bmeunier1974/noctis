@@ -119,6 +119,13 @@ def _run(script, *, retries: int = 2, **kwargs) -> tuple[EpisodeResult[Decision]
     return result, client
 
 
+def _run_with_runner(script, *, retries: int = 2) -> tuple[EpisodeResult[Decision], EpisodeRunner]:
+    client = FakeClient(script)
+    runner = EpisodeRunner(client=client, retries=retries)
+    result = runner.run(contract=CONTRACT, system="SYS", briefing="BRIEF")
+    return result, runner
+
+
 # ── 1. A clean forced call is a pure briefing-in / typed-dataclass-out function ───────────
 def test_clean_forced_call_returns_the_typed_value():
     result, client = _run(
@@ -297,35 +304,56 @@ def test_malformed_json_in_text_is_a_misfire_not_a_crash():
     assert len(client.calls) == 2
 
 
-# ── 5. Episode/retry counting is exposed for budget enforcement, counted in one place ─────
-def test_episode_counter_counts_each_episode_once_retries_folded_in():
-    # run 1: a clean emit (1 completion). run 2: a misfire then a success (2 completions).
+# ── 5. Completion counting is exposed for budget enforcement, counted in one place ────────
+# The budget the driver enforces (max_episodes) counts every LLM completion — each
+# client.complete() attempt, retries included — so the runner counts each completion exactly
+# once and the driver never has to add retry counts on top.
+def test_completions_clean_run_counts_one():
+    result, runner = _run_with_runner([emit_turn({"action": "hold", "confidence": 0.5})])
+    assert result.ok
+    assert runner.completions == 1
+
+
+def test_completions_one_misfire_then_success_counts_two():
+    result, runner = _run_with_runner(
+        [text_turn("<tool_call>x</tool_call>"), emit_turn({"action": "hold", "confidence": 0.5})]
+    )
+    assert result.ok
+    assert runner.completions == 2  # the misfired completion AND the successful one
+    assert result.misfires == 1
+
+
+def test_completions_retries_exhausted_counts_every_attempt():
+    markup = text_turn("<tool_call>x</tool_call>")
+    result, runner = _run_with_runner([markup, markup, markup], retries=2)
+    assert not result.ok
+    assert runner.completions == 3  # initial + 2 retries, every completion counted
+
+
+def test_completions_api_error_on_first_call_counts_one():
+    result, runner = _run_with_runner([ConnectionError("backend unreachable")])
+    assert result.outcome == API_ERROR
+    assert runner.completions == 1  # the raising attempt is still one completion spent
+
+
+def test_completion_counter_accumulates_across_episodes_retries_included():
+    # run 1: a clean emit (1 completion). run 2: two misfires then a success (3 completions).
     client = FakeClient(
         [
             emit_turn({"action": "hold", "confidence": 0.1}),
             text_turn("<tool_call>x</tool_call>"),
+            text_turn("<tool_call>y</tool_call>"),
             emit_turn({"action": "hold", "confidence": 0.2}),
         ]
     )
     runner = EpisodeRunner(client=client, retries=2)
-    assert runner.episodes == 0
+    assert runner.completions == 0
 
     runner.run(contract=CONTRACT, system="SYS", briefing="a")
-    assert runner.episodes == 1  # one episode, one completion
+    assert runner.completions == 1
 
     runner.run(contract=CONTRACT, system="SYS", briefing="b")
-    assert runner.episodes == 2  # a retried episode is still ONE episode, not two
-
-
-def test_a_failed_episode_still_increments_the_counter():
-    markup = text_turn("<tool_call>x</tool_call>")
-    client = FakeClient([markup, markup, markup])
-    runner = EpisodeRunner(client=client, retries=2)
-
-    result = runner.run(contract=CONTRACT, system="SYS", briefing="a")
-
-    assert not result.ok
-    assert runner.episodes == 1
+    assert runner.completions == 4  # 1 + 3: every retry adds to the single budget counter
 
 
 # ── 6. A genuine transport failure is a typed failure, never a cascade ────────────────────

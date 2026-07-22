@@ -23,9 +23,10 @@ mid-run; each episode is a pure function of the prompt the caller hands in.
   to ``retries`` times. When the budget is spent the episode returns a typed failure — never an
   exception cascade — and the caller decides what that means. A genuine transport outage (a
   non-misfire exception) is a typed failure too, not a raise.
-* **Counted once, in one place.** Every episode (retries folded in) increments
-  :attr:`EpisodeRunner.episodes`, so the driver enforces ``max_episodes`` off one counter without
-  double-counting a retried episode.
+* **Counted once, in one place.** Every completion — each ``client.complete()`` attempt, retries
+  included, even one that raised — increments :attr:`EpisodeRunner.completions`, so the driver
+  enforces ``max_episodes`` off one counter that already counted each completion exactly once (it
+  never has to add retry counts on top).
 
 The result is an :class:`EpisodeResult`: the typed value on success, plus the model, token total,
 misfire count, and outcome a caller writes to the session ledger's ``episode`` line
@@ -164,7 +165,7 @@ class EpisodeRunner:
     Construct with the client and the retry bound (the composition root wires
     ``research.agent.episode_retries`` here — the runner never reads Settings), then call
     :meth:`run` once per judgment point. The runner holds no per-episode state beyond the
-    :attr:`episodes` counter, so each call is a fresh, self-contained round trip.
+    :attr:`completions` budget counter, so each call is a fresh, self-contained round trip.
     """
 
     def __init__(
@@ -177,9 +178,11 @@ class EpisodeRunner:
         self._client = client
         self._retries = max(0, retries)
         self._max_tokens = max_tokens
-        # Completed episodes, retries folded in — one per run() call regardless of internal
-        # retries or outcome, so the driver enforces max_episodes off this single counter.
-        self.episodes = 0
+        # The budget counter: every completion, retries included. Incremented once per
+        # client.complete() attempt in the loop below (an attempt that raised still counts), so
+        # the driver enforces max_episodes off this single counter — it never adds retry counts
+        # on top, because each completion is already counted here exactly once.
+        self.completions = 0
 
     def run(
         self,
@@ -200,7 +203,6 @@ class EpisodeRunner:
         ``model`` labels the ledger line (defaults to the client's own ``model``); ``max_tokens``
         overrides the runner default for this call (a small-context backend compatibility lever).
         """
-        self.episodes += 1
         resolved_model = model if model is not None else str(getattr(self._client, "model", ""))
         tokens = 0
         misfires = 0
@@ -218,6 +220,7 @@ class EpisodeRunner:
         messages: list[dict[str, Any]] = [{"role": "user", "content": briefing}]
 
         for _ in range(self._retries + 1):
+            self.completions += 1  # every attempt, retries included — the max_episodes budget
             try:
                 turn = self._client.complete(
                     system=system,
