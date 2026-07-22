@@ -1049,7 +1049,13 @@ def run_episodic_research(
     # A legible rollup at session end (story #74): the same at-a-glance numbers the CLOSE report
     # renders, derived from the ledger's typed records — theses, files authored, validation
     # failures, trials, verdicts by kind, undecided, escalations, tokens by stage and by model.
-    logger.info("session rollup — %s", ledger.rollup().log_line())
+    rollup = ledger.rollup()
+    # The one comparable spend axis (story #75): total judgment-model tokens this session, summed
+    # off the ledger's per-episode token counts (the same four usage fields the conversation loop
+    # totals), so the parity harness reads tokens/verdict off both loops honestly. Escalated
+    # coder-authoring runs on a separate client and is excluded, as in the conversation loop.
+    summary.tokens_total = sum(rollup.tokens_by_stage.values())
+    logger.info("session rollup — %s", rollup.log_line())
     if summary.undecided:
         logger.warning(
             "%d strategies left undecided — archived after the TTL: %s",

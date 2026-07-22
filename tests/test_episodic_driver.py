@@ -300,6 +300,9 @@ def test_full_cycle_reaches_a_verdict_and_a_complete_ledger(tmp_path):
     assert summary.iterations == 1
     assert summary.undecided == []
     assert summary.stopped_reason == "max_episodes"
+    # tokens_total sums the ledger's per-episode tokens (formulate 12 + decide 8) — the comparable
+    # spend axis the parity harness reads (story #75).
+    assert summary.tokens_total == 20
 
     # A complete ledger: start, thesis, every stage in protocol order, both episodes, the
     # verdict, the session-end rollup.

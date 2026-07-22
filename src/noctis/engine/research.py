@@ -66,6 +66,14 @@ class ResearchSummary:
     # loop and the legacy loop leave it None (they write no ledger), so a ledgerless report renders
     # exactly as today. None by default keeps every existing constructor unaffected.
     ledger_path: str | None = None
+    # Total judgment/driver-model tokens this session — the sum of the four neutral usage fields
+    # (input + output + cache-creation + cache-read) across every completion the loop's own model
+    # made, retries included. Both agent loops fill it from usage they already track: the
+    # conversation loop from its per-round usage totals, the episodic driver from its ledger's
+    # episode token sums. Coder-authoring completions run on a separate client and are excluded from
+    # both, so the figure is one comparable spend axis (the parity harness's tokens/verdict row,
+    # story #75). 0 by default keeps the legacy loop and every existing constructor unaffected.
+    tokens_total: int = 0
 
 
 def _utcnow() -> datetime:

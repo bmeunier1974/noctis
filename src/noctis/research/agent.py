@@ -550,6 +550,11 @@ def run_agent_research(
     summary.rejections = toolbox.rejections
     summary.candidates = list(toolbox.strategies_touched)
     summary.author_calls = toolbox.author_calls
+    # The one comparable spend axis (story #75): all judgment-model tokens this session — input +
+    # output + cache-creation + cache-read, exactly the four fields already summed above. The
+    # episodic driver fills the same field from its ledger, so the parity harness's tokens/verdict
+    # row reads both loops off one honest number.
+    summary.tokens_total = sum(usage_totals.values())
     # Session-end honesty: whatever the stop reason (every loop exit flows through here), a
     # strategy authored but never carried to a verdict is left undecided. Surface the sorted list
     # on the summary and name each one in a WARNING — they are archived after the TTL, not lost
