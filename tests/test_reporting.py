@@ -170,6 +170,124 @@ def test_report_omits_empty_undecided():
     assert "Undecided" not in render_report(data)
 
 
+# ── session rollup + per-candidate trail from the ledger (story #74) ─────────────────────────
+def _ledgered_research(escalations: int = 1) -> dict:
+    """A research block carrying one ledgered session's rollup + candidate trail — the shape
+    ``assemble_report`` threads in from a session ledger's ``report_view``."""
+    return {
+        "iterations": 3,
+        "promotions": 1,
+        "rejections": 1,
+        "sessions": [
+            {
+                "session_id": "session-1",
+                "rollup": {
+                    "session_id": "session-1",
+                    "theses": 3,
+                    "authored": 2,
+                    "validation_failures": 1,
+                    "trials": 12,
+                    "verdicts": {"approve": 1, "reject": 1},
+                    "promoted": 1,
+                    "undecided": 0,
+                    "escalations": escalations,
+                    "tokens_by_stage": {"formulate": 26, "decide": 14, "author": 40},
+                    "tokens_by_model": {"driver": 40, "coder-paid": 40},
+                    "note": "max_episodes",
+                },
+                "candidates": [
+                    {
+                        "strategy": "momo_1",
+                        "thesis": "buy strength above the average",
+                        "stages": ["match", "author", "optimize", "decide"],
+                        "trials": 5,
+                        "best_metric": 1.2,
+                        "verdict": "reject",
+                        "promoted": False,
+                        "outcome": "rejected",
+                    },
+                    {
+                        "strategy": "rev_2",
+                        "thesis": "fade the spike",
+                        "stages": ["match", "author", "optimize", "decide"],
+                        "trials": 7,
+                        "best_metric": 2.5,
+                        "verdict": "approve",
+                        "promoted": True,
+                        "outcome": "promoted",
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def test_report_renders_the_session_rollup_and_candidate_trail():
+    text = render_report(ReportData(as_of="2026-07-03", research=_ledgered_research()))
+    # The session rollup names every field of the epic's list.
+    assert "session-1" in text
+    assert "Theses formulated: 3" in text
+    assert "Files authored: 2" in text
+    assert "Validation failures: 1" in text
+    assert "Trials run: 12" in text
+    assert "approve=1" in text and "reject=1" in text
+    assert "Undecided: 0" in text
+    assert "Escalations: 1" in text
+    assert "formulate=26" in text and "author=40" in text  # tokens by stage
+    assert "driver=40" in text and "coder-paid=40" in text  # tokens by model
+    # The per-candidate trail: each candidate's formulate → decide walk.
+    assert "momo_1" in text and "rejected" in text
+    assert "rev_2" in text and "promoted" in text
+    assert "fade the spike" in text  # the thesis (the FORMULATE step) frames the trail
+
+
+def test_report_renders_escalations_as_zero_when_none_occurred():
+    text = render_report(ReportData(as_of="2026-07-03", research=_ledgered_research(escalations=0)))
+    assert "Escalations: 0" in text
+
+
+def test_ledgerless_report_is_byte_for_byte_unchanged():
+    """A session without a ledger carries no ``sessions`` key; its render must be byte-identical
+    to the pre-#74 output (the graceful-degradation acceptance criterion)."""
+    data = ReportData(
+        as_of="2026-07-03",
+        start_equity=100_000.0,
+        end_equity=101_500.0,
+        realized_pnl=1_500.0,
+        trades=[Trade("AAPL", "BUY", 10, 190.5, "SMA crossover long")],
+        positions={"AAPL": 10},
+        promotions=[
+            {"family": "sma_crossover", "params": {"fast": 5}, "rationale": "beat weakest"}
+        ],
+        research={
+            "iterations": 12,
+            "promotions": 1,
+            "rejections": 8,
+            "dead_ends": 3,
+            "undecided": ["draft_a"],
+            "findings": ["momentum works in the morning"],
+            "minted": ["spec_x"],
+            "promoted_specs": ["spec_x"],
+        },
+        events=["Risk halt: daily loss limit reached on TSLA"],
+    )
+    expected = (
+        "# Close-of-day report — 2026-07-03\n\n**Mode:** paper\n\n## Summary\n\n"
+        "- Start equity: 100,000.00\n- End equity: 101,500.00\n- Session return: 1.50%\n"
+        "- Realized P&L: 1,500.00\n\n## Trades\n\n| Symbol | Side | Qty | Price | Rationale |\n"
+        "|---|---|---:|---:|---|\n| AAPL | BUY | 10 | 190.5000 | SMA crossover long |\n\n"
+        "## Open positions\n\n- AAPL: 10\n\n## Champion changes\n\n"
+        "- PROMOTED sma_crossover {'fast': 5} — beat weakest\n\n## Current champions\n\n"
+        "_No champions yet._\n\n## Forward track record (live-holdout)\n\n"
+        "_No forward record yet._\n\n"
+        "## Research\n\n- Candidates tried: 12\n- Promotions: 1\n- Rejections: 8\n- Dead ends: 3\n"
+        "- Undecided (authored, no verdict):\n  - draft_a\n- Notable findings:\n"
+        "  - momentum works in the morning\n\n## Notable events\n\n"
+        "- Risk halt: daily loss limit reached on TSLA\n"
+    )
+    assert render_report(data) == expected
+
+
 def test_write_and_retrieve_report(tmp_path):
     path = write_report(ReportData(as_of="2026-07-03"), tmp_path / "reports")
     assert path.is_file()

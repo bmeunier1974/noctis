@@ -12,15 +12,53 @@ from datetime import UTC, datetime
 import pytest
 
 from noctis.research.ledger import (
+    CandidateTrail,
     Episode,
     SessionEnd,
     SessionLedger,
+    SessionRollup,
     SessionStart,
     StageTransition,
     ThesisLine,
     Verdict,
     new_session_id,
 )
+
+
+def _full_arc(ledger: SessionLedger) -> None:
+    """A complete two-candidate arc: one authored → rejected, one authored (escalated) →
+    approved+promoted, plus one thesis whose author failed the write gate (no optimize)."""
+    ledger.record_session_start(mandate="m", budgets={}, models={"driver": "d", "coder": "c"})
+    # candidate 1: authored locally, rejected.
+    ledger.record_thesis("momo_1", "buy strength")
+    ledger.record_stage("formulate")
+    ledger.record_episode(stage="formulate", model="driver", tokens=12, outcome="ok")
+    ledger.record_stage("match", strategy="momo_1")
+    ledger.record_stage("author", strategy="momo_1")
+    ledger.record_stage("optimize", strategy="momo_1", detail={"trials": 5, "best_metric": 1.2})
+    ledger.record_stage("decide", strategy="momo_1")
+    ledger.record_episode(stage="decide", model="driver", tokens=8, outcome="ok")
+    ledger.record_verdict("momo_1", verdict="reject", lesson="thin", promoted=False)
+    # candidate 2: escalated author, approved + promoted.
+    ledger.record_thesis("rev_2", "fade the spike")
+    ledger.record_stage("formulate")
+    ledger.record_episode(stage="formulate", model="driver", tokens=10, outcome="ok")
+    ledger.record_stage("match", strategy="rev_2")
+    ledger.record_stage("author", strategy="rev_2")
+    ledger.record_episode(
+        stage="author", model="coder-paid", tokens=40, outcome="ok", escalated=True
+    )
+    ledger.record_stage("optimize", strategy="rev_2", detail={"trials": 7, "best_metric": 2.5})
+    ledger.record_stage("decide", strategy="rev_2")
+    ledger.record_episode(stage="decide", model="driver", tokens=6, outcome="ok")
+    ledger.record_verdict("rev_2", verdict="approve", lesson="edge holds", promoted=True)
+    # candidate 3: author failed the write gate — never optimized, left undecided by no verdict.
+    ledger.record_thesis("dud_3", "an idea that will not compile")
+    ledger.record_stage("formulate")
+    ledger.record_episode(stage="formulate", model="driver", tokens=4, outcome="ok")
+    ledger.record_stage("match", strategy="dud_3")
+    ledger.record_stage("author", strategy="dud_3")
+    ledger.record_session_end(formulated=3, promoted=1, rejected=1, note="max_episodes")
 
 
 @pytest.fixture
@@ -262,3 +300,96 @@ def test_records_written_sorted_and_line_delimited(ledger):
     line = ledger.path.read_text(encoding="utf-8").splitlines()[0]
     assert json.loads(line)  # exactly one record per line
     assert line == json.dumps(json.loads(line), sort_keys=True)  # stable key order on disk
+
+
+# ── derived views: the at-a-glance rollup + per-candidate trail the CLOSE report renders (#74) ─
+def test_rollup_derives_every_field_from_the_typed_records(ledger):
+    _full_arc(ledger)
+    rollup = ledger.rollup()
+    assert isinstance(rollup, SessionRollup)
+    assert rollup.session_id == "sess-1"
+    assert rollup.theses == 3  # one thesis per formulate
+    assert rollup.authored == 2  # two files reached OPTIMIZE; the third failed the write gate
+    assert rollup.validation_failures == 1  # author stages that never reached optimize
+    assert rollup.trials == 12  # summed from each optimize detail (5 + 7)
+    assert rollup.verdicts == {"reject": 1, "approve": 1}  # by kind
+    assert rollup.promoted == 1
+    assert rollup.undecided == 0  # every authored file reached a verdict
+    assert rollup.escalations == 1  # one paid AUTHOR episode
+    assert rollup.tokens_by_stage == {"formulate": 26, "decide": 14, "author": 40}
+    assert rollup.tokens_by_model == {"driver": 40, "coder-paid": 40}
+    assert rollup.note == "max_episodes"
+
+
+def test_rollup_counts_authored_but_unverdicted_files_as_undecided(tmp_path):
+    led = SessionLedger(tmp_path, "undec")
+    led.record_thesis("draft_1", "an idea")
+    led.record_stage("author", strategy="draft_1")
+    led.record_stage("optimize", strategy="draft_1", detail={"trials": 3})
+    led.record_stage("decide", strategy="draft_1")  # decide ran but left no verdict (undecided)
+    assert led.rollup().undecided == 1
+    assert led.rollup().verdicts == {}
+
+
+def test_rollup_on_an_empty_ledger_is_all_zeros(ledger):
+    rollup = ledger.rollup()
+    assert rollup.theses == 0 and rollup.authored == 0 and rollup.trials == 0
+    assert rollup.verdicts == {} and rollup.escalations == 0
+    assert rollup.tokens_by_stage == {} and rollup.tokens_by_model == {}
+
+
+def test_rollup_log_line_names_every_field(ledger):
+    _full_arc(ledger)
+    line = ledger.rollup().log_line()
+    for token in (
+        "3 theses",
+        "2 authored",
+        "1 validation failures",
+        "12 trials",
+        "approve=1",
+        "reject=1",
+        "0 undecided",
+        "1 escalations",
+        "formulate=26",
+        "driver=40",
+    ):
+        assert token in line
+
+
+def test_candidate_trails_walk_each_candidate_formulate_to_decide(ledger):
+    _full_arc(ledger)
+    trails = ledger.candidate_trails()
+    assert [t.strategy for t in trails] == ["momo_1", "rev_2", "dud_3"]  # thesis (formulate) order
+    momo, rev, dud = trails
+    assert isinstance(momo, CandidateTrail)
+    assert momo.thesis == "buy strength"
+    assert momo.stages == ("match", "author", "optimize", "decide")
+    assert momo.trials == 5 and momo.best_metric == 1.2
+    assert momo.verdict == "reject" and momo.outcome == "rejected"
+    assert rev.best_metric == 2.5 and rev.verdict == "approve" and rev.promoted is True
+    assert rev.outcome == "promoted"
+    # The write-gate failure never reached optimize/decide and left no verdict — an undecided trail.
+    assert dud.stages == ("match", "author")
+    assert dud.trials == 0 and dud.best_metric is None
+    assert dud.verdict is None and dud.outcome == "undecided"
+
+
+def test_report_view_is_json_safe_or_none_on_an_empty_ledger(ledger, tmp_path):
+    assert ledger.report_view() is None  # nothing written ⇒ nothing to render (graceful)
+    _full_arc(ledger)
+    view = ledger.report_view()
+    assert view is not None
+    assert view["session_id"] == "sess-1"
+    assert view["rollup"]["theses"] == 3
+    assert [c["strategy"] for c in view["candidates"]] == ["momo_1", "rev_2", "dud_3"]
+    # JSON-safe end to end (the report writes this straight into the structured report).
+    assert json.loads(json.dumps(view)) == view
+
+
+def test_from_path_reconstructs_a_ledger_at_the_same_file(tmp_path):
+    led = SessionLedger(tmp_path, "roundtrip")
+    led.record_stage("formulate")
+    reopened = SessionLedger.from_path(led.path)
+    assert reopened.path == led.path
+    assert reopened.session_id == "roundtrip"
+    assert [s.stage for s in reopened.stages()] == ["formulate"]

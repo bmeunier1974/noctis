@@ -197,6 +197,111 @@ class SessionEnd:
         )
 
 
+def _fmt_counts(counts: dict[str, int]) -> str:
+    """Render a ``{name: count}`` map as ``a=1 b=2`` (sorted, deterministic) or ``none`` when
+    empty — the one formatter the rollup log line and the report renderer share."""
+    return " ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none"
+
+
+@dataclass(frozen=True)
+class SessionRollup:
+    """The at-a-glance close of one session, *derived* from the ledger's typed records (never a
+    stored line): theses formulated, files authored, validation failures (author stages that
+    never reached OPTIMIZE), trials run, verdicts by kind, undecided count, escalations, and
+    tokens grouped by stage and by model. This is the rollup the session log and the CLOSE
+    report render (story #74) — computed from what the ledger already holds, so no new writer
+    is added to the schema."""
+
+    session_id: str
+    theses: int
+    authored: int
+    validation_failures: int
+    trials: int
+    verdicts: dict[str, int]
+    promoted: int
+    undecided: int
+    escalations: int
+    tokens_by_stage: dict[str, int]
+    tokens_by_model: dict[str, int]
+    note: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """A JSON-safe view the structured report writes straight to disk."""
+        return {
+            "session_id": self.session_id,
+            "theses": self.theses,
+            "authored": self.authored,
+            "validation_failures": self.validation_failures,
+            "trials": self.trials,
+            "verdicts": dict(self.verdicts),
+            "promoted": self.promoted,
+            "undecided": self.undecided,
+            "escalations": self.escalations,
+            "tokens_by_stage": dict(self.tokens_by_stage),
+            "tokens_by_model": dict(self.tokens_by_model),
+            "note": self.note,
+        }
+
+    def log_line(self) -> str:
+        """One compact line naming every field — the session-log rollup at session end."""
+        by_stage = _fmt_counts(self.tokens_by_stage)
+        by_model = _fmt_counts(self.tokens_by_model)
+        return (
+            f"{self.session_id}: {self.theses} theses, {self.authored} authored, "
+            f"{self.validation_failures} validation failures, {self.trials} trials, "
+            f"verdicts [{_fmt_counts(self.verdicts)}], {self.undecided} undecided, "
+            f"{self.escalations} escalations; tokens by stage [{by_stage}]; "
+            f"tokens by model [{by_model}]"
+        )
+
+
+@dataclass(frozen=True)
+class CandidateTrail:
+    """One candidate's formulate → author → optimize → decide trail, derived from the ledger so a
+    post-mortem walks structured records instead of prose. ``stages`` is the strategy-scoped stage
+    labels it reached in order (its thesis is the FORMULATE step); ``trials`` / ``best_metric``
+    come from its OPTIMIZE detail; ``verdict`` / ``promoted`` are ``None`` when it never reached a
+    verdict (left undecided)."""
+
+    strategy: str
+    thesis: str
+    stages: tuple[str, ...]
+    trials: int
+    best_metric: float | None
+    verdict: str | None
+    promoted: bool | None
+
+    @property
+    def outcome(self) -> str:
+        """A display label: ``rejected`` / ``promoted`` / ``not promoted`` / ``undecided``."""
+        if self.verdict is None:
+            return "undecided"
+        if self.verdict == "reject":
+            return "rejected"
+        if self.verdict == "approve":
+            return "promoted" if self.promoted else "not promoted"
+        return self.verdict
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "strategy": self.strategy,
+            "thesis": self.thesis,
+            "stages": list(self.stages),
+            "trials": self.trials,
+            "best_metric": self.best_metric,
+            "verdict": self.verdict,
+            "promoted": self.promoted,
+            "outcome": self.outcome,
+        }
+
+
+def _num(value: Any) -> float | None:
+    """A tolerant numeric read: an int/float (not bool) as a float, else ``None``."""
+    if isinstance(value, bool):
+        return None
+    return float(value) if isinstance(value, (int, float)) else None
+
+
 class SessionLedger:
     """An append-only per-session ledger under ``<state_dir>/sessions/``.
 
@@ -214,6 +319,14 @@ class SessionLedger:
     ) -> None:
         self.session_id = session_id or new_session_id(now)
         self.path = Path(state_dir) / SESSIONS_DIRNAME / f"{self.session_id}.jsonl"
+
+    @classmethod
+    def from_path(cls, path: str | Path) -> SessionLedger:
+        """Reopen the ledger that *wrote* ``path`` (``<state_dir>/sessions/<id>.jsonl``) — the
+        reader the CLOSE report uses to reach a session's ledger from the summary's stored path,
+        without threading the state dir separately."""
+        p = Path(path)
+        return cls(p.parent.parent, p.stem)
 
     # ── reads ────────────────────────────────────────────────────────────────
     def records(self) -> list[dict[str, Any]]:
@@ -250,6 +363,88 @@ class SessionLedger:
     def session_end(self) -> SessionEnd | None:
         records = self._typed("session_end")
         return SessionEnd.from_record(records[-1]) if records else None
+
+    # ── derived views (story #74): the at-a-glance rollup + per-candidate trail ──────────────
+    def rollup(self) -> SessionRollup:
+        """Derive the :class:`SessionRollup` from this session's typed records — the source of
+        truth for the session-log rollup and the CLOSE report. A file authored is one that reached
+        OPTIMIZE (passed the write gate); an author stage that never did is a validation failure; a
+        strategy authored but never carried to a verdict is undecided. Tolerant of an empty/absent
+        ledger (all zeros)."""
+        stages = self.stages()
+        episodes = self.episodes()
+        verdicts = self.verdicts()
+        end = self.session_end()
+
+        author_attempts = sum(1 for s in stages if s.stage == "author")
+        optimized = [s for s in stages if s.stage == "optimize"]
+        trials = sum(int(s.detail.get("trials") or 0) for s in optimized)
+
+        verdict_counts: dict[str, int] = {}
+        for v in verdicts:
+            verdict_counts[v.verdict] = verdict_counts.get(v.verdict, 0) + 1
+
+        authored_names = {s.strategy for s in optimized if s.strategy}
+        decided_names = {v.strategy for v in verdicts if v.strategy}
+
+        tokens_by_stage: dict[str, int] = {}
+        tokens_by_model: dict[str, int] = {}
+        for e in episodes:
+            tokens_by_stage[e.stage] = tokens_by_stage.get(e.stage, 0) + e.tokens
+            tokens_by_model[e.model] = tokens_by_model.get(e.model, 0) + e.tokens
+
+        return SessionRollup(
+            session_id=self.session_id,
+            theses=len(self.theses()),
+            authored=len(optimized),
+            validation_failures=author_attempts - len(optimized),
+            trials=trials,
+            verdicts=verdict_counts,
+            promoted=sum(1 for v in verdicts if v.promoted),
+            undecided=len(authored_names - decided_names),
+            escalations=sum(1 for e in episodes if e.stage == "author" and e.escalated),
+            tokens_by_stage=tokens_by_stage,
+            tokens_by_model=tokens_by_model,
+            note=end.note if end else None,
+        )
+
+    def candidate_trails(self) -> list[CandidateTrail]:
+        """One :class:`CandidateTrail` per formulated thesis, in ledger (formulate) order — the
+        per-candidate stage trail the CLOSE report renders so a post-mortem walks structured
+        records instead of a transcript."""
+        stages = self.stages()
+        verdicts = {v.strategy: v for v in self.verdicts()}
+        trails: list[CandidateTrail] = []
+        for t in self.theses():
+            name = t.strategy
+            my_stages = [s for s in stages if s.strategy == name]
+            optimize = next((s for s in my_stages if s.stage == "optimize"), None)
+            verdict = verdicts.get(name)
+            trails.append(
+                CandidateTrail(
+                    strategy=name,
+                    thesis=t.text,
+                    stages=tuple(s.stage for s in my_stages),
+                    trials=int(optimize.detail.get("trials") or 0) if optimize else 0,
+                    best_metric=_num(optimize.detail.get("best_metric")) if optimize else None,
+                    verdict=verdict.verdict if verdict else None,
+                    promoted=verdict.promoted if verdict else None,
+                )
+            )
+        return trails
+
+    def report_view(self) -> dict[str, Any] | None:
+        """The JSON-safe ``{session_id, rollup, candidates}`` the CLOSE report threads into its
+        research block, or ``None`` when the ledger holds nothing (absent/empty/all-malformed) so
+        the report degrades to its ledgerless rendering. Never raises — a report is evidence, not a
+        gate."""
+        if not self.records():
+            return None
+        return {
+            "session_id": self.session_id,
+            "rollup": self.rollup().to_dict(),
+            "candidates": [c.to_dict() for c in self.candidate_trails()],
+        }
 
     # ── writes ───────────────────────────────────────────────────────────────
     def record_session_start(

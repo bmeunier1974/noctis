@@ -309,6 +309,10 @@ class Runtime:
         self._cycle.research_rejections += summary.rejections
         self._cycle.research_dead_ends += summary.dead_ends
         self._cycle.research_undecided.extend(summary.undecided)
+        # An episodic session carries its ledger path so CLOSE renders a per-session rollup +
+        # candidate trail (story #74); the conversation loop and legacy loop leave it None.
+        if summary.ledger_path:
+            self._cycle.research_ledgers.append(summary.ledger_path)
         self._cycle.minted_specs.extend(summary.minted_specs)
         self.result.research_iterations += summary.iterations
         self.result.research_promotions += summary.promotions

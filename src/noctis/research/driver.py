@@ -1039,12 +1039,17 @@ def run_episodic_research(
     summary.author_calls = int(getattr(toolbox, "author_calls", 0))
     summary.escalations = int(getattr(toolbox, "escalations", 0))
     summary.undecided = sorted(getattr(toolbox, "undecided", set()))
+    summary.ledger_path = str(ledger.path)
     ledger.record_session_end(
         formulated=formulated,
         promoted=summary.promotions,
         rejected=summary.rejections,
         note=summary.stopped_reason or None,
     )
+    # A legible rollup at session end (story #74): the same at-a-glance numbers the CLOSE report
+    # renders, derived from the ledger's typed records — theses, files authored, validation
+    # failures, trials, verdicts by kind, undecided, escalations, tokens by stage and by model.
+    logger.info("session rollup — %s", ledger.rollup().log_line())
     if summary.undecided:
         logger.warning(
             "%d strategies left undecided — archived after the TTL: %s",

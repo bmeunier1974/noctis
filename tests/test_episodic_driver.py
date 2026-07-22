@@ -319,6 +319,34 @@ def test_full_cycle_reaches_a_verdict_and_a_complete_ledger(tmp_path):
     assert end is not None and end.formulated == 1 and end.rejected == 1
 
 
+def test_summary_carries_the_session_ledger_path(tmp_path):
+    # The episodic summary carries its session ledger's path so the CLOSE report can find it and
+    # render a per-session rollup + candidate trail (story #74).
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    ledger = SessionLedger(tmp_path, "lp1")
+    summary = _drive(episodes, FakeToolbox(), max_episodes=2, ledger=ledger)
+    assert summary.ledger_path == str(ledger.path)
+
+
+def test_session_end_logs_the_rollup_with_every_field(tmp_path, caplog):
+    # At session end the driver logs a legible rollup line derived from the ledger — theses, files
+    # authored, validation failures, trials, verdicts by kind, undecided, escalations, and tokens
+    # by stage and by model (the epic's field list).
+    import logging
+
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    ledger = SessionLedger(tmp_path, "roll1")
+    with caplog.at_level(logging.INFO, logger="noctis.research.driver"):
+        _drive(episodes, FakeToolbox(), max_episodes=2, ledger=ledger)
+
+    rollup_lines = [r.message for r in caplog.records if "session rollup" in r.message]
+    assert rollup_lines, "expected a session-rollup log line at session end"
+    line = rollup_lines[0]
+    for token in ("1 theses", "1 authored", "0 validation failures", "reject=1", "0 escalations"):
+        assert token in line
+    assert "tokens by stage" in line and "tokens by model" in line
+
+
 def test_optimize_recipe_runs_baseline_then_cheap_subset_sweep_then_full_panel_confirm(tmp_path):
     # The v1 recipe (story #70): a full-panel baseline, a CHEAP sweep on a subset of the fit
     # panel at reduced bar-fidelity, then a full-panel confirm of that sweep's best params.

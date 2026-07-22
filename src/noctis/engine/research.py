@@ -61,6 +61,11 @@ class ResearchSummary:
     # conversation loop leaves it 0, so a later report story can show exactly what the paid model
     # bought. 0 by default keeps the legacy/conversation constructors unaffected.
     escalations: int = 0
+    # The episodic session's ledger file, so the CLOSE report can read a per-session rollup and a
+    # per-candidate stage trail from it (story #74). The episodic driver fills it; the conversation
+    # loop and the legacy loop leave it None (they write no ledger), so a ledgerless report renders
+    # exactly as today. None by default keeps every existing constructor unaffected.
+    ledger_path: str | None = None
 
 
 def _utcnow() -> datetime:

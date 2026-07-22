@@ -41,6 +41,25 @@ class AccountForward:
     records: list[ForwardRecord]
 
 
+def gather_research_sessions(ledger_paths: list[str]) -> list[dict]:
+    """Read each episodic session's ledger into its report view — a per-session rollup + a
+    per-candidate stage trail (story #74). Tolerant by design: a missing/empty/malformed ledger
+    (or one that yields no records) contributes nothing rather than raising, so a report never
+    breaks on a ledger and a ledgerless cycle produces an empty list (no ``sessions`` key)."""
+    from noctis.research.ledger import SessionLedger
+
+    views: list[dict] = []
+    for path in ledger_paths:
+        try:
+            view = SessionLedger.from_path(path).report_view()
+        except Exception as exc:  # noqa: BLE001 — a report is evidence, never a gate
+            logger.warning("skipping unreadable research ledger %s: %s", path, exc)
+            continue
+        if view is not None:
+            views.append(view)
+    return views
+
+
 def gather_account_forward(state_dir: str | Path, entries) -> AccountForward:
     """One read of ``paper_account.json`` + ``forward_ledger.json`` → account summary and
     per-champion forward records (realized from the ledger + current unrealized on the
@@ -80,6 +99,11 @@ class SessionActivity:
     # Strategies authored across the cycle's research sessions but never carried to a verdict
     # (each summary's ``undecided``, accumulated). Empty when every draft reached a decision.
     research_undecided: list[str] = field(default_factory=list)
+    # Session-ledger paths for the cycle's episodic research sessions (each summary's
+    # ``ledger_path``, when it carried one). The CLOSE report reads a per-session rollup + a
+    # per-candidate trail from each. Empty for conversation-loop / legacy sessions, which carry no
+    # ledger — so a ledgerless report degrades to today's rendering.
+    research_ledgers: list[str] = field(default_factory=list)
     minted_specs: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
 
@@ -116,6 +140,22 @@ def assemble_report(
         logger.warning("paper account unreadable; report omits cumulative P&L")
     account = af.account
     forward_data = [r.to_dict() for r in af.records]
+    # Episodic research sessions (story #74): each carries a ledger the report reads a rollup +
+    # candidate trail from. Only added when at least one ledgered session ran, so a ledgerless
+    # cycle's research block — and thus its rendered/JSON report — is byte-identical to today.
+    research: dict = {
+        "iterations": session.research_iterations,
+        "promotions": session.research_promotions,
+        "rejections": session.research_rejections,
+        "dead_ends": session.research_dead_ends,
+        "undecided": list(session.research_undecided),
+        "findings": memory.findings(),
+        "minted": list(session.minted_specs),
+        "promoted_specs": promoted_specs,
+    }
+    sessions = gather_research_sessions(session.research_ledgers)
+    if sessions:
+        research["sessions"] = sessions
     return ReportData(
         as_of=as_of,
         mode=mode,
@@ -130,15 +170,6 @@ def assemble_report(
         promotions=promotions,
         demotions=demotions,
         champions=champions,
-        research={
-            "iterations": session.research_iterations,
-            "promotions": session.research_promotions,
-            "rejections": session.research_rejections,
-            "dead_ends": session.research_dead_ends,
-            "undecided": list(session.research_undecided),
-            "findings": memory.findings(),
-            "minted": list(session.minted_specs),
-            "promoted_specs": promoted_specs,
-        },
+        research=research,
         events=list(session.events),
     )
