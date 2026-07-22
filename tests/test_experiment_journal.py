@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from noctis.research.journal import ExperimentJournal, Trial
+from noctis.research.journal import ExperimentJournal, Thesis, Trial
 
 
 def _card(train=1.5, test=1.0, holdout=0.8, stage="validated", metric_name="sharpe"):
@@ -107,6 +107,70 @@ def test_class_tag_latest_wins(journal):
     journal.record_class_tag("probe", "first idea")
     journal.record_class_tag("probe", "refined idea")
     assert journal.class_tag("probe") == "refined idea"
+
+
+def test_thesis_round_trips_typed_with_lineage(journal):
+    journal.record_thesis(
+        "probe",
+        "Overnight drift persists into the open.",
+        parent_thesis="Momentum survives the gap.",
+        pivot_rationale="Widen from close-to-close to gap-through.",
+    )
+    thesis = journal.thesis("probe")
+    assert isinstance(thesis, Thesis)
+    assert thesis.text == "Overnight drift persists into the open."
+    assert thesis.parent_thesis == "Momentum survives the gap."
+    assert thesis.pivot_rationale == "Widen from close-to-close to gap-through."
+    assert thesis.at  # every record is timestamped
+    # The raw record carries the extended schema beside the existing kinds.
+    (record,) = journal.records("probe")
+    assert record["event"] == "thesis"
+    assert record["thesis"] == "Overnight drift persists into the open."
+    assert record["parent_thesis"] == "Momentum survives the gap."
+    assert record["pivot_rationale"] == "Widen from close-to-close to gap-through."
+
+
+def test_thesis_lineage_fields_are_optional(journal):
+    journal.record_thesis("probe", "Just an idea, no parent.")
+    thesis = journal.thesis("probe")
+    assert thesis is not None
+    assert thesis.text == "Just an idea, no parent."
+    assert thesis.parent_thesis is None
+    assert thesis.pivot_rationale is None
+    # Absent lineage is omitted from the record, not written as null.
+    (record,) = journal.records("probe")
+    assert "parent_thesis" not in record
+    assert "pivot_rationale" not in record
+
+
+def test_missing_thesis_reads_none(journal):
+    journal.record_class_tag("probe", "some class")
+    assert journal.thesis("probe") is None
+    assert journal.thesis("ghost") is None
+
+
+def test_thesis_latest_wins(journal):
+    journal.record_thesis("probe", "first idea")
+    journal.record_thesis("probe", "refined idea", parent_thesis="first idea")
+    latest = journal.thesis("probe")
+    assert latest is not None
+    assert latest.text == "refined idea"
+    assert latest.parent_thesis == "first idea"
+
+
+def test_unknown_record_kinds_do_not_break_consumers(journal):
+    """Tolerant reads: a future record kind an older reader never learned is skipped by the
+    typed views, not fatal — the journal schema is extended, never changed."""
+    journal.record_thesis("probe", "an idea")
+    with journal.path("probe").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"event": "episode", "future_field": 7}) + "\n")
+    journal.record_class_tag("probe", "a class")
+    # Every consumer keeps loading across the unknown kind.
+    assert len(journal.records("probe")) == 3
+    assert journal.class_tag("probe") == "a class"
+    assert journal.thesis("probe").text == "an idea"
+    assert journal.trials("probe") == []
+    assert journal.verdicts("probe") == []
 
 
 def test_touched_symbols_unions_every_journaled_trial(journal):

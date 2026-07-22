@@ -208,6 +208,16 @@ verdict time the agent may nominate `holdout_symbols` it deliberately kept out o
 the toolbox refuses any name found in the strategy's experiment journal. See
 `mandate/README.md` to author your own or pick a shipped profile.
 
+## Two agent loops, one contract
+
+With a client, the same protocol runs one of two ways behind one seam (`research.agent.loop`): the
+**conversation** loop (one long tool-use transcript) or the **episodic** driver (a deterministic
+state machine that calls the model only at narrow judgment points and keeps the cross-strategy story
+in a session ledger, not a growing chat context — built for small-context backends). Both return the
+same `ResearchSummary`. To decide when `auto` should prefer episodic, the **parity harness**
+(`scripts/parity_harness.py`) runs both loops on the same model, fixture, and mandate and reports
+verdicts/session and tokens/verdict side by side — see [parity.md](parity.md).
+
 ## The legacy fallback
 
 No configured client (missing key or missing `[llm]` extra) → the legacy proposer/Optuna loop

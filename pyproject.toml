@@ -43,7 +43,9 @@ data = [
     "transitions>=0.9.3",
     "apscheduler>=3.11.3",
 ]
-llm = ["anthropic>=0.117.0", "litellm>=1.92.0"]
+# fastapi/orjson: not ours — litellm's gpt-5.x Responses-API bridge (stream + tools +
+# reasoning_effort) imports both at runtime without declaring them ("No module named …" otherwise).
+llm = ["anthropic>=0.117.0", "litellm>=1.92.0", "fastapi>=0.115", "orjson>=3.10"]
 
 # Dev tooling lives in a PEP 735 dependency-group (not an optional extra) so a bare
 # `uv sync` installs the test-suite-ready environment by default. The runtime seams

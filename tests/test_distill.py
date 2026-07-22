@@ -77,6 +77,80 @@ def test_no_client_degrades_to_stage1_and_stays_due(tmp_path):
     assert maybe_distill(settings, memory, client=FakeDistillClient("- ok")) is True
 
 
+def _no_call(*_a, **_k):
+    raise AssertionError("this builder must not be consulted in this routing path")
+
+
+def test_distill_routes_to_the_paid_model_when_key_available(tmp_path, monkeypatch):
+    # Story #72: a configured coder_fallback_model whose provider key resolves is what distillation
+    # uses — the strong model does the map-reduce; the local/default builder is never consulted.
+    import noctis.research as research_pkg
+    import noctis.research.llm as llm_mod
+
+    settings = Settings(
+        state_dir=str(tmp_path),
+        research={
+            "memory_distill_every": 1,
+            "agent": {"coder_fallback_model": "anthropic/claude-x"},
+        },
+    )
+    memory = _memory()
+    paid = FakeDistillClient("- paid lesson")
+
+    def fake_client_for(s, model, **kw):
+        assert model == "anthropic/claude-x"
+        return paid
+
+    monkeypatch.setattr(llm_mod, "client_for", fake_client_for)
+    monkeypatch.setattr(research_pkg, "build_llm_client", _no_call)
+    bump_research_session(settings.state_dir)
+
+    assert maybe_distill(settings, memory) is True
+    assert memory.distilled() == ["- paid lesson"]
+    assert paid.calls  # the paid client did the distillation
+
+
+def test_distill_falls_back_to_local_when_the_paid_model_has_no_key(tmp_path, monkeypatch):
+    # coder_fallback_model configured but its provider key/extra is missing → client_for returns
+    # None → distillation uses the local/default builder (no crash, no skipped cycle).
+    import noctis.research as research_pkg
+    import noctis.research.llm as llm_mod
+
+    settings = Settings(
+        state_dir=str(tmp_path),
+        research={
+            "memory_distill_every": 1,
+            "agent": {"coder_fallback_model": "anthropic/claude-x"},
+        },
+    )
+    memory = _memory()
+    local = FakeDistillClient("- local lesson")
+    monkeypatch.setattr(llm_mod, "client_for", lambda s, m, **kw: None)
+    monkeypatch.setattr(research_pkg, "build_llm_client", lambda s: local)
+    bump_research_session(settings.state_dir)
+
+    assert maybe_distill(settings, memory) is True
+    assert memory.distilled() == ["- local lesson"]
+    assert local.calls
+
+
+def test_distill_without_a_fallback_model_uses_the_default_builder(tmp_path, monkeypatch):
+    # No coder_fallback_model ⇒ the paid-routing branch is never entered (client_for untouched);
+    # distillation uses the local/default client exactly as before this story.
+    import noctis.research as research_pkg
+    import noctis.research.llm as llm_mod
+
+    settings = Settings(state_dir=str(tmp_path), research={"memory_distill_every": 1})
+    memory = _memory()
+    local = FakeDistillClient("- default lesson")
+    monkeypatch.setattr(llm_mod, "client_for", _no_call)
+    monkeypatch.setattr(research_pkg, "build_llm_client", lambda s: local)
+    bump_research_session(settings.state_dir)
+
+    assert maybe_distill(settings, memory) is True
+    assert local.calls
+
+
 def test_distill_needs_history_and_bullets(tmp_path):
     client = FakeDistillClient("- a lesson")
     assert distill_findings(_memory(3), client) is False  # too little history to fold

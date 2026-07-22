@@ -2,17 +2,21 @@
 
 ``state/experiments/<strategy>.jsonl`` holds one JSON line per research event: every
 ``run_backtest`` call and ``run_sweep`` trial (``trial``), sweep completion
-(``sweep_complete``), the class a ``write_strategy`` declared (``class_tag``), and every
-verdict spent (``verdict``). The journal — never the agent's context — is the ground truth
-the research discipline reads: the exhaustion gate counts distinct journaled param sets,
-the symbol-holdout taint check scans journaled trial symbols, and ``reject_strategy``
-recovers the best-observed params from journaled trials. That is why the record schema
-lives here and nowhere else: every writer is an explicit ``record_*`` method and every
-reader gets typed views, so no caller re-parses ``event`` strings by hand.
+(``sweep_complete``), the class a ``write_strategy`` declared (``class_tag``), the
+motivating idea it authored (``thesis`` — the prose plus optional ``parent_thesis`` /
+``pivot_rationale`` lineage a later session or report can walk instead of re-parsing the
+file), and every verdict spent (``verdict``). The journal — never the agent's context — is
+the ground truth the research discipline reads: the exhaustion gate counts distinct
+journaled param sets, the symbol-holdout taint check scans journaled trial symbols, and
+``reject_strategy`` recovers the best-observed params from journaled trials. That is why the
+record schema lives here and nowhere else: every writer is an explicit ``record_*`` method
+and every reader gets typed views, so no caller re-parses ``event`` strings by hand.
 
-Reads are tolerant (a malformed line is skipped — a corrupt record can't confirm
-anything), appends are line-atomic per strategy, and the toolbox keeps journaling
-parent-side so there is exactly one writer per session.
+The schema is *extended, never changed*: one writer per kind, tolerant reads. A malformed
+line is skipped (a corrupt record can't confirm anything) and an unknown record kind an
+older reader never learned is ignored by the typed views rather than being fatal, so an
+existing journal keeps loading as new kinds land. Appends are line-atomic per strategy, and
+the toolbox keeps journaling parent-side so there is exactly one writer per session.
 """
 
 from __future__ import annotations
@@ -37,6 +41,11 @@ def _now_iso() -> str:
 
 def _round(value: Any, digits: int = 4) -> float | None:
     return None if value is None else round(float(value), digits)
+
+
+def _opt_str(value: Any) -> str | None:
+    """A tolerant optional-text read: absent/empty stays ``None``, anything else stringifies."""
+    return str(value) if value else None
 
 
 @dataclass(frozen=True)
@@ -75,6 +84,29 @@ class Trial:
             window=dict(record.get("window") or {}),
             metrics=dict(record.get("metrics") or {}),
             max_bars=int(max_bars) if max_bars else None,
+        )
+
+
+@dataclass(frozen=True)
+class Thesis:
+    """One journaled thesis with its lineage — a typed view of a ``thesis`` line.
+
+    ``text`` is the motivating idea in prose; ``parent_thesis`` / ``pivot_rationale`` are the
+    optional lineage a pivot chain walks (both ``None`` when the thesis stands on its own).
+    """
+
+    at: str
+    text: str
+    parent_thesis: str | None = None
+    pivot_rationale: str | None = None
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> Thesis:
+        return cls(
+            at=str(record.get("at", "")),
+            text=str(record.get("thesis", "")),
+            parent_thesis=_opt_str(record.get("parent_thesis")),
+            pivot_rationale=_opt_str(record.get("pivot_rationale")),
         )
 
 
@@ -134,6 +166,14 @@ class ExperimentJournal:
                 tag = str(rec["class_tag"])
         return tag
 
+    def thesis(self, name: str) -> Thesis | None:
+        """The most recently journaled ``thesis`` for ``name``, typed with lineage (or ``None``)."""
+        latest: dict[str, Any] | None = None
+        for rec in self.records(name):
+            if rec.get("event") == "thesis" and rec.get("thesis"):
+                latest = rec
+        return Thesis.from_record(latest) if latest is not None else None
+
     def touched_symbols(self, name: str) -> set[str]:
         """Every symbol any journaled trial ever tuned on — the holdout taint set."""
         return {s for trial in self.trials(name) for s in trial.symbols}
@@ -187,6 +227,27 @@ class ExperimentJournal:
 
     def record_class_tag(self, name: str, class_tag: str) -> None:
         self._append(name, {"event": "class_tag", "at": _now_iso(), "class_tag": class_tag})
+
+    def record_thesis(
+        self,
+        name: str,
+        thesis: str,
+        *,
+        parent_thesis: str | None = None,
+        pivot_rationale: str | None = None,
+    ) -> None:
+        """Journal the motivating idea at author time, beside the class-tag record.
+
+        ``parent_thesis`` / ``pivot_rationale`` are the optional lineage a pivot chain walks;
+        an absent field is omitted from the record rather than written as null, so a tolerant
+        read distinguishes "no lineage" from a stored empty value.
+        """
+        record: dict[str, Any] = {"event": "thesis", "at": _now_iso(), "thesis": thesis}
+        if parent_thesis is not None:
+            record["parent_thesis"] = parent_thesis
+        if pivot_rationale is not None:
+            record["pivot_rationale"] = pivot_rationale
+        self._append(name, record)
 
     def record_approval(
         self,

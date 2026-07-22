@@ -53,6 +53,43 @@ def _fmt_pct(a: float, b: float) -> str:
     return f"{(b / a - 1.0) * 100:.2f}%"
 
 
+def _fmt_counts(counts: dict) -> str:
+    """``a=1 b=2`` (sorted, deterministic) or ``none`` — the by-kind/by-stage/by-model formatter."""
+    return " ".join(f"{k}={v}" for k, v in sorted((counts or {}).items())) or "none"
+
+
+def _render_research_sessions(lines: list[str], sessions: list) -> None:
+    """Render each episodic session's rollup + per-candidate trail (story #74). Called only from
+    the Research section; appends nothing when ``sessions`` is empty, so a ledgerless report is
+    byte-identical to today."""
+    for s in sessions:
+        rollup = s.get("rollup") or {}
+        lines.append(f"- Session {s.get('session_id', '')}:")
+        lines.append(f"  - Theses formulated: {rollup.get('theses', 0)}")
+        lines.append(f"  - Files authored: {rollup.get('authored', 0)}")
+        lines.append(f"  - Validation failures: {rollup.get('validation_failures', 0)}")
+        lines.append(f"  - Trials run: {rollup.get('trials', 0)}")
+        lines.append(f"  - Verdicts: {_fmt_counts(rollup.get('verdicts', {}))}")
+        lines.append(f"  - Undecided: {rollup.get('undecided', 0)}")
+        lines.append(f"  - Escalations: {rollup.get('escalations', 0)}")
+        lines.append(f"  - Tokens by stage: {_fmt_counts(rollup.get('tokens_by_stage', {}))}")
+        lines.append(f"  - Tokens by model: {_fmt_counts(rollup.get('tokens_by_model', {}))}")
+        candidates = s.get("candidates") or []
+        if candidates:
+            lines.append("  - Candidate trail:")
+            for c in candidates:
+                trail = " → ".join(["formulate", *c.get("stages", [])])
+                metric = c.get("best_metric")
+                metric_note = f", best={metric:.4f}" if isinstance(metric, (int, float)) else ""
+                lines.append(
+                    f"    - {c.get('strategy', '')} [{c.get('outcome', '')}]: {trail} "
+                    f"(trials={c.get('trials', 0)}{metric_note})"
+                )
+                thesis = c.get("thesis")
+                if thesis:
+                    lines.append(f"      thesis: {thesis}")
+
+
 def render_report(data: ReportData) -> str:
     lines: list[str] = []
     lines.append(f"# Close-of-day report — {data.as_of}")
@@ -154,6 +191,10 @@ def render_report(data: ReportData) -> str:
         lines.append("- Notable findings:")
         for f in findings:
             lines.append(f"  - {f}")
+    # Episodic sessions (story #74): a per-session rollup + per-candidate stage trail, derived
+    # from each session's ledger. Absent (conversation-loop / legacy sessions carry no ledger) ⇒
+    # nothing is appended, so the render stays byte-identical to a ledgerless report.
+    _render_research_sessions(lines, r.get("sessions") or [])
     lines.append("")
 
     lines.append("## Notable events")

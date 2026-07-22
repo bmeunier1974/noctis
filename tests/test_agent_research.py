@@ -225,6 +225,36 @@ def test_agent_loop_plays_full_protocol(tmp_path):
     }
 
 
+def test_summary_tokens_total_sums_every_completions_usage(tmp_path):
+    """The conversation loop fills ``summary.tokens_total`` from the four neutral usage fields it
+    already accumulates — one comparable spend axis the parity harness reads (story #75). A
+    no-usage backend contributes 0, so the field stays honest on any provider."""
+    toolbox = _make_toolbox(tmp_path)
+    # Two rounds: a tool round with usage, then the plain-text conclusion with usage. tokens_total
+    # sums input+output+cache_w+cache_r across both = (100+20+5+3) + (40+10+0+0) = 178.
+    client = FakeLLM(
+        [
+            tool_turn(
+                ("list_strategies", {}, "t0"),
+                usage={
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 3,
+                },
+            ),
+            text_turn("done", usage={"input_tokens": 40, "output_tokens": 10}),
+        ]
+    )
+
+    summary = run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=20
+    )
+
+    assert summary.stopped_reason == "agent_done"
+    assert summary.tokens_total == 178
+
+
 def test_iteration_budget_halts_mid_protocol(tmp_path):
     toolbox = _make_toolbox(tmp_path)
     client = FakeLLM(_script())

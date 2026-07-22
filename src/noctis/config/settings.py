@@ -162,6 +162,13 @@ class AgentResearchConfig(BaseModel):
     """
 
     model: str = "claude-opus-4-8"
+    # Which research loop drives a session (episodic-research epic #62). ``conversation`` = the
+    # one long tool-use transcript (today's behavior); ``episodic`` = the deterministic session
+    # driver that owns the protocol and calls the model only at narrow judgment episodes (for a
+    # small-context local model). ``auto`` (the default) resolves to ``conversation`` in this
+    # story; the evidence-gated flip to episodic-on-small-window lands in #76. Loop selection is
+    # resolved in the composition root (``bootstrap.resolve_research_loop``), never here.
+    loop: Literal["auto", "conversation", "episodic"] = "auto"
     # Dedicated authoring model for write_strategy (same LiteLLM ``provider/model`` grammar as
     # research.model — the provider prefix picks the API key). ``None`` (the default) = the driver
     # writes full source itself, today's behavior bit for bit. Set it to pair a cheap/local driver
@@ -169,6 +176,24 @@ class AgentResearchConfig(BaseModel):
     # validated strategy files. Built stateless at the composition root; a missing provider
     # key/extra degrades loudly back to driver-authored mode, never a mid-session failure.
     coder_model: str | None = None
+    # The paid coder-fallback model for cheapest-first authoring (episodic-research epic #62,
+    # story #72). ``coder_model`` (typically a cheap/local coder) attempts EVERY authoring job
+    # first; only when its validator-retry budget is spent — an honest write-gate failure, never a
+    # budget refusal — the SAME brief escalates to this model with the full validator-retry budget.
+    # ``None`` (the default) = no escalation path: a failed local author is skipped exactly as
+    # today. Same LiteLLM ``provider/model`` grammar as ``coder_model``; built stateless at the
+    # composition root beside the local coder, and a missing provider key/extra degrades loudly to
+    # no fallback (never a mid-session failure). The paid coder is a counted fallback triggered by
+    # validator failure, never a default — its per-session spend is bounded by ``max_escalations``.
+    coder_fallback_model: str | None = None
+    # How many failed local authoring attempts may escalate to ``coder_fallback_model`` per session
+    # (story #72). ``0`` (the default) disables escalation entirely — the paid coder is never
+    # reached even when ``coder_fallback_model`` is set — so escalation is strictly opt-in bounded
+    # spend. Each escalation (whether the paid coder then authors the file or also fails) counts
+    # against this cap; once spent, a further local failure is skipped without touching the paid
+    # model. Formulate/decide stay local; only authoring escalates. Inert without a configured
+    # ``coder_fallback_model`` (there is nothing to escalate to).
+    max_escalations: int = 0
     # The coder's own thinking dial (#17), default ON — authoring (scenario-window + warmup
     # arithmetic) is the reasoning-heavy sub-task, so the dedicated coder client reasons through it
     # instead of repeating an error it was just shown. Separate from the driver's ``thinking`` watch
@@ -232,6 +257,14 @@ class AgentResearchConfig(BaseModel):
     # replaced stays re-fetchable through the same tools (the on-disk experiment journal is the
     # ground truth, so no gate is affected). ``None`` ⇒ unlimited (history byte-identical).
     context_window: int | None = None
+    # Corrective retries per episode when the model misfires (episode runner, #66). An episode is
+    # one forced structured-emit call; a misfire — markup instead of a native tool call, an
+    # output-limit truncation, a thinking-only stall, or a payload that fails the schema — is
+    # re-prompted with the classifier's corrective up to this many times before the episode fails
+    # typed and the driver decides. Small by design: a persistent misfirer should fail fast, not
+    # burn the session budget. Default 2 (initial + 2 retries = 3 completions), matching the
+    # coder engine's private-retry budget. NOT a Class-B token budget — a robustness knob.
+    episode_retries: int = 2
 
 
 class ResearchConfig(BaseModel):

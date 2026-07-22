@@ -107,3 +107,27 @@ def classify_completion_error(exc: Exception) -> Misfire | None:
     if any(marker in text for marker in _MALFORMED_CALL_MARKERS):
         return _INVALID_CALL
     return None
+
+
+def classify_emit_failure(reason: str) -> Misfire:
+    """The fifth face of the same stumble, specific to the forced-emit *episode* contract.
+
+    The four :func:`classify_turn` faces cover a turn that produced no tool call at all; this
+    covers the episode-only case a general tool-use loop never meets: the model DID answer (a
+    native call, or a JSON object in text), but the payload was missing/unparseable/schema-
+    invalid, so no typed record could be built. The single ``parse`` both transports meet at
+    raised, and ``reason`` — a validation message, or ``"no JSON object in the reply"`` — rides
+    into the corrective so the model sees exactly what to fix and re-emits one clean object.
+
+    Always a retryable :class:`Misfire` (never ``None``): unlike ``classify_turn``, there is no
+    "deliberate plain-text conclusion" branch — an episode's only valid move is a schema-valid
+    emit, so a payload that fails the schema is always a stumble to correct within the budget.
+    """
+    return Misfire(
+        note=f"structured emit invalid ({reason}) — asking for a schema-valid re-emit",
+        retry=(
+            "Your reply did not produce one valid JSON object for the required schema "
+            f"({reason}). Respond with exactly one JSON object that matches the schema, emitted "
+            "through the tool — no prose, no markdown fences, nothing else."
+        ),
+    )

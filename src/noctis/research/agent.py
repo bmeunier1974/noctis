@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from noctis.engine.research import ResearchSummary, StopEvent
-from noctis.observability.events import Event, render_plain
+from noctis.observability.events import Event, render_plain, tool_event, usage_line
 from noctis.research.llm import WEB_SEARCH_TOOL_TYPE, cached_system, effective_web_search
 from noctis.research.misfire import classify_completion_error, classify_turn
 from noctis.research.prompt import build_system_prompt
@@ -550,6 +550,11 @@ def run_agent_research(
     summary.rejections = toolbox.rejections
     summary.candidates = list(toolbox.strategies_touched)
     summary.author_calls = toolbox.author_calls
+    # The one comparable spend axis (story #75): all judgment-model tokens this session — input +
+    # output + cache-creation + cache-read, exactly the four fields already summed above. The
+    # episodic driver fills the same field from its ledger, so the parity harness's tokens/verdict
+    # row reads both loops off one honest number.
+    summary.tokens_total = sum(usage_totals.values())
     # Session-end honesty: whatever the stop reason (every loop exit flows through here), a
     # strategy authored but never carried to a verdict is left undecided. Surface the sorted list
     # on the summary and name each one in a WARNING — they are archived after the TTL, not lost
@@ -585,51 +590,12 @@ def run_agent_research(
     return summary
 
 
-def _usage_line(usage: dict | None) -> str:
-    """A compact per-round token line from a turn's neutral usage dict (0 for any field a
-    provider omits, so a no-usage backend still yields a clean line)."""
-    u = usage or {}
-
-    def g(k: str) -> int:
-        return int(u.get(k, 0) or 0)
-
-    return (
-        f"tokens in={g('input_tokens')} out={g('output_tokens')} "
-        f"cache_w={g('cache_creation_input_tokens')} cache_r={g('cache_read_input_tokens')}"
-    )
-
-
-def _tool_event(name: str, args: dict, result: dict, brief: dict) -> Event:
-    """One :class:`Event` per tool call for logs / the CLI feed (level 1). ``text`` is the call
-    plus a compact outcome; ``brief`` — the toolbox's own gate-facing slice of the result
-    (:meth:`~noctis.research.tools.ResearchToolbox.result_brief`) — carries the numbers, both
-    printed and structured into ``meta``, plus an ``ok`` flag the renderer colors on (green
-    success / red error).
-
-    ``meta`` also carries the structured call itself — ``meta["tool"]`` (the name) and
-    ``meta["args"]`` (the *same* per-arg-truncated ``brief_args`` shown in ``text``) — so a
-    downstream consumer (the QA feed this epic builds later) reads the call off the metadata
-    instead of reparsing the prose. Truncation happens *before* the args enter ``meta``, so a
-    strategy-source-sized string surfaces only as a ``<N chars>`` placeholder and never leaks
-    whole. The console renderer reads only ``meta["ok"]``, so this widening is invisible to
-    ``-v`` output. ``tool``/``args`` are set last, after any ``meta.update(brief)``, so the
-    structured keys win deterministically over a same-named brief key."""
-    brief_args = {
-        k: (f"<{len(v)} chars>" if isinstance(v, str) and len(v) > 80 else v)
-        for k, v in (args or {}).items()
-    }
-    meta: dict = {}
-    if isinstance(result, dict) and "error" in result:
-        meta["ok"] = False
-        outcome = f"ERROR: {result['error']}"
-    else:
-        meta["ok"] = True
-        meta.update(brief)
-        outcome = ", ".join(f"{k}={v}" for k, v in brief.items()) or "ok"
-    meta["tool"] = name
-    meta["args"] = brief_args
-    text = f"{name}({json.dumps(brief_args, default=str)}) -> {outcome}"
-    return Event("tool", text, meta=meta, level=1)
+# The per-round usage line and per-tool-call Event are built by the shared observability builders
+# (:mod:`noctis.observability.events`), so the conversation loop and the episodic driver emit
+# byte-identical lines. Kept aliased under their private names for the emit sites above and the
+# tests that pin the format.
+_usage_line = usage_line
+_tool_event = tool_event
 
 
 def _tool_label(name: str, args: dict) -> str:

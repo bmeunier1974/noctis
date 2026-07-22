@@ -152,6 +152,9 @@ def _make_toolbox(
     coder_model: str | None = None,
     coder_max_tokens: int | None = None,
     max_author_calls: int | None = None,
+    coder_fallback_client=None,
+    coder_fallback_model: str | None = None,
+    max_escalations: int | None = None,
     on_event=None,
 ):
     strategies_dir = tmp_path / "strategies"
@@ -166,6 +169,10 @@ def _make_toolbox(
         agent["coder_model"] = coder_model
     if coder_max_tokens is not None:
         agent["coder_max_tokens"] = coder_max_tokens
+    if coder_fallback_model is not None:
+        agent["coder_fallback_model"] = coder_fallback_model
+    if max_escalations is not None:
+        agent["max_escalations"] = max_escalations
     settings = Settings(
         strategies_dir=str(strategies_dir),
         state_dir=str(tmp_path / "state"),
@@ -194,6 +201,7 @@ def _make_toolbox(
         memory=memory,
         rules=LENIENT,
         coder_client=coder_client,
+        coder_fallback_client=coder_fallback_client,
         on_event=on_event,
     )
     # Author through the toolbox's own tier paths (seeds + workspace tiers), exactly as a
@@ -972,6 +980,55 @@ def test_write_strategy_allows_a_fresh_class_and_journals_the_tag(toolbox):
     assert toolbox.journal.class_tag("probe") == "brand new idea"
 
 
+def test_write_strategy_journals_a_thesis_with_lineage(toolbox):
+    out = toolbox.dispatch(
+        "write_strategy",
+        {
+            "name": "probe",
+            "source": PROBE,
+            "class_tag": "brand new idea",
+            "thesis": "Long above a short moving average; the drift persists intraday.",
+            "parent_thesis": "Trend-following survives on liquid names.",
+            "pivot_rationale": "Narrow to the intraday horizon.",
+        },
+    )
+    assert out.get("ok") is True
+    thesis = toolbox.journal.thesis("probe")
+    assert thesis is not None
+    assert thesis.text == "Long above a short moving average; the drift persists intraday."
+    assert thesis.parent_thesis == "Trend-following survives on liquid names."
+    assert thesis.pivot_rationale == "Narrow to the intraday horizon."
+    # The thesis record lands beside the class-tag record, not instead of it.
+    assert toolbox.journal.class_tag("probe") == "brand new idea"
+
+
+def test_write_strategy_thesis_lineage_is_optional(toolbox):
+    out = toolbox.dispatch(
+        "write_strategy",
+        {"name": "probe", "source": PROBE, "thesis": "A bare idea with no lineage."},
+    )
+    assert out.get("ok") is True
+    thesis = toolbox.journal.thesis("probe")
+    assert thesis is not None
+    assert thesis.text == "A bare idea with no lineage."
+    assert thesis.parent_thesis is None
+    assert thesis.pivot_rationale is None
+
+
+def test_write_strategy_without_thesis_records_none(toolbox):
+    out = toolbox.dispatch("write_strategy", {"name": "probe", "source": PROBE})
+    assert out.get("ok") is True
+    assert toolbox.journal.thesis("probe") is None
+
+
+def test_write_schema_exposes_optional_thesis_lineage_fields(toolbox):
+    schema = _write_spec(toolbox)["input_schema"]
+    props = schema["properties"]
+    assert {"thesis", "parent_thesis", "pivot_rationale"} <= set(props)
+    # Optional: none of the lineage fields join `required` (which stays name/source).
+    assert schema["required"] == ["name", "source"]
+
+
 def test_market_context_surfaces_exhausted_classes(toolbox):
     toolbox.exhausted.record("dead class", "why it died", example="x")
     ctx = toolbox.market_context()
@@ -1491,6 +1548,14 @@ def test_research_summary_surfaces_the_author_call_count(tmp_path):
     assert ResearchSummary().author_calls == 0
 
 
+def test_research_summary_surfaces_the_escalation_count(tmp_path):
+    """Story #72: the session summary carries the coder-fallback escalation count (default 0, so
+    the legacy/conversation constructors are unaffected)."""
+    from noctis.engine.research import ResearchSummary
+
+    assert ResearchSummary().escalations == 0
+
+
 # ── brief mode: authoring observability — one on_event per coder completion (#9) ────────────
 def _author_events(events) -> list[Event]:
     return [e for e in events if isinstance(e, Event) and e.kind == "author"]
@@ -1613,3 +1678,175 @@ def test_source_write_persists_no_failure_record(tmp_path):
     assert "error" in out
     root = box.strategies_dir.tmp / "failed"
     assert not root.exists() or list(root.glob("*.py")) == []
+
+
+# ── coder-fallback escalation: cheapest-first routing, bounded per session (story #72) ────────
+def _escalation_box(
+    tmp_path,
+    local_replies,
+    fallback_replies,
+    *,
+    max_escalations,
+    max_author_calls: int | None = None,
+    on_event=None,
+):
+    """A toolbox wired with BOTH a cheap local coder and a paid coder-fallback, each scripted."""
+    local = _FakeCoder(local_replies)
+    fallback = _FakeCoder(fallback_replies)
+    box = _make_toolbox(
+        tmp_path,
+        coder_client=local,
+        coder_model="fake/coder-local",
+        coder_fallback_client=fallback,
+        coder_fallback_model="fake/coder-paid",
+        max_escalations=max_escalations,
+        max_author_calls=max_author_calls,
+        on_event=on_event,
+    )
+    return box, local, fallback
+
+
+def test_failed_local_author_escalates_the_same_brief_to_the_fallback(tmp_path):
+    """Criterion 1: when local authoring spends its validator-retry budget, the SAME brief goes to
+    the fallback with the full validator-retry budget (the fallback fails twice, lands on its third
+    attempt — so the fallback gets its own initial + 2 retries)."""
+    box, local, fallback = _escalation_box(
+        tmp_path,
+        [_fenced(BROKEN)] * 3,  # local burns its full retry budget
+        [_fenced(BROKEN), _fenced(BROKEN), _fenced(_named("esc_probe"))],
+        max_escalations=1,
+    )
+    out = box.dispatch("write_strategy", {"name": "esc_probe", "brief": BRIEF_ARGS})
+
+    assert out.get("ok") is True
+    assert out["name"] == "esc_probe"
+    assert out["escalated"] is True  # the write surfaces that the paid model authored it
+    assert out["author_model"] == "fake/coder-paid"
+    assert box.escalations == 1
+    assert len(local.calls) == 3  # local spent its whole retry budget first
+    assert len(fallback.calls) == 3  # the fallback got the FULL validator-retry budget too
+    # The fallback received the SAME brief content the local coder was given.
+    fb_prompt = fallback.calls[0]["messages"][0]["content"]
+    assert BRIEF_ARGS["thesis"] in fb_prompt
+    assert BRIEF_ARGS["scenarios"] in fb_prompt
+    # Both engines' completions count against the author-call budget (retries included).
+    assert box.author_calls == 6  # 3 local + 3 fallback
+    # The file the fallback authored actually landed in the working tier.
+    assert library.strategy_path(box.strategies_dir, "esc_probe") == box.strategies_dir.tmp / (
+        "esc_probe.py"
+    )
+
+
+def test_escalation_that_also_fails_is_still_counted_and_skips_the_strategy(tmp_path):
+    """Criterion 3: an escalation whose fallback ALSO exhausts its budget still counts (bounded
+    spend is what we meter), and the write comes back as a repairable validation error — the
+    strategy is skipped, nothing landed."""
+    box, local, fallback = _escalation_box(
+        tmp_path,
+        [_fenced(BROKEN)] * 3,
+        [_fenced(BROKEN)] * 3,  # the paid model can't author it either
+        max_escalations=2,
+    )
+    out = box.dispatch("write_strategy", {"name": "esc_probe", "brief": BRIEF_ARGS})
+
+    assert "error" in out and "validation failed" in out["error"]
+    assert out.get("escalated") is True  # the paid model was spent, even though it failed
+    assert out.get("author_model") == "fake/coder-paid"
+    assert box.escalations == 1  # counted once — the escalation attempt, not its outcome
+    assert len(fallback.calls) == 3  # the fallback got its full budget before giving up
+    assert library.strategy_path(box.strategies_dir, "esc_probe") is None  # nothing landed
+
+
+def test_max_escalations_caps_paid_spend_across_the_session(tmp_path):
+    """Criterion 2: with cap=1, the first failed local author escalates; a SECOND strategy's local
+    failure with the cap already spent does NOT touch the fallback client at all."""
+    box, local, fallback = _escalation_box(
+        tmp_path,
+        # first strategy: local fails 3x; second strategy: local fails 3x again
+        [_fenced(BROKEN)] * 3 + [_fenced(BROKEN)] * 3,
+        [_fenced(_named("first"))],  # exactly one paid authoring available
+        max_escalations=1,
+    )
+    first = box.dispatch("write_strategy", {"name": "first", "brief": BRIEF_ARGS})
+    assert first.get("ok") is True and first["escalated"] is True
+    assert box.escalations == 1
+    paid_calls_after_first = len(fallback.calls)
+
+    second = box.dispatch("write_strategy", {"name": "second", "brief": BRIEF_ARGS})
+
+    assert "error" in second
+    assert not second.get("escalated")  # cap spent — no paid attempt on the second strategy
+    assert box.escalations == 1  # unchanged
+    assert len(fallback.calls) == paid_calls_after_first  # the fallback client was never touched
+    assert library.strategy_path(box.strategies_dir, "second") is None
+
+
+def test_max_escalations_zero_never_touches_the_fallback(tmp_path):
+    """Criterion 2: ``max_escalations == 0`` disables escalation entirely — a failed local author
+    is skipped exactly as today and the (present) fallback client is never consulted."""
+    box, local, fallback = _escalation_box(
+        tmp_path,
+        [_fenced(BROKEN)] * 3,
+        [_fenced(_named("esc_probe"))],  # available, but must never be reached
+        max_escalations=0,
+    )
+    out = box.dispatch("write_strategy", {"name": "esc_probe", "brief": BRIEF_ARGS})
+
+    assert "error" in out and "validation failed" in out["error"]
+    assert not out.get("escalated")
+    assert box.escalations == 0
+    assert fallback.calls == []  # never consulted
+    assert box.author_calls == 3  # only the local coder's completions
+
+
+def test_author_budget_refusal_never_triggers_paid_spend(tmp_path):
+    """Criterion (escalation semantics): a ``max_author_calls`` refusal short-circuits BEFORE any
+    authoring completion, so it never escalates — the paid coder is reached only by validator
+    failure, never by a spent local budget."""
+    box, local, fallback = _escalation_box(
+        tmp_path,
+        [_fenced(_named("first"))],  # one successful local authoring spends the whole budget
+        [_fenced(_named("late"))],  # present, must never be reached
+        max_escalations=5,
+        max_author_calls=1,
+    )
+    assert box.dispatch("write_strategy", {"name": "first", "brief": BRIEF_ARGS}).get("ok") is True
+    refused = box.dispatch("write_strategy", {"name": "late", "brief": BRIEF_ARGS})
+
+    assert "error" in refused and "budget" in refused["error"]
+    assert not refused.get("escalated")
+    assert box.escalations == 0  # a budget refusal is not paid spend
+    assert fallback.calls == []  # the fallback client was never consulted
+
+
+def test_escalation_events_carry_the_fallback_model(tmp_path):
+    """The per-completion authoring events for the escalated attempts name the paid fallback model,
+    so a watch session sees which model authored (or failed to author) the file."""
+    events: list = []
+    box, _, _ = _escalation_box(
+        tmp_path,
+        [_fenced(BROKEN)] * 3,
+        [_fenced(_named("esc_probe"))],
+        max_escalations=1,
+        on_event=events.append,
+    )
+    box.dispatch("write_strategy", {"name": "esc_probe", "brief": BRIEF_ARGS})
+
+    authored = _author_events(events)
+    local_events = [e for e in authored if e.meta["model"] == "fake/coder-local"]
+    paid_events = [e for e in authored if e.meta["model"] == "fake/coder-paid"]
+    assert len(local_events) == 3  # the three failed local completions
+    assert len(paid_events) == 1  # the one paid completion that landed
+    assert paid_events[0].meta["ok"] is True
+
+
+def test_no_fallback_client_configured_never_escalates(tmp_path):
+    """With a local coder but NO fallback client, a failed local author is skipped as today — even
+    with ``max_escalations`` set, there is nothing to escalate to."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN)] * 3, max_author_calls=None)
+    box.max_escalations = 5  # a cap without a fallback engine is inert
+    out = box.dispatch("write_strategy", {"name": "esc_probe", "brief": BRIEF_ARGS})
+
+    assert "error" in out and "validation failed" in out["error"]
+    assert not out.get("escalated")
+    assert box.escalations == 0

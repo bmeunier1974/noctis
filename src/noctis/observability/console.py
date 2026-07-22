@@ -44,6 +44,9 @@ _STYLE: dict[str, tuple[str, str | None, bool]] = {
     "feed": ("~", None, True),
     "heartbeat": ("♥", typer.colors.BLUE, True),
     "phase": ("#", typer.colors.MAGENTA, False),
+    # A stage boundary is the episodic session's inner frame (#73): the `▸` glyph + a distinct
+    # bright-magenta so it stands apart from the outer `phase` frame while reading as its sibling.
+    "stage": ("▸", typer.colors.BRIGHT_MAGENTA, False),
 }
 
 _MIN_BODY_WIDTH = 20  # never wrap narrower than this, however deep the gutter

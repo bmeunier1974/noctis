@@ -398,12 +398,56 @@ def build_recorder(settings, *, argv: list[str], mode: str | None):
 # ─────────────────────────────────────────────────────────────────────────────
 # The agent research session
 # ─────────────────────────────────────────────────────────────────────────────
+# The episodic memory-distillation default (episodic-research epic #62): when the episodic loop
+# is selected and the operator left ``research.memory_distill_every`` at its global-default 0,
+# distillation defaults ON at this modest cadence. Applied as a per-session *effective value* on
+# the shared settings instance in the loop-selection path (:meth:`ResearchSession.run`) — never a
+# change to the class default — so a conversation-loop session's behavior stays bit-identical.
+_EPISODIC_DISTILL_DEFAULT = 1
+
+# The context window the episodic briefings assert against when the operator left
+# ``research.agent.context_window`` unset. Generous so the build-time fit assertion is effectively
+# inert (matching the conversation loop's unlimited history); an operator on a small-context
+# backend sets ``context_window`` to engage the real discipline (the evidence-gated flip is #76).
+_EPISODIC_CONTEXT_WINDOW = 128_000
+
+
+def resolve_research_loop(settings) -> str:
+    """Which research loop this session runs — ``"conversation"`` | ``"episodic"`` — from
+    ``research.agent.loop``.
+
+    ``"episodic"`` selects the deterministic episodic driver; ``"auto"`` (the default) and
+    anything else resolve to the conversation loop in this story. The evidence-gated flip of
+    ``"auto"`` to episodic-on-small-window lands in #76 — the one place that decision moves is
+    this function, so the entrypoints never learn about it.
+    """
+    return "episodic" if settings.research.agent.loop == "episodic" else "conversation"
+
+
+def effective_memory_distill_every(settings) -> int:
+    """The memory-distillation cadence for this session: the operator's ``memory_distill_every``
+    when set, otherwise the episodic default (#62) when the episodic loop is selected, else off.
+
+    Pure — the loop-selection path applies it to the shared settings so the CLOSE-phase
+    distillation reads the effective value with no change to the global default (the
+    conversation loop keeps ``0`` = off, bit-identical to today)."""
+    configured = int(settings.research.memory_distill_every or 0)
+    if configured:
+        return configured
+    if resolve_research_loop(settings) == "episodic":
+        return _EPISODIC_DISTILL_DEFAULT
+    return 0
+
+
 @dataclass
 class ResearchSession:
     """One assembled agent research session: client + budgets + toolbox, ready to run.
 
     Built by :func:`build_research_session`; ``noctis research`` and the runtime's RESEARCH
-    phase both run exactly this bundle, so their loop kwargs can never drift apart again.
+    phase both run exactly this bundle, so their loop kwargs can never drift apart again. The
+    loop that actually drives the session — the conversation transcript or the episodic driver —
+    is resolved from ``research.agent.loop`` inside :meth:`run`, so both entrypoints follow the
+    same selection without a code change.
     """
 
     settings: Settings
@@ -419,7 +463,21 @@ class ResearchSession:
         return self.settings.research.model or self.settings.research.agent.model
 
     def run(self, *, max_iterations: int | None = None, stop_event=None) -> ResearchSummary:
-        """Run the session. ``max_iterations`` falls back to the cost-profile budget."""
+        """Run the session behind the ``research.agent.loop`` selector. ``max_iterations`` falls
+        back to the cost-profile budget for either loop."""
+        if resolve_research_loop(self.settings) == "episodic":
+            # Apply the episodic memory-distillation default as a per-session effective value on
+            # the shared settings (never the global default), so CLOSE distills on the episodic
+            # cadence while a conversation session stays bit-identical.
+            self.settings.research.memory_distill_every = effective_memory_distill_every(
+                self.settings
+            )
+            return self._run_episodic(max_iterations=max_iterations, stop_event=stop_event)
+        return self._run_conversation(max_iterations=max_iterations, stop_event=stop_event)
+
+    def _run_conversation(self, *, max_iterations: int | None, stop_event) -> ResearchSummary:
+        """The conversation loop — one long tool-use transcript. Unchanged from before the loop
+        knob: byte-identical kwargs, so ``auto``/unset selects exactly today's behavior."""
         from noctis.research import run_agent_research
 
         agent_cfg = self.settings.research.agent
@@ -436,6 +494,56 @@ class ResearchSession:
             prefix_trim=self.budgets.prefix_trim,
             on_event=self.on_event,
             mandate=self.mandate,
+        )
+
+    def _run_episodic(self, *, max_iterations: int | None, stop_event) -> ResearchSummary:
+        """The episodic driver — a deterministic session machine that calls the model only at
+        narrow judgment episodes and executes everything else through the gated toolbox. The
+        episode runner (which holds the client) and the ledger are assembled here and injected;
+        the driver itself never sees the client. Returns the same summary shape as the
+        conversation loop, so the runtime and the CLI are untouched."""
+        from noctis.engine.runtime import trading_roster
+        from noctis.research.driver import make_episodes, run_episodic_research
+        from noctis.research.episode import EpisodeRunner
+        from noctis.research.ledger import SessionLedger
+
+        settings = self.settings
+        agent_cfg = settings.research.agent
+        runner_kwargs: dict[str, Any] = {}
+        if agent_cfg.max_tokens:
+            runner_kwargs["max_tokens"] = agent_cfg.max_tokens
+        runner = EpisodeRunner(
+            client=self.client,
+            retries=agent_cfg.episode_retries,
+            on_event=self.on_event,
+            **runner_kwargs,
+        )
+        ledger = SessionLedger(settings.state_dir)
+        context_window = agent_cfg.context_window or _EPISODIC_CONTEXT_WINDOW
+        formulate, decide = make_episodes(
+            runner=runner,
+            toolbox=self.toolbox,
+            ledger=ledger,
+            mandate=self.mandate,
+            context_window=context_window,
+        )
+        lake = self.toolbox.lake
+        ready = [s for s in trading_roster(settings, lake) if lake.check_symbol_ready(s)]
+        fit_symbols = ready[: settings.research.fit_set_size]
+        return run_episodic_research(
+            toolbox=self.toolbox,
+            ledger=ledger,
+            formulate=formulate,
+            decide=decide,
+            fit_symbols=fit_symbols,
+            budget_minutes=settings.research_time_budget_minutes,
+            max_episodes=max_iterations or self.budgets.max_iterations,
+            completions=lambda: runner.completions,
+            stop_event=stop_event,
+            mandate_source=self.mandate.source if self.mandate else None,
+            models={"driver": self.model, "coder": agent_cfg.coder_model},
+            sweep_trials=self.toolbox.default_sweep_trials,
+            on_event=self.on_event,
         )
 
 
@@ -473,6 +581,41 @@ def _build_coder_client(settings):
             coder_model,
         )
     return coder
+
+
+def _build_coder_fallback_client(settings):
+    """The PAID coder-fallback client for ``research.agent.coder_fallback_model`` (story #72), or
+    ``None`` — the counted escalation target a spent local author falls back to.
+
+    Escalation is a fallback FROM local authoring, so this is built only when BOTH a local
+    ``coder_model`` and a ``coder_fallback_model`` are configured; either unset ⇒ ``None`` (no
+    escalation path, and no wasted client). Built stateless beside the local coder through the
+    shared :func:`~noctis.research.client_for` constructor with the same *deliberate*, budgeted
+    thinking decision (``coder_thinking``, ``deliberate=True``) — the paid coder reasons through
+    authoring just like the local one. If that client can't be built (its provider's key or the
+    ``[llm]`` extra is missing) the degradation is loud, never silent: warn and fall back to
+    ``None``, so the session still assembles and a failed local author is simply skipped as today
+    — the same graceful-degradation contract as :func:`_build_coder_client`, never a mid-session
+    failure. Bounded per session by ``research.agent.max_escalations`` (0 = never escalate)."""
+    from noctis.research import client_for
+
+    agent = settings.research.agent
+    if not agent.coder_model or not agent.coder_fallback_model:
+        return None
+    fallback = client_for(
+        settings,
+        agent.coder_fallback_model,
+        thinking=agent.coder_thinking,
+        deliberate=True,
+    )
+    if fallback is None:
+        logger.warning(
+            "coder_fallback_model %r is configured but no fallback client could be built (its "
+            "provider's API key or the [llm] extra is missing) — assembling with no escalation "
+            "path; a failed local author will be skipped as today. See docs/configuration.md.",
+            agent.coder_fallback_model,
+        )
+    return fallback
 
 
 def build_research_session(
@@ -524,6 +667,7 @@ def build_research_session(
         mandate_source=mandate.source if mandate else None,
         mandate=mandate,
         coder_client=_build_coder_client(settings),
+        coder_fallback_client=_build_coder_fallback_client(settings),
         on_event=on_event,
     )
     return ResearchSession(

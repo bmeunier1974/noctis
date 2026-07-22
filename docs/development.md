@@ -71,6 +71,15 @@ uv run mypy                       # type-check src/noctis
 uv run pre-commit run --all-files # all quality gates at once
 ```
 
+## Dev scripts
+
+`scripts/` holds dev tools that are deliberately *not* CLI subcommands. The one there today is the
+**parity harness** (`scripts/parity_harness.py`): it runs both research loops — conversation and
+episodic — on one fixed lake fixture and prints a side-by-side metrics comparison, the evidence gate
+for preferring episodic on small-context backends. It runs *paid* model sessions, so it refuses
+without an API key and prints its spend first; the deterministic metric math it prints is covered by
+`tests/test_parity.py`. See [parity.md](parity.md).
+
 ## Reading a QA report
 
 `--debug` (on both `noctis run` and `noctis research`, see

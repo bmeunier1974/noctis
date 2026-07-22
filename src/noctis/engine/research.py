@@ -56,6 +56,24 @@ class ResearchSummary:
     # loop fills this from the toolbox's undecided set at session end (sorted); empty by default so
     # the legacy loop and existing constructors are unaffected. They are archived after the TTL.
     undecided: list[str] = field(default_factory=list)
+    # Failed local authoring attempts escalated to the paid coder-fallback model this session
+    # (episodic driver, story #72). The episodic driver fills it from the toolbox's counter; the
+    # conversation loop leaves it 0, so a later report story can show exactly what the paid model
+    # bought. 0 by default keeps the legacy/conversation constructors unaffected.
+    escalations: int = 0
+    # The episodic session's ledger file, so the CLOSE report can read a per-session rollup and a
+    # per-candidate stage trail from it (story #74). The episodic driver fills it; the conversation
+    # loop and the legacy loop leave it None (they write no ledger), so a ledgerless report renders
+    # exactly as today. None by default keeps every existing constructor unaffected.
+    ledger_path: str | None = None
+    # Total judgment/driver-model tokens this session — the sum of the four neutral usage fields
+    # (input + output + cache-creation + cache-read) across every completion the loop's own model
+    # made, retries included. Both agent loops fill it from usage they already track: the
+    # conversation loop from its per-round usage totals, the episodic driver from its ledger's
+    # episode token sums. Coder-authoring completions run on a separate client and are excluded from
+    # both, so the figure is one comparable spend axis (the parity harness's tokens/verdict row,
+    # story #75). 0 by default keeps the legacy loop and every existing constructor unaffected.
+    tokens_total: int = 0
 
 
 def _utcnow() -> datetime:

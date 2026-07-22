@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from noctis.observability import Console, Event, render_plain
+from noctis.observability.events import stage_event
 
 
 def _console(verbose, **kw):
@@ -176,7 +177,7 @@ def test_render_plain_collapses_multiline_and_prefixes_by_kind():
 
 
 @pytest.mark.parametrize(
-    "kind", ["think", "say", "tool", "result", "usage", "trade", "refuse", "author"]
+    "kind", ["think", "say", "tool", "result", "usage", "trade", "refuse", "author", "stage"]
 )
 def test_render_plain_is_single_line_for_every_kind(kind):
     assert "\n" not in render_plain(Event(kind, "a\nb\nc"))
@@ -199,6 +200,42 @@ def test_author_failure_colors_red_like_a_failed_tool():
 def test_render_plain_prefixes_author_with_its_glyph():
     line = render_plain(Event("author", "author probe attempt 1"))
     assert line.startswith("✎ ")
+
+
+# ── stage boundaries (episodic verbose narration, #73) ────────────────────────────────────────
+def test_stage_event_builder_carries_the_stage_and_strategy():
+    # The builder is the single source of the boundary line's format: an uppercased stage label,
+    # the strategy after a `·` when named, and the structured stage/strategy in meta at level 1.
+    ev = stage_event("formulate")
+    assert ev.kind == "stage" and ev.level == 1
+    assert ev.text == "FORMULATE" and ev.meta == {"stage": "formulate"}
+
+    ev2 = stage_event("match", "intraday_momentum_1")
+    assert ev2.text == "MATCH · intraday_momentum_1"
+    assert ev2.meta == {"stage": "match", "strategy": "intraday_momentum_1"}
+
+
+def test_stage_boundary_shows_at_verbose_and_is_gated_below_it():
+    # A stage boundary is the episodic session's skeleton — it shows at -v (level 1) like a tool
+    # line, and is gated out of a quiet (verbose=0) run.
+    con, out = _console(1)
+    con(stage_event("optimize", "intraday_momentum_1"))
+    assert any("OPTIMIZE" in line and "intraday_momentum_1" in line for line in out)
+
+    quiet, quiet_out = _console(0)
+    quiet(stage_event("optimize", "intraday_momentum_1"))
+    assert quiet_out == []
+
+
+def test_stage_boundary_renders_its_glyph_and_a_distinct_color():
+    con, out = _console(1, color=True)
+    con(stage_event("decide", "intraday_momentum_1"))
+    assert out[0].startswith("\x1b[")  # styled
+    assert "▸" in out[0]  # the boundary glyph
+
+
+def test_render_plain_prefixes_stage_with_its_glyph():
+    assert render_plain(Event("stage", "FORMULATE")).startswith("▸ ")
 
 
 # ── P6: in-place activity heartbeat ────────────────────────────────────────────────────────────

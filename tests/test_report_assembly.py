@@ -158,6 +158,96 @@ def test_assemble_empty_undecided_is_an_empty_entry(tmp_path):
     assert data.research["undecided"] == []
 
 
+def _ledgered_session(state_dir, session_id: str = "session-x"):
+    """Write a real two-candidate SessionLedger arc (one escalated author, one reject, one
+    approve+promote) and return it — the ledger the CLOSE report reads a rollup + trail from."""
+    from noctis.research.ledger import SessionLedger
+
+    led = SessionLedger(state_dir, session_id)
+    led.record_session_start(mandate="m", budgets={}, models={"driver": "d"})
+    led.record_thesis("momo_1", "buy strength")
+    led.record_stage("formulate")
+    led.record_episode(stage="formulate", model="driver", tokens=12, outcome="ok")
+    led.record_stage("match", strategy="momo_1")
+    led.record_stage("author", strategy="momo_1")
+    led.record_stage("optimize", strategy="momo_1", detail={"trials": 5, "best_metric": 1.2})
+    led.record_stage("decide", strategy="momo_1")
+    led.record_episode(stage="decide", model="driver", tokens=8, outcome="ok")
+    led.record_verdict("momo_1", verdict="reject", lesson="thin", promoted=False)
+    led.record_thesis("rev_2", "fade the spike")
+    led.record_stage("author", strategy="rev_2")
+    led.record_episode(stage="author", model="coder-paid", tokens=40, outcome="ok", escalated=True)
+    led.record_stage("optimize", strategy="rev_2", detail={"trials": 7, "best_metric": 2.5})
+    led.record_stage("decide", strategy="rev_2")
+    led.record_verdict("rev_2", verdict="approve", lesson="edge holds", promoted=True)
+    led.record_session_end(formulated=2, promoted=1, rejected=1, note="max_episodes")
+    return led
+
+
+def test_assemble_threads_the_ledger_rollup_and_candidate_trail(tmp_path):
+    """A folded episodic summary carrying a ledger path lands a per-session rollup + candidate
+    trail in the research block, derived from the session ledger."""
+    from noctis.reporting.report import render_report
+
+    state = tmp_path / "state"
+    led = _ledgered_session(state, "session-x")
+    reg = ChampionRegistry(state / "champions.json", capacity=3)
+    session = SessionActivity()
+    session.research_ledgers.append(str(led.path))
+
+    data = assemble_report(
+        as_of="2026-01-06",
+        mode="paper",
+        registry=reg,
+        memory=InMemoryMemory(),
+        state_dir=state,
+        session=session,
+    )
+
+    sessions = data.research["sessions"]
+    assert len(sessions) == 1
+    rollup = sessions[0]["rollup"]
+    assert rollup["theses"] == 2 and rollup["authored"] == 2
+    assert rollup["trials"] == 12 and rollup["escalations"] == 1
+    assert rollup["verdicts"] == {"approve": 1, "reject": 1}
+    assert [c["strategy"] for c in sessions[0]["candidates"]] == ["momo_1", "rev_2"]
+    # It renders end to end.
+    text = render_report(data)
+    assert "Theses formulated: 2" in text and "momo_1" in text
+
+
+def test_assemble_without_a_ledger_adds_no_sessions_key(tmp_path):
+    """No ledger path folded ⇒ the research block carries no ``sessions`` key at all, so a
+    ledgerless (conversation-loop / legacy / `noctis report`) render is byte-identical to today."""
+    reg = ChampionRegistry(tmp_path / "champions.json", capacity=3)
+    data = assemble_report(
+        as_of="2026-01-06",
+        mode="paper",
+        registry=reg,
+        memory=InMemoryMemory(),
+        state_dir=tmp_path / "state",
+    )
+    assert "sessions" not in data.research
+
+
+def test_assemble_tolerates_a_missing_or_malformed_ledger(tmp_path):
+    """A folded ledger path that points at a missing/empty file never breaks the report — that
+    session simply contributes no rollup (graceful degradation to today's rendering)."""
+    reg = ChampionRegistry(tmp_path / "champions.json", capacity=3)
+    session = SessionActivity()
+    session.research_ledgers.append(str(tmp_path / "state" / "sessions" / "ghost.jsonl"))
+
+    data = assemble_report(
+        as_of="2026-01-06",
+        mode="paper",
+        registry=reg,
+        memory=InMemoryMemory(),
+        state_dir=tmp_path / "state",
+        session=session,
+    )
+    assert "sessions" not in data.research  # the missing ledger contributed nothing
+
+
 def test_corrupt_account_omits_curve_and_keeps_forward_realized(tmp_path):
     """An unreadable paper account degrades to no cumulative line — never an error — and
     the forward section falls back to realized-only (no broker to mark unrealized)."""

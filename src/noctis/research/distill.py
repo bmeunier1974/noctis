@@ -105,11 +105,34 @@ def distill_findings(memory: Memory, client, *, max_lines: int = _DISTILL_MAX_LI
     return True
 
 
+def _distill_client(settings):
+    """Pick the LLM client memory distillation should use (context plan P3 / story #72).
+
+    Routes to the PAID coder-fallback model when one is configured AND its provider key resolves:
+    distillation is a small, once-per-cadence map-reduce, so when the operator already pays for a
+    strong coder it is the natural model for it. When ``coder_fallback_model`` is unset, or its
+    provider key/extra is missing (``client_for`` returns ``None``), it degrades to the existing
+    local/default research client — byte-identical to before this story, so conversation-loop
+    behavior is unchanged when the knob is not configured."""
+    from noctis.research import build_llm_client
+
+    fallback_model = getattr(settings.research.agent, "coder_fallback_model", None)
+    if fallback_model:
+        from noctis.research.llm import client_for
+
+        paid = client_for(settings, fallback_model)
+        if paid is not None:
+            return paid
+    return build_llm_client(settings)
+
+
 def maybe_distill(settings, memory: Memory, *, client=None) -> bool:
     """The periodic trigger: distill when ≥ ``research.memory_distill_every`` sessions have
     completed since the last distillation. Off (0/None knob) and no-client both degrade to
     stage-1 behavior; the counter resets only on a successful write, so a transient failure
-    retries at the next close instead of silently skipping a cycle."""
+    retries at the next close instead of silently skipping a cycle. When no ``client`` is passed,
+    the model is chosen by :func:`_distill_client` — the paid coder-fallback when a key exists,
+    the local/default client otherwise (story #72)."""
     every = int(getattr(settings.research, "memory_distill_every", 0) or 0)
     if every <= 0:
         return False
@@ -117,9 +140,7 @@ def maybe_distill(settings, memory: Memory, *, client=None) -> bool:
     if _read_counter(state_dir) < every:
         return False
     if client is None:
-        from noctis.research import build_llm_client
-
-        client = build_llm_client(settings)
+        client = _distill_client(settings)
     if client is None:
         logger.info("memory distillation due but no LLM client; keeping stage-1 view")
         return False
