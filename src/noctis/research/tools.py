@@ -810,6 +810,26 @@ class ResearchToolbox:
             "materially-new dimension this attempt adds that the post-mortem did "
             "not cover (short leg / session-time gate / different symbol character).",
         }
+        thesis = {
+            "type": "string",
+            "description": "Optional: the motivating idea in one paragraph, recorded verbatim in "
+            "the research journal beside the class tag so a later session or report can read the "
+            "thesis without re-parsing the file docstring.",
+        }
+        parent_thesis = {
+            "type": "string",
+            "description": "Optional lineage: the prior thesis this one pivots from — its parent "
+            "in a pivot chain a future session can walk.",
+        }
+        pivot_rationale = {
+            "type": "string",
+            "description": "Optional lineage: why this thesis pivots away from parent_thesis.",
+        }
+        lineage = {
+            "thesis": thesis,
+            "parent_thesis": parent_thesis,
+            "pivot_rationale": pivot_rationale,
+        }
         name = {"type": "string", "description": "lower_snake_case strategy name."}
         if self.coder_client is None:
             return _tool(
@@ -820,6 +840,7 @@ class ResearchToolbox:
                     "source": {"type": "string", "description": "Complete Python source."},
                     "class_tag": class_tag,
                     "new_lever": new_lever,
+                    **lineage,
                 },
                 ["name", "source"],
             )
@@ -878,6 +899,7 @@ class ResearchToolbox:
                 },
                 "class_tag": class_tag,
                 "new_lever": new_lever,
+                **lineage,
             },
             ["name", "brief"],
         )
@@ -1137,6 +1159,9 @@ class ResearchToolbox:
         brief: dict | None = None,
         class_tag: str | None = None,
         new_lever: str | None = None,
+        thesis: str | None = None,
+        parent_thesis: str | None = None,
+        pivot_rationale: str | None = None,
     ) -> dict:
         is_new = library.strategy_path(self.strategies_dir, name) is None
         # The guards that fire before any source exists (exhausted-class, undecided nudge) run
@@ -1238,6 +1263,15 @@ class ResearchToolbox:
         if class_tag:
             # Persist the class so a later reject_strategy can attribute it across sessions.
             self.journal.record_class_tag(name, class_tag)
+        if thesis:
+            # The motivating idea gets a durable, typed home beside the class tag, so a later
+            # session or report can walk the pivot chain instead of re-parsing the docstring.
+            self.journal.record_thesis(
+                name,
+                thesis,
+                parent_thesis=parent_thesis,
+                pivot_rationale=pivot_rationale,
+            )
         out = {"ok": True, **result}
         if warning:
             out["warning"] = warning

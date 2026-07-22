@@ -972,6 +972,55 @@ def test_write_strategy_allows_a_fresh_class_and_journals_the_tag(toolbox):
     assert toolbox.journal.class_tag("probe") == "brand new idea"
 
 
+def test_write_strategy_journals_a_thesis_with_lineage(toolbox):
+    out = toolbox.dispatch(
+        "write_strategy",
+        {
+            "name": "probe",
+            "source": PROBE,
+            "class_tag": "brand new idea",
+            "thesis": "Long above a short moving average; the drift persists intraday.",
+            "parent_thesis": "Trend-following survives on liquid names.",
+            "pivot_rationale": "Narrow to the intraday horizon.",
+        },
+    )
+    assert out.get("ok") is True
+    thesis = toolbox.journal.thesis("probe")
+    assert thesis is not None
+    assert thesis.text == "Long above a short moving average; the drift persists intraday."
+    assert thesis.parent_thesis == "Trend-following survives on liquid names."
+    assert thesis.pivot_rationale == "Narrow to the intraday horizon."
+    # The thesis record lands beside the class-tag record, not instead of it.
+    assert toolbox.journal.class_tag("probe") == "brand new idea"
+
+
+def test_write_strategy_thesis_lineage_is_optional(toolbox):
+    out = toolbox.dispatch(
+        "write_strategy",
+        {"name": "probe", "source": PROBE, "thesis": "A bare idea with no lineage."},
+    )
+    assert out.get("ok") is True
+    thesis = toolbox.journal.thesis("probe")
+    assert thesis is not None
+    assert thesis.text == "A bare idea with no lineage."
+    assert thesis.parent_thesis is None
+    assert thesis.pivot_rationale is None
+
+
+def test_write_strategy_without_thesis_records_none(toolbox):
+    out = toolbox.dispatch("write_strategy", {"name": "probe", "source": PROBE})
+    assert out.get("ok") is True
+    assert toolbox.journal.thesis("probe") is None
+
+
+def test_write_schema_exposes_optional_thesis_lineage_fields(toolbox):
+    schema = _write_spec(toolbox)["input_schema"]
+    props = schema["properties"]
+    assert {"thesis", "parent_thesis", "pivot_rationale"} <= set(props)
+    # Optional: none of the lineage fields join `required` (which stays name/source).
+    assert schema["required"] == ["name", "source"]
+
+
 def test_market_context_surfaces_exhausted_classes(toolbox):
     toolbox.exhausted.record("dead class", "why it died", example="x")
     ctx = toolbox.market_context()
