@@ -52,6 +52,10 @@ class ResearchSummary:
     # Coder-model completions spent this session (0 without a configured coder_model). Surfaced
     # alongside the backtest count so a session report shows how much authoring the split did.
     author_calls: int = 0
+    # Strategies authored this session but never carried to a verdict (promote/reject) — the agent
+    # loop fills this from the toolbox's undecided set at session end (sorted); empty by default so
+    # the legacy loop and existing constructors are unaffected. They are archived after the TTL.
+    undecided: list[str] = field(default_factory=list)
 
 
 def _utcnow() -> datetime:

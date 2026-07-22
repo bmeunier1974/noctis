@@ -1281,3 +1281,87 @@ def test_tool_event_structured_keys_survive_a_colliding_brief():
     assert ev.meta["tool"] == "run_backtest"
     assert ev.meta["args"] == {"name": "probe"}
     assert ev.meta["gap"] == 0.1  # unrelated brief numbers still ride along
+
+
+# ── #55 session-end honesty: undecided list + WARNING on every stop reason ────────────────────
+def _ending_client(reason: str):
+    """A minimal client that drives the loop to the requested stop reason in as few rounds as
+    possible, so the session-end honesty check runs on each distinct exit path."""
+    if reason == "agent_done":
+        return FakeLLM([text_turn("No verdict this session.")], capabilities=NO_CAPS)
+    if reason == "max_iterations":
+        # A model that never resolves a native tool call — bounded by the iteration budget.
+        return FakeLLM([misfire_turn() for _ in range(3)], capabilities=NO_CAPS)
+    if reason == "api_error":
+        client = FakeLLM([], capabilities=NO_CAPS)
+        client.complete = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("connection refused"))
+        return client
+    raise AssertionError(f"unknown stop reason {reason!r}")
+
+
+@pytest.mark.parametrize("reason", ["agent_done", "max_iterations", "api_error"])
+def test_undecided_strategies_warn_and_surface_on_every_stop_reason(tmp_path, caplog, reason):
+    """However the loop ends — agent done, iteration budget, or an API error — a non-empty
+    toolbox undecided set is surfaced on the summary (sorted) and named in one WARNING."""
+    toolbox = _make_toolbox(tmp_path)
+    toolbox.undecided.update({"gamma", "alpha", "beta"})
+    client = _ending_client(reason)
+
+    with caplog.at_level("WARNING", logger="noctis.research.agent"):
+        summary = run_agent_research(
+            toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=3
+        )
+
+    assert summary.stopped_reason == reason
+    # Sorted for determinism, populated straight from the toolbox set.
+    assert summary.undecided == ["alpha", "beta", "gamma"]
+
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING" and "undecided" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    msg = warnings[0]
+    assert "3 strategies left undecided" in msg
+    assert "archived after the TTL" in msg
+    for name in ("alpha", "beta", "gamma"):
+        assert name in msg
+
+
+def test_no_undecided_leaves_field_empty_and_logs_no_warning(tmp_path, caplog):
+    """A clean session (nothing left undecided) leaves the summary field empty and emits no
+    undecided WARNING — the honesty check adds zero noise on the common path."""
+    toolbox = _make_toolbox(tmp_path)
+    client = FakeLLM([text_turn("Rejected; nothing carried forward.")], capabilities=NO_CAPS)
+
+    with caplog.at_level("WARNING", logger="noctis.research.agent"):
+        summary = run_agent_research(
+            toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=3
+        )
+
+    assert summary.stopped_reason == "agent_done"
+    assert summary.undecided == []
+    assert not [r for r in caplog.records if "undecided" in r.getMessage()]
+
+
+def test_undecided_populated_organically_through_the_write_gate(tmp_path):
+    """The field reads the toolbox's own set: a strategy authored but never decided during the
+    session lands on ``summary.undecided`` without the test poking the set directly."""
+    toolbox = _make_toolbox(tmp_path)
+    # write_strategy adds the name to the undecided set; the session then concludes without a
+    # verdict, so the strategy is carried out of the session undecided.
+    client = FakeLLM(
+        [
+            tool_turn(("write_strategy", {"name": "probe", "source": PROBE}, "tu_0")),
+            text_turn("Out of time before a verdict."),
+        ],
+        capabilities=NO_CAPS,
+    )
+
+    summary = run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=5
+    )
+
+    assert summary.stopped_reason == "agent_done"
+    assert summary.undecided == ["probe"]
