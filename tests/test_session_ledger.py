@@ -145,7 +145,24 @@ def test_episode_round_trips_typed(ledger):
     assert episode.misfires == 2
     assert episode.outcome == "tool_call"
     assert episode.escalated is True
+    assert episode.checks == []  # absent ⇒ empty, a tolerant default
     assert episode.at
+
+
+def test_episode_checks_round_trip_and_default_empty(ledger):
+    # Driver-side sanity-check outcomes (story #71) ride the episode line as a tolerant extension.
+    ledger.record_episode(
+        stage="formulate",
+        model="local",
+        outcome="ok",
+        checks=[{"check": "cost_arithmetic", "result": "reask"}],
+    )
+    ledger.record_episode(stage="decide", model="local", outcome="ok")  # no checks ⇒ absent
+    formulate_ep, decide_ep = ledger.episodes()
+    assert formulate_ep.checks == [{"check": "cost_arithmetic", "result": "reask"}]
+    assert decide_ep.checks == []
+    # An empty/None checks list is omitted from the record, never stored as an empty field.
+    assert "checks" not in [r for r in ledger.records() if r["stage"] == "decide"][0]
 
 
 def test_verdict_round_trips_with_class_lesson(ledger):

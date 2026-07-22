@@ -121,7 +121,12 @@ class StageTransition:
 
 @dataclass(frozen=True)
 class Episode:
-    """A typed view of an ``episode`` line: one narrow model judgment and how it went."""
+    """A typed view of an ``episode`` line: one narrow model judgment and how it went.
+
+    ``checks`` is the optional list of driver-side sanity-check outcomes (story #71) — each a
+    ``{"check": <id>, "result": <reask|exhausted>}`` naming a check that fired on this episode's
+    output and whether it earned the one corrective re-ask or exhausted it. It stays an empty list
+    for the episodes that fired none, so a reader never branches on presence."""
 
     at: str
     stage: str
@@ -130,6 +135,7 @@ class Episode:
     misfires: int
     outcome: str
     escalated: bool
+    checks: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Episode:
@@ -141,6 +147,7 @@ class Episode:
             misfires=int(record.get("misfires") or 0),
             outcome=str(record.get("outcome", "")),
             escalated=bool(record.get("escalated")),
+            checks=[dict(c) for c in (record.get("checks") or []) if isinstance(c, dict)],
         )
 
 
@@ -315,19 +322,25 @@ class SessionLedger:
         tokens: int = 0,
         misfires: int = 0,
         escalated: bool = False,
+        checks: list[dict[str, Any]] | None = None,
     ) -> None:
-        self._append(
-            {
-                "event": "episode",
-                "at": _now_iso(),
-                "stage": stage,
-                "model": model,
-                "tokens": int(tokens),
-                "misfires": int(misfires),
-                "outcome": outcome,
-                "escalated": bool(escalated),
-            }
-        )
+        """One episode line. ``checks`` is the optional driver-side sanity-check payload (story
+        #71) — a list of ``{"check", "result"}`` entries for the checks that fired on this
+        episode's output; an absent/empty list is omitted from the record rather than written as an
+        empty field, so a tolerant read distinguishes "no check fired" from a stored empty one."""
+        record: dict[str, Any] = {
+            "event": "episode",
+            "at": _now_iso(),
+            "stage": stage,
+            "model": model,
+            "tokens": int(tokens),
+            "misfires": int(misfires),
+            "outcome": outcome,
+            "escalated": bool(escalated),
+        }
+        if checks:
+            record["checks"] = [dict(c) for c in checks]
+        self._append(record)
 
     def record_verdict(
         self,

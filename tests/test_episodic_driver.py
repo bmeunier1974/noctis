@@ -96,11 +96,13 @@ class Episodes:
         self._d = list(decide_script)
         self.completions = 0
         self.formulate_calls = 0
+        self.formulate_correctives: list[str | None] = []
         self.decide_calls: list[tuple[str, str | None]] = []
 
-    def formulate(self):
+    def formulate(self, *, corrective=None):
         self.completions += 1
         self.formulate_calls += 1
+        self.formulate_correctives.append(corrective)
         return self._f.pop(0)
 
     def decide(self, strategy, *, corrective=None):
@@ -130,6 +132,26 @@ def sw(params=None, test=None, n_trials=3, **extra):
     return out
 
 
+# ── a fake exhausted-class registry mirroring ExhaustedClassRegistry.is_exhausted ───────────
+class FakeExhausted:
+    def __init__(self, tags=()):
+        self._tags = {" ".join(str(t).split()).lower() for t in tags}
+
+    def is_exhausted(self, tag):
+        key = " ".join(str(tag).split()).lower()
+        return {"reason": "a prior session ruled it out"} if key in self._tags else None
+
+
+# The market digest the driver's cost-arithmetic check compares against; the numbers here (4, 2,
+# 0, 8) overlap the default ``formulate_ok`` cost arithmetic (1m, 8bp, 4bp) so the check passes.
+_FAKE_DIGEST = {
+    "round_trip_cost_bp": 4.0,
+    "fee_bps_per_side": 2.0,
+    "slippage_bps_per_side": 0.0,
+    "median_abs_bar_move_bp": 8.0,
+}
+
+
 # ── a fake toolbox: only the gated surface the driver drives, with honest bookkeeping ───────
 class FakeToolbox:
     def __init__(
@@ -141,7 +163,9 @@ class FakeToolbox:
         screen_result=None,
         backtest_results=None,
         sweep_results=None,
+        exhausted=(),
     ):
+        self.exhausted = FakeExhausted(exhausted)
         self.promotions = 0
         self.rejections = 0
         self.author_calls = 0
@@ -173,6 +197,9 @@ class FakeToolbox:
         if script is None:
             return dict(default)
         return dict(script.pop(0) if len(script) > 1 else script[0])
+
+    def market_context(self):
+        return dict(_FAKE_DIGEST)
 
     def tool_screen_symbols(self, trend="any", volatility="any", liquidity="any", symbols=None):
         self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
@@ -503,13 +530,122 @@ def test_decide_episode_failure_reasks_then_undecided(tmp_path):
     assert [e.outcome for e in ledger.episodes() if e.stage == "decide"] == [API_ERROR, API_ERROR]
 
 
-def test_revise_verdict_leaves_the_strategy_undecided(tmp_path):
-    episodes = Episodes([formulate_ok()], [decide_ok("revise", new_lever="add a short leg")])
+def test_revise_cap_reasks_once_then_leaves_undecided(tmp_path):
+    # A `revise` is capped: the first one earns the single corrective re-ask (naming the cap); a
+    # second `revise` for the same strategy applies the DECIDE failure policy (left undecided).
+    episodes = Episodes(
+        [formulate_ok()],
+        [decide_ok("revise", new_lever="add a short leg"), decide_ok("revise", new_lever="again")],
+    )
     box = FakeToolbox()
-    summary = _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "s9"))
+    ledger = SessionLedger(tmp_path, "s9")
+    summary = _drive(episodes, box, max_episodes=3, ledger=ledger)
 
-    assert box.rejects == [] and box.evaluations == []  # revise is not a terminal verdict here
+    assert box.rejects == [] and box.evaluations == []  # revise is never a terminal verdict
+    assert len(episodes.decide_calls) == 2  # initial + exactly one capped re-ask
+    assert episodes.decide_calls[0][1] is None  # first ask has no corrective
+    assert episodes.decide_calls[1][1] is not None and "revise" in episodes.decide_calls[1][1]
     assert summary.undecided == ["intraday_momentum_1"]
+    dchecks = [e.checks for e in ledger.episodes() if e.stage == "decide"]
+    assert dchecks == [
+        [{"check": "revise_cap", "result": "reask"}],
+        [{"check": "revise_cap", "result": "exhausted"}],
+    ]
+
+
+def test_revise_cap_reask_can_recover_to_a_terminal_verdict(tmp_path):
+    # The capped re-ask lands a real verdict: the strategy is disposed, not left undecided.
+    episodes = Episodes([formulate_ok()], [decide_ok("revise", new_lever="x"), decide_ok("reject")])
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "s9b")
+    summary = _drive(episodes, box, max_episodes=3, ledger=ledger)
+
+    assert episodes.decide_calls[1][1] is not None  # the re-ask carried the cap corrective
+    assert len(box.rejects) == 1 and summary.rejections == 1  # recovered to a terminal reject
+    dchecks = [e.checks for e in ledger.episodes() if e.stage == "decide"]
+    assert dchecks == [[{"check": "revise_cap", "result": "reask"}], []]
+
+
+# ── 2c. driver-side sanity checks on episode outputs (story #71) ────────────────────────────
+def test_cost_arithmetic_check_reasks_then_proceeds_on_a_clean_second_thesis(tmp_path):
+    # A number-free cost_arithmetic cites nothing from the digest → the check fires one corrective
+    # re-ask; the clean re-ask proceeds to author/optimize/decide as usual.
+    episodes = Episodes(
+        [formulate_ok(cost_arithmetic="the move clears the round trip nicely"), formulate_ok()],
+        [decide_ok("reject")],
+    )
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "sc1")
+    summary = _drive(episodes, box, max_episodes=3, ledger=ledger)
+
+    assert episodes.formulate_calls == 2  # one corrective re-ask
+    assert episodes.formulate_correctives[0] is None
+    assert "cost_arithmetic" in episodes.formulate_correctives[1]
+    assert box.rejects and summary.iterations == 1  # the clean re-ask reached a verdict
+    fchecks = [e.checks for e in ledger.episodes() if e.stage == "formulate"]
+    assert fchecks == [[{"check": "cost_arithmetic", "result": "reask"}], []]
+
+
+def test_cost_arithmetic_check_failing_twice_ends_the_session(tmp_path):
+    # The re-ask also cites no digest number → the FORMULATE failure policy applies (end session),
+    # never an author call.
+    episodes = Episodes(
+        [
+            formulate_ok(cost_arithmetic="edge beats cost, trust me"),
+            formulate_ok(cost_arithmetic="still no numbers"),
+        ],
+        [],
+    )
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "sc2")
+    summary = _drive(episodes, box, max_episodes=5, ledger=ledger)
+
+    assert summary.stopped_reason == "formulate_failed"
+    assert box.writes == []  # nothing authored — the check caught it before the authoring call
+    assert episodes.formulate_calls == 2
+    fchecks = [e.checks for e in ledger.episodes() if e.stage == "formulate"]
+    assert fchecks == [
+        [{"check": "cost_arithmetic", "result": "reask"}],
+        [{"check": "cost_arithmetic", "result": "exhausted"}],
+    ]
+
+
+def test_class_tag_exhausted_check_reasks_then_proceeds_on_a_fresh_class(tmp_path):
+    # The proposed class is already a declared dead end → one corrective re-ask; a genuinely
+    # different class on the re-ask proceeds.
+    episodes = Episodes(
+        [formulate_ok(class_tag="dead class"), formulate_ok(class_tag="fresh class")],
+        [decide_ok("reject")],
+    )
+    box = FakeToolbox(exhausted=["dead class"])
+    ledger = SessionLedger(tmp_path, "sc3")
+    summary = _drive(episodes, box, max_episodes=3, ledger=ledger)
+
+    assert episodes.formulate_calls == 2
+    assert "dead class" in episodes.formulate_correctives[1]
+    assert box.rejects and box.rejects[0]["name"] == "fresh_class_1"  # authored the fresh class
+    assert summary.iterations == 1
+    fchecks = [e.checks for e in ledger.episodes() if e.stage == "formulate"]
+    assert fchecks == [[{"check": "class_tag_exhausted", "result": "reask"}], []]
+
+
+def test_class_tag_exhausted_check_failing_twice_ends_the_session(tmp_path):
+    # The re-ask re-proposes the same exhausted class → the FORMULATE failure policy applies.
+    episodes = Episodes(
+        [formulate_ok(class_tag="dead class"), formulate_ok(class_tag="dead class")],
+        [],
+    )
+    box = FakeToolbox(exhausted=["dead class"])
+    ledger = SessionLedger(tmp_path, "sc4")
+    summary = _drive(episodes, box, max_episodes=5, ledger=ledger)
+
+    assert summary.stopped_reason == "formulate_failed"
+    assert box.writes == []
+    fchecks = [e.checks for e in ledger.episodes() if e.stage == "formulate"]
+    assert fchecks == [
+        [{"check": "class_tag_exhausted", "result": "reask"}],
+        [{"check": "class_tag_exhausted", "result": "exhausted"}],
+    ]
 
 
 def test_approve_routes_through_evaluate_vs_champion_with_best_params_and_holdout(tmp_path):

@@ -51,21 +51,45 @@ end to end with plain fakes and zero LLM involvement.
   structural reservation. When MATCH fell back (no reservation), the holdout nomination is left
   empty and the toolbox's own out-of-fit fallback picks the symbol holdout, exactly as before.
 
+**Driver-side sanity checks on episode outputs (story #71).** A small model can emit
+schema-valid nonsense that would burn an authoring call or a verdict attempt; three cheap,
+advisory-corrective checks catch it first. They are a *first line*, not a new gate — the promotion
+gates still arbitrate quality; a failing check only earns one corrective re-ask (a message naming
+exactly what was wrong) before the stage's own failed-episode policy applies:
+
+* **FORMULATE — cost arithmetic must cite the digest.** At least one number in the formulate
+  output's ``cost_arithmetic`` must appear in the MARKET ECONOMICS digest the episode was shown
+  (:func:`_check_cost_arithmetic`, numeric-token overlap; a number-free sketch fails). The digest
+  source is the same one the briefing embeds, injected as ``market_digest``.
+* **FORMULATE — the proposed class must not be exhausted.** ``class_tag`` is checked against the
+  exhausted-class registry (:func:`_check_class_tag`, mirroring the write-gate guard). FORMULATE
+  carries no ``new_lever`` escape, so an exhausted tag simply fails — the honest move is a
+  genuinely different class.
+* **DECIDE — ``revise`` is capped.** A ``revise`` verdict earns the one corrective re-ask (naming
+  the cap); a second ``revise`` for the same strategy exhausts it and leaves the strategy undecided.
+
+Each check's outcome rides the ledger's ``episode`` line (a ``checks`` payload of
+``{check, result}`` — ``reask`` when it earned the correction, ``exhausted`` when it fired again),
+so which check fired and how its re-ask resolved is visible to reports.
+
 **The per-stage failed-episode policies (honest, documented, and deterministically tested).**
 
 * **FORMULATE failure ends the session** (``stopped_reason="formulate_failed"``): without a thesis
   there is nothing to author, and a persistently misfiring formulate model would otherwise
-  busy-loop against the episode budget rather than do useful work.
+  busy-loop against the episode budget rather than do useful work. A FORMULATE sanity check that
+  fails, then fails again on its single re-ask, ends the session the same way — the model was shown
+  what was wrong and did not fix it.
 * **AUTHOR failure skips the strategy**: a write-gate rejection is a code bug in one draft, not a
   verdict on the thesis, so the driver drops it and formulates the next idea. (The refused draft
   was never added to the undecided set, so nothing lingers.)
-* **DECIDE failure re-asks once, then leaves the strategy undecided**: a failed decide episode
-  *or* a refused verdict triggers exactly one re-ask, with the failure note / the method's refusal
-  folded in as corrective context. If the re-ask still fails or is still refused, the strategy is
-  left undecided (the toolbox already holds it there from AUTHOR time, so the session-end rollup
-  and the summary surface it, and the TTL sweep archives it later — never a silent loss). A
-  ``revise`` verdict is not terminal in this skeleton: the strategy is left undecided for a later
-  story to thread back into another optimize round.
+* **DECIDE failure re-asks once, then leaves the strategy undecided**: a failed decide episode, a
+  refused verdict, *or* a capped ``revise`` triggers exactly one re-ask, with the failure note /
+  refusal / cap folded in as corrective context. The two-attempt cap is shared across all three
+  causes — one corrective re-ask total, never more — so a mix (e.g. a ``revise`` then a gate
+  refusal) still spends only the one re-ask. If the re-ask still fails, is still refused, or
+  ``revise``s again, the strategy is left undecided (the toolbox already holds it there from AUTHOR
+  time, so the session-end rollup and the summary surface it, and the TTL sweep archives it later —
+  never a silent loss).
 
 **Budgets.** ``max_episodes`` (mapped from ``max_iterations``) is enforced off the injected
 ``completions`` counter — the episode runner's own per-completion tally, retries included — checked
@@ -89,6 +113,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from noctis.engine.research import ResearchSummary, StopEvent
+from noctis.research import digests
 from noctis.research.briefings import decide_briefing, formulate_briefing
 from noctis.research.episode import EmitContract, EpisodeResult
 
@@ -110,11 +135,40 @@ DECIDE = "decide"
 # The verdict vocabulary of a DECIDE episode.
 _APPROVE, _REJECT, _REVISE = "approve", "reject", "revise"
 
-# One re-ask on a failed/refused DECIDE, then undecided (see the module docstring).
+# One re-ask on a failed/refused DECIDE, then undecided (see the module docstring). The same
+# two-attempt cap absorbs a `revise` verdict: the first revise earns the corrective re-ask, a
+# second revise for the same strategy exhausts it (undecided).
 _DECIDE_ATTEMPTS = 2
 
-# Folded into a re-asked decide briefing so the model sees why its last verdict did not land.
+# One re-ask on a failed FORMULATE sanity check, then end the session (the FORMULATE policy).
+_FORMULATE_ATTEMPTS = 2
+
+# Folded into a re-asked briefing so the model sees why its last output did not land.
 _CORRECTIVE_HEADER = "PREVIOUS VERDICT DID NOT LAND — correct and re-decide:"
+_FORMULATE_CORRECTIVE_HEADER = (
+    "PREVIOUS THESIS FAILED A DRIVER SANITY CHECK — correct and re-formulate:"
+)
+
+# ── driver-side sanity checks on episode outputs (story #71) ─────────────────────────────────
+# Three cheap, advisory-corrective checks catch schema-valid nonsense from a small model *before*
+# it burns an authoring call or a verdict attempt. Each is a FIRST LINE, not a gate: a failing
+# check earns exactly one corrective re-ask (a message naming what was wrong), and if the re-ask
+# still fails the stage's own failed-episode policy applies. The promotion gates absorb whatever
+# slips past. The check ids and result labels below ride the ledger episode line's ``checks``
+# payload so a reader sees which check fired and how the re-ask resolved.
+_COST_CHECK = "cost_arithmetic"  # cost_arithmetic cites no number from the digest shown
+_CLASS_CHECK = "class_tag_exhausted"  # the proposed class is already a declared dead end
+_REVISE_CHECK = "revise_cap"  # a `revise` verdict — capped at one re-ask per strategy
+_REASK, _EXHAUSTED = "reask", "exhausted"  # earned the re-ask vs fired again and exhausted it
+
+# A maximal integer/decimal run — the cheap numeric-token extractor the cost check overlaps on.
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+_REVISE_CORRECTIVE = (
+    "a 'revise' verdict is capped — this session does not spend another tuning round on your "
+    "say-so. Decide on the current evidence: approve (challenge the board), reject (a class-level "
+    "dead end), or revise once more only if the class genuinely continues."
+)
 
 # ── the deterministic MATCH lexicon ─────────────────────────────────────────────────────────
 # A pure keyword map from the formulate output's prose ``symbol_character`` onto the screener's
@@ -358,9 +412,78 @@ _DECIDE_SYSTEM = (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Driver-side sanity checks on episode outputs (story #71)
+# ─────────────────────────────────────────────────────────────────────────────
+def _numbers(text: str) -> set[float]:
+    """The set of numeric-token values in ``text`` — the cheap, formatting-agnostic basis for the
+    cost-arithmetic overlap check (``4bp`` and ``4.0`` both read ``4.0``)."""
+    out: set[float] = set()
+    for token in _NUMBER_RE.findall(text or ""):
+        try:
+            out.add(float(token))
+        except ValueError:  # pragma: no cover — the regex only yields parseable numbers
+            continue
+    return out
+
+
+@dataclass(frozen=True)
+class SanityCheck:
+    """One driver-side sanity-check outcome: ``ok`` when it passed, else the ``check`` id that
+    fired and the ``corrective`` message naming what was wrong (folded into the one re-ask)."""
+
+    ok: bool
+    check: str = ""
+    corrective: str = ""
+
+
+_CHECK_OK = SanityCheck(True)
+
+
+def _check_cost_arithmetic(fo: FormulateOutput, digest_text: str) -> SanityCheck:
+    """The cost arithmetic must cite at least one number that actually appears in the MARKET
+    digest the episode was shown; a number-free or wholly-invented cost sketch fails. Cheap and
+    honest — a first line against schema-valid nonsense, never a parser of the arithmetic."""
+    if _numbers(fo.cost_arithmetic) & _numbers(digest_text):
+        return _CHECK_OK
+    return SanityCheck(
+        False,
+        _COST_CHECK,
+        "your cost_arithmetic cites no number from the MARKET ECONOMICS digest you were shown — "
+        "redo it against the real round-trip cost and per-bar move numbers in the briefing.",
+    )
+
+
+def _check_class_tag(fo: FormulateOutput, exhausted: Any) -> SanityCheck:
+    """The proposed ``class_tag`` must not already be a declared dead end (mirrors the write-gate
+    exhausted-class guard). FORMULATE carries no ``new_lever`` escape, so an exhausted tag simply
+    fails here — the honest move is a genuinely different class, not a loosened guard."""
+    if exhausted is None:
+        return _CHECK_OK
+    dead = exhausted.is_exhausted(fo.class_tag)
+    if dead is None:
+        return _CHECK_OK
+    reason = dead.get("reason", "") if isinstance(dead, dict) else ""
+    return SanityCheck(
+        False,
+        _CLASS_CHECK,
+        f"the class {fo.class_tag!r} was already declared a dead end by a prior session "
+        f"({reason}) — do not re-mine it; propose a genuinely different class.",
+    )
+
+
+def _formulate_checks(fo: FormulateOutput, digest_text: str, exhausted: Any) -> SanityCheck:
+    """Run the FORMULATE sanity checks in order (cost arithmetic, then exhausted class) and return
+    the first that fires, or the passing result when both are clean."""
+    for check in (_check_cost_arithmetic(fo, digest_text), _check_class_tag(fo, exhausted)):
+        if not check.ok:
+            return check
+    return _CHECK_OK
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Episode callables — production wiring (tests inject plain fakes instead)
 # ─────────────────────────────────────────────────────────────────────────────
-FormulateEpisode = Callable[[], EpisodeResult[FormulateOutput]]
+FormulateEpisode = Callable[..., EpisodeResult[FormulateOutput]]
 DecideEpisode = Callable[..., EpisodeResult[DecideOutput]]
 
 
@@ -378,10 +501,12 @@ def make_episodes(
     there is no accumulated transcript to overflow a small window. The runner (which holds the LLM
     client) is injected here, never in the driver — the driver only ever sees these callables."""
 
-    def formulate() -> EpisodeResult[FormulateOutput]:
+    def formulate(*, corrective: str | None = None) -> EpisodeResult[FormulateOutput]:
         briefing = formulate_briefing(
             toolbox, ledger, mandate=mandate, context_window=context_window
         )
+        if corrective:
+            briefing = f"{briefing}\n\n{_FORMULATE_CORRECTIVE_HEADER}\n{corrective}"
         return runner.run(contract=FORMULATE_CONTRACT, system=_FORMULATE_SYSTEM, briefing=briefing)
 
     def decide(strategy: str, *, corrective: str | None = None) -> EpisodeResult[DecideOutput]:
@@ -699,6 +824,7 @@ def run_episodic_research(
     mandate_source: str | None = None,
     models: dict[str, Any] | None = None,
     sweep_trials: int | None = None,
+    market_digest: Callable[[], str] | None = None,
 ) -> ResearchSummary:
     """Run one episodic research session; returns the same summary shape as the conversation loop.
 
@@ -708,10 +834,14 @@ def run_episodic_research(
     ``max_episodes`` budgets against; ``budget_minutes`` and ``stop_event`` bound wall-clock and
     interruption. ``fit_symbols`` is now the MATCH *fallback* panel — deterministic screening
     (:func:`_match_stage`) chooses the per-thesis fit set and reserves the symbol holdout, and only
-    an empty screen falls back to ``fit_symbols``. See the module docstring for the stage protocol
-    and the per-stage failed-episode policies.
+    an empty screen falls back to ``fit_symbols``. ``market_digest`` supplies the MARKET ECONOMICS
+    digest text the FORMULATE cost-arithmetic sanity check overlaps against — the same source the
+    formulate briefing embeds; it defaults to the toolbox's own digest. See the module docstring
+    for the stage protocol, the per-stage failed-episode policies, and the sanity checks.
     """
     stop_event = stop_event or _NeverStop()
+    digest_source = market_digest or (lambda: digests.market_digest(toolbox))
+    exhausted = getattr(toolbox, "exhausted", None)
     summary = ResearchSummary()
     start = now()
     budget_seconds = budget_minutes * 60.0
@@ -732,13 +862,18 @@ def run_episodic_research(
             return "max_episodes"
         return None
 
-    def _record_episode(stage: str, result: EpisodeResult[Any]) -> None:
+    def _record_episode(
+        stage: str,
+        result: EpisodeResult[Any],
+        checks: list[dict[str, Any]] | None = None,
+    ) -> None:
         ledger.record_episode(
             stage=stage,
             model=result.model,
             outcome=result.outcome,
             tokens=result.tokens,
             misfires=result.misfires,
+            checks=checks,
         )
 
     while True:
@@ -747,15 +882,14 @@ def run_episodic_research(
             summary.stopped_reason = stop
             break
 
-        # ── FORMULATE ────────────────────────────────────────────────────────
+        # ── FORMULATE (+ driver-side sanity checks, #71) ──────────────────────
         ledger.record_stage(FORMULATE)
-        f_result = formulate()
-        _record_episode(FORMULATE, f_result)
-        if not f_result.ok or f_result.value is None:
-            # No thesis ⇒ nothing to author; end the session rather than busy-loop the budget.
+        fo = _formulate_stage(formulate, digest_source(), exhausted, _record_episode)
+        if fo is None:
+            # No usable thesis (a failed episode, or a sanity check the one re-ask never fixed);
+            # end the session rather than busy-loop the budget.
             summary.stopped_reason = "formulate_failed"
             break
-        fo = f_result.value
         formulated += 1
         name = f"{_slug(fo.class_tag) or 'strategy'}_{formulated}"
         ledger.record_thesis(
@@ -824,6 +958,42 @@ def run_episodic_research(
     return summary
 
 
+def _formulate_stage(
+    formulate: FormulateEpisode,
+    digest_text: str,
+    exhausted: Any,
+    record_episode: Callable[..., None],
+) -> FormulateOutput | None:
+    """Run FORMULATE with the driver-side sanity checks (#71): propose a thesis, run the
+    cost-arithmetic and exhausted-class checks, and on a failing check re-ask exactly once (naming
+    what was wrong) before the FORMULATE failure policy applies (return ``None`` ⇒ end the
+    session). A failed episode (no thesis at all) ends immediately with no sanity re-ask — a
+    persistently misfiring model is not corrected by a check note. Each episode line is ledgered
+    with the check that fired (``reask`` when it earned the one correction, ``exhausted`` when it
+    fired again after it), so a reader sees which check fired and how the re-ask resolved."""
+    corrective: str | None = None
+    for attempt in range(_FORMULATE_ATTEMPTS):
+        result = formulate(corrective=corrective)
+        if not result.ok or result.value is None:
+            record_episode(FORMULATE, result)
+            return None
+        fo = result.value
+        check = _formulate_checks(fo, digest_text, exhausted)
+        if check.ok:
+            record_episode(FORMULATE, result)
+            return fo
+        last = attempt == _FORMULATE_ATTEMPTS - 1
+        record_episode(
+            FORMULATE, result, [{"check": check.check, "result": _EXHAUSTED if last else _REASK}]
+        )
+        if last:
+            logger.info("formulate failed %s after the re-ask — ending session", check.check)
+            return None
+        logger.info("formulate failed the %s check — re-asking once", check.check)
+        corrective = check.corrective
+    return None  # pragma: no cover — the loop always returns within _FORMULATE_ATTEMPTS
+
+
 def _decide_stage(
     toolbox: ResearchToolbox,
     ledger: SessionLedger,
@@ -831,19 +1001,20 @@ def _decide_stage(
     name: str,
     symbols: Sequence[str],
     reserved_holdout: Sequence[str],
-    record_episode: Callable[[str, EpisodeResult[Any]], None],
+    record_episode: Callable[..., None],
 ) -> None:
     """Run DECIDE for one strategy: propose a verdict, submit it through the gated toolbox method,
-    and on a failed episode or a refused verdict re-ask exactly once (with the note/refusal as
-    corrective context) before leaving the strategy undecided. A ``revise`` verdict is left
-    undecided too (not terminal in this skeleton). ``reserved_holdout`` is the MATCH-reserved
-    symbol holdout the driver submits at verdict time — a code reservation the model proposal
-    never overwrites."""
+    and on a failed episode, a refused verdict, or a (capped) ``revise`` re-ask exactly once before
+    leaving the strategy undecided. The two-attempt cap is shared across all three causes — one
+    corrective re-ask total, whatever fired it — so a ``revise`` earns the one re-ask (naming the
+    cap) and a second ``revise`` for the same strategy exhausts it (undecided). ``reserved_holdout``
+    is the MATCH-reserved symbol holdout the driver submits at verdict time — a code reservation the
+    model proposal never overwrites."""
     corrective: str | None = None
-    for _ in range(_DECIDE_ATTEMPTS):
+    for attempt in range(_DECIDE_ATTEMPTS):
         result = decide(name, corrective=corrective)
-        record_episode(DECIDE, result)
         if not result.ok or result.value is None:
+            record_episode(DECIDE, result)
             corrective = (
                 f"The previous decide episode produced no valid verdict "
                 f"({result.note or result.outcome}). Re-read the evidence and emit a verdict."
@@ -851,9 +1022,17 @@ def _decide_stage(
             continue
         verdict = result.value
         if verdict.verdict == _REVISE:
-            # A new-lever call — not a terminal verdict here; leave undecided for a later round.
-            logger.info("decide %s: revise (left undecided this story)", name)
-            return
+            # `revise` is capped: the first earns the one corrective re-ask, a second exhausts it.
+            last = attempt == _DECIDE_ATTEMPTS - 1
+            record_episode(
+                DECIDE, result, [{"check": _REVISE_CHECK, "result": _EXHAUSTED if last else _REASK}]
+            )
+            if last:
+                logger.info("decide %s: revise cap reached — left undecided", name)
+                return
+            corrective = _REVISE_CORRECTIVE
+            continue
+        record_episode(DECIDE, result)
         outcome = _submit_verdict(toolbox, name, symbols, reserved_holdout, verdict)
         if "error" not in outcome:
             _record_verdict(ledger, name, verdict, outcome)
