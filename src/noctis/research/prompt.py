@@ -11,20 +11,13 @@ stay byte-stable within a session so prompt caching can hit).
 from __future__ import annotations
 
 import json
-import logging
 from typing import TYPE_CHECKING
 
-from noctis.memory.consolidate import consolidate_findings, consolidate_rejected
+from noctis.research import digests
 from noctis.strategies import library
 
 if TYPE_CHECKING:
     from noctis.research.mandate import Mandate
-
-logger = logging.getLogger("noctis.research.prompt")
-
-# Hard byte bound on the findings block the prefix embeds (P3): the consolidated tail drops
-# its oldest lines past this. Sized so today's economy tail always fits untouched.
-_MEMORY_FINDINGS_CHAR_BUDGET = 8_000
 
 
 _PROTOCOL = """\
@@ -233,58 +226,20 @@ def build_system_prompt(
         max_iterations=max_iterations,
         budget_minutes=budget_minutes,
     )
-    try:
-        digest = toolbox.market_context()
-    except Exception as exc:  # noqa: BLE001 — a lake hiccup must not kill the session
-        logger.warning("market context digest failed (%s); degrading to cost facts only", exc)
-        digest = {"note": "per-symbol digest unavailable this session"}
-    # sort_keys → the digest (the most static part of the prefix) serializes byte-identically
-    # across sessions regardless of dict insertion order, so a future cross-session cache hits.
-    prompt += _MARKET_REALITY_BLOCK.format(digest=json.dumps(digest, sort_keys=True))
+    # The four state facts are built by the shared digest builders (noctis.research.digests) so
+    # the episodic research driver renders the same facts by construction; this loop owns only
+    # the prose framing around them. The market digest serializes with sorted keys (byte-stable
+    # across insertion order) and degrades gracefully on a lake hiccup.
+    prompt += _MARKET_REALITY_BLOCK.format(digest=digests.market_digest(toolbox))
     if mandate is not None:
         block_text = mandate.text.strip()
         for ref in mandate.references:
             block_text += f"\n\n--- reference: {ref.path} ---\n{ref.text.strip()}"
         prompt += _MANDATE_BLOCK.format(mandate=block_text)
 
-    # Rejected strategies collapse to {name, status} stubs: their class-level lesson already
-    # arrives via memory's rejected_ideas and the exhausted_classes list, so shipping each
-    # corpse's thesis/params/param_space is pure duplication that grows with every rejection.
-    # Files stay on disk untouched and the list_strategies TOOL keeps returning everything.
-    index = [
-        entry
-        if entry.get("status") != "rejected"
-        else {"name": entry["name"], "status": entry["status"]}
-        for entry in library.list_strategies(toolbox.strategies_dir)
-    ]
-    champions = [
-        {
-            "family": e.family,
-            "params": e.params,
-            "test_metric": round(e.test_metric, 4),
-            # The neutral cross-profile yardstick: out-of-sample Sharpe read on a common basis
-            # for every champion, regardless of the metric it was elected on (the `auto` rule).
-            "sharpe": round(e.scorecard.avg_test_named("sharpe"), 4),
-            "mandate_source": e.mandate_source,
-            "fit_symbols": e.fit_symbols,
-        }
-        for e in toolbox.registry.list()
-    ]
-    memory = toolbox.memory
-    # economy trims the advisory memory tail (cost, not capability — the dead-end guard and gates
-    # are unaffected); balanced/full keep the full recent window. The tail counts consolidated
-    # *lesson classes* (P3 stage 1), not raw events, so the same size spans deeper history; when
-    # a distilled block exists (P3 stage 2), sessions embed it plus the 3 newest raw entries.
-    tail = 5 if prefix_trim else 20
-    raw_findings = memory.findings() if hasattr(memory, "findings") else []
-    distilled = memory.distilled() if hasattr(memory, "distilled") else []
-    if distilled:
-        findings = distilled + raw_findings[-3:]
-    else:
-        findings = consolidate_findings(
-            raw_findings, limit=tail, char_budget=_MEMORY_FINDINGS_CHAR_BUDGET
-        )
-    rejected = consolidate_rejected(memory.rejected_ideas(), limit=tail)
+    index = digests.library_index(toolbox.strategies_dir)
+    champions = digests.champion_digest(toolbox.registry)
+    findings, rejected = digests.memory_block(toolbox.memory, prefix_trim=prefix_trim)
 
     state = (
         f"\nCURRENT STATE\n"

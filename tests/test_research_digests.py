@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 
 from noctis.memory.consolidate import consolidate_findings, consolidate_rejected
-from noctis.research import build_system_prompt
+from noctis.research import build_system_prompt, digests
 from noctis.research.prompt import _MARKET_REALITY_BLOCK
 from noctis.strategies import library
 from noctis.strategies.library import set_header, write_strategy
@@ -112,3 +112,23 @@ def test_prompt_state_tail_byte_identical_under_prefix_trim(tmp_path):
     for i in range(8):
         box.memory.append_finding(f"finding-{i}")
     assert _tail_of(box, prefix_trim=True) == _expected_tail(box, prefix_trim=True)
+
+
+def test_prompt_tail_is_assembled_from_the_shared_digest_builders(tmp_path):
+    """The prompt tail is rendered *from* :mod:`noctis.research.digests`, not an inline copy:
+    the four shared builders' outputs, framed the documented way, reproduce the tail byte-for-
+    byte — so the episodic driver that reuses them renders the same facts by construction."""
+    box = _populated_toolbox(tmp_path)
+    market = _MARKET_REALITY_BLOCK.format(digest=digests.market_digest(box))
+    index = digests.library_index(box.strategies_dir)
+    champions = digests.champion_digest(box.registry)
+    findings, rejected = digests.memory_block(box.memory)
+    state = (
+        f"\nCURRENT STATE\n"
+        f"Strategy library (rejected entries stubbed; list_strategies/get_strategy show any "
+        f"in full): {json.dumps(index, default=str)}\n"
+        f"Champion board ({box.registry.capacity} slots): {json.dumps(champions)}\n"
+        f"Memory — findings: {json.dumps(findings)}\n"
+        f"Memory — known dead ends (do not re-mine): {json.dumps(rejected)}\n"
+    )
+    assert _tail_of(box) == market + state
