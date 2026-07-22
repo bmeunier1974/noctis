@@ -220,6 +220,46 @@ def test_example_config_ships_the_driver_coder_pairing():
     assert any("ollama_chat/noctis-qwen3:14b" in ln for ln in lines)
 
 
+# ── the working-tier draft TTL knob (#56): prune-on-start bound, research-level ─────────────
+def test_draft_ttl_hours_defaults_to_48(tmp_path):
+    """Working-tier housekeeping (story #56): undecided __tmp drafts are swept after 48h by
+    default. It lives at the research level, not the agent sub-config — the sweep is not
+    agent-loop-specific."""
+    settings = load_settings(config_path=tmp_path / "missing.yaml")
+    assert settings.research.draft_ttl_hours == 48.0
+
+
+def test_draft_ttl_hours_loads_from_yaml(tmp_path):
+    """The TTL is configurable under the ``research`` block."""
+    cfg = _write_yaml(tmp_path / "config.yaml", "research:\n  draft_ttl_hours: 12\n")
+    settings = load_settings(config_path=cfg)
+    assert settings.research.draft_ttl_hours == 12.0
+
+
+def test_draft_ttl_hours_none_disables_the_sweep(tmp_path):
+    """``null`` (like ``0``) is the disable path — the sweep never runs."""
+    cfg = _write_yaml(tmp_path / "config.yaml", "research:\n  draft_ttl_hours: null\n")
+    settings = load_settings(config_path=cfg)
+    assert settings.research.draft_ttl_hours is None
+
+
+def test_draft_ttl_hours_env_overrides_yaml(monkeypatch, tmp_path):
+    """Env wins over YAML for the TTL, via pydantic's nested delimiter."""
+    cfg = _write_yaml(tmp_path / "config.yaml", "research:\n  draft_ttl_hours: 12\n")
+    monkeypatch.setenv("RESEARCH__DRAFT_TTL_HOURS", "6")
+    settings = load_settings(config_path=cfg)
+    assert settings.research.draft_ttl_hours == 6.0
+
+
+def test_example_config_documents_draft_ttl_hours():
+    """The example config documents the working-tier draft TTL and its disable path (story #56)."""
+    lines = REPO_EXAMPLE_CONFIG.read_text(encoding="utf-8").splitlines()
+    knob = [ln for ln in lines if "draft_ttl_hours" in ln]
+    assert knob, "example config should document draft_ttl_hours"
+    text = " ".join(knob).lower()
+    assert "null" in text or "0" in text  # the disable path is documented
+
+
 def test_example_config_ships_mandate_auto(tmp_path):
     """The example config ships research.mandate: auto (#27) — a fresh install that copies it
     runs research under agent profile selection — while the typed default on a bare install (no

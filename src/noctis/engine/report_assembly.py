@@ -77,6 +77,9 @@ class SessionActivity:
     research_promotions: int = 0
     research_rejections: int = 0
     research_dead_ends: int = 0
+    # Strategies authored across the cycle's research sessions but never carried to a verdict
+    # (each summary's ``undecided``, accumulated). Empty when every draft reached a decision.
+    research_undecided: list[str] = field(default_factory=list)
     minted_specs: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
 
@@ -132,6 +135,7 @@ def assemble_report(
             "promotions": session.research_promotions,
             "rejections": session.research_rejections,
             "dead_ends": session.research_dead_ends,
+            "undecided": list(session.research_undecided),
             "findings": memory.findings(),
             "minted": list(session.minted_specs),
             "promoted_specs": promoted_specs,

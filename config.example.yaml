@@ -15,6 +15,7 @@ research:
   # research brief: MANDATE (your own mandate/MANDATE.md), a profile name, or null (unconstrained).
   mandate: auto # default: agent picks a shipped profile per session, scored on the base promotion.metric
   cost_profile: balanced # full | balanced | economy — spend ceilings, never quality gates
+  draft_ttl_hours: 48 # sweep undecided __tmp/ drafts older than N hours into archive/ on start; null/0 = off
   # A local $0 backend (e.g. noctis-ollama) replaces the model line and adds the agent block:
   # model: ollama_chat/noctis-qwen3:14b # cheap driver runs the session…
   # agent:

@@ -239,6 +239,71 @@ def test_research_metric_flag_validates_before_anything_else(tmp_path):
     assert "[llm] extra" in result.output and "OPENAI_API_KEY" in result.output
 
 
+def test_research_end_of_session_lists_undecided(tmp_path, monkeypatch):
+    """#55: the one-shot ``research`` command surfaces the summary's undecided list in its
+    end-of-session output (a session that assembled and ran is faked so no LLM is needed)."""
+    from noctis.engine.research import ResearchSummary
+
+    summary = ResearchSummary(
+        iterations=4,
+        promotions=0,
+        rejections=1,
+        stopped_reason="agent_done",
+        candidates=["alpha", "beta"],
+        undecided=["alpha", "beta"],
+    )
+
+    class _Budgets:
+        name = "test-profile"
+        max_iterations = 20
+
+    class _Toolbox:
+        author_calls = 0
+        backtests_run = 3
+
+    class _Session:
+        model = "fake/model"
+        budgets = _Budgets()
+        toolbox = _Toolbox()
+
+        def run(self, *, max_iterations=None, stop_event=None):
+            return summary
+
+    monkeypatch.setattr("noctis.bootstrap.build_research_session", lambda **kwargs: _Session())
+    result = runner.invoke(app, ["research", "-c", _paper_config(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "undecided" in result.output.lower()
+    assert "alpha" in result.output and "beta" in result.output
+
+
+def test_research_end_of_session_omits_undecided_when_empty(tmp_path, monkeypatch):
+    """An empty undecided list adds no extra end-of-session line."""
+    from noctis.engine.research import ResearchSummary
+
+    summary = ResearchSummary(iterations=2, stopped_reason="agent_done")
+
+    class _Budgets:
+        name = "test-profile"
+        max_iterations = 20
+
+    class _Toolbox:
+        author_calls = 0
+        backtests_run = 1
+
+    class _Session:
+        model = "fake/model"
+        budgets = _Budgets()
+        toolbox = _Toolbox()
+
+        def run(self, *, max_iterations=None, stop_event=None):
+            return summary
+
+    monkeypatch.setattr("noctis.bootstrap.build_research_session", lambda **kwargs: _Session())
+    result = runner.invoke(app, ["research", "-c", _paper_config(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "undecided" not in result.output.lower()
+
+
 def test_champions_command_runs(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(f"state_dir: {tmp_path}/state/\n")

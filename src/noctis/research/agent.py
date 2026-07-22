@@ -550,6 +550,17 @@ def run_agent_research(
     summary.rejections = toolbox.rejections
     summary.candidates = list(toolbox.strategies_touched)
     summary.author_calls = toolbox.author_calls
+    # Session-end honesty: whatever the stop reason (every loop exit flows through here), a
+    # strategy authored but never carried to a verdict is left undecided. Surface the sorted list
+    # on the summary and name each one in a WARNING — they are archived after the TTL, not lost
+    # silently. Empty set ⇒ no field, no warning (the clean-session common path adds no noise).
+    summary.undecided = sorted(toolbox.undecided)
+    if summary.undecided:
+        logger.warning(
+            "%d strategies left undecided — they will be archived after the TTL: %s",
+            len(summary.undecided),
+            ", ".join(summary.undecided),
+        )
     logger.info(
         "agent research session finished: %d rounds, %d backtests, %d coder calls, %d promotions, "
         "%d rejections, strategies=%s (%s)",

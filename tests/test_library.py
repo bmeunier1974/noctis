@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,7 @@ from noctis.strategies.library import (
     load_and_register,
     parse_header,
     plan_promotion,
+    prune_stale_drafts,
     set_header,
     strategy_path,
     strategy_source,
@@ -621,3 +624,160 @@ def test_validation_timeout_kills_the_whole_process_tree(tmp_path, monkeypatch):
         time.sleep(0.05)
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+# ── 7. prune_stale_drafts: sweep undecided drafts out of the working tier into archive/ ───
+def _draft_file(directory: Path, name: str, *, status: str = "draft", age_hours: float = 0.0):
+    """Author a minimal header-only file in ``directory`` and back-date its mtime.
+
+    prune reads only the docstring header (never imports), so a bare docstring is a full
+    fixture here — external filesystem behavior is all these tests assert.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.py"
+    path.write_text(f'"""Toy {name}.\n\nstatus: {status}\nstyle: momentum\n"""\n', encoding="utf-8")
+    if age_hours:
+        stamp = time.time() - age_hours * 3600
+        os.utime(path, (stamp, stamp))
+    return path
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    """Every file under ``root`` mapped to its exact bytes — the byte-identical oracle."""
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def test_prune_archives_stale_draft_and_spares_fresh(tmp_path):
+    work = tmp_path / "__tmp"
+    stale = _draft_file(work, "stale_probe", age_hours=3)
+    fresh = _draft_file(work, "fresh_probe", age_hours=0)
+
+    archived = prune_stale_drafts(work, ttl_hours=1)
+
+    assert archived == ["stale_probe"]
+    assert not stale.exists()  # moved out of the working tier
+    assert (work / "archive" / "000001-stale_probe.py").is_file()
+    assert fresh.is_file()  # the fresh draft stays put at the working-tier top level
+
+
+def test_prune_archives_stale_candidate_too(tmp_path):
+    work = tmp_path / "__tmp"
+    _draft_file(work, "cand_probe", status="candidate", age_hours=5)
+
+    assert prune_stale_drafts(work, ttl_hours=1) == ["cand_probe"]
+    assert (work / "archive" / "000001-cand_probe.py").is_file()
+
+
+def test_prune_spares_rejected_and_champion_status(tmp_path):
+    work = tmp_path / "__tmp"
+    _draft_file(work, "old_reject", status="rejected", age_hours=9)
+    _draft_file(work, "old_champ", status="champion", age_hours=9)
+
+    assert prune_stale_drafts(work, ttl_hours=1) == []
+    assert (work / "old_reject.py").is_file()
+    assert (work / "old_champ.py").is_file()
+    assert not (work / "archive").exists()  # nothing archived ⇒ area never materializes
+
+
+def test_prune_never_scans_subdirectories(tmp_path):
+    work = tmp_path / "__tmp"
+    # A stale attempt persisted under failed/ and a pre-existing archived file both sit in
+    # subdirectories — discovery globs a tier top-level only, and so must prune.
+    failed = _draft_file(work / "failed", "000001-old_attempt", status="draft", age_hours=99)
+    prior = _draft_file(work / "archive", "000001-earlier", status="draft", age_hours=99)
+    failed_before = failed.read_bytes()
+    prior_before = prior.read_bytes()
+    _draft_file(work, "live_draft", age_hours=9)
+
+    assert prune_stale_drafts(work, ttl_hours=1) == ["live_draft"]
+    assert failed.read_bytes() == failed_before  # failed/ contents untouched
+    assert prior.read_bytes() == prior_before  # existing archive/ contents untouched
+
+
+def test_prune_leaves_other_tiers_and_journals_untouched(tmp_path):
+    from noctis.strategies.library import LibraryPaths
+
+    seeds = tmp_path / "seeds"
+    ws = tmp_path / "workspace" / "strategies"
+    paths = LibraryPaths(seeds=seeds, tmp=ws / "__tmp", champions=ws / "champions")
+    _draft_file(seeds, "seeded", status="draft", age_hours=99)  # a committed seed
+    _draft_file(paths.champions, "crowned", status="champion", age_hours=99)
+    journal = tmp_path / "state" / "experiments" / "stale_probe.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text('{"trial": 1}\n', encoding="utf-8")
+    _draft_file(paths.tmp, "stale_probe", age_hours=9)
+
+    seeds_before = _snapshot(seeds)
+    champions_before = _snapshot(paths.champions)
+    journal_before = journal.read_bytes()
+
+    assert prune_stale_drafts(paths.tmp, ttl_hours=1) == ["stale_probe"]
+    assert _snapshot(seeds) == seeds_before  # seeds tier byte-identical
+    assert _snapshot(paths.champions) == champions_before  # champions tier byte-identical
+    assert journal.read_bytes() == journal_before  # experiment journals byte-identical
+
+
+def test_archived_file_leaves_discovery_and_seed_unshadows(tmp_path):
+    from noctis.strategies.library import LibraryPaths
+
+    seeds = tmp_path / "seeds"
+    ws = tmp_path / "workspace" / "strategies"
+    paths = LibraryPaths(seeds=seeds, tmp=ws / "__tmp", champions=ws / "champions")
+    seed = _draft_file(seeds, "probe", status="draft", age_hours=0)  # committed seed
+    _draft_file(paths.tmp, "probe", status="draft", age_hours=9)  # stale working copy shadows it
+    assert strategy_path(paths, "probe") == paths.tmp / "probe.py"  # tmp shadows seed
+
+    assert prune_stale_drafts(paths.tmp, ttl_hours=1) == ["probe"]
+    assert strategy_path(paths, "probe") == seed  # the seed un-shadows once the draft is archived
+
+
+def test_archive_collision_sequences_both_files(tmp_path):
+    work = tmp_path / "__tmp"
+    _draft_file(work, "probe", age_hours=9)
+    assert prune_stale_drafts(work, ttl_hours=1) == ["probe"]
+    # A fresh draft of the SAME name is authored later and also goes stale.
+    _draft_file(work, "probe", age_hours=9)
+    assert prune_stale_drafts(work, ttl_hours=1) == ["probe"]
+
+    archived = sorted((work / "archive").glob("*.py"))
+    assert [p.name for p in archived] == ["000001-probe.py", "000002-probe.py"]
+
+
+def test_archive_cap_evicts_the_oldest_sequence(tmp_path):
+    work = tmp_path / "__tmp"
+    for i in range(5):
+        _draft_file(work, f"probe_{i}", age_hours=9)
+        prune_stale_drafts(work, ttl_hours=1, cap=3)
+
+    seqs = sorted(int(p.name.split("-", 1)[0]) for p in (work / "archive").glob("*.py"))
+    assert seqs == [3, 4, 5]  # sequences 1 and 2 evicted, numbering never reused
+
+
+def test_ttl_zero_or_none_is_byte_identical_noop(tmp_path):
+    work = tmp_path / "__tmp"
+    _draft_file(work, "stale_probe", age_hours=99)
+    before = _snapshot(work)
+
+    assert prune_stale_drafts(work, ttl_hours=0) == []
+    assert _snapshot(work) == before  # byte-identical
+    assert prune_stale_drafts(work, ttl_hours=None) == []
+    assert _snapshot(work) == before
+    assert not (work / "archive").exists()  # the disable path never materializes an archive
+
+
+def test_prune_never_restamps_header_or_writes_a_verdict(tmp_path):
+    work = tmp_path / "__tmp"
+    original = _draft_file(work, "stale_probe", age_hours=9).read_bytes()
+
+    prune_stale_drafts(work, ttl_hours=1)
+
+    archived = work / "archive" / "000001-stale_probe.py"
+    assert archived.read_bytes() == original  # header intact — status still 'draft', not re-stamped
+    # Exactly one file landed in archive/ (the moved draft); no rejection record, no verdict.
+    assert [p.name for p in (work / "archive").glob("*")] == ["000001-stale_probe.py"]
+
+
+def test_prune_on_missing_directory_is_a_noop(tmp_path):
+    assert prune_stale_drafts(tmp_path / "does_not_exist", ttl_hours=1) == []

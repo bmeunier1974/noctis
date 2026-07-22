@@ -36,6 +36,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, cast
@@ -59,9 +60,18 @@ TEMPLATE_NAME = "TEMPLATE.py"
 # sibling layout (both output tiers under the seeds root).
 TMP_SUBDIR = "__tmp"
 CHAMPIONS_SUBDIR = "champions"
+# Where the working-tier sweep parks stale, still-undecided drafts (a subdir of __tmp/, so
+# discovery's top-level glob never sees it — the twin of the coder-failure store's failed/).
+ARCHIVE_SUBDIR = "archive"
+# Statuses the sweep may touch: an undecided draft/candidate is housekeeping; a rejected or
+# champion file has a verdict and is left alone (AGENTS.md rule 2 — archiving is not judgment).
+UNDECIDED_STATUSES = ("draft", "candidate")
+# Keep roughly the last N archived drafts on disk, oldest evicted (mirrors failed_store).
+ARCHIVE_CAP = 50
 HEADER_FIELDS = ("status", "style", "symbols", "tuned")
 VALID_STATUSES = ("draft", "candidate", "champion", "rejected")
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_ARCHIVE_SEQ_RE = re.compile(r"^(\d+)-")
 _NS_PER_MINUTE = 60 * 1_000_000_000
 _VALIDATE_TIMEOUT_S = 120
 _module_counter = itertools.count()
@@ -381,6 +391,88 @@ def _locate(strategies_dir: LibrarySpec, name: str) -> Path | None:
 def strategy_path(strategies_dir: LibrarySpec, name: str) -> Path | None:
     """Public locator: where ``name`` currently lives, or None if it is not in the library."""
     return _locate(strategies_dir, name)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Working-tier housekeeping — sweep stale, still-undecided drafts into archive/
+# ─────────────────────────────────────────────────────────────────────────────
+def prune_stale_drafts(
+    strategies_dir: str | Path, *, ttl_hours: float | None, cap: int = ARCHIVE_CAP
+) -> list[str]:
+    """Archive undecided working-tier drafts older than ``ttl_hours``; return their names.
+
+    ``strategies_dir`` is the working tier itself (``workspace/strategies/__tmp/``), not a
+    :class:`LibraryPaths` — the sweep is scoped to exactly one directory it is handed and
+    resolves no workspace paths of its own. It globs that tier top-level only (the same
+    non-recursive mechanism discovery uses, so ``failed/`` and ``archive/`` are never
+    scanned) and moves each file whose header ``status`` is still ``draft``/``candidate``
+    and whose mtime predates the TTL into an ``archive/`` subdirectory.
+
+    Archiving is housekeeping, not judgment (AGENTS.md rule 2): the file's bytes are moved
+    verbatim — no header re-stamp, no rejection record, no gate. Names mirror the
+    coder-failure store (:mod:`noctis.research.failed_store`): a zero-padded monotonic
+    sequence prefix (``{seq:06d}-{name}.py``) gives collision-safe insertion order, the
+    archive is capped (default :data:`ARCHIVE_CAP`) with the lowest sequences evicted, and
+    both the next sequence and the eviction set are re-read from disk each call, so the
+    sweep holds no cross-call state. Eviction is the sole deletion.
+
+    ``ttl_hours`` of ``None`` or ``<= 0`` is the disable path: an immediate no-op that
+    returns ``[]`` and leaves the filesystem byte-identical. A missing ``strategies_dir``
+    is likewise a no-op.
+    """
+    if ttl_hours is None or ttl_hours <= 0:
+        return []
+    work = Path(strategies_dir)
+    if not work.is_dir():
+        return []
+    cutoff = time.time() - ttl_hours * 3600
+    archive_dir = work / ARCHIVE_SUBDIR
+    archived: list[str] = []
+    for path in sorted(work.glob("*.py")):
+        if not _is_library_file(path):
+            continue
+        if path.stat().st_mtime >= cutoff:
+            continue
+        header = parse_header(path.read_text(encoding="utf-8"))
+        if header.status not in UNDECIDED_STATUSES:
+            continue
+        _archive_draft(archive_dir, path)
+        archived.append(path.stem)
+    if archived:
+        _evict_archive(archive_dir, max(1, cap))
+    return archived
+
+
+def _archive_draft(archive_dir: Path, path: Path) -> Path:
+    """Move ``path`` under ``archive_dir`` with the next monotonic sequence prefix."""
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    seq = _next_archive_seq(archive_dir)
+    dest = archive_dir / f"{seq:06d}-{path.stem}.py"
+    path.replace(dest)
+    return dest
+
+
+def _archived_files(archive_dir: Path) -> list[Path]:
+    """The sequence-prefixed archive entries (a stray non-sequenced file is ignored)."""
+    if not archive_dir.is_dir():
+        return []
+    return [p for p in archive_dir.glob("*.py") if _ARCHIVE_SEQ_RE.match(p.name)]
+
+
+def _archive_seq_of(path: Path) -> int:
+    match = _ARCHIVE_SEQ_RE.match(path.name)
+    return int(match.group(1)) if match else 0
+
+
+def _next_archive_seq(archive_dir: Path) -> int:
+    return max((_archive_seq_of(p) for p in _archived_files(archive_dir)), default=0) + 1
+
+
+def _evict_archive(archive_dir: Path, cap: int) -> None:
+    """Drop the lowest sequences past the cap — the one deletion, mirroring failed_store."""
+    files = sorted(_archived_files(archive_dir), key=_archive_seq_of)
+    for stale in files[: max(0, len(files) - cap)]:
+        stale.unlink(missing_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

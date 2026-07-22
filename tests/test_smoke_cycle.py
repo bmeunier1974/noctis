@@ -126,6 +126,38 @@ def test_two_cycles_are_cumulative(tmp_path):
         assert header in text
 
 
+def test_run_research_accumulates_undecided_into_the_cycle(tmp_path, monkeypatch):
+    """Each research session's undecided strategies (authored, never carried to a verdict)
+    fold into the per-cycle accumulator — and a cycle spanning several sessions extends,
+    never replaces, the list."""
+    import noctis.engine.runtime as runtime_mod
+    from noctis.engine.research import ResearchSummary
+
+    settings, lake_dir = _make_settings(tmp_path, time_limit_hours=None)
+    lake, _vendor = _seed_catalog(lake_dir)
+    memory = MemoryStore(tmp_path / "MEMORY.md")
+    runtime = build_runtime(
+        settings,
+        market_lake=lake,
+        memory=memory,
+        reports_dir=str(tmp_path / "reports"),
+        research_max_iters=1,
+    )
+
+    summaries = iter(
+        [
+            ResearchSummary(iterations=1, undecided=["draft_a", "draft_b"]),
+            ResearchSummary(iterations=1, undecided=["draft_c"]),
+        ]
+    )
+    monkeypatch.setattr(runtime_mod, "run_research", lambda **_: next(summaries))
+
+    runtime._run_research()
+    runtime._run_research()
+
+    assert runtime._cycle.research_undecided == ["draft_a", "draft_b", "draft_c"]
+
+
 def test_runtime_research_panel_and_symbol_holdout_are_fixed(tmp_path):
     """The fit set is the first fit_set_size ready symbols, the holdout the next
     symbol_holdout_size — fixed at startup and identical for every candidate."""

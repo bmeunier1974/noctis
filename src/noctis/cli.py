@@ -717,6 +717,11 @@ def research(
                 f"Inspect: noctis strategies; {settings.state_dir}/experiments/<name>.jsonl; "
                 f"{settings.memory_path}"
             )
+        if summary.undecided:
+            typer.echo(
+                f"Left undecided ({len(summary.undecided)}): {', '.join(summary.undecided)} "
+                f"— archived after the TTL"
+            )
     finally:
         if recorder is not None:
             recorder.close()

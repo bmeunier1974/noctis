@@ -308,6 +308,7 @@ class Runtime:
         self._cycle.research_promotions += summary.promotions
         self._cycle.research_rejections += summary.rejections
         self._cycle.research_dead_ends += summary.dead_ends
+        self._cycle.research_undecided.extend(summary.undecided)
         self._cycle.minted_specs.extend(summary.minted_specs)
         self.result.research_iterations += summary.iterations
         self.result.research_promotions += summary.promotions

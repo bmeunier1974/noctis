@@ -142,6 +142,34 @@ def test_report_includes_trades_promotions_events():
     assert "Risk halt" in text
 
 
+def test_report_shows_undecided_strategies():
+    """The research section lists strategies a session authored but left unresolved, so the
+    close report and QA rollups surface the honesty check beside the counters."""
+    data = ReportData(
+        as_of="2026-07-03",
+        research={
+            "iterations": 5,
+            "promotions": 0,
+            "rejections": 1,
+            "dead_ends": 0,
+            "undecided": ["draft_a", "draft_b"],
+        },
+    )
+    text = render_report(data)
+    assert "Undecided" in text
+    assert "draft_a" in text and "draft_b" in text
+
+
+def test_report_omits_empty_undecided():
+    """A session with nothing undecided renders no undecided line — an empty entry is silent,
+    not noise."""
+    data = ReportData(
+        as_of="2026-07-03",
+        research={"iterations": 5, "undecided": []},
+    )
+    assert "Undecided" not in render_report(data)
+
+
 def test_write_and_retrieve_report(tmp_path):
     path = write_report(ReportData(as_of="2026-07-03"), tmp_path / "reports")
     assert path.is_file()

@@ -144,6 +144,11 @@ def render_report(data: ReportData) -> str:
     lines.append(f"- Promotions: {r.get('promotions', 0)}")
     lines.append(f"- Rejections: {r.get('rejections', 0)}")
     lines.append(f"- Dead ends: {r.get('dead_ends', 0)}")
+    undecided = r.get("undecided", [])
+    if undecided:
+        lines.append("- Undecided (authored, no verdict):")
+        for name in undecided:
+            lines.append(f"  - {name}")
     findings = r.get("findings", [])
     if findings:
         lines.append("- Notable findings:")
