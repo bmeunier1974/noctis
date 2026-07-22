@@ -122,6 +122,42 @@ def test_assemble_folds_session_activity(tmp_path):
     assert "Close-of-day report — 2026-01-06" in render_report(data)
 
 
+def test_assemble_folds_undecided_strategies(tmp_path):
+    """A session's undecided strategies (authored but never carried to a verdict) pass
+    through beside the research counters, as a copy the report owns."""
+    reg = ChampionRegistry(tmp_path / "champions.json", capacity=3)
+    session = SessionActivity()
+    session.research_undecided.extend(["draft_a", "draft_b"])
+
+    data = assemble_report(
+        as_of="2026-01-06",
+        mode="paper",
+        registry=reg,
+        memory=InMemoryMemory(),
+        state_dir=tmp_path / "state",
+        session=session,
+    )
+
+    assert data.research["undecided"] == ["draft_a", "draft_b"]
+    assert data.research["undecided"] is not session.research_undecided
+
+
+def test_assemble_empty_undecided_is_an_empty_entry(tmp_path):
+    """A session that left nothing unresolved still carries the key — an empty list, not a
+    missing entry — so consumers (JSON, QA rollups) read one shape."""
+    reg = ChampionRegistry(tmp_path / "champions.json", capacity=3)
+
+    data = assemble_report(
+        as_of="2026-01-06",
+        mode="paper",
+        registry=reg,
+        memory=InMemoryMemory(),
+        state_dir=tmp_path / "state",
+    )
+
+    assert data.research["undecided"] == []
+
+
 def test_corrupt_account_omits_curve_and_keeps_forward_realized(tmp_path):
     """An unreadable paper account degrades to no cumulative line — never an error — and
     the forward section falls back to realized-only (no broker to mark unrealized)."""
