@@ -491,6 +491,25 @@ def build_research_session(
     whether that means an error (CLI) or the legacy-loop fallback (runtime)."""
     from noctis.champions.promotion import PromotionRules
     from noctis.research import ResearchToolbox, build_llm_client, resolve_budgets
+    from noctis.strategies.library import LibraryPaths, prune_stale_drafts
+
+    # Working-tier housekeeping (story #56): sweep stale, still-undecided drafts out of
+    # __tmp/ into __tmp/archive/ *before* the toolbox constructs. The toolbox's init loads and
+    # registers the library, so pruning first guarantees no session ever observes a stale
+    # corpse mid-assembly. This is session assembly, so it runs regardless of which research
+    # path (agent or legacy) the caller ends up choosing. Bounded by research.draft_ttl_hours;
+    # None/0 is a no-op. Pure housekeeping — never a verdict or a gate (AGENTS.md rule 2).
+    # Prior art: prune_qa_dir in build_recorder.
+    archived = prune_stale_drafts(
+        LibraryPaths.from_settings(settings).tmp,
+        ttl_hours=settings.research.draft_ttl_hours,
+    )
+    if archived:
+        logger.info(
+            "pruned %d stale working-tier draft(s) before research assembly: %s",
+            len(archived),
+            ", ".join(archived),
+        )
 
     client = build_llm_client(settings)
     if client is None:

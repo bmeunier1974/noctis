@@ -10,6 +10,8 @@ from settings, the agent research session bundle).
 from __future__ import annotations
 
 import logging
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +30,7 @@ from noctis.champions.promotion import PromotionRules
 from noctis.config import SafetyGateError, load_settings
 from noctis.engine.research import ResearchSummary
 from noctis.research import Capabilities, MandateError
+from noctis.strategies.families import FamilyRegistry
 
 
 def _fake_coder():
@@ -486,3 +489,83 @@ def test_coder_client_missing_key_degrades_loudly(tmp_path, monkeypatch, caplog)
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("coder" in msg.lower() for msg in warnings)
     assert any("claude-sonnet-5" in msg for msg in warnings)
+
+
+# ── prune-on-start: sweep stale working-tier drafts before the toolbox loads the library (#56) ─
+def _prune_settings(tmp_path, *, draft_ttl_hours: float | str | None = None):
+    """Session settings with a fully-owned workspace, so the working tier is a clean tmp path."""
+    lines = [
+        f"workspace_dir: {tmp_path}/workspace",
+        f"state_dir: {tmp_path}/state/",
+        f"strategies_dir: {tmp_path}/strategies/",
+    ]
+    if draft_ttl_hours is not None:
+        lines += ["research:", f"  draft_ttl_hours: {draft_ttl_hours}"]
+    return load_settings(config_path=_config(tmp_path, lines))
+
+
+def _corpse(work: Path, name: str, *, status: str = "draft", age_hours: float = 99.0) -> Path:
+    """A minimal header-only working-tier draft with a back-dated mtime (prune reads only the
+    docstring header, never imports — the same fixture the library sweep tests use)."""
+    work.mkdir(parents=True, exist_ok=True)
+    path = work / f"{name}.py"
+    path.write_text(f'"""Toy {name}.\n\nstatus: {status}\nstyle: momentum\n"""\n', encoding="utf-8")
+    stamp = time.time() - age_hours * 3600
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_build_research_session_prunes_stale_drafts_before_toolbox_constructs(
+    tmp_path, monkeypatch, caplog
+):
+    """Prune-on-start (story #56): a stale, still-undecided working-tier draft is swept into
+    __tmp/archive/ before the toolbox loads the library, so no session observes the corpse. The
+    archived names and count are logged at INFO."""
+    from noctis.strategies import library
+
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    settings = _prune_settings(tmp_path)
+    work = library.LibraryPaths.from_settings(settings).tmp
+    corpse = _corpse(work, "stale_probe")
+
+    with caplog.at_level(logging.INFO, logger="noctis.bootstrap"):
+        session = build_research_session(
+            settings=settings,
+            lake=object(),
+            registry=object(),
+            families=FamilyRegistry(),
+            memory=object(),
+        )
+
+    assert session is not None
+    assert not corpse.exists()  # swept out of the working tier before the library loaded
+    assert (work / "archive" / "000001-stale_probe.py").is_file()
+    names = {entry["name"] for entry in library.list_strategies(session.toolbox.strategies_dir)}
+    assert "stale_probe" not in names  # absent from the built session's library view
+    prune_logs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("stale_probe" in msg and "1" in msg for msg in prune_logs)
+
+
+def test_build_research_session_draft_ttl_none_disables_prune(tmp_path, monkeypatch, caplog):
+    """``research.draft_ttl_hours: null`` is the disable path: the stale corpse survives, the
+    archive never materializes, and no prune log is emitted (nothing archived ⇒ no noise)."""
+    from noctis.strategies import library
+
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    settings = _prune_settings(tmp_path, draft_ttl_hours="null")
+    work = library.LibraryPaths.from_settings(settings).tmp
+    corpse = _corpse(work, "stale_probe")
+
+    with caplog.at_level(logging.INFO, logger="noctis.bootstrap"):
+        session = build_research_session(
+            settings=settings,
+            lake=object(),
+            registry=object(),
+            families=FamilyRegistry(),
+            memory=object(),
+        )
+
+    assert session is not None
+    assert corpse.exists()  # disabled sweep leaves the working tier byte-identical
+    assert not (work / "archive").exists()
+    assert not any("prune" in r.getMessage().lower() for r in caplog.records)

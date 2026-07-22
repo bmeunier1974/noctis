@@ -269,6 +269,13 @@ class ResearchConfig(BaseModel):
     # Exhaustion gate: verdict tools (evaluate_vs_champion / reject_strategy) refuse until
     # the strategy's journal shows this many distinct param sets or one completed sweep.
     min_trials: int = 8
+    # Working-tier housekeeping (story #56): on each research-session assembly, undecided
+    # (draft/candidate) top-level drafts in workspace/strategies/__tmp/ whose mtime predates
+    # this many hours are swept into __tmp/archive/ before the library loads, so a session
+    # never inherits a stale corpse. Bounds only how long an abandoned draft lingers; ``None``
+    # or ``0`` disables the sweep entirely. Pure housekeeping — it moves bytes verbatim and
+    # never touches a verdict, a promotion gate, or the exhaustion floor (AGENTS.md rule 2).
+    draft_ttl_hours: float | None = 48.0
     # Agent-session knobs (model, iteration/backtest budgets, web search).
     agent: AgentResearchConfig = Field(default_factory=AgentResearchConfig)
     # Symbols in the fit panel (walk-forward + election). 0 would disable research.
