@@ -24,6 +24,7 @@ import pytest
 
 from noctis.research import Capabilities
 from noctis.research.driver import (
+    _CHEAP_MAX_BARS,
     DECIDE_CONTRACT,
     FORMULATE_CONTRACT,
     DecideOutput,
@@ -108,9 +109,39 @@ class Episodes:
         return self._d.pop(0)
 
 
+# ── recipe-return builders: what a backtest/sweep hands the OPTIMIZE recipe (story #70) ──────
+def bt(metric=None, **extra):
+    """A ``tool_run_backtest`` return; ``metric`` is the panel ``avg_test_metric`` the recipe's
+    improvement checks read (absent ⇒ the recipe treats the round as un-scored)."""
+    out = {"ok": True}
+    if metric is not None:
+        out["avg_test_metric"] = metric
+    out.update(extra)
+    return out
+
+
+def sw(params=None, test=None, n_trials=3, **extra):
+    """A ``tool_run_sweep`` return; ``top_trials`` carries the best params the recipe confirms and
+    narrows around, and ``n_trials`` is what the journal counts toward the exhaustion floor."""
+    out = {"ok": True, "sweep_completed": True, "n_trials": n_trials}
+    if params is not None:
+        out["top_trials"] = [{"params": params, "test": test}]
+    out.update(extra)
+    return out
+
+
 # ── a fake toolbox: only the gated surface the driver drives, with honest bookkeeping ───────
 class FakeToolbox:
-    def __init__(self, *, write_result=None, verdict_results=None, log=None, screen_result=None):
+    def __init__(
+        self,
+        *,
+        write_result=None,
+        verdict_results=None,
+        log=None,
+        screen_result=None,
+        backtest_results=None,
+        sweep_results=None,
+    ):
         self.promotions = 0
         self.rejections = 0
         self.author_calls = 0
@@ -125,6 +156,10 @@ class FakeToolbox:
         self._write_result = write_result or {"ok": True}
         self._verdicts = list(verdict_results or [{"ok": True, "status": "rejected"}])
         self._log = log or {"top_trials": [{"params": {"lookback": 20}}]}
+        # Per-call recipe scripts (OPTIMIZE, #70): each call pops the next result, the last one
+        # repeating. ``None`` ⇒ the pre-#70 constant return (a bare ``ok`` / a completed sweep).
+        self._backtest_results = list(backtest_results) if backtest_results else None
+        self._sweep_results = list(sweep_results) if sweep_results else None
         # Default: an empty structural screen (no lake match) — the driver then falls back to
         # the composition-root fit panel exactly as the pre-#69 passthrough did.
         self._screen_result = (
@@ -132,6 +167,12 @@ class FakeToolbox:
             if screen_result is not None
             else {"suggested_fit": [], "reserved_holdout": []}
         )
+
+    @staticmethod
+    def _next(script, default):
+        if script is None:
+            return dict(default)
+        return dict(script.pop(0) if len(script) > 1 else script[0])
 
     def tool_screen_symbols(self, trend="any", volatility="any", liquidity="any", symbols=None):
         self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
@@ -149,11 +190,11 @@ class FakeToolbox:
 
     def tool_run_backtest(self, **kwargs):
         self.backtests.append(kwargs)
-        return {"ok": True}
+        return self._next(self._backtest_results, {"ok": True})
 
     def tool_run_sweep(self, **kwargs):
         self.sweeps.append(kwargs)
-        return {"ok": True, "sweep_completed": True}
+        return self._next(self._sweep_results, {"ok": True, "sweep_completed": True})
 
     def tool_get_experiment_log(self, **kwargs):
         return dict(self._log)
@@ -195,6 +236,16 @@ def _drive(episodes, toolbox, *, max_episodes, ledger, **over):
     return run_episodic_research(**kwargs)
 
 
+def _drive_optimize(tmp_path, session, *, backtest_results, sweep_results, sweep_trials=4, **over):
+    """Drive one full cycle (a reject verdict) with the OPTIMIZE recipe fed per-call backtest/sweep
+    scripts; returns the fake toolbox, its ledger, and the episode script for branch assertions."""
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox(backtest_results=backtest_results, sweep_results=sweep_results)
+    ledger = SessionLedger(tmp_path, session)
+    _drive(episodes, box, max_episodes=2, ledger=ledger, sweep_trials=sweep_trials, **over)
+    return box, ledger, episodes
+
+
 # ── 1. a full cycle: verdict through the gated method, complete ledger ──────────────────────
 def test_full_cycle_reaches_a_verdict_and_a_complete_ledger(tmp_path):
     episodes = Episodes([formulate_ok()], [decide_ok("reject")])
@@ -228,12 +279,135 @@ def test_full_cycle_reaches_a_verdict_and_a_complete_ledger(tmp_path):
     assert end is not None and end.formulated == 1 and end.rejected == 1
 
 
-def test_optimize_runs_a_baseline_backtest_and_a_sweep_before_decide(tmp_path):
-    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
-    box = FakeToolbox()
-    _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "s2"))
-    assert len(box.backtests) == 1 and box.backtests[0]["symbols"] == ["AAA", "BBB", "CCC"]
-    assert len(box.sweeps) == 1  # a sweep gives DECIDE a real journal / clears the floor
+def test_optimize_recipe_runs_baseline_then_cheap_subset_sweep_then_full_panel_confirm(tmp_path):
+    # The v1 recipe (story #70): a full-panel baseline, a CHEAP sweep on a subset of the fit
+    # panel at reduced bar-fidelity, then a full-panel confirm of that sweep's best params.
+    box, ledger, ep = _drive_optimize(
+        tmp_path,
+        "opt-shape",
+        backtest_results=[bt(1.0), bt(1.0)],  # baseline 1.0, confirm 1.0 (no gain ⇒ no re-tune)
+        sweep_results=[sw(params={"lookback": 12}, test=1.0)],
+    )
+    assert box.backtests[0]["symbols"] == ["AAA", "BBB", "CCC"]  # baseline: full fit panel
+    assert box.backtests[0].get("params") is None  # baseline runs the shipped defaults
+    assert set(box.sweeps[0]["symbols"]) < {"AAA", "BBB", "CCC"}  # cheap: a strict subset
+    assert box.sweeps[0]["max_bars"] == _CHEAP_MAX_BARS  # cheap: reduced bar-fidelity
+    assert box.backtests[1]["symbols"] == ["AAA", "BBB", "CCC"]  # confirm: full fit panel
+    assert box.backtests[1]["params"] == {"lookback": 12}  # confirm the sweep's best params
+    assert len(box.sweeps) == 1  # a stalled confirm earns no re-tune
+    # Zero LLM in the recipe — only the two judgment episodes ran.
+    assert ep.formulate_calls == 1 and len(ep.decide_calls) == 1
+
+
+def test_optimize_promising_baseline_sweeps_the_full_cheap_budget(tmp_path):
+    box, _, _ = _drive_optimize(
+        tmp_path,
+        "opt-promising",
+        backtest_results=[bt(1.0), bt(1.0)],  # positive baseline ⇒ promising branch
+        sweep_results=[sw(params={"lookback": 12}, test=1.0)],
+        sweep_trials=4,
+    )
+    assert box.sweeps[0]["n_trials"] == 4  # the full cheap trial budget
+
+
+def test_optimize_weak_baseline_still_sweeps_but_sizes_down(tmp_path):
+    # A flat/negative baseline is exactly what tuning is for — still sweep (the floor needs
+    # trials), but the cheap sweep is sized down (the branch point a later interpret slots into).
+    box, ledger, _ = _drive_optimize(
+        tmp_path,
+        "opt-weak",
+        backtest_results=[bt(-0.2), bt(-0.2)],  # weak baseline
+        sweep_results=[sw(params={"lookback": 12}, test=-0.2)],
+        sweep_trials=4,
+    )
+    assert len(box.sweeps) == 1  # a weak baseline still sweeps to feed the exhaustion floor
+    assert box.sweeps[0]["n_trials"] == 2  # sized down (half the cheap budget)
+    opt = next(s for s in ledger.stages() if s.stage == "optimize")
+    assert opt.detail["weak_baseline"] is True
+
+
+def test_optimize_retune_improvement_runs_a_second_narrowed_sweep(tmp_path):
+    # The confirm beats the baseline meaningfully ⇒ one narrowed re-tune round on the full panel.
+    box, ledger, _ = _drive_optimize(
+        tmp_path,
+        "opt-improve",
+        backtest_results=[bt(1.0), bt(2.0), bt(2.0)],  # baseline 1.0, confirm 2.0, re-tune 2.0
+        sweep_results=[
+            sw(params={"lookback": 12}, test=2.0),
+            sw(params={"lookback": 14}, test=2.0),
+        ],
+    )
+    assert len(box.sweeps) == 2  # cheap sweep + exactly one narrowed re-tune
+    assert box.sweeps[1].get("ranges")  # the re-tune narrowed the space around the best params
+    assert box.sweeps[1]["symbols"] == ["AAA", "BBB", "CCC"]  # re-tune confirms on the full panel
+    assert box.sweeps[1].get("max_bars") is None  # full-fidelity refinement (no bar truncation)
+    opt = next(s for s in ledger.stages() if s.stage == "optimize")
+    assert opt.detail["retune_rounds"] == 1
+    assert opt.detail["best_metric"] == 2.0
+
+
+def test_optimize_retune_stall_stops_without_a_second_sweep(tmp_path):
+    # The confirm does not improve on the baseline ⇒ stop, keep the best-so-far, on to DECIDE.
+    box, ledger, _ = _drive_optimize(
+        tmp_path,
+        "opt-stall",
+        backtest_results=[bt(1.0), bt(1.0)],  # confirm does not beat the baseline
+        sweep_results=[sw(params={"lookback": 12}, test=1.0)],
+    )
+    assert len(box.sweeps) == 1  # no re-tune
+    opt = next(s for s in ledger.stages() if s.stage == "optimize")
+    assert opt.detail["retune_rounds"] == 0
+    assert opt.detail["stopped"] == "stall"
+
+
+def test_optimize_retune_is_hard_capped_at_two_rounds(tmp_path):
+    # An always-improving sequence still stops at two re-tunes — the cap, not a stall, ends it.
+    box, ledger, _ = _drive_optimize(
+        tmp_path,
+        "opt-cap",
+        backtest_results=[bt(1.0), bt(2.0), bt(3.0), bt(4.0), bt(5.0)],
+        sweep_results=[
+            sw(params={"lookback": 12}, test=2.0),
+            sw(params={"lookback": 14}, test=3.0),
+            sw(params={"lookback": 16}, test=4.0),
+            sw(params={"lookback": 18}, test=5.0),
+        ],
+    )
+    assert len(box.sweeps) == 3  # cheap sweep + exactly two re-tunes, never a third
+    opt = next(s for s in ledger.stages() if s.stage == "optimize")
+    assert opt.detail["retune_rounds"] == 2
+    assert opt.detail["stopped"] == "hard_cap"
+
+
+def test_optimize_budget_refusal_mid_recipe_proceeds_to_decide(tmp_path):
+    # A budget-refused sweep stops the recipe honestly — no further tuning — and DECIDE runs on
+    # whatever evidence exists (the gates dispose).
+    box, ledger, _ = _drive_optimize(
+        tmp_path,
+        "opt-budget",
+        backtest_results=[bt(1.0)],  # baseline succeeds
+        sweep_results=[{"error": "backtest budget exhausted"}],  # cheap sweep is refused
+    )
+    assert len(box.backtests) == 1  # baseline only — no confirm attempted after the refusal
+    assert len(box.sweeps) == 1  # the one refused cheap sweep
+    assert box.rejects  # the recipe still proceeded to DECIDE
+    opt = next(s for s in ledger.stages() if s.stage == "optimize")
+    assert opt.detail["stopped"] == "budget"
+
+
+def test_optimize_recipe_journals_trials_and_clears_the_floor_on_the_real_toolbox(tmp_path):
+    # Against the REAL toolbox + journal: the recipe's trials land in the experiments journal and
+    # a completed sweep clears the min-trials exhaustion floor — zero LLM.
+    from noctis.research.driver import _optimize_stage
+
+    box = _make_toolbox(tmp_path)
+    detail = _optimize_stage(box, "probe", ["AAA", "BBB", "CCC"], sweep_trials=3)
+
+    stats = box.journal.stats("probe")
+    assert stats.sweep_completed  # a completed sweep clears the exhaustion floor
+    assert stats.n_trials >= 2  # baseline + the cheap sweep's trials journaled
+    assert detail["sweeps"] >= 1 and detail["backtests"] >= 2
+    assert box._exhaustion_block("probe") is None  # the gate is satisfied by the recipe alone
 
 
 def test_author_stage_passes_the_thesis_and_lineage_onto_the_brief(tmp_path):
@@ -414,8 +588,8 @@ def test_reserved_holdout_never_reaches_tuning_and_reaches_decide(tmp_path):
     fit = ["A", "B", "C"]
     reserved = {"D", "E"}
     assert box.writes[0]["brief"]["symbols"] == fit
-    assert box.backtests[0]["symbols"] == fit
-    assert box.sweeps[0]["symbols"] == fit
+    assert box.backtests[0]["symbols"] == fit  # the baseline runs the full fit panel
+    assert set(box.sweeps[0]["symbols"]).issubset(set(fit))  # the cheap sweep stays within the fit
     for call in box.writes:
         assert reserved.isdisjoint(call["brief"]["symbols"])
     for call in box.backtests + box.sweeps:

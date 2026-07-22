@@ -30,9 +30,17 @@ end to end with plain fakes and zero LLM involvement.
   fresh-subprocess validation, and thesis journaling all live behind that one gated method. (Brief
   authoring needs the coder engine — ``research.agent.coder_model``; without it the write is
   refused and the strategy is skipped, exactly like any other author failure.)
-* **OPTIMIZE** — a baseline ``tool_run_backtest`` plus one ``tool_run_sweep`` to give DECIDE a real
-  journal. A completed sweep clears the ``min_trials`` exhaustion floor; the multi-fidelity recipe
-  lands in #70.
+* **OPTIMIZE** — the v1 multi-fidelity tuning recipe (#70), run with **zero LLM calls** entirely
+  through the gated toolbox methods (:func:`_optimize_stage`): a full-panel **baseline** backtest →
+  a **cheap** exploration sweep (a subset of the fit panel at a truncated recent window) → a
+  **full-panel confirm** of that sweep's best params → **≤ 2 narrowed re-tune rounds**, each earned
+  by a meaningful improvement and hard-capped at two. Every backtest/sweep journals its trials
+  exactly as before, so a completed cheap sweep clears the ``min_trials`` exhaustion floor and the
+  best-observed params reach DECIDE through the same journal. The recipe is code with
+  data-dependent branches (promising vs weak baseline, re-tune improvement vs stall) — the exact
+  branch points a later ``interpret`` episode could slot into, deliberately out of scope here — and
+  it handles a budget refusal at any step honestly: it stops tuning and hands DECIDE whatever
+  evidence exists (the gates dispose).
 * **DECIDE** — one episode proposes a verdict (a :class:`DecideOutput`); the driver *submits it
   through* the gated ``tool_evaluate_vs_champion`` / ``tool_reject_strategy`` methods, so the
   exhaustion floor and evidence checks — not the episode — dispose of it. A verdict the journal
@@ -490,6 +498,192 @@ def _brief_from_formulate(fo: FormulateOutput, symbols: Sequence[str]) -> dict[s
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# OPTIMIZE — the v1 multi-fidelity tuning recipe (story #70), zero LLM
+# ─────────────────────────────────────────────────────────────────────────────
+# Hard cap on narrowed re-tune rounds — the recipe never spends more than two, however far the
+# metric keeps climbing (AGENTS.md rule 2: search effort is bounded, the gates are the arbiter).
+_MAX_RETUNES = 2
+
+# Cheap-fidelity bar cap for the exploration sweep: it tunes on at most this many recent bars per
+# symbol (a truncated recent window), so a broad first pass is cheap. Kept well above the toolbox's
+# ``_MAX_BARS_FLOOR`` (walk-forward needs train+test+holdout room); on a shorter series it is a
+# no-op (``tail`` returns the whole series). The full-panel confirm re-checks the best on all bars.
+_CHEAP_MAX_BARS = 2000
+
+# A re-tune must clear this relative bar over the previous round's confirm to earn another round —
+# a scale-free "meaningful improvement" gate for a positive metric; a flat/negative metric only has
+# to strictly increase (moving it up at all is progress the search earned). See :func:`_improved`.
+_IMPROVE_MARGIN = 0.05
+
+
+def _panel_metric(result: dict[str, Any]) -> float | None:
+    """The panel test metric a backtest/confirm exposes (``avg_test_metric``), or ``None`` when the
+    call errored or scored nothing — the same metric the journal ranks trials by, so baseline,
+    confirm, and sweep numbers sit on one scale-free footing."""
+    value = result.get("avg_test_metric")
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _best_params(sweep: dict[str, Any]) -> dict[str, Any]:
+    """The best (top-ranked) param set from a sweep return, or ``{}`` when it journaled none."""
+    trials = sweep.get("top_trials") or []
+    return dict(trials[0].get("params", {})) if trials else {}
+
+
+def _improved(new: float | None, prev: float | None) -> bool:
+    """Scale-free "meaningful improvement" of a panel test metric over the prior round's confirm.
+
+    An un-scored new round never counts; a first round (no prior) always does. With a positive
+    prior the new confirm must clear it by ``_IMPROVE_MARGIN`` (relative); with a flat/negative
+    prior any strict increase counts, since nudging a losing metric upward is real search progress
+    the recipe should let run one more round (still hard-capped)."""
+    if new is None:
+        return False
+    if prev is None:
+        return True
+    if prev > 0:
+        return new >= prev * (1.0 + _IMPROVE_MARGIN)
+    return new > prev
+
+
+def _narrow_ranges(best_params: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
+    """A narrowed ``ranges`` request for a re-tune sweep — a neighborhood around each numeric best
+    param (half its magnitude either side, positive ints floored at 1). Categorical/bool params
+    have no numeric neighborhood and are skipped. Returns ``None`` when nothing numeric can be
+    narrowed, which the recipe reads as "no re-tune to run" and stops honestly. The toolbox keeps
+    each param's original kind/step/choices and only swaps the low/high we send (see
+    ``_sweep_space``)."""
+    ranges: dict[str, dict[str, Any]] = {}
+    for pname, value in best_params.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            span_i = max(1, abs(value) // 2)
+            low = value - span_i
+            ranges[pname] = {"low": max(1, low) if value > 0 else low, "high": value + span_i}
+        elif isinstance(value, float):
+            span_f = abs(value) * 0.5 or 1.0
+            ranges[pname] = {"low": value - span_f, "high": value + span_f}
+    return ranges or None
+
+
+def _cheap_subset(fit: Sequence[str]) -> list[str]:
+    """The subset of the fit panel the cheap exploration sweep tunes on: the first half (rounded
+    up, at least one). A strict subset for a panel of two or more — the other cheap-fidelity lever
+    beside the truncated bar window; the confirm re-checks the best on the whole panel."""
+    half = max(1, (len(fit) + 1) // 2)
+    return list(fit[:half])
+
+
+def _optimize_stage(
+    toolbox: ResearchToolbox,
+    name: str,
+    fit_symbols: Sequence[str],
+    *,
+    sweep_trials: int | None,
+) -> dict[str, Any]:
+    """Run the v1 multi-fidelity OPTIMIZE recipe for one strategy and return the ledger detail.
+
+    Zero LLM: every step is a gated ``toolbox`` call, journaled exactly as today. The shape is
+    baseline → cheap subset sweep → full-panel confirm → ≤ 2 narrowed re-tune rounds, with two
+    data-dependent branch axes (see the module docstring): the baseline's sign sizes the cheap
+    sweep (promising vs weak — the weak branch still sweeps to feed the exhaustion floor, just
+    smaller), and each confirm's improvement over the prior round earns or ends re-tuning. A budget
+    refusal at any step stops the recipe and hands DECIDE whatever evidence the journal already
+    holds — the gates dispose. Adds no gate and invents no metric; it only allocates search effort.
+    """
+    fit = list(fit_symbols)
+    detail: dict[str, Any] = {
+        "retune_rounds": 0,
+        "sweeps": 0,  # completed sweeps (each journals its trials)
+        "backtests": 0,  # completed backtests (each journals one trial)
+        "trials": 0,  # trials journaled this recipe (backtests + sweep trials)
+        "weak_baseline": False,
+        "best_metric": None,
+        "stopped": "complete",
+    }
+
+    def run_backtest(**kwargs: Any) -> dict[str, Any]:
+        result = _invoke(toolbox.tool_run_backtest, **kwargs)
+        if "error" not in result:
+            detail["backtests"] += 1
+            detail["trials"] += 1
+        return result
+
+    def run_sweep(**kwargs: Any) -> dict[str, Any]:
+        result = _invoke(toolbox.tool_run_sweep, **kwargs)
+        if "error" not in result:
+            detail["sweeps"] += 1
+            detail["trials"] += int(result.get("n_trials") or 0)
+        return result
+
+    def note_best(metric: float | None) -> None:
+        if metric is not None and (detail["best_metric"] is None or metric > detail["best_metric"]):
+            detail["best_metric"] = metric
+
+    # 1. Baseline — the shipped defaults on the full fit panel.
+    baseline = run_backtest(name=name, symbols=fit)
+    if "error" in baseline:
+        detail["stopped"] = "budget"
+        return detail
+    baseline_metric = _panel_metric(baseline)
+    note_best(baseline_metric)
+
+    # 2. Cheap exploration sweep — a subset of the panel at a truncated recent window. A weak
+    #    baseline still sweeps (the floor needs trials) but is sized down (the interpret slot).
+    weak = baseline_metric is None or baseline_metric <= 0.0
+    detail["weak_baseline"] = weak
+    base_trials = sweep_trials or int(getattr(toolbox, "default_sweep_trials", 0) or 0) or None
+    cheap_trials = max(1, base_trials // 2) if (weak and base_trials) else base_trials
+    sweep = run_sweep(
+        name=name,
+        symbols=_cheap_subset(fit),
+        n_trials=cheap_trials,
+        max_bars=_CHEAP_MAX_BARS,
+    )
+    if "error" in sweep:
+        detail["stopped"] = "budget"
+        return detail
+    best_params = _best_params(sweep)
+
+    # 3. Full-panel confirm of the cheap sweep's best.
+    confirm = run_backtest(name=name, symbols=fit, params=best_params or None)
+    if "error" in confirm:
+        detail["stopped"] = "budget"
+        return detail
+    confirm_metric = _panel_metric(confirm)
+    note_best(confirm_metric)
+
+    # 4. Up to two narrowed re-tune rounds — each earned by a meaningful improvement, hard-capped.
+    prev_metric = baseline_metric
+    while detail["retune_rounds"] < _MAX_RETUNES:
+        if not _improved(confirm_metric, prev_metric):
+            detail["stopped"] = "stall"
+            break
+        ranges = _narrow_ranges(best_params)
+        if ranges is None:
+            detail["stopped"] = "no_narrowing"
+            break
+        retune = run_sweep(name=name, symbols=fit, ranges=ranges)
+        if "error" in retune:
+            detail["stopped"] = "budget"
+            break
+        detail["retune_rounds"] += 1
+        best_params = _best_params(retune) or best_params
+        prev_metric = confirm_metric
+        confirm = run_backtest(name=name, symbols=fit, params=best_params or None)
+        if "error" in confirm:
+            detail["stopped"] = "budget"
+            break
+        confirm_metric = _panel_metric(confirm)
+        note_best(confirm_metric)
+    else:
+        detail["stopped"] = "hard_cap"
+
+    return detail
+
+
 def run_episodic_research(
     *,
     toolbox: ResearchToolbox,
@@ -590,10 +784,9 @@ def run_episodic_research(
             logger.info("author skipped %s: %s", name, write["error"])
             continue
 
-        # ── OPTIMIZE (baseline backtest + one sweep to clear the exhaustion floor) ──
-        ledger.record_stage(OPTIMIZE, strategy=name)
-        _invoke(toolbox.tool_run_backtest, name=name, symbols=list(symbols))
-        _invoke(toolbox.tool_run_sweep, name=name, symbols=list(symbols), n_trials=sweep_trials)
+        # ── OPTIMIZE (v1 multi-fidelity tuning recipe, #70 — zero LLM) ──────────
+        optimize_detail = _optimize_stage(toolbox, name, symbols, sweep_trials=sweep_trials)
+        ledger.record_stage(OPTIMIZE, strategy=name, detail=optimize_detail)
 
         # ── DECIDE ────────────────────────────────────────────────────────────
         stop = _budget_stop()
