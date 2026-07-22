@@ -56,6 +56,11 @@ class ResearchSummary:
     # loop fills this from the toolbox's undecided set at session end (sorted); empty by default so
     # the legacy loop and existing constructors are unaffected. They are archived after the TTL.
     undecided: list[str] = field(default_factory=list)
+    # Failed local authoring attempts escalated to the paid coder-fallback model this session
+    # (episodic driver, story #72). The episodic driver fills it from the toolbox's counter; the
+    # conversation loop leaves it 0, so a later report story can show exactly what the paid model
+    # bought. 0 by default keeps the legacy/conversation constructors unaffected.
+    escalations: int = 0
 
 
 def _utcnow() -> datetime:

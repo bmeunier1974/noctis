@@ -176,6 +176,24 @@ class AgentResearchConfig(BaseModel):
     # validated strategy files. Built stateless at the composition root; a missing provider
     # key/extra degrades loudly back to driver-authored mode, never a mid-session failure.
     coder_model: str | None = None
+    # The paid coder-fallback model for cheapest-first authoring (episodic-research epic #62,
+    # story #72). ``coder_model`` (typically a cheap/local coder) attempts EVERY authoring job
+    # first; only when its validator-retry budget is spent — an honest write-gate failure, never a
+    # budget refusal — the SAME brief escalates to this model with the full validator-retry budget.
+    # ``None`` (the default) = no escalation path: a failed local author is skipped exactly as
+    # today. Same LiteLLM ``provider/model`` grammar as ``coder_model``; built stateless at the
+    # composition root beside the local coder, and a missing provider key/extra degrades loudly to
+    # no fallback (never a mid-session failure). The paid coder is a counted fallback triggered by
+    # validator failure, never a default — its per-session spend is bounded by ``max_escalations``.
+    coder_fallback_model: str | None = None
+    # How many failed local authoring attempts may escalate to ``coder_fallback_model`` per session
+    # (story #72). ``0`` (the default) disables escalation entirely — the paid coder is never
+    # reached even when ``coder_fallback_model`` is set — so escalation is strictly opt-in bounded
+    # spend. Each escalation (whether the paid coder then authors the file or also fails) counts
+    # against this cap; once spent, a further local failure is skipped without touching the paid
+    # model. Formulate/decide stay local; only authoring escalates. Inert without a configured
+    # ``coder_fallback_model`` (there is nothing to escalate to).
+    max_escalations: int = 0
     # The coder's own thinking dial (#17), default ON — authoring (scenario-window + warmup
     # arithmetic) is the reasoning-heavy sub-task, so the dedicated coder client reasons through it
     # instead of repeating an error it was just shown. Separate from the driver's ``thinking`` watch

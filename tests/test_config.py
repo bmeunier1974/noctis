@@ -209,6 +209,31 @@ def test_coder_model_env_overrides_yaml(monkeypatch, tmp_path):
     assert settings.research.agent.coder_model == "anthropic/claude-opus-4-8"
 
 
+def test_coder_fallback_model_and_max_escalations_default_off(tmp_path):
+    """Cheapest-first routing is opt-in bounded spend (story #72): no fallback model by default,
+    and escalation disabled (``max_escalations == 0``) so the paid coder is never reached."""
+    settings = load_settings(config_path=tmp_path / "missing.yaml")
+    assert settings.research.agent.coder_fallback_model is None
+    assert settings.research.agent.max_escalations == 0
+
+
+def test_coder_fallback_model_and_max_escalations_load_from_yaml(tmp_path):
+    """The escalation knobs live in the agent block alongside ``coder_model``."""
+    cfg = _write_yaml(
+        tmp_path / "config.yaml",
+        """
+        research:
+          agent:
+            coder_model: ollama_chat/noctis-qwen3:14b
+            coder_fallback_model: anthropic/claude-sonnet-5
+            max_escalations: 3
+        """,
+    )
+    settings = load_settings(config_path=cfg)
+    assert settings.research.agent.coder_fallback_model == "anthropic/claude-sonnet-5"
+    assert settings.research.agent.max_escalations == 3
+
+
 def test_example_config_ships_the_driver_coder_pairing():
     """The example config carries the commented local-driver + hosted-coder pairing (#4) —
     the whole point of the knob — under research.agent, still fully commented out."""

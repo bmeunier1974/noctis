@@ -308,14 +308,27 @@ def test_build_recorder_config_digest_excludes_secrets(tmp_path):
 
 
 # ── build_research_session: the one bundle both entrypoints run ───────────────────────────
-def _session_settings(tmp_path, *, coder_model: str | None = None):
+def _session_settings(
+    tmp_path,
+    *,
+    coder_model: str | None = None,
+    coder_fallback_model: str | None = None,
+    max_escalations: int | None = None,
+):
     lines = [
         "research_time_budget_minutes: 42",
         f"state_dir: {tmp_path}/state/",
         f"strategies_dir: {tmp_path}/strategies/",
     ]
+    agent: list[str] = []
     if coder_model is not None:
-        lines += ["research:", "  agent:", f"    coder_model: {coder_model}"]
+        agent.append(f"    coder_model: {coder_model}")
+    if coder_fallback_model is not None:
+        agent.append(f"    coder_fallback_model: {coder_fallback_model}")
+    if max_escalations is not None:
+        agent.append(f"    max_escalations: {max_escalations}")
+    if agent:
+        lines += ["research:", "  agent:", *agent]
     return load_settings(config_path=_config(tmp_path, lines))
 
 
@@ -492,6 +505,109 @@ def test_coder_client_missing_key_degrades_loudly(tmp_path, monkeypatch, caplog)
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("coder" in msg.lower() for msg in warnings)
     assert any("claude-sonnet-5" in msg for msg in warnings)
+
+
+# ── the coder-fallback knob (#72): a paid escalation client, threaded here or None ─────────
+def test_coder_fallback_client_not_built_when_knob_unset(tmp_path, monkeypatch):
+    """No ``coder_fallback_model`` ⇒ no fallback client on the toolbox (today's behavior)."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    coder = _fake_coder()
+    monkeypatch.setattr(research_mod, "client_for", lambda *a, **k: coder)
+    session = build_research_session(
+        settings=_session_settings(tmp_path, coder_model="anthropic/claude-sonnet-5"),
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    assert session is not None
+    assert session.toolbox.coder_fallback_client is None
+
+
+def test_coder_fallback_client_built_when_configured(tmp_path, monkeypatch):
+    """``coder_fallback_model`` set + provider available ⇒ a stateless paid client reaches the
+    toolbox, built like the local coder (thinking ON, a deliberate/budgeted decision)."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    local, fallback = _fake_coder(), _fake_coder()
+    seen: list[tuple] = []
+
+    def fake_client_for(settings, model, **kwargs):
+        seen.append((model, kwargs))
+        return fallback if model == "anthropic/claude-opus-4-8" else local
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    settings = _session_settings(
+        tmp_path,
+        coder_model="anthropic/claude-sonnet-5",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+        max_escalations=2,
+    )
+    session = build_research_session(
+        settings=settings,
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    assert session is not None
+    assert session.toolbox.coder_client is local
+    assert session.toolbox.coder_fallback_client is fallback
+    assert session.toolbox.max_escalations == 2
+    # The fallback client was built for the configured fallback model, thinking ON (deliberate).
+    fb = next(kw for model, kw in seen if model == "anthropic/claude-opus-4-8")
+    assert fb.get("thinking") == "on"
+    assert fb.get("deliberate") is True
+
+
+def test_coder_fallback_client_missing_key_degrades_loudly(tmp_path, monkeypatch, caplog):
+    """``coder_fallback_model`` set but its provider key/extra missing ⇒ a loud warning, session
+    still assembles with no fallback (escalation simply unavailable) — never a mid-session error."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    coder = _fake_coder()
+
+    def fake_client_for(settings, model, **kwargs):
+        # local coder resolves; the paid fallback provider has no key
+        return None if model == "anthropic/claude-opus-4-8" else coder
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    settings = _session_settings(
+        tmp_path,
+        coder_model="anthropic/claude-sonnet-5",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+    )
+    with caplog.at_level(logging.WARNING):
+        session = build_research_session(
+            settings=settings,
+            lake=object(),
+            registry=object(),
+            families=object(),
+            memory=object(),
+        )
+    assert session is not None
+    assert session.toolbox.coder_client is coder
+    assert session.toolbox.coder_fallback_client is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("fallback" in msg.lower() for msg in warnings)
+    assert any("claude-opus-4-8" in msg for msg in warnings)
+
+
+def test_coder_fallback_not_built_without_a_local_coder(tmp_path, monkeypatch):
+    """Escalation is a fallback FROM local authoring: a ``coder_fallback_model`` with no
+    ``coder_model`` builds no fallback client (there is nothing to escalate from)."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    calls: list = []
+    monkeypatch.setattr(research_mod, "client_for", lambda *a, **k: calls.append((a, k)))
+    settings = _session_settings(tmp_path, coder_fallback_model="anthropic/claude-opus-4-8")
+    session = build_research_session(
+        settings=settings,
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    assert session is not None
+    assert session.toolbox.coder_fallback_client is None
+    assert calls == []  # no local coder ⇒ neither builder is consulted
 
 
 # ── prune-on-start: sweep stale working-tier drafts before the toolbox loads the library (#56) ─

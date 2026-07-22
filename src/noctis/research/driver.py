@@ -609,6 +609,31 @@ def _match_stage(
     return MatchResult(fit, reserved, profile)
 
 
+# The AUTHOR episode-line outcomes for an ESCALATED authoring job (story #72): the paid fallback
+# either authored the file (``ok``) or also failed the write gate (``author_failed``). A
+# non-escalated (local-only) author records no episode line at all, so the episode stream is
+# unchanged when nothing escalated.
+_AUTHOR_OK = "ok"
+_AUTHOR_FAILED = "author_failed"
+
+
+def _record_author_escalation(ledger: SessionLedger, write: dict[str, Any]) -> None:
+    """Ledger one AUTHOR episode line when — and only when — the write escalated to the paid coder
+    fallback (story #72). ``tool_write_strategy`` marks an escalated write ``escalated=True`` and
+    names the model that authored it (``author_model`` = the fallback model), so the line records
+    which paid model was spent and whether it landed (``ok``) or also failed (``author_failed``).
+    A local-only author carries no ``escalated`` flag, so this is a no-op and the episode stream
+    stays byte-identical to before this story."""
+    if not write.get("escalated"):
+        return
+    ledger.record_episode(
+        stage=AUTHOR,
+        model=str(write.get("author_model") or ""),
+        outcome=_AUTHOR_FAILED if "error" in write else _AUTHOR_OK,
+        escalated=True,
+    )
+
+
 def _brief_from_formulate(fo: FormulateOutput, symbols: Sequence[str]) -> dict[str, Any]:
     """Map a FORMULATE output onto the strategy author's brief (thesis, entry/exit, param space,
     scenarios). Passed to ``tool_write_strategy(brief=…)`` — the coder author engine translates it
@@ -913,6 +938,7 @@ def run_episodic_research(
             parent_thesis=fo.parent_thesis,
             pivot_rationale=fo.pivot_rationale,
         )
+        _record_author_escalation(ledger, write)
         if "error" in write:
             # A write-gate rejection is a code bug in one draft, not a verdict — skip and move on.
             logger.info("author skipped %s: %s", name, write["error"])
@@ -935,6 +961,7 @@ def run_episodic_research(
     summary.rejections = int(getattr(toolbox, "rejections", 0))
     summary.candidates = list(getattr(toolbox, "strategies_touched", []))
     summary.author_calls = int(getattr(toolbox, "author_calls", 0))
+    summary.escalations = int(getattr(toolbox, "escalations", 0))
     summary.undecided = sorted(getattr(toolbox, "undecided", set()))
     ledger.record_session_end(
         formulated=formulated,

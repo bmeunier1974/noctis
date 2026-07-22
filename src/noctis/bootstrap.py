@@ -579,6 +579,41 @@ def _build_coder_client(settings):
     return coder
 
 
+def _build_coder_fallback_client(settings):
+    """The PAID coder-fallback client for ``research.agent.coder_fallback_model`` (story #72), or
+    ``None`` — the counted escalation target a spent local author falls back to.
+
+    Escalation is a fallback FROM local authoring, so this is built only when BOTH a local
+    ``coder_model`` and a ``coder_fallback_model`` are configured; either unset ⇒ ``None`` (no
+    escalation path, and no wasted client). Built stateless beside the local coder through the
+    shared :func:`~noctis.research.client_for` constructor with the same *deliberate*, budgeted
+    thinking decision (``coder_thinking``, ``deliberate=True``) — the paid coder reasons through
+    authoring just like the local one. If that client can't be built (its provider's key or the
+    ``[llm]`` extra is missing) the degradation is loud, never silent: warn and fall back to
+    ``None``, so the session still assembles and a failed local author is simply skipped as today
+    — the same graceful-degradation contract as :func:`_build_coder_client`, never a mid-session
+    failure. Bounded per session by ``research.agent.max_escalations`` (0 = never escalate)."""
+    from noctis.research import client_for
+
+    agent = settings.research.agent
+    if not agent.coder_model or not agent.coder_fallback_model:
+        return None
+    fallback = client_for(
+        settings,
+        agent.coder_fallback_model,
+        thinking=agent.coder_thinking,
+        deliberate=True,
+    )
+    if fallback is None:
+        logger.warning(
+            "coder_fallback_model %r is configured but no fallback client could be built (its "
+            "provider's API key or the [llm] extra is missing) — assembling with no escalation "
+            "path; a failed local author will be skipped as today. See docs/configuration.md.",
+            agent.coder_fallback_model,
+        )
+    return fallback
+
+
 def build_research_session(
     *,
     settings,
@@ -628,6 +663,7 @@ def build_research_session(
         mandate_source=mandate.source if mandate else None,
         mandate=mandate,
         coder_client=_build_coder_client(settings),
+        coder_fallback_client=_build_coder_fallback_client(settings),
         on_event=on_event,
     )
     return ResearchSession(

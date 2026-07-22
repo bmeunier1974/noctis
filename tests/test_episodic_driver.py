@@ -169,6 +169,7 @@ class FakeToolbox:
         self.promotions = 0
         self.rejections = 0
         self.author_calls = 0
+        self.escalations = 0
         self.strategies_touched: list[str] = []
         self.undecided: set[str] = set()
         self.writes: list[dict] = []
@@ -207,6 +208,10 @@ class FakeToolbox:
 
     def tool_write_strategy(self, **kwargs):
         self.writes.append(kwargs)
+        # Mirror the real toolbox: an escalated write bumps the session escalation counter (the
+        # summary surfaces it) whether the paid model then authors the file or also fails.
+        if self._write_result.get("escalated"):
+            self.escalations += 1
         if "error" in self._write_result:
             return dict(self._write_result)
         name = kwargs["name"]
@@ -485,6 +490,66 @@ def test_author_failure_skips_the_strategy(tmp_path):
     assert summary.undecided == []  # a refused draft never entered the undecided set
     assert summary.stopped_reason == "max_episodes"
     assert "decide" not in [s.stage for s in ledger.stages()]
+
+
+# ── 2d. coder-fallback escalation surfaced on the ledger + summary (story #72) ──────────────
+def test_escalated_author_records_a_paid_episode_line_and_counts_in_the_summary(tmp_path):
+    # A write the paid fallback authored comes back with escalated=True + the fallback model; the
+    # driver ledgers a paid AUTHOR episode line and the summary counts the escalation.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox(
+        write_result={"ok": True, "escalated": True, "author_model": "fake/coder-paid"}
+    )
+    ledger = SessionLedger(tmp_path, "esc1")
+
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    assert summary.escalations == 1
+    author_eps = [e for e in ledger.episodes() if e.stage == "author"]
+    assert len(author_eps) == 1
+    assert author_eps[0].escalated is True
+    assert author_eps[0].model == "fake/coder-paid"  # the paid fallback model, named on the line
+    assert author_eps[0].outcome == "ok"
+    # A valid file was authored, so the strategy still flows to optimize + a verdict.
+    assert box.rejects and summary.rejections == 1
+
+
+def test_escalated_author_that_also_fails_is_counted_and_skips_the_strategy(tmp_path):
+    # The paid fallback also failed: escalated=True rides an error write. The escalation still
+    # counts, an escalated author episode line records the failure, and the strategy is skipped.
+    episodes = Episodes([formulate_ok()], [])
+    box = FakeToolbox(
+        write_result={
+            "error": "validation failed: bad scenario window",
+            "escalated": True,
+            "author_model": "fake/coder-paid",
+        }
+    )
+    ledger = SessionLedger(tmp_path, "esc2")
+
+    summary = _drive(episodes, box, max_episodes=1, ledger=ledger)
+
+    assert summary.escalations == 1  # the escalation is metered even when the paid model fails
+    author_eps = [e for e in ledger.episodes() if e.stage == "author"]
+    assert len(author_eps) == 1 and author_eps[0].escalated is True
+    assert author_eps[0].outcome != "ok"  # the paid attempt also failed the gate
+    # Skipped exactly like any author failure — no optimize, no verdict.
+    assert box.backtests == [] and box.rejects == []
+    assert "decide" not in [s.stage for s in ledger.stages()]
+    assert summary.undecided == []
+
+
+def test_non_escalated_author_records_no_paid_episode_line(tmp_path):
+    # A local (non-escalated) author success writes NO author episode line — the ledger's episode
+    # stream is unchanged from before this story when nothing escalated.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "esc3")
+
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    assert summary.escalations == 0
+    assert [e.stage for e in ledger.episodes()] == ["formulate", "decide"]  # no author episode
 
 
 def test_decide_refusal_reasks_once_with_the_refusal_then_leaves_undecided(tmp_path):
@@ -869,6 +934,22 @@ class FakeCoder:
         return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
 
 
+class FakeBrokenCoder:
+    """A local coder that always emits a name-mismatched file — it never passes the write gate,
+    so it exhausts its validator-retry budget and triggers escalation to the paid fallback."""
+
+    def __init__(self):
+        self.model = "fake/coder-local"
+        self.capabilities = Capabilities()
+        self.calls = 0
+
+    def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
+        self.calls += 1
+        source = PROBE.replace('name = "probe"', 'name = "mismatch"')
+        block = f"```python\n{source}\n```"
+        return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
+
+
 def _emit(name: str, payload: dict) -> Turn:
     call = ToolCall(id="c", name=name, arguments=payload)
     return Turn(
@@ -942,6 +1023,56 @@ def test_end_to_end_episodic_session_produces_a_gated_verdict_and_a_complete_led
     verdicts = ledger.verdicts()
     assert len(verdicts) == 1 and verdicts[0].verdict == "reject"
     assert ledger.session_end() is not None
+
+
+def test_end_to_end_escalation_authors_via_the_paid_fallback_and_ledgers_it(tmp_path):
+    # Real toolbox + real StrategyAuthor engines: the local coder always fails the write gate, so
+    # after its full validator-retry budget the SAME brief escalates to the paid fallback, which
+    # authors a valid file. The whole session then optimizes and reaches a gated verdict, and the
+    # driver ledgers a paid AUTHOR episode line + surfaces the escalation on the summary (#72).
+    local, fallback = FakeBrokenCoder(), FakeCoder()
+    box = _make_toolbox(
+        tmp_path,
+        coder_client=local,
+        coder_model="fake/coder-local",
+        coder_fallback_client=fallback,
+        coder_fallback_model="fake/coder-paid",
+        max_escalations=1,
+    )
+    ledger = SessionLedger(box.state_dir, session_id="ep-escalate")
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fit_symbols=["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+
+    name = "intraday_momentum_1"
+    assert summary.escalations == 1 and box.escalations == 1
+    assert local.calls == 3  # the local coder burned its full validator-retry budget first
+    assert summary.author_calls == 4  # 3 local + 1 paid fallback completion
+    # The driver ledgered a paid AUTHOR episode line naming the fallback model.
+    author_eps = [e for e in ledger.episodes() if e.stage == "author"]
+    assert len(author_eps) == 1
+    assert author_eps[0].escalated is True and author_eps[0].model == "fake/coder-paid"
+    assert author_eps[0].outcome == "ok"
+    # The escalated file was real: it authored, optimized (sweep cleared the floor), got a verdict.
+    assert box.journal.stats(name).sweep_completed
+    assert summary.rejections == 1 and summary.undecided == []
+    assert [e.stage for e in ledger.episodes()] == ["formulate", "author", "decide"]
 
 
 def test_end_to_end_below_floor_verdict_is_refused_by_the_real_gate(tmp_path):

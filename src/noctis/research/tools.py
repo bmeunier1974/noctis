@@ -187,6 +187,7 @@ class ResearchToolbox:
         mandate_source=None,
         mandate=None,
         coder_client=None,
+        coder_fallback_client=None,
         on_event=None,
     ):
         self.settings = settings
@@ -209,6 +210,22 @@ class ResearchToolbox:
         # The coder model string that pairs with coder_client — stamped onto every authoring
         # event so a watch session names the model that wrote (or failed to write) the file.
         self.coder_model = settings.research.agent.coder_model
+        # The PAID coder-fallback client for cheapest-first authoring (story #72), or None (the
+        # default). Built at the composition root from research.agent.coder_fallback_model. When
+        # set (and a local coder_client exists), a local authoring job that spends its whole
+        # validator-retry budget escalates the SAME brief to this client with the full budget —
+        # a counted fallback triggered by validator failure, never a default. Its per-session
+        # spend is bounded by max_escalations (0 = never escalate).
+        self.coder_fallback_client = coder_fallback_client
+        # The paid-fallback model string that pairs with coder_fallback_client — stamped onto every
+        # escalated authoring event and returned as the authoring model on an escalated write.
+        self.coder_fallback_model = settings.research.agent.coder_fallback_model
+        # Per-session escalation cap (0 = never escalate). Each escalation — whether the paid coder
+        # then authors the file or also fails — counts against it; once spent, a further local
+        # failure is skipped without touching the paid model.
+        self.max_escalations = settings.research.agent.max_escalations
+        # Escalations spent this session (the summary surfaces it, the driver ledgers it).
+        self.escalations = 0
         # The session event channel this toolbox emits authoring observability through (#9): the
         # SAME on_event sink the agent loop and console already use, threaded in at the composition
         # root. None (tests, bare loops) falls back to the logger, like the agent's default sink.
@@ -237,6 +254,21 @@ class ResearchToolbox:
                 **author_kwargs,
             )
             if coder_client is not None
+            else None
+        )
+        # The paid-fallback authoring engine — a second StrategyAuthor over the fallback client,
+        # built only when BOTH a local coder and a fallback client exist (escalation is a fallback
+        # FROM local authoring, so with no local coder there is nothing to escalate). It runs the
+        # SAME validator-retry loop and gate with the full retry budget, and its client is wrapped
+        # in the same counting proxy so every escalated completion counts against author_calls too.
+        self.fallback_author_engine = (
+            StrategyAuthor(
+                client=_CoderCallCounter(coder_fallback_client, self._bump_author_calls),
+                strategies_dir=self.strategies_dir,
+                families=self.families,
+                **author_kwargs,
+            )
+            if (coder_client is not None and coder_fallback_client is not None)
             else None
         )
         # Every coder attempt the write gate rejects is persisted here — a capped folder under
@@ -1204,6 +1236,11 @@ class ResearchToolbox:
         # repair guidance below: the driver holds source in the hand-written path but not in
         # brief mode, so "fix the source" is actionable in one and not the other.
         brief_mode = brief is not None and self.author_engine is not None
+        # Escalation bookkeeping (story #72): _author_from_brief bumps self.escalations when a
+        # spent local author escalates the same brief to the paid fallback. Snapshot the counter
+        # here so both the success and error branches can tell whether THIS write escalated —
+        # surfaced as `escalated`/`author_model` so the driver ledgers a paid author episode line.
+        esc_before = self.escalations
         # Both authoring paths converge here on a validated write result: a driver-supplied
         # `source` goes straight to the write gate, while a `brief` (coder mode) is turned into
         # source and validated by the StrategyAuthor engine (its private retries invisible).
@@ -1246,7 +1283,7 @@ class ResearchToolbox:
                     "write_strategy with the SAME name and the full corrected source (nothing "
                     "was saved). Do not start a new strategy over a validation error."
                 )
-            return {"error": error}
+            return self._with_escalation({"error": error}, esc_before)
         self._write_gate_failures = 0
         abandoned = self._last_failed_write
         self._last_failed_write = None
@@ -1275,6 +1312,18 @@ class ResearchToolbox:
         out = {"ok": True, **result}
         if warning:
             out["warning"] = warning
+        return self._with_escalation(out, esc_before)
+
+    def _with_escalation(self, out: dict, esc_before: int) -> dict:
+        """Stamp a write result with the escalation provenance the driver ledgers.
+
+        When this write escalated (``self.escalations`` moved since ``esc_before``), the paid
+        fallback authored it (or tried to), so mark ``escalated`` and name the model that did —
+        the fallback model. A non-escalated write carries neither key, so the driver records no
+        paid author episode and every existing (local-only) write result is byte-identical."""
+        if self.escalations > esc_before:
+            out["escalated"] = True
+            out["author_model"] = self.coder_fallback_model
         return out
 
     def _author_source(self, name: str, source: str | None, brief: dict | None) -> dict:
@@ -1297,15 +1346,48 @@ class ResearchToolbox:
     def _author_from_brief(self, name: str, brief: dict) -> dict:
         """Delegate to the coder engine: the driver's brief in, a validated file out.
 
-        The engine makes stateless coder completions with private retries and lands the file
-        through the same ``library.write_strategy`` gate the source path uses. Its
-        :class:`AuthoringError` (retries exhausted) re-surfaces as the final
-        :class:`library.StrategyValidationError`, so the caller's shared fixation/REPAIR path
-        steers the driver to refine the brief and resubmit the same name.
+        The (cheap/local) engine makes stateless coder completions with private retries and lands
+        the file through the same ``library.write_strategy`` gate the source path uses. When it
+        exhausts its validator-retry budget (:class:`AuthoringError`) and escalation is available
+        (a fallback engine and an unspent :attr:`max_escalations` cap), the SAME brief escalates to
+        the paid fallback with the full validator-retry budget — a counted fallback triggered by
+        validator failure, never a default (story #72). A brief the fallback also cannot author, or
+        a spent cap / no fallback, re-surfaces the final :class:`library.StrategyValidationError`,
+        so the caller's shared fixation/REPAIR path steers the driver to refine the brief.
         """
         engine = self.author_engine
         assert engine is not None  # only reached in coder mode (guarded by _author_source)
-        parsed = StrategyBrief(
+        parsed = self._parse_brief(brief)
+        try:
+            return engine.author(name, parsed, on_attempt=self._author_attempt_sink(name))
+        except AuthoringError as exc:
+            if not self._can_escalate():
+                raise self._as_validation_error(exc) from exc
+            return self._escalate_author(name, parsed)
+
+    def _can_escalate(self) -> bool:
+        """Whether a spent local author may escalate now: a fallback engine exists and the paid
+        per-session cap is not yet spent (``max_escalations == 0`` disables escalation entirely)."""
+        return self.fallback_author_engine is not None and self.escalations < self.max_escalations
+
+    def _escalate_author(self, name: str, parsed: StrategyBrief) -> dict:
+        """Escalate one spent local author to the paid fallback with the full validator-retry
+        budget. The escalation is counted BEFORE the attempt (the cap bounds paid *spend*, whether
+        or not the file then lands), and the fallback's completions bump ``author_calls`` through
+        the same counting proxy. A fallback that also fails re-surfaces its validation error into
+        the shared REPAIR path — the strategy is skipped, but the escalation still counted."""
+        engine = self.fallback_author_engine
+        assert engine is not None  # guarded by _can_escalate
+        self.escalations += 1
+        sink = self._author_attempt_sink(name, model=self.coder_fallback_model)
+        try:
+            return engine.author(name, parsed, on_attempt=sink)
+        except AuthoringError as exc:
+            raise self._as_validation_error(exc) from exc
+
+    @staticmethod
+    def _parse_brief(brief: dict) -> StrategyBrief:
+        return StrategyBrief(
             thesis=brief["thesis"],
             entry_exit=brief["entry_exit"],
             param_space=brief["param_space"],
@@ -1314,13 +1396,13 @@ class ResearchToolbox:
             style=brief.get("style"),
             symbols=tuple(brief.get("symbols") or ()),
         )
-        try:
-            return engine.author(name, parsed, on_attempt=self._author_attempt_sink(name))
-        except AuthoringError as exc:
-            error = exc.validation_error or library.StrategyValidationError(str(exc))
-            raise error from exc
 
-    def _author_attempt_sink(self, name: str):
+    @staticmethod
+    def _as_validation_error(exc: AuthoringError) -> Exception:
+        """The final gate error an exhausted authoring job carries, for the shared REPAIR path."""
+        return exc.validation_error or library.StrategyValidationError(str(exc))
+
+    def _author_attempt_sink(self, name: str, *, model: str | None = None):
         """Adapt the engine's per-attempt hook into (a) a session authoring event and (b) an
         on-disk failure record for ``name``.
 
@@ -1329,24 +1411,31 @@ class ResearchToolbox:
         source. The toolbox owns both the event channel (the #9 telemetry, unchanged) and the
         capped ``failed/`` store: a rejected attempt's source and gate error are persisted so a
         bad session is inspectable from disk, while a landing attempt writes no failure record.
+
+        ``model`` names which coder authored this attempt — the local coder by default, the paid
+        fallback for an escalated job (story #72) — so the watch feed attributes each completion to
+        the model that actually made it.
         """
 
         def sink(attempt: int, error: Exception | None, source: str) -> None:
-            self._emit_author_event(name, attempt, error)
+            self._emit_author_event(name, attempt, error, model=model)
             if error is not None:
                 self.failed_store.record(name, attempt, source, str(error))
 
         return sink
 
-    def _emit_author_event(self, name: str, attempt: int, error: Exception | None) -> None:
+    def _emit_author_event(
+        self, name: str, attempt: int, error: Exception | None, *, model: str | None = None
+    ) -> None:
         """Emit one ``author`` :class:`Event` for a resolved coder completion (#9).
 
         ``error is None`` ⇒ the attempt landed (``ok``); otherwise the validation error (a gate
         rejection or a non-code reply) is the attempt's outcome. So a watch session (``research
         -v``) sees authoring happen instead of a silent gap where a file appears from nowhere.
+        ``model`` overrides the default local coder model for an escalated (paid-fallback) attempt.
         """
         ok = error is None
-        model = self.coder_model or "coder"
+        model = model or self.coder_model or "coder"
         outcome = "ok" if ok else str(error)
         text = f"author {name} · attempt {attempt} · {model} -> {outcome}"
         self._emit(
