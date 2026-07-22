@@ -162,6 +162,13 @@ class AgentResearchConfig(BaseModel):
     """
 
     model: str = "claude-opus-4-8"
+    # Which research loop drives a session (episodic-research epic #62). ``conversation`` = the
+    # one long tool-use transcript (today's behavior); ``episodic`` = the deterministic session
+    # driver that owns the protocol and calls the model only at narrow judgment episodes (for a
+    # small-context local model). ``auto`` (the default) resolves to ``conversation`` in this
+    # story; the evidence-gated flip to episodic-on-small-window lands in #76. Loop selection is
+    # resolved in the composition root (``bootstrap.resolve_research_loop``), never here.
+    loop: Literal["auto", "conversation", "episodic"] = "auto"
     # Dedicated authoring model for write_strategy (same LiteLLM ``provider/model`` grammar as
     # research.model — the provider prefix picks the API key). ``None`` (the default) = the driver
     # writes full source itself, today's behavior bit for bit. Set it to pair a cheap/local driver

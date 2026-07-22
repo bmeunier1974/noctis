@@ -20,10 +20,13 @@ import pytest
 import noctis.research as research_mod
 from noctis.bootstrap import (
     MissingVendorKey,
+    ResearchSession,
     UsageError,
     build_lake,
     build_recorder,
     build_research_session,
+    effective_memory_distill_every,
+    resolve_research_loop,
     resolve_session,
 )
 from noctis.champions.promotion import PromotionRules
@@ -569,3 +572,133 @@ def test_build_research_session_draft_ttl_none_disables_prune(tmp_path, monkeypa
     assert corpse.exists()  # disabled sweep leaves the working tier byte-identical
     assert not (work / "archive").exists()
     assert not any("prune" in r.getMessage().lower() for r in caplog.records)
+
+
+# ── the research-loop knob (#68): conversation vs the episodic driver, selected here ──────────
+def _loop_settings(tmp_path, *, loop: str | None = None, distill: int | None = None):
+    lines = [
+        "research_time_budget_minutes: 42",
+        f"state_dir: {tmp_path}/state/",
+        f"strategies_dir: {tmp_path}/strategies/",
+    ]
+    research = []
+    if distill is not None:
+        research.append(f"  memory_distill_every: {distill}")
+    if loop is not None:
+        research += ["  agent:", f"    loop: {loop}"]
+    if research:
+        lines = [*lines, "research:", *research]
+    return load_settings(config_path=_config(tmp_path, lines, f"loop-{loop}-{distill}.yaml"))
+
+
+def test_loop_config_knob_defaults_to_auto_and_accepts_the_three_values(tmp_path):
+    from noctis.config.settings import AgentResearchConfig
+
+    assert AgentResearchConfig().loop == "auto"
+    for value in ("auto", "conversation", "episodic"):
+        assert AgentResearchConfig(loop=value).loop == value
+    with pytest.raises(Exception):
+        AgentResearchConfig(loop="nonsense")
+
+
+def test_resolve_research_loop_maps_auto_and_unset_to_conversation(tmp_path):
+    assert resolve_research_loop(_loop_settings(tmp_path)) == "conversation"  # unset
+    assert resolve_research_loop(_loop_settings(tmp_path, loop="auto")) == "conversation"
+    assert resolve_research_loop(_loop_settings(tmp_path, loop="conversation")) == "conversation"
+    assert resolve_research_loop(_loop_settings(tmp_path, loop="episodic")) == "episodic"
+
+
+def _session(tmp_path, monkeypatch, *, loop=None, distill=None):
+    client = SimpleNamespace(model="fake/model", capabilities=Capabilities())
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: client)
+    return build_research_session(
+        settings=_loop_settings(tmp_path, loop=loop, distill=distill),
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+
+
+def test_loop_episodic_selects_the_episodic_driver(tmp_path, monkeypatch):
+    session = _session(tmp_path, monkeypatch, loop="episodic")
+    seen: dict = {}
+    monkeypatch.setattr(
+        ResearchSession,
+        "_run_episodic",
+        lambda self, **k: seen.setdefault("episodic", k) or ResearchSummary(),
+    )
+    monkeypatch.setattr(
+        ResearchSession,
+        "_run_conversation",
+        lambda self, **k: seen.setdefault("conversation", k) or ResearchSummary(),
+    )
+    session.run(max_iterations=3)
+    assert "episodic" in seen and "conversation" not in seen
+    assert seen["episodic"]["max_iterations"] == 3
+
+
+def _which_loop_ran(session, monkeypatch) -> set[str]:
+    seen: set[str] = set()
+    monkeypatch.setattr(
+        ResearchSession, "_run_conversation", lambda self, **k: seen.add("conversation")
+    )
+    monkeypatch.setattr(ResearchSession, "_run_episodic", lambda self, **k: seen.add("episodic"))
+    session.run()
+    return seen
+
+
+@pytest.mark.parametrize("loop", [None, "auto"])
+def test_loop_auto_and_unset_still_select_the_conversation_loop(tmp_path, monkeypatch, loop):
+    session = _session(tmp_path, monkeypatch, loop=loop)
+    assert _which_loop_ran(session, monkeypatch) == {"conversation"}
+
+
+def test_conversation_loop_kwargs_unchanged_under_auto(tmp_path, monkeypatch):
+    """The loop knob must not perturb the conversation path — ``auto`` threads exactly the kwargs
+    the CLI/runtime always wired into ``run_agent_research``."""
+    client = SimpleNamespace(model="fake/model", capabilities=Capabilities())
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: client)
+    seen: dict = {}
+    monkeypatch.setattr(
+        research_mod, "run_agent_research", lambda **k: seen.update(k) or ResearchSummary()
+    )
+    session = build_research_session(
+        settings=_loop_settings(tmp_path),  # unset ⇒ auto ⇒ conversation
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    session.run(max_iterations=5)
+    assert seen["client"] is client
+    assert seen["budget_minutes"] == 42
+    assert seen["max_iterations"] == 5
+
+
+# ── memory_distill_every defaults ON in episodic mode; conversation stays bit-identical ──────
+def test_effective_memory_distill_every_defaults_on_only_for_episodic(tmp_path):
+    # Episodic + operator left it at 0 ⇒ defaults on (a modest cadence).
+    assert effective_memory_distill_every(_loop_settings(tmp_path, loop="episodic")) == 1
+    # Conversation / auto / unset ⇒ off, exactly as today.
+    assert effective_memory_distill_every(_loop_settings(tmp_path)) == 0
+    assert effective_memory_distill_every(_loop_settings(tmp_path, loop="conversation")) == 0
+    # An explicit operator value always wins, in either loop.
+    assert effective_memory_distill_every(_loop_settings(tmp_path, loop="episodic", distill=4)) == 4
+    assert effective_memory_distill_every(_loop_settings(tmp_path, distill=7)) == 7
+
+
+def test_running_the_episodic_loop_applies_the_distill_default_to_settings(tmp_path, monkeypatch):
+    session = _session(tmp_path, monkeypatch, loop="episodic")
+    assert session.settings.research.memory_distill_every == 0  # before the run
+    monkeypatch.setattr(ResearchSession, "_run_episodic", lambda self, **k: ResearchSummary())
+    session.run()
+    # CLOSE reads the shared settings instance, so the episodic default now governs distillation.
+    assert session.settings.research.memory_distill_every == 1
+
+
+def test_running_the_conversation_loop_leaves_distill_untouched(tmp_path, monkeypatch):
+    session = _session(tmp_path, monkeypatch, loop="conversation")
+    monkeypatch.setattr(research_mod, "run_agent_research", lambda **k: ResearchSummary())
+    session.run()
+    assert session.settings.research.memory_distill_every == 0  # bit-identical to today
