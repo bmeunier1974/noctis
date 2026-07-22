@@ -42,6 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
+from noctis.observability.events import Event, usage_line
 from noctis.research.llm import LLMClient, Turn
 from noctis.research.misfire import (
     classify_completion_error,
@@ -174,10 +175,16 @@ class EpisodeRunner:
         client: LLMClient,
         retries: int,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
+        on_event: Callable[[Event | str], None] | None = None,
     ) -> None:
         self._client = client
         self._retries = max(0, retries)
         self._max_tokens = max_tokens
+        # The observability sink (#73): each completion's reasoning, per-completion usage, and
+        # narration — all already on the Turn — are teed as the SAME typed think/say/usage Events
+        # the conversation loop emits, so an episode reads through the existing console pipeline
+        # unchanged. `None` (a bare run / the deterministic tests) ⇒ no emission, byte-identical.
+        self._on_event = on_event
         # The budget counter: every completion, retries included. Incremented once per
         # client.complete() attempt in the loop below (an attempt that raised still counts), so
         # the driver enforces max_episodes off this single counter — it never adds retry counts
@@ -247,6 +254,7 @@ class EpisodeRunner:
                 continue
 
             tokens += _turn_tokens(turn.usage)
+            self._emit_turn(turn)  # tee think/usage/say for the operator feed (#73)
             payload = _payload_from_turn(turn, contract.name)
             if payload is not None:
                 try:
@@ -280,6 +288,22 @@ class EpisodeRunner:
             misfires=misfires,
             note=note,
         )
+
+    def _emit_turn(self, turn: Turn) -> None:
+        """Tee one completion's reasoning, usage, and narration to the ``on_event`` sink (#73).
+
+        Mirrors the conversation loop's per-turn emission exactly: the model's thinking as a
+        level-2 ``think``, the per-completion token line as a level-2 ``usage`` (with the raw usage
+        dict in ``meta``), and any prose the completion carried as a level-2 ``say``. It only ever
+        surfaces what the completion already returned — zero extra model calls or tokens. A no-op
+        when no sink is wired."""
+        if self._on_event is None:
+            return
+        if turn.reasoning.strip():
+            self._on_event(Event("think", turn.reasoning.strip(), level=2))
+        self._on_event(Event("usage", usage_line(turn.usage), meta=dict(turn.usage or {}), level=2))
+        if turn.text.strip():
+            self._on_event(Event("say", turn.text.strip(), level=2))
 
 
 def _reason(exc: Exception) -> str:

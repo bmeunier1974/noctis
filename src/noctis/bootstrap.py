@@ -513,7 +513,10 @@ class ResearchSession:
         if agent_cfg.max_tokens:
             runner_kwargs["max_tokens"] = agent_cfg.max_tokens
         runner = EpisodeRunner(
-            client=self.client, retries=agent_cfg.episode_retries, **runner_kwargs
+            client=self.client,
+            retries=agent_cfg.episode_retries,
+            on_event=self.on_event,
+            **runner_kwargs,
         )
         ledger = SessionLedger(settings.state_dir)
         context_window = agent_cfg.context_window or _EPISODIC_CONTEXT_WINDOW
@@ -540,6 +543,7 @@ class ResearchSession:
             mandate_source=self.mandate.source if self.mandate else None,
             models={"driver": self.model, "coder": agent_cfg.coder_model},
             sweep_trials=self.toolbox.default_sweep_trials,
+            on_event=self.on_event,
         )
 
 

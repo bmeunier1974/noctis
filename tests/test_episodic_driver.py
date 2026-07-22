@@ -202,6 +202,14 @@ class FakeToolbox:
     def market_context(self):
         return dict(_FAKE_DIGEST)
 
+    def result_brief(self, result):
+        """The gate-facing slice the driver's tool-line emitter prints — a small honest subset of
+        the real toolbox's ``result_brief`` (enough for the narration tests)."""
+        if not isinstance(result, dict):
+            return {}
+        keys = ("status", "promoted", "n_trials", "sweep_completed", "avg_test_metric")
+        return {k: result[k] for k in keys if k in result}
+
     def tool_screen_symbols(self, trend="any", volatility="any", liquidity="any", symbols=None):
         self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
         return dict(self._screen_result)
@@ -838,6 +846,87 @@ def test_match_fallback_is_ledgered_when_the_screen_is_empty(tmp_path):
     assert match.detail["fallback"]  # a non-empty reason string records why it fell back
 
 
+# ── 2e. observability: stage boundaries + deterministic tool lines (story #73) ──────────────
+def test_stage_events_are_emitted_in_protocol_order(tmp_path):
+    # The driver emits a `stage` boundary Event beside each ledger stage write, in protocol order,
+    # carrying the stage and (past FORMULATE) the strategy the boundary concerns.
+    events: list = []
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    _drive(
+        episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "nv1"), on_event=events.append
+    )
+
+    stages = [(e.meta["stage"], e.meta.get("strategy")) for e in events if e.kind == "stage"]
+    assert stages == [
+        ("formulate", None),
+        ("match", "intraday_momentum_1"),
+        ("author", "intraday_momentum_1"),
+        ("optimize", "intraday_momentum_1"),
+        ("decide", "intraday_momentum_1"),
+    ]
+    assert all(e.level == 1 for e in events if e.kind == "stage")  # -v skeleton, like tool lines
+
+
+def test_deterministic_actions_emit_tool_lines_ending_with_the_verdict_submission(tmp_path):
+    # The driver's deterministic toolbox actions (screen, write, backtests, sweeps, verdict) emit
+    # the existing tool-line format, so an episodic session's -v feed reads as one continuous
+    # narrative — ending with the verdict submission's line.
+    events: list = []
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox(screen_result={"suggested_fit": ["A", "B"], "reserved_holdout": ["C"]})
+    _drive(
+        episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "nv2"), on_event=events.append
+    )
+
+    tools = [e.meta["tool"] for e in events if e.kind == "tool"]
+    assert tools[0] == "screen_symbols"  # MATCH's structural screen is the first action
+    assert "write_strategy" in tools  # AUTHOR
+    assert "run_backtest" in tools and "run_sweep" in tools  # OPTIMIZE
+    assert tools[-1] == "reject_strategy"  # DECIDE's verdict submission is the last tool line
+    assert all(e.level == 1 for e in events if e.kind == "tool")
+
+
+def test_approve_verdict_submission_emits_an_evaluate_tool_line(tmp_path):
+    events: list = []
+    episodes = Episodes([formulate_ok()], [decide_ok("approve")])
+    box = FakeToolbox(
+        screen_result={"suggested_fit": ["A", "B"], "reserved_holdout": ["C"]},
+        verdict_results=[{"ok": True, "promoted": True}],
+    )
+    _drive(
+        episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "nv3"), on_event=events.append
+    )
+    tools = [e.meta["tool"] for e in events if e.kind == "tool"]
+    assert tools[-1] == "evaluate_vs_champion"  # the approve routes through the champion challenge
+
+
+def test_tool_line_carries_the_gate_facing_brief_and_error_flag(tmp_path):
+    # A tool line's meta carries the gate-facing brief on success and an ok=False on an error
+    # result, exactly like the conversation loop's tool events.
+    events: list = []
+    episodes = Episodes([formulate_ok()], [decide_ok("reject"), decide_ok("reject")])
+    box = FakeToolbox(verdict_results=[{"error": _EXHAUSTION_REFUSAL}])
+    _drive(
+        episodes,
+        box,
+        max_episodes=3,
+        ledger=SessionLedger(tmp_path, "nv4"),
+        on_event=events.append,
+    )
+    reject_lines = [e for e in events if e.kind == "tool" and e.meta["tool"] == "reject_strategy"]
+    assert reject_lines and reject_lines[0].meta["ok"] is False  # the gate refusal colors red
+    assert "ERROR" in reject_lines[0].text
+
+
+def test_narration_is_silent_without_a_sink(tmp_path):
+    # No on_event (a bare run) ⇒ no stage/tool emission and no crash — byte-identical to before.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    summary = _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "nv5"))
+    assert summary.rejections == 1  # the session still ran end to end
+
+
 # ── 3. budgets: every episode ledgered before acting; three stop conditions ─────────────────
 def test_max_episodes_stops_at_the_next_stage_boundary(tmp_path):
     episodes = Episodes([formulate_ok(), formulate_ok()], [decide_ok("reject")])
@@ -1113,3 +1202,54 @@ def test_end_to_end_below_floor_verdict_is_refused_by_the_real_gate(tmp_path):
     # The re-asked decide episode carried the real gate refusal as corrective context.
     assert "exhaustion gate" in client.calls[2][0]["content"]
     assert [e.stage for e in ledger.episodes()] == ["formulate", "decide", "decide"]
+
+
+# ── 6. verbose narration: a fake-client episodic session reads as one continuous arc (#73) ───
+def test_verbose_episodic_session_narrates_the_full_arc(tmp_path):
+    # A whole fake-client session narrated through one recording sink shows the full arc: the
+    # session-start/rollup ledger frame, the five stage boundaries in protocol order, the episode
+    # events (think/say/usage the fake client's turns provide), the driver's deterministic tool
+    # lines, and the verdict submission's line last — the same shape the conversation loop reads.
+    events: list = []
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder(), on_event=events.append)
+    ledger = SessionLedger(box.state_dir, session_id="ep-narrate")
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
+    )
+    runner = EpisodeRunner(client=client, retries=2, on_event=events.append)
+    formulate, decide = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fit_symbols=["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+        on_event=events.append,
+    )
+    assert summary.rejections == 1
+
+    kinds = [e.kind for e in events]
+    # Stage boundaries in protocol order.
+    stages = [e.meta["stage"] for e in events if e.kind == "stage"]
+    assert stages == ["formulate", "match", "author", "optimize", "decide"]
+    # Episode events the two emit turns provided (usage rides every completion).
+    assert "usage" in kinds
+    # Deterministic tool lines, ending with the verdict submission.
+    tools = [e.meta["tool"] for e in events if e.kind == "tool"]
+    assert "run_backtest" in tools and "run_sweep" in tools
+    assert tools[-1] == "reject_strategy"
+    # The arc is ordered: FORMULATE opens, the DECIDE boundary precedes the verdict line, and the
+    # verdict line is the last tool line of all.
+    stage_positions = {e.meta["stage"]: i for i, e in enumerate(events) if e.kind == "stage"}
+    reject_pos = max(i for i, e in enumerate(events) if e.kind == "tool")
+    assert stage_positions["formulate"] == min(i for i, e in enumerate(events) if e.kind == "stage")
+    assert stage_positions["decide"] < reject_pos
+    # The ledger frames the arc: a session start and a rollup at the close.
+    assert ledger.session_start() is not None and ledger.session_end() is not None

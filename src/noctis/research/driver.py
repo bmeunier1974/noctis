@@ -113,6 +113,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from noctis.engine.research import ResearchSummary, StopEvent
+from noctis.observability.events import Event, stage_event, tool_event
 from noctis.research import digests
 from noctis.research.briefings import decide_briefing, formulate_briefing
 from noctis.research.episode import EmitContract, EpisodeResult
@@ -549,6 +550,36 @@ def _invoke(fn: Callable[..., Any], **kwargs: Any) -> dict[str, Any]:
     return result if isinstance(result, dict) else {"error": "tool returned no dict result"}
 
 
+# ── observability: stage boundaries + deterministic tool lines (story #73) ───────────────────
+# The driver calls the gated toolbox methods directly (never through the conversation loop's
+# ``dispatch``), so the tool/result line the loop emits after each dispatch has no counterpart
+# here. The driver emits it itself, through the SAME builder the loop uses
+# (:func:`noctis.observability.events.tool_event`), so an episodic session's -v feed reads as one
+# continuous narrative — screens, backtests, sweeps, writes, and verdict submissions all as tool
+# lines, interleaved with the stage boundaries and the episode think/say/usage the runner tees.
+# ``ToolEmitter`` is ``(short_tool_name, args, result) -> None``; ``_NO_EMIT`` is the no-sink no-op
+# so a bare run stays byte-identical.
+ToolEmitter = Callable[[str, dict[str, Any], dict[str, Any]], None]
+
+
+def _no_emit(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+    return None
+
+
+def _tool_emitter(on_event: Callable[[Event | str], None] | None, toolbox: Any) -> ToolEmitter:
+    """Build the driver's tool-line emitter, or the no-op when no sink is wired. Each line uses the
+    toolbox's own ``result_brief`` (the gate-facing slice) so the numbers a promotion/rejection
+    turns on print exactly as they do in the conversation loop's feed."""
+    if on_event is None:
+        return _no_emit
+
+    def emit_tool(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        brief = toolbox.result_brief(result) if isinstance(result, dict) else {}
+        on_event(tool_event(name, args, result, brief))
+
+    return emit_tool
+
+
 def _entry_exit_brief(fo: FormulateOutput) -> str:
     """Compose the brief's precise-rules field from the formulate output (skeleton mapping; the
     author engine turns it into code). The prose ``symbol_character`` still frames the rules; MATCH
@@ -582,7 +613,11 @@ class MatchResult:
 
 
 def _match_stage(
-    toolbox: ResearchToolbox, fo: FormulateOutput, *, fallback_panel: Sequence[str]
+    toolbox: ResearchToolbox,
+    fo: FormulateOutput,
+    *,
+    fallback_panel: Sequence[str],
+    emit_tool: ToolEmitter = _no_emit,
 ) -> MatchResult:
     """Deterministic MATCH: screen the lake for the thesis's symbol character and reserve the
     symbol holdout — all in driver code, zero LLM. The band profile comes from
@@ -592,12 +627,13 @@ def _match_stage(
     (the composition-root fit set) with no reservation, so the toolbox's own out-of-fit holdout
     fallback still supplies a symbol holdout at verdict time (rule 4 stays honored)."""
     profile = character_to_profile(fo.symbol_character)
-    screen = _invoke(
-        toolbox.tool_screen_symbols,
-        trend=profile["trend"],
-        volatility=profile["volatility"],
-        liquidity=profile["liquidity"],
-    )
+    screen_args = {
+        "trend": profile["trend"],
+        "volatility": profile["volatility"],
+        "liquidity": profile["liquidity"],
+    }
+    screen = _invoke(toolbox.tool_screen_symbols, **screen_args)
+    emit_tool("screen_symbols", screen_args, screen)
     if "error" in screen:
         return MatchResult(
             list(fallback_panel), [], profile, fallback=f"screen_error: {screen['error']}"
@@ -732,6 +768,7 @@ def _optimize_stage(
     fit_symbols: Sequence[str],
     *,
     sweep_trials: int | None,
+    emit_tool: ToolEmitter = _no_emit,
 ) -> dict[str, Any]:
     """Run the v1 multi-fidelity OPTIMIZE recipe for one strategy and return the ledger detail.
 
@@ -756,6 +793,7 @@ def _optimize_stage(
 
     def run_backtest(**kwargs: Any) -> dict[str, Any]:
         result = _invoke(toolbox.tool_run_backtest, **kwargs)
+        emit_tool("run_backtest", kwargs, result)
         if "error" not in result:
             detail["backtests"] += 1
             detail["trials"] += 1
@@ -763,6 +801,7 @@ def _optimize_stage(
 
     def run_sweep(**kwargs: Any) -> dict[str, Any]:
         result = _invoke(toolbox.tool_run_sweep, **kwargs)
+        emit_tool("run_sweep", kwargs, result)
         if "error" not in result:
             detail["sweeps"] += 1
             detail["trials"] += int(result.get("n_trials") or 0)
@@ -850,6 +889,7 @@ def run_episodic_research(
     models: dict[str, Any] | None = None,
     sweep_trials: int | None = None,
     market_digest: Callable[[], str] | None = None,
+    on_event: Callable[[Event | str], None] | None = None,
 ) -> ResearchSummary:
     """Run one episodic research session; returns the same summary shape as the conversation loop.
 
@@ -863,6 +903,13 @@ def run_episodic_research(
     digest text the FORMULATE cost-arithmetic sanity check overlaps against — the same source the
     formulate briefing embeds; it defaults to the toolbox's own digest. See the module docstring
     for the stage protocol, the per-stage failed-episode policies, and the sanity checks.
+
+    ``on_event`` (story #73) makes one observable episodic session read *better* than the
+    conversation loop's inferred narration: a ``stage`` boundary Event opens each of
+    FORMULATE/MATCH/AUTHOR/OPTIMIZE/DECIDE, the driver's deterministic toolbox actions emit the
+    same ``tool`` lines the loop does, and the injected episodes (via the episode runner's own
+    ``on_event``) tee the think/say/usage the model returned — so the whole arc interleaves on one
+    sink. ``None`` (a bare run) ⇒ no emission, byte-identical to before.
     """
     stop_event = stop_event or _NeverStop()
     digest_source = market_digest or (lambda: digests.market_digest(toolbox))
@@ -871,6 +918,14 @@ def run_episodic_research(
     start = now()
     budget_seconds = budget_minutes * 60.0
     formulated = 0
+
+    # Observability seam (#73): a `stage` boundary before each stage's work and a `tool` line per
+    # deterministic toolbox action, both no-ops without a sink so a bare run is unchanged.
+    emit_tool = _tool_emitter(on_event, toolbox)
+
+    def emit_stage(stage: str, strategy: str | None = None) -> None:
+        if on_event is not None:
+            on_event(stage_event(stage, strategy))
 
     ledger.record_session_start(
         mandate=mandate_source,
@@ -908,6 +963,7 @@ def run_episodic_research(
             break
 
         # ── FORMULATE (+ driver-side sanity checks, #71) ──────────────────────
+        emit_stage(FORMULATE)
         ledger.record_stage(FORMULATE)
         fo = _formulate_stage(formulate, digest_source(), exhausted, _record_episode)
         if fo is None:
@@ -922,12 +978,16 @@ def run_episodic_research(
         )
 
         # ── MATCH (deterministic screening + symbol-holdout reservation, #69) ──
-        match = _match_stage(toolbox, fo, fallback_panel=fit_symbols)
+        # The boundary Event opens the stage before its screen runs; the ledger line lands after,
+        # once the screen's profile/fit/reservation detail exists to carry.
+        emit_stage(MATCH, name)
+        match = _match_stage(toolbox, fo, fallback_panel=fit_symbols, emit_tool=emit_tool)
         ledger.record_stage(MATCH, strategy=name, detail=match.ledger_detail())
         symbols = match.fit  # AUTHOR/OPTIMIZE tune on the fit set ONLY
         reserved_holdout = match.reserved  # held out by code — never tuned, DECIDE's holdout
 
         # ── AUTHOR ────────────────────────────────────────────────────────────
+        emit_stage(AUTHOR, name)
         ledger.record_stage(AUTHOR, strategy=name)
         write = _invoke(
             toolbox.tool_write_strategy,
@@ -938,6 +998,9 @@ def run_episodic_research(
             parent_thesis=fo.parent_thesis,
             pivot_rationale=fo.pivot_rationale,
         )
+        # The write's own coder-attempt `author` events already emitted from inside the toolbox;
+        # this tool line is the write's outcome, mirroring the loop's post-dispatch line.
+        emit_tool("write_strategy", {"name": name, "class_tag": fo.class_tag}, write)
         _record_author_escalation(ledger, write)
         if "error" in write:
             # A write-gate rejection is a code bug in one draft, not a verdict — skip and move on.
@@ -945,7 +1008,10 @@ def run_episodic_research(
             continue
 
         # ── OPTIMIZE (v1 multi-fidelity tuning recipe, #70 — zero LLM) ──────────
-        optimize_detail = _optimize_stage(toolbox, name, symbols, sweep_trials=sweep_trials)
+        emit_stage(OPTIMIZE, name)
+        optimize_detail = _optimize_stage(
+            toolbox, name, symbols, sweep_trials=sweep_trials, emit_tool=emit_tool
+        )
         ledger.record_stage(OPTIMIZE, strategy=name, detail=optimize_detail)
 
         # ── DECIDE ────────────────────────────────────────────────────────────
@@ -953,8 +1019,18 @@ def run_episodic_research(
         if stop:
             summary.stopped_reason = stop
             break  # authored + optimized but out of budget — left undecided, honestly
+        emit_stage(DECIDE, name)
         ledger.record_stage(DECIDE, strategy=name)
-        _decide_stage(toolbox, ledger, decide, name, symbols, reserved_holdout, _record_episode)
+        _decide_stage(
+            toolbox,
+            ledger,
+            decide,
+            name,
+            symbols,
+            reserved_holdout,
+            _record_episode,
+            emit_tool=emit_tool,
+        )
 
     summary.iterations = formulated
     summary.promotions = int(getattr(toolbox, "promotions", 0))
@@ -1029,6 +1105,8 @@ def _decide_stage(
     symbols: Sequence[str],
     reserved_holdout: Sequence[str],
     record_episode: Callable[..., None],
+    *,
+    emit_tool: ToolEmitter = _no_emit,
 ) -> None:
     """Run DECIDE for one strategy: propose a verdict, submit it through the gated toolbox method,
     and on a failed episode, a refused verdict, or a (capped) ``revise`` re-ask exactly once before
@@ -1060,7 +1138,9 @@ def _decide_stage(
             corrective = _REVISE_CORRECTIVE
             continue
         record_episode(DECIDE, result)
-        outcome = _submit_verdict(toolbox, name, symbols, reserved_holdout, verdict)
+        outcome = _submit_verdict(
+            toolbox, name, symbols, reserved_holdout, verdict, emit_tool=emit_tool
+        )
         if "error" not in outcome:
             _record_verdict(ledger, name, verdict, outcome)
             return
@@ -1077,6 +1157,8 @@ def _submit_verdict(
     symbols: Sequence[str],
     reserved_holdout: Sequence[str],
     verdict: DecideOutput,
+    *,
+    emit_tool: ToolEmitter = _no_emit,
 ) -> dict[str, Any]:
     """Submit a proposed verdict through the matching gated toolbox method — the method, not the
     episode, disposes of it (min-trials floor + evidence checks refuse an unsupported verdict).
@@ -1085,15 +1167,22 @@ def _submit_verdict(
     model's nomination: the reservation was made in code at MATCH time and those names were kept
     out of every backtest/sweep, so they are the honest symbol holdout. A model nomination that
     disagrees is ignored (and logged). An empty reservation (MATCH fell back) submits no holdout,
-    so the toolbox's own out-of-fit fallback supplies one."""
+    so the toolbox's own out-of-fit fallback supplies one.
+
+    The verdict submission is the narrated action here (#73): its tool line — a reject or an
+    evaluate-vs-champion — is emitted, so it is the last tool line the DECIDE stage prints. The
+    internal ``get_experiment_log`` read that fetches the best params is plumbing, not an action,
+    so it is not narrated."""
     if verdict.verdict == _REJECT:
-        return _invoke(
-            toolbox.tool_reject_strategy,
-            name=name,
-            reason=verdict.reason,
-            class_tag=verdict.class_tag or None,
-            class_exhausted=verdict.class_exhausted,
-        )
+        reject_args = {
+            "name": name,
+            "reason": verdict.reason,
+            "class_tag": verdict.class_tag or None,
+            "class_exhausted": verdict.class_exhausted,
+        }
+        result = _invoke(toolbox.tool_reject_strategy, **reject_args)
+        emit_tool("reject_strategy", reject_args, result)
+        return result
     # approve: challenge the champion board with the best-observed params from the journal.
     nominated = [s for s in verdict.holdout_symbols if s]
     if nominated and set(nominated) != set(reserved_holdout):
@@ -1106,13 +1195,15 @@ def _submit_verdict(
     log = _invoke(toolbox.tool_get_experiment_log, name=name)
     trials = log.get("top_trials") or []
     params = trials[0].get("params", {}) if trials else {}
-    return _invoke(
-        toolbox.tool_evaluate_vs_champion,
-        name=name,
-        symbols=list(symbols),
-        params=params,
-        holdout_symbols=list(reserved_holdout) or None,
-    )
+    evaluate_args = {
+        "name": name,
+        "symbols": list(symbols),
+        "params": params,
+        "holdout_symbols": list(reserved_holdout) or None,
+    }
+    result = _invoke(toolbox.tool_evaluate_vs_champion, **evaluate_args)
+    emit_tool("evaluate_vs_champion", evaluate_args, result)
+    return result
 
 
 def _record_verdict(

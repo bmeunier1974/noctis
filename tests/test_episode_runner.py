@@ -420,3 +420,58 @@ def test_max_tokens_default_and_per_call_override_thread_to_the_completion():
 def test_episode_retries_config_knob_default_and_override():
     assert AgentResearchConfig().episode_retries == 2
     assert AgentResearchConfig(episode_retries=5).episode_retries == 5
+
+
+# ── 9. Episode completions tee think/say/usage through on_event (verbose narration, #73) ──────
+def test_runner_tees_think_usage_and_narration_per_completion():
+    # A completion's reasoning, per-completion usage, and narration — all already on the Turn — are
+    # surfaced as the SAME typed Events the conversation loop emits, so an episode reads through the
+    # existing console pipeline unchanged. Order mirrors the loop: think → usage → say.
+    events: list = []
+    call = ToolCall(id="e1", name=TOOL_NAME, arguments={"action": "hold", "confidence": 0.5})
+    turn = Turn(
+        text="here is my read of the evidence",
+        tool_calls=[call],
+        stop_reason="tool_use",
+        usage={"input_tokens": 10, "output_tokens": 5},
+        reasoning="weighing the cost arithmetic",
+    )
+    client = FakeClient([turn])
+    runner = EpisodeRunner(client=client, retries=2, on_event=events.append)
+    result = runner.run(contract=CONTRACT, system="SYS", briefing="B")
+
+    assert result.ok
+    assert [e.kind for e in events] == ["think", "usage", "say"]
+    assert events[0].text == "weighing the cost arithmetic" and events[0].level == 2
+    assert events[1].meta == {"input_tokens": 10, "output_tokens": 5} and events[1].level == 2
+    assert events[2].text == "here is my read of the evidence" and events[2].level == 2
+
+
+def test_runner_emits_usage_even_without_reasoning_or_narration():
+    # A clean forced emit carries no reasoning or prose — only the usage line surfaces, so a quiet
+    # tool-only turn still meters its tokens.
+    events: list = []
+    turn = emit_turn({"action": "hold", "confidence": 0.5}, usage={"input_tokens": 3})
+    runner = EpisodeRunner(client=FakeClient([turn]), retries=2, on_event=events.append)
+    runner.run(contract=CONTRACT, system="SYS", briefing="B")
+    assert [e.kind for e in events] == ["usage"]
+
+
+def test_runner_tees_a_completion_per_retry():
+    # Every completion that returned a turn narrates — the misfired first turn and the clean retry
+    # both surface their usage, so a -vv watcher sees each round.
+    events: list = []
+    client = FakeClient(
+        [text_turn("<tool_call>x</tool_call>"), emit_turn({"action": "hold", "confidence": 0.5})]
+    )
+    runner = EpisodeRunner(client=client, retries=2, on_event=events.append)
+    result = runner.run(contract=CONTRACT, system="SYS", briefing="B")
+    assert result.ok
+    assert [e.kind for e in events].count("usage") == 2  # one usage line per completion
+
+
+def test_runner_without_on_event_stays_silent():
+    # No sink wired (a bare run / the deterministic tests) ⇒ no emission, no crash.
+    client = FakeClient([emit_turn({"action": "hold", "confidence": 0.5})])
+    runner = EpisodeRunner(client=client, retries=2)
+    assert runner.run(contract=CONTRACT, system="SYS", briefing="B").ok
