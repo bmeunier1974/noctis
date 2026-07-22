@@ -21,6 +21,7 @@ alternate file.
 | `research.model`, `research.base_url` | LiteLLM `provider/model` string; base URL for local/self-hosted backends |
 | `research.mandate` | Mandate selector: a profile name, `MANDATE`, `auto`, or `null` — code default `null` (unconstrained); **shipped config ships `auto`** (agent picks a profile per session) |
 | `research.min_trials` | Exhaustion floor — verdict tools refuse before this many journaled trials |
+| `research.draft_ttl_hours` | Working-tier housekeeping: undecided (`draft`/`candidate`) `__tmp/` drafts older than this many hours are swept into `__tmp/archive/` on each research-session start (default `48.0`; `null`/`0` disables). Moves bytes verbatim — never fabricates a verdict or touches a gate ([research.md](research.md)) |
 | `research.max_iterations`, `max_backtests`, `sweep_trials`, `web_search` | Agent session budgets |
 | `research.agent.coder_model`, `max_author_calls` | Dedicated authoring model + its Class-B budget: coder completions/session (retries included); exhausted → brief authoring refused, hand-written `source` stays open |
 | `research.agent.coder_thinking` | `on` (default) / `off` — the coder reasons through scenario-window/warmup arithmetic (deliberate, budgeted by `max_author_calls`); separate from the driver `thinking` dial |

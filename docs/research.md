@@ -35,6 +35,28 @@ A champion file is immutable after that — improving one means authoring a new 
 seed files at the `strategies/` root are never mutated in place. The strategy-file contract and
 the three-tier layout are documented in `strategies/README.md`.
 
+## Draft housekeeping and session-end honesty
+
+An authored draft has three exits, not two: promote, reject, or **archive**. Not every strategy
+the driver writes reaches a verdict — a session can exhaust its budget, or the loop can stop, with
+a file still `draft`/`candidate` in `__tmp/`. Two seams keep that honest instead of letting
+undecided drafts accumulate silently.
+
+**Prune-on-start.** On each research-session assembly, before the library loads, a sweep **moves**
+every still-undecided top-level `__tmp/` file whose mtime predates `research.draft_ttl_hours`
+(default 48h; `null`/`0` disables — see [configuration.md](configuration.md)) into an
+`__tmp/archive/` subdirectory. It moves bytes verbatim — no re-stamp, no rejection record, no gate
+(AGENTS.md rule 2) — capped at 50 with the oldest evicted, so a fresh session never inherits a
+stale draft it abandoned days ago. When anything is archived, the count and names log at INFO
+(`pruned N stale working-tier draft(s) …`). The experiment journals under
+`workspace/state/experiments/` are untouched and stay the ground truth for what was tried.
+
+**Session-end honesty.** However a loop exits, any strategy authored but never carried to a verdict
+is left undecided. The session names them in a WARNING (`… will be archived after the TTL`) and
+records the sorted list on `ResearchSummary.undecided`, so the abandonment is visible, not silent:
+`noctis research` prints it (`Left undecided (N): … — archived after the TTL`) and the CLOSE
+report's Research rollup lists them under *Undecided (authored, no verdict)*.
+
 ## The coder-model split: brief in, validated file out
 
 `write_strategy` demands a complete strategy file that survives fresh-subprocess validation in

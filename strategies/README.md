@@ -258,4 +258,15 @@ stays in `__tmp/` stamped `status: rejected` (kept for local inspection, out of 
 champion file is immutable — to improve one, author a new name; `write_strategy` refuses to
 overwrite the crown.
 
+A draft that reaches neither verdict has a third exit: **archive**. A prune-on-start sweep — run
+at the top of each research session — **moves** every still-undecided (`draft`/`candidate`)
+top-level `__tmp/` file whose age exceeds the TTL (`research.draft_ttl_hours`, default 48h;
+`null`/`0` disables) into an `__tmp/archive/` subdirectory. Archiving is housekeeping, not
+judgment: the bytes are **moved verbatim — never deleted, never re-stamped** (no `status:
+rejected`, no gate, no verdict), so a session never inherits a stale draft it abandoned days ago.
+The archive is capped (50 files, oldest sequence evicted first) with the same collision-safe
+`{seq}-{name}.py` naming the coder-failure store uses, and the experiment journals under
+`workspace/state/experiments/` stay the ground truth for what was tried — archiving a file never
+touches them.
+
 Start a new strategy from `TEMPLATE.py` (the loader skips it).
