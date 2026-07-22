@@ -232,6 +232,14 @@ class AgentResearchConfig(BaseModel):
     # replaced stays re-fetchable through the same tools (the on-disk experiment journal is the
     # ground truth, so no gate is affected). ``None`` ⇒ unlimited (history byte-identical).
     context_window: int | None = None
+    # Corrective retries per episode when the model misfires (episode runner, #66). An episode is
+    # one forced structured-emit call; a misfire — markup instead of a native tool call, an
+    # output-limit truncation, a thinking-only stall, or a payload that fails the schema — is
+    # re-prompted with the classifier's corrective up to this many times before the episode fails
+    # typed and the driver decides. Small by design: a persistent misfirer should fail fast, not
+    # burn the session budget. Default 2 (initial + 2 retries = 3 completions), matching the
+    # coder engine's private-retry budget. NOT a Class-B token budget — a robustness knob.
+    episode_retries: int = 2
 
 
 class ResearchConfig(BaseModel):

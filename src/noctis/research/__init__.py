@@ -17,6 +17,7 @@ from __future__ import annotations
 from .agent import run_agent_research
 from .author import AuthoringError, StrategyAuthor, StrategyBrief
 from .cost import CostProfile, resolve_budgets, resolve_cost_profile
+from .episode import EmitContract, EpisodeResult, EpisodeRunner
 from .ideation import IdeationContext, Ideator, build_ideator, propose_specs
 from .llm import (
     Capabilities,
@@ -54,6 +55,9 @@ __all__ = [
     "StrategyAuthor",
     "StrategyBrief",
     "AuthoringError",
+    "EpisodeRunner",
+    "EpisodeResult",
+    "EmitContract",
     "SweepRunner",
     "run_agent_research",
     "build_system_prompt",
