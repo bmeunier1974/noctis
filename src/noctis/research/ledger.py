@@ -25,7 +25,7 @@ resumed driver replays the append-only tail it already knows how to read.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -98,11 +98,16 @@ class ThesisLine:
 
 @dataclass(frozen=True)
 class StageTransition:
-    """A typed view of a ``stage`` line: the loop moving to a new research stage."""
+    """A typed view of a ``stage`` line: the loop moving to a new research stage.
+
+    ``detail`` is an optional structured payload a stage may carry (e.g. the deterministic MATCH
+    stage records its screened ``profile``, ``fit`` set, and ``reserved_holdout``); it stays an
+    empty dict for the stages that carry none, so a reader never branches on presence."""
 
     at: str
     stage: str
     strategy: str | None = None
+    detail: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> StageTransition:
@@ -110,6 +115,7 @@ class StageTransition:
             at=str(record.get("at", "")),
             stage=str(record.get("stage", "")),
             strategy=_opt_str(record.get("strategy")),
+            detail=dict(record.get("detail") or {}),
         )
 
 
@@ -282,10 +288,22 @@ class SessionLedger:
             record["pivot_rationale"] = pivot_rationale
         self._append(record)
 
-    def record_stage(self, stage: str, *, strategy: str | None = None) -> None:
+    def record_stage(
+        self,
+        stage: str,
+        *,
+        strategy: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """One stage-transition line. ``detail`` is an optional structured payload the stage
+        carries (e.g. MATCH's screened profile / fit set / reserved holdout); an absent detail is
+        omitted from the record rather than written as an empty object, so a tolerant read
+        distinguishes "no detail" from a stored empty one."""
         record: dict[str, Any] = {"event": "stage", "at": _now_iso(), "stage": stage}
         if strategy is not None:
             record["strategy"] = strategy
+        if detail:
+            record["detail"] = dict(detail)
         self._append(record)
 
     def record_episode(

@@ -28,6 +28,7 @@ from noctis.research.driver import (
     FORMULATE_CONTRACT,
     DecideOutput,
     FormulateOutput,
+    character_to_profile,
     make_episodes,
     run_episodic_research,
 )
@@ -109,13 +110,14 @@ class Episodes:
 
 # ── a fake toolbox: only the gated surface the driver drives, with honest bookkeeping ───────
 class FakeToolbox:
-    def __init__(self, *, write_result=None, verdict_results=None, log=None):
+    def __init__(self, *, write_result=None, verdict_results=None, log=None, screen_result=None):
         self.promotions = 0
         self.rejections = 0
         self.author_calls = 0
         self.strategies_touched: list[str] = []
         self.undecided: set[str] = set()
         self.writes: list[dict] = []
+        self.screens: list[dict] = []
         self.backtests: list[dict] = []
         self.sweeps: list[dict] = []
         self.rejects: list[dict] = []
@@ -123,6 +125,17 @@ class FakeToolbox:
         self._write_result = write_result or {"ok": True}
         self._verdicts = list(verdict_results or [{"ok": True, "status": "rejected"}])
         self._log = log or {"top_trials": [{"params": {"lookback": 20}}]}
+        # Default: an empty structural screen (no lake match) — the driver then falls back to
+        # the composition-root fit panel exactly as the pre-#69 passthrough did.
+        self._screen_result = (
+            screen_result
+            if screen_result is not None
+            else {"suggested_fit": [], "reserved_holdout": []}
+        )
+
+    def tool_screen_symbols(self, trend="any", volatility="any", liquidity="any", symbols=None):
+        self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
+        return dict(self._screen_result)
 
     def tool_write_strategy(self, **kwargs):
         self.writes.append(kwargs)
@@ -326,8 +339,11 @@ def test_revise_verdict_leaves_the_strategy_undecided(tmp_path):
 
 
 def test_approve_routes_through_evaluate_vs_champion_with_best_params_and_holdout(tmp_path):
+    # The model nominates DDD, but the MATCH reservation (D) is the structural holdout the
+    # driver submits — a code reservation the model proposal never overwrites.
     episodes = Episodes([formulate_ok()], [decide_ok("approve", holdout_symbols=("DDD",))])
     box = FakeToolbox(
+        screen_result={"suggested_fit": ["A", "B"], "reserved_holdout": ["D"]},
         verdict_results=[{"ok": True, "promoted": True}],
         log={"top_trials": [{"params": {"lookback": 20}}]},
     )
@@ -338,11 +354,113 @@ def test_approve_routes_through_evaluate_vs_champion_with_best_params_and_holdou
     assert len(box.evaluations) == 1
     ev = box.evaluations[0]
     assert ev["params"] == {"lookback": 20}  # the best-observed params from the journal
-    assert ev["symbols"] == ["AAA", "BBB", "CCC"]
-    assert ev["holdout_symbols"] == ["DDD"]
+    assert ev["symbols"] == ["A", "B"]  # the MATCH fit set, not the fallback panel
+    assert ev["holdout_symbols"] == ["D"]  # the MATCH reservation, not the model's DDD
     assert summary.promotions == 1
     verdicts = ledger.verdicts()
     assert verdicts[0].verdict == "approve" and verdicts[0].promoted is True
+
+
+# ── 2b. deterministic MATCH: screening, holdout reservation, fallback (story #69) ───────────
+@pytest.mark.parametrize(
+    "character, expected",
+    [
+        ("liquid trending names", {"trend": "high", "volatility": "any", "liquidity": "high"}),
+        (
+            "illiquid small-caps that mean-revert",
+            {"trend": "low", "volatility": "any", "liquidity": "low"},
+        ),
+        (
+            "calm mega-caps drifting sideways",
+            {"trend": "low", "volatility": "low", "liquidity": "high"},
+        ),
+        (
+            "volatile breakout candidates",
+            {"trend": "high", "volatility": "high", "liquidity": "any"},
+        ),
+        ("anything at all", {"trend": "any", "volatility": "any", "liquidity": "any"}),
+        ("", {"trend": "any", "volatility": "any", "liquidity": "any"}),
+    ],
+)
+def test_character_to_profile_is_a_deterministic_keyword_map(character, expected):
+    # Low/negative markers win over high ones per dimension: "illiquid" reads low (not high on
+    # the "liquid" substring); an unmentioned dimension stays "any".
+    assert character_to_profile(character) == expected
+
+
+def test_match_screens_with_the_profile_mapped_from_symbol_character(tmp_path):
+    # "liquid trending names" maps to trend=high, liquidity=high (volatility unmentioned → any),
+    # and the screen runs in driver code — no episode beyond formulate + decide is consumed.
+    episodes = Episodes(
+        [formulate_ok(symbol_character="liquid trending names")], [decide_ok("reject")]
+    )
+    box = FakeToolbox()
+    _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "sm1"))
+
+    assert box.screens == [{"trend": "high", "volatility": "any", "liquidity": "high"}]
+    assert episodes.formulate_calls == 1 and len(episodes.decide_calls) == 1  # zero extra LLM
+
+
+def test_reserved_holdout_never_reaches_tuning_and_reaches_decide(tmp_path):
+    # Screening returns A..E: fit = A,B,C; reserved holdout = D,E. The reserved names must never
+    # appear in any tuning call (write/backtest/sweep) and must reach DECIDE as the holdout.
+    episodes = Episodes([formulate_ok()], [decide_ok("approve")])
+    box = FakeToolbox(
+        screen_result={"suggested_fit": ["A", "B", "C"], "reserved_holdout": ["D", "E"]},
+        verdict_results=[{"ok": True, "promoted": True}],
+    )
+    _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "sm2"))
+
+    fit = ["A", "B", "C"]
+    reserved = {"D", "E"}
+    assert box.writes[0]["brief"]["symbols"] == fit
+    assert box.backtests[0]["symbols"] == fit
+    assert box.sweeps[0]["symbols"] == fit
+    for call in box.writes:
+        assert reserved.isdisjoint(call["brief"]["symbols"])
+    for call in box.backtests + box.sweeps:
+        assert reserved.isdisjoint(call["symbols"])
+    ev = box.evaluations[0]
+    assert ev["symbols"] == fit
+    assert ev["holdout_symbols"] == ["D", "E"]  # the reserved names reach DECIDE, never tuned
+
+
+def test_empty_screen_falls_back_to_the_composition_root_panel(tmp_path):
+    # No lake match (default empty screen) → the driver falls back to the composition-root fit
+    # panel exactly as the passthrough did, and reserves nothing (holdout defers to the toolbox).
+    episodes = Episodes([formulate_ok()], [decide_ok("approve", holdout_symbols=("DDD",))])
+    box = FakeToolbox(verdict_results=[{"ok": True, "promoted": True}])
+    _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "sm3"))
+
+    assert box.backtests[0]["symbols"] == ["AAA", "BBB", "CCC"]  # the fallback panel
+    ev = box.evaluations[0]
+    assert ev["holdout_symbols"] is None  # no code reservation → the toolbox picks the fallback
+
+
+def test_match_stage_ledgers_the_profile_fit_and_reservation(tmp_path):
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox(
+        screen_result={"suggested_fit": ["A", "B", "C"], "reserved_holdout": ["D", "E"]}
+    )
+    ledger = SessionLedger(tmp_path, "sm4")
+    _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    match = next(s for s in ledger.stages() if s.stage == "match")
+    assert match.detail["profile"] == {"trend": "high", "volatility": "any", "liquidity": "high"}
+    assert match.detail["fit"] == ["A", "B", "C"]
+    assert match.detail["reserved_holdout"] == ["D", "E"]
+    assert match.detail.get("fallback") is None
+
+
+def test_match_fallback_is_ledgered_when_the_screen_is_empty(tmp_path):
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    ledger = SessionLedger(tmp_path, "sm5")
+    _drive(episodes, FakeToolbox(), max_episodes=2, ledger=ledger)
+
+    match = next(s for s in ledger.stages() if s.stage == "match")
+    assert match.detail["fit"] == ["AAA", "BBB", "CCC"]  # the composition-root fallback panel
+    assert match.detail["reserved_holdout"] == []
+    assert match.detail["fallback"]  # a non-empty reason string records why it fell back
 
 
 # ── 3. budgets: every episode ledgered before acting; three stop conditions ─────────────────

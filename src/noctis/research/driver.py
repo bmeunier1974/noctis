@@ -15,8 +15,16 @@ end to end with plain fakes and zero LLM involvement.
 * **FORMULATE** — one episode proposes a falsifiable thesis (a :class:`FormulateOutput`). Its
   thesis is recorded to the session ledger (so the next formulate's briefing tail already knows
   what this session tried) before any authoring.
-* **MATCH** — a passthrough in this story: the fit panel is the symbols the composition root
-  chose. Deterministic structural screening lands in #69.
+* **MATCH** — *deterministic* structural screening in driver code, no model call (#69). The
+  formulate output's ``symbol_character`` prose is mapped (:func:`character_to_profile`) onto the
+  screener's trend/volatility/liquidity band profile, and the gated, budget-aware
+  ``toolbox.tool_screen_symbols`` ranks the lake for it. Its ``suggested_fit`` becomes the fit set
+  AUTHOR/OPTIMIZE tune on; its ``reserved_holdout`` is held out *by code* — those names never
+  enter a write/backtest/sweep and are submitted at DECIDE time as the symbol-holdout nominees.
+  What was a soft prompt rule in the conversation loop ("keep reserved_holdout out of tuning") is
+  now a structural guarantee. An empty screen (no lake match) falls back to the composition-root
+  panel exactly as the pre-#69 passthrough did, ledgered as a fallback; the discover-episode that
+  would replace that fallback is out of this epic's scope for now.
 * **AUTHOR** — the formulate output is mapped onto a :class:`~noctis.research.author.StrategyBrief`
   and committed through ``toolbox.tool_write_strategy(brief=…)``; the coder author engine,
   fresh-subprocess validation, and thesis journaling all live behind that one gated method. (Brief
@@ -29,6 +37,11 @@ end to end with plain fakes and zero LLM involvement.
   through* the gated ``tool_evaluate_vs_champion`` / ``tool_reject_strategy`` methods, so the
   exhaustion floor and evidence checks — not the episode — dispose of it. A verdict the journal
   cannot support comes back as a structured refusal and is handled by the DECIDE policy below.
+  The decide schema still carries a ``holdout_symbols`` field, but with deterministic MATCH the
+  *code* owns the reservation: the driver submits the MATCH-reserved holdout names and **ignores
+  (logging) any model nomination** that disagrees, so a model proposal can never overwrite the
+  structural reservation. When MATCH fell back (no reservation), the holdout nomination is left
+  empty and the toolbox's own out-of-fit fallback picks the symbol holdout, exactly as before.
 
 **The per-stage failed-episode policies (honest, documented, and deterministically tested).**
 
@@ -94,6 +107,85 @@ _DECIDE_ATTEMPTS = 2
 
 # Folded into a re-asked decide briefing so the model sees why its last verdict did not land.
 _CORRECTIVE_HEADER = "PREVIOUS VERDICT DID NOT LAND — correct and re-decide:"
+
+# ── the deterministic MATCH lexicon ─────────────────────────────────────────────────────────
+# A pure keyword map from the formulate output's prose ``symbol_character`` onto the screener's
+# three band dimensions (each low | high | any). Per dimension the low/negative markers are tested
+# BEFORE the high/positive ones — so "illiquid" reads low (not high on the "liquid" substring) and
+# "low volatility" reads low (not high on "volatility") — and a dimension with no marker stays
+# "any" (the screen then ranks that axis by liquidity, most-tradable first). It is deliberately
+# best-effort and side-effect free: the tickers are the lake's job (:func:`tool_screen_symbols`);
+# this only turns the thesis's character sketch into the band request the screen understands.
+_CHARACTER_LEXICON: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "trend": (
+        (
+            "chop",
+            "range-bound",
+            "rangebound",
+            "ranging",
+            "mean-revert",
+            "mean revert",
+            "reversion",
+            "sideways",
+            "oscillat",
+        ),
+        ("trend", "momentum", "directional", "breakout", "persistent"),
+    ),
+    "volatility": (
+        ("calm", "quiet", "low-vol", "low vol", "stable", "tight", "placid", "sleepy"),
+        ("volatile", "volatility", "high-vol", "high vol", "wide", "explosive"),
+    ),
+    "liquidity": (
+        (
+            "illiquid",
+            "small-cap",
+            "small cap",
+            "micro-cap",
+            "thin",
+            "low-volume",
+            "low volume",
+            "lightly traded",
+        ),
+        (
+            "liquid",
+            "large-cap",
+            "large cap",
+            "mega-cap",
+            "mega cap",
+            "high-volume",
+            "high volume",
+            "deep",
+            "heavily traded",
+        ),
+    ),
+}
+
+
+def _any_marker(text: str, markers: tuple[str, ...]) -> bool:
+    """Whether any marker opens a word in ``text``. A leading word boundary (never a bare
+    substring) is what keeps "thin" out of "anything" and "liquid" out of "illiquid"; the trailing
+    end is left open so a marker still catches its plurals ("mega-cap" ⇒ "mega-caps", "trend" ⇒
+    "trending")."""
+    return any(re.search(r"\b" + re.escape(m), text) for m in markers)
+
+
+def _band_for(text: str, low_markers: tuple[str, ...], high_markers: tuple[str, ...]) -> str:
+    if _any_marker(text, low_markers):
+        return "low"
+    if _any_marker(text, high_markers):
+        return "high"
+    return "any"
+
+
+def character_to_profile(symbol_character: str) -> dict[str, str]:
+    """Map a formulate output's prose ``symbol_character`` onto the screener's band profile.
+
+    Pure and deterministic (no LLM, no I/O): the same sketch always yields the same
+    ``{trend, volatility, liquidity}`` bands, each ``low`` / ``high`` / ``any`` (see
+    :data:`_CHARACTER_LEXICON`). The bands are exactly the keyword args
+    :meth:`~noctis.research.tools.ResearchToolbox.tool_screen_symbols` takes."""
+    text = (symbol_character or "").lower()
+    return {dim: _band_for(text, low, high) for dim, (low, high) in _CHARACTER_LEXICON.items()}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -326,12 +418,62 @@ def _invoke(fn: Callable[..., Any], **kwargs: Any) -> dict[str, Any]:
 
 def _entry_exit_brief(fo: FormulateOutput) -> str:
     """Compose the brief's precise-rules field from the formulate output (skeleton mapping; the
-    author engine turns it into code). Deepened when MATCH/screening lands (#69)."""
+    author engine turns it into code). The prose ``symbol_character`` still frames the rules; MATCH
+    (#69) additionally maps it onto a band profile to screen the fit set the brief tunes on."""
     return (
         f"Author precise long/short/flat rules that make this thesis falsifiable at the "
         f"{fo.timeframe} timeframe. Target symbol character: {fo.symbol_character}. The captured "
         f"move per trade must clear the round-trip cost: {fo.cost_arithmetic}."
     )
+
+
+@dataclass(frozen=True)
+class MatchResult:
+    """The deterministic MATCH outcome for one thesis: the ``fit`` set AUTHOR/OPTIMIZE tune on, the
+    ``reserved`` symbol-holdout names held out by code (never tuned; DECIDE's holdout nominees), the
+    screened band ``profile``, and a ``fallback`` reason (``None`` on a real screen, a short string
+    when the screen found no lake match and the composition-root panel was used instead)."""
+
+    fit: list[str]
+    reserved: list[str]
+    profile: dict[str, str]
+    fallback: str | None = None
+
+    def ledger_detail(self) -> dict[str, Any]:
+        return {
+            "profile": dict(self.profile),
+            "fit": list(self.fit),
+            "reserved_holdout": list(self.reserved),
+            "fallback": self.fallback,
+        }
+
+
+def _match_stage(
+    toolbox: ResearchToolbox, fo: FormulateOutput, *, fallback_panel: Sequence[str]
+) -> MatchResult:
+    """Deterministic MATCH: screen the lake for the thesis's symbol character and reserve the
+    symbol holdout — all in driver code, zero LLM. The band profile comes from
+    :func:`character_to_profile`; the gated, budget-aware ``tool_screen_symbols`` (the same method
+    the conversation loop used) ranks the lake and splits ``suggested_fit`` / ``reserved_holdout``
+    by the configured sizes. A screen error or an empty match falls back to ``fallback_panel``
+    (the composition-root fit set) with no reservation, so the toolbox's own out-of-fit holdout
+    fallback still supplies a symbol holdout at verdict time (rule 4 stays honored)."""
+    profile = character_to_profile(fo.symbol_character)
+    screen = _invoke(
+        toolbox.tool_screen_symbols,
+        trend=profile["trend"],
+        volatility=profile["volatility"],
+        liquidity=profile["liquidity"],
+    )
+    if "error" in screen:
+        return MatchResult(
+            list(fallback_panel), [], profile, fallback=f"screen_error: {screen['error']}"
+        )
+    fit = [str(s) for s in (screen.get("suggested_fit") or [])]
+    reserved = [str(s) for s in (screen.get("reserved_holdout") or [])]
+    if not fit:
+        return MatchResult(list(fallback_panel), [], profile, fallback="no_lake_match")
+    return MatchResult(fit, reserved, profile)
 
 
 def _brief_from_formulate(fo: FormulateOutput, symbols: Sequence[str]) -> dict[str, Any]:
@@ -370,8 +512,10 @@ def run_episodic_research(
     behind them, never handed here); every other stage runs through the gated ``toolbox`` methods.
     ``completions`` returns the episode runner's per-completion count (retries included) that
     ``max_episodes`` budgets against; ``budget_minutes`` and ``stop_event`` bound wall-clock and
-    interruption. ``fit_symbols`` is the MATCH panel (a passthrough this story). See the module
-    docstring for the stage protocol and the per-stage failed-episode policies.
+    interruption. ``fit_symbols`` is now the MATCH *fallback* panel — deterministic screening
+    (:func:`_match_stage`) chooses the per-thesis fit set and reserves the symbol holdout, and only
+    an empty screen falls back to ``fit_symbols``. See the module docstring for the stage protocol
+    and the per-stage failed-episode policies.
     """
     stop_event = stop_event or _NeverStop()
     summary = ResearchSummary()
@@ -424,9 +568,11 @@ def run_episodic_research(
             name, fo.thesis, parent_thesis=fo.parent_thesis, pivot_rationale=fo.pivot_rationale
         )
 
-        # ── MATCH (passthrough; deterministic screening lands in #69) ─────────
-        ledger.record_stage(MATCH, strategy=name)
-        symbols = list(fit_symbols)
+        # ── MATCH (deterministic screening + symbol-holdout reservation, #69) ──
+        match = _match_stage(toolbox, fo, fallback_panel=fit_symbols)
+        ledger.record_stage(MATCH, strategy=name, detail=match.ledger_detail())
+        symbols = match.fit  # AUTHOR/OPTIMIZE tune on the fit set ONLY
+        reserved_holdout = match.reserved  # held out by code — never tuned, DECIDE's holdout
 
         # ── AUTHOR ────────────────────────────────────────────────────────────
         ledger.record_stage(AUTHOR, strategy=name)
@@ -455,7 +601,7 @@ def run_episodic_research(
             summary.stopped_reason = stop
             break  # authored + optimized but out of budget — left undecided, honestly
         ledger.record_stage(DECIDE, strategy=name)
-        _decide_stage(toolbox, ledger, decide, name, symbols, _record_episode)
+        _decide_stage(toolbox, ledger, decide, name, symbols, reserved_holdout, _record_episode)
 
     summary.iterations = formulated
     summary.promotions = int(getattr(toolbox, "promotions", 0))
@@ -491,12 +637,15 @@ def _decide_stage(
     decide: DecideEpisode,
     name: str,
     symbols: Sequence[str],
+    reserved_holdout: Sequence[str],
     record_episode: Callable[[str, EpisodeResult[Any]], None],
 ) -> None:
     """Run DECIDE for one strategy: propose a verdict, submit it through the gated toolbox method,
     and on a failed episode or a refused verdict re-ask exactly once (with the note/refusal as
     corrective context) before leaving the strategy undecided. A ``revise`` verdict is left
-    undecided too (not terminal in this skeleton)."""
+    undecided too (not terminal in this skeleton). ``reserved_holdout`` is the MATCH-reserved
+    symbol holdout the driver submits at verdict time — a code reservation the model proposal
+    never overwrites."""
     corrective: str | None = None
     for _ in range(_DECIDE_ATTEMPTS):
         result = decide(name, corrective=corrective)
@@ -512,7 +661,7 @@ def _decide_stage(
             # A new-lever call — not a terminal verdict here; leave undecided for a later round.
             logger.info("decide %s: revise (left undecided this story)", name)
             return
-        outcome = _submit_verdict(toolbox, name, symbols, verdict)
+        outcome = _submit_verdict(toolbox, name, symbols, reserved_holdout, verdict)
         if "error" not in outcome:
             _record_verdict(ledger, name, verdict, outcome)
             return
@@ -524,10 +673,20 @@ def _decide_stage(
 
 
 def _submit_verdict(
-    toolbox: ResearchToolbox, name: str, symbols: Sequence[str], verdict: DecideOutput
+    toolbox: ResearchToolbox,
+    name: str,
+    symbols: Sequence[str],
+    reserved_holdout: Sequence[str],
+    verdict: DecideOutput,
 ) -> dict[str, Any]:
     """Submit a proposed verdict through the matching gated toolbox method — the method, not the
-    episode, disposes of it (min-trials floor + evidence checks refuse an unsupported verdict)."""
+    episode, disposes of it (min-trials floor + evidence checks refuse an unsupported verdict).
+
+    For an approve, the symbol holdout is the MATCH-reserved names (``reserved_holdout``), not the
+    model's nomination: the reservation was made in code at MATCH time and those names were kept
+    out of every backtest/sweep, so they are the honest symbol holdout. A model nomination that
+    disagrees is ignored (and logged). An empty reservation (MATCH fell back) submits no holdout,
+    so the toolbox's own out-of-fit fallback supplies one."""
     if verdict.verdict == _REJECT:
         return _invoke(
             toolbox.tool_reject_strategy,
@@ -537,6 +696,14 @@ def _submit_verdict(
             class_exhausted=verdict.class_exhausted,
         )
     # approve: challenge the champion board with the best-observed params from the journal.
+    nominated = [s for s in verdict.holdout_symbols if s]
+    if nominated and set(nominated) != set(reserved_holdout):
+        logger.info(
+            "decide %s: ignoring model-nominated holdout %s in favor of the MATCH reservation %s",
+            name,
+            nominated,
+            list(reserved_holdout),
+        )
     log = _invoke(toolbox.tool_get_experiment_log, name=name)
     trials = log.get("top_trials") or []
     params = trials[0].get("params", {}) if trials else {}
@@ -545,7 +712,7 @@ def _submit_verdict(
         name=name,
         symbols=list(symbols),
         params=params,
-        holdout_symbols=list(verdict.holdout_symbols) or None,
+        holdout_symbols=list(reserved_holdout) or None,
     )
 
 
