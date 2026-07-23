@@ -444,8 +444,102 @@ def _check_warmup_honesty(cls, scenario: Scenario, params, targets: list[int]) -
     return None
 
 
-# Ordered — warmup honesty is the first member; later Tier-1 checks (a separate story) append here.
-_INVARIANTS = (_check_warmup_honesty,)
+def _check_determinism(cls, scenario: Scenario, params, targets: list[int]) -> str | None:
+    """Two replays of the same tape through fresh instances must agree bar-for-bar.
+
+    ``targets`` is the first replay (the one ``run_scenario`` already produced); this replays
+    the tape once more through a brand-new instance and compares. A divergence is class-level
+    mutable state, a ``random.*`` draw, or state that survived because ``on_start`` failed to
+    reset it — anything that makes the same bars decide differently on a second run. The
+    message names the first diverging bar so the coder knows exactly where determinism broke.
+    """
+    replay = replay_targets(cls(params), scenario.frame())
+    for j, (first, second) in enumerate(zip(targets, replay, strict=True)):
+        if first != second:
+            return (
+                f"scenario {scenario.name!r}: non-deterministic replay — targets differ at bar "
+                f"{j} ({first} vs {second}) between two replays of the same tape; remove "
+                f"class-level mutable state or randomness and reset all incremental state in "
+                f"on_start (on_bar must be a pure function of the bars seen so far)"
+            )
+    return None
+
+
+# A handful of truncation cut points per tape (not every k) keeps this O(tape), not O(tape²);
+# ×10 is a scale factor that leaves relative comparisons (close vs SMA) untouched by construction.
+_PRICE_COLUMNS = ("open", "high", "low", "close")
+_PRICE_SCALE = 10.0
+
+
+def _truncation_cuts(full: list[int], n: int) -> list[int]:
+    """Sensible cut points: quarter/half/three-quarter of the tape, plus just past the first
+    live signal so at least one cut lands where ``signals`` is nonzero (inside an expectation
+    window). A handful, deduplicated and sorted — never every k."""
+    cuts = {max(1, n // 4), max(1, n // 2), max(1, (3 * n) // 4)}
+    first = next((j for j, t in enumerate(full) if t != 0), None)
+    if first is not None and first + 2 <= n:
+        cuts.add(first + 2)
+    return sorted(cuts)
+
+
+def _check_truncation(cls, scenario: Scenario, params, targets: list[int]) -> str | None:
+    """The vectorised path must be causal: ``signals(tape[:k]) == signals(tape)[:k]``.
+
+    The event path (``on_bar``) is causal by construction, but a ``signals`` override can peek
+    at the future — a centered window, a full-series ``max``/``mean``, a ``shift(-k)``, or a
+    decision keyed off ``len(data)``. Truncating the tape and re-running ``signals`` exposes it:
+    a prefix decision that changes when later bars are removed used those later bars. Checked at
+    a handful of cut points to stay in milliseconds; the message names the cut and the bar.
+    """
+    frame = scenario.frame()
+    full = [int(x) for x in cls.signals(frame, params)]
+    n = len(full)
+    if n < 2:
+        return None
+    for k in _truncation_cuts(full, n):
+        prefix = [int(x) for x in cls.signals(frame.iloc[:k], params)]
+        for j in range(min(k, len(prefix))):
+            if prefix[j] != full[j]:
+                return (
+                    f"scenario {scenario.name!r}: signals() looks ahead — signals(tape[:{k}]) "
+                    f"disagrees with signals(tape)[:{k}] at bar {j} ({prefix[j]} vs {full[j]}); a "
+                    f"vectorised override must decide bar t from bars ≤ t only (no full-series "
+                    f"max/mean, no centered window, no shift(-k))"
+                )
+    return None
+
+
+def _check_price_scale(cls, scenario: Scenario, params, targets: list[int]) -> str | None:
+    """Scaling every price ×10 must leave the target series unchanged.
+
+    Only the price columns (open/high/low/close) scale — volume and timestamps do not — so a
+    scale-free thesis (close vs a moving average, a percentile, a ratio) is invariant while an
+    absolute price threshold (``close > 105``) is not. A dependence on the price *level* cannot
+    transfer across a symbol panel, so it is a structural defect the message names by bar.
+    """
+    scaled = scenario.frame()
+    for col in _PRICE_COLUMNS:
+        scaled[col] = scaled[col] * _PRICE_SCALE
+    scaled_targets = replay_targets(cls(params), scaled)
+    for j, (base, moved) in enumerate(zip(targets, scaled_targets, strict=True)):
+        if base != moved:
+            return (
+                f"scenario {scenario.name!r}: price-scale dependent — scaling every price ×"
+                f"{int(_PRICE_SCALE)} flips the target at bar {j} ({base} vs {moved}); decide "
+                f"from scale-free features (moving averages, ratios, percentiles), never absolute "
+                f"price levels, so the edge transfers across a symbol panel"
+            )
+    return None
+
+
+# Ordered — warmup honesty stays first; determinism gates the rest (a non-deterministic strategy
+# would make the replay-and-compare checks below meaningless), then the two structural checks.
+_INVARIANTS = (
+    _check_warmup_honesty,
+    _check_determinism,
+    _check_truncation,
+    _check_price_scale,
+)
 
 
 def check_invariants(cls, scenario: Scenario, params, targets: list[int]) -> str | None:

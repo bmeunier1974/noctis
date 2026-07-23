@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import random
 from collections import deque
 from dataclasses import dataclass
 
+import pandas as pd
 import pytest
 
 from noctis.strategies import indicators as ind
@@ -14,6 +16,7 @@ from noctis.strategies.scenarios import (
     ScenarioError,
     Segment,
     always_flat,
+    check_invariants,
     check_scenario_contract,
     chop,
     flat,
@@ -531,3 +534,164 @@ def test_a_warmup_bars_that_raises_is_reported_not_propagated():
     scenario = Scenario("boom", segments=[flat(90)], expect=[long_within(5, 40)])
     msg = run_scenario(_Boom, scenario)
     assert msg is not None and "warmup_bars()" in msg and "kaput" in msg
+
+
+# ── Tier-1 invariants: determinism, truncation no-lookahead, price-scale (#81) ──────────────
+def _trivial_params():
+    """A frozen empty Params for the throwaway invariant probes below."""
+
+    @dataclass(frozen=True)
+    class _P:
+        pass
+
+    return _P
+
+
+def _nondeterministic():
+    """A strategy carrying class-level state that survives across replays (a determinism bug).
+
+    A shared class flag flips permanently on the first bar of the first replay, so a second
+    replay of the same tape through a fresh instance produces a different target series —
+    exactly what class-level mutable state or a missing on_start reset looks like.
+    """
+
+    class _Flaky(TraderStrategy):
+        name = "flaky"
+        params_cls = _trivial_params()
+        _ran_before = False  # class-level: never reset in on_start (the bug)
+
+        def on_start(self, ctx):
+            pass
+
+        def on_bar(self, ctx, bar):
+            ctx.set_target(1 if _Flaky._ran_before else 0)
+            _Flaky._ran_before = True
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Flaky
+
+
+def _random_targets():
+    """A strategy that draws its target from the ``random`` module (a determinism bug)."""
+
+    class _Rng(TraderStrategy):
+        name = "rng"
+        params_cls = _trivial_params()
+
+        def on_start(self, ctx):
+            pass
+
+        def on_bar(self, ctx, bar):
+            ctx.set_target(random.choice([0, 1]))
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Rng
+
+
+def _lookahead_signals():
+    """A vectorised ``signals`` override whose decision at bar t depends on the total bar count.
+
+    ``i >= len(data) // 2`` means truncating the tape shifts every earlier decision — the
+    canonical vectorised-override lookahead the event path cannot express.
+    """
+
+    class _Peek(TraderStrategy):
+        name = "peek"
+        params_cls = _trivial_params()
+
+        def on_start(self, ctx):
+            pass
+
+        def on_bar(self, ctx, bar):
+            ctx.set_target(0)
+
+        @classmethod
+        def signals(cls, data, params):
+            n = len(data)
+            return pd.Series([1 if i >= n // 2 else 0 for i in range(n)], dtype=int)
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Peek
+
+
+def _absolute_threshold(level: float = 105.0):
+    """A strategy comparing close to an absolute price level (a price-scale bug)."""
+
+    class _Abs(TraderStrategy):
+        name = "abs"
+        params_cls = _trivial_params()
+
+        def on_start(self, ctx):
+            pass
+
+        def on_bar(self, ctx, bar):
+            ctx.set_target(1 if bar.close > level else 0)
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Abs
+
+
+def test_nondeterministic_replay_is_caught_naming_the_first_diverging_bar():
+    # Two replays of the same tape disagree at bar 0 — the invariant names the bar and points
+    # at the two structural causes (class-level state / randomness).
+    scenario = Scenario("flips", segments=[flat(90)], expect=[long_within(1, 89)])
+    msg = run_scenario(_nondeterministic(), scenario)
+    assert msg is not None
+    assert "non-deterministic" in msg
+    assert "bar 0" in msg
+    assert "class-level" in msg or "randomness" in msg
+
+
+def test_randomness_is_caught_as_nondeterminism():
+    # A strategy reading random.* is non-deterministic across replays — caught the same way.
+    scenario = Scenario("noise", segments=[flat(90)], expect=[long_within(1, 89)])
+    msg = run_scenario(_random_targets(), scenario)
+    assert msg is not None and "non-deterministic" in msg
+
+
+def test_lookahead_signals_override_is_caught_by_truncation():
+    # signals(tape[:k]) disagrees with signals(tape)[:k]: the override peeks at the future.
+    scenario = Scenario("halves", segments=[flat(90)], expect=[always_flat()])
+    msg = run_scenario(_lookahead_signals(), scenario)
+    assert msg is not None
+    assert "looks ahead" in msg
+    assert "bar" in msg
+
+
+def test_absolute_price_threshold_is_caught_by_price_scale():
+    # Scaling every price ×10 flips the target at bar 0 — the close>105 level is not scale-free.
+    scenario = Scenario("rally", segments=[flat(20), trend(60, 0.2)], expect=[long_within(30, 79)])
+    msg = run_scenario(_absolute_threshold(), scenario)
+    assert msg is not None
+    assert "price-scale" in msg
+    assert "bar 0" in msg
+
+
+def test_check_invariants_runs_the_whole_tier1_suite_in_order():
+    # Warmup honesty stays first; the three new checks are all reachable through the dispatcher.
+    flaky = _nondeterministic()
+    scenario = Scenario("flips", segments=[flat(90)], expect=[long_within(1, 89)])
+    params = flaky.params_cls()
+    from noctis.strategies.base import replay_targets
+
+    targets = replay_targets(flaky(params), scenario.frame())
+    assert "non-deterministic" in (check_invariants(flaky, scenario, params, targets) or "")
+
+
+def test_scale_free_deterministic_causal_strategy_passes_every_invariant():
+    # The SMA probe is deterministic, causal (default signals), and scale-free — no invariant
+    # fires, so a legitimate strategy sails through the whole suite.
+    for scen in (POSITIVE, NEGATIVE):
+        assert run_scenario(_with_scenarios(POSITIVE, NEGATIVE), scen) is None

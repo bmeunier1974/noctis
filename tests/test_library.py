@@ -268,6 +268,203 @@ def test_lying_warmup_is_caught_through_the_in_process_gate(tmp_path):
     assert "bar 5" in str(exc.value)
 
 
+# ── Tier-1 invariant suite (#81): determinism, truncation, price-scale, through BOTH runners ─
+# One deliberately-broken fixture per invariant. Each passes every earlier gate check (name,
+# docstring, timeframe, param_space, on_bar/signals parity on the fixture frame) and then trips
+# exactly its own invariant inside the shared scenario funnel — so both validator runners catch
+# it with the same actionable message.
+
+# Class-level state that survives across replays: a shared flag flips permanently once price
+# clears 200 (the smoke fixture peaks near 104, so parity on it stays all-flat and passes), then
+# a second replay of the rising tape decides differently — the determinism check names the bar.
+NONDETERMINISTIC_SOURCE = '''"""Toy probe with class-level state that survives across replays.
+
+status: draft
+style: momentum
+"""
+from dataclasses import dataclass
+
+from noctis.strategies import scenarios as sc
+from noctis.strategies.base import Bar, Context, ParamSpec, TraderStrategy
+
+
+class LeakyProbe(TraderStrategy):
+    name = "leaky"
+
+    _ran_before = False  # class-level mutable state, never reset in on_start (the bug)
+
+    @dataclass(frozen=True)
+    class Params:
+        pass
+
+    params_cls = Params
+
+    def on_start(self, ctx: Context) -> None:
+        pass  # BUG: leaves the shared class flag alone
+
+    def on_bar(self, ctx: Context, bar: Bar) -> None:
+        if bar.close > 200.0:
+            ctx.set_target(1 if LeakyProbe._ran_before else 0)
+            LeakyProbe._ran_before = True
+        else:
+            ctx.set_target(0)
+
+    @classmethod
+    def param_space(cls):
+        return []
+
+    @classmethod
+    def scenarios(cls):
+        return [
+            sc.Scenario(
+                "rallies_past_200",
+                segments=[sc.flat(10), sc.trend(90, 5.0)],
+                expect=[sc.long_within(20, 99)],
+            ),
+            sc.Scenario(
+                "quiet_tape",
+                segments=[sc.flat(90)],
+                expect=[sc.always_flat()],
+            ),
+        ]
+'''
+
+# A vectorised signals override whose decision keys off len(data) — the classic lookahead the
+# event path cannot express. on_bar hardcodes the same midpoint the 180-bar smoke fixture yields
+# (180 // 2 == 90) so parity passes; truncating a scenario tape then shifts the split and the
+# truncation check fires.
+LOOKAHEAD_SOURCE = '''"""Toy probe whose vectorised signals peek at the total bar count.
+
+status: draft
+style: momentum
+"""
+from dataclasses import dataclass
+
+import pandas as pd
+
+from noctis.strategies import scenarios as sc
+from noctis.strategies.base import Bar, Context, ParamSpec, TraderStrategy
+
+
+class LookaheadProbe(TraderStrategy):
+    name = "lookahead"
+
+    @dataclass(frozen=True)
+    class Params:
+        pass
+
+    params_cls = Params
+
+    def on_start(self, ctx: Context) -> None:
+        self._i = -1
+
+    def on_bar(self, ctx: Context, bar: Bar) -> None:
+        # Matches signals() on the 180-bar smoke fixture (180 // 2 == 90) so parity holds.
+        self._i += 1
+        ctx.set_target(1 if self._i >= 90 else 0)
+
+    @classmethod
+    def signals(cls, data, params):
+        n = len(data)  # LOOKAHEAD: bar t's decision depends on the total bar count
+        return pd.Series([1 if i >= n // 2 else 0 for i in range(n)], dtype=int)
+
+    @classmethod
+    def param_space(cls):
+        return []
+
+    @classmethod
+    def scenarios(cls):
+        return [
+            sc.Scenario(
+                "second_half_long",
+                segments=[sc.flat(120)],
+                expect=[sc.flat_until(90), sc.long_within(90, 119)],
+            ),
+            sc.Scenario(
+                "short_tape_stays_flat",
+                segments=[sc.flat(70)],
+                expect=[sc.always_flat()],
+            ),
+        ]
+'''
+
+# An absolute price threshold (close > 105): scale-free on the smoke fixture (which never clears
+# 105, so parity is all-flat and passes) but not on a rising tape — scaling ×10 makes every bar
+# clear the level and the price-scale check fires.
+ABSOLUTE_PRICE_SOURCE = '''"""Toy probe that compares close to an absolute price level.
+
+status: draft
+style: momentum
+"""
+from dataclasses import dataclass
+
+from noctis.strategies import scenarios as sc
+from noctis.strategies.base import Bar, Context, ParamSpec, TraderStrategy
+
+
+class AbsPriceProbe(TraderStrategy):
+    name = "absprice"
+
+    @dataclass(frozen=True)
+    class Params:
+        pass
+
+    params_cls = Params
+
+    def on_start(self, ctx: Context) -> None:
+        pass
+
+    def on_bar(self, ctx: Context, bar: Bar) -> None:
+        ctx.set_target(1 if bar.close > 105.0 else 0)  # absolute level: not scale-free (the bug)
+
+    @classmethod
+    def param_space(cls):
+        return []
+
+    @classmethod
+    def scenarios(cls):
+        return [
+            sc.Scenario(
+                "rallies_above_105",
+                segments=[sc.flat(20), sc.trend(60, 0.2)],
+                expect=[sc.flat_until(20), sc.long_within(21, 79)],
+            ),
+            sc.Scenario(
+                "stays_below_105",
+                segments=[sc.flat(60), sc.selloff(20, 0.1)],
+                expect=[sc.always_flat()],
+            ),
+        ]
+'''
+
+TIER1_VIOLATIONS = [
+    (NONDETERMINISTIC_SOURCE, "leaky", "non-deterministic"),
+    (LOOKAHEAD_SOURCE, "lookahead", "looks ahead"),
+    (ABSOLUTE_PRICE_SOURCE, "absprice", "price-scale"),
+]
+
+
+@pytest.mark.parametrize(("source", "name", "match"), TIER1_VIOLATIONS)
+def test_tier1_invariant_violation_caught_through_the_subprocess_gate(
+    tmp_path, families, source, name, match
+):
+    # The DEFAULT fresh-interpreter validator: the actionable single-line message survives the
+    # gate's last-stderr-line boundary and nothing lands on disk.
+    with pytest.raises(StrategyValidationError, match=match):
+        write_strategy(tmp_path, name, source, families)
+    assert strategy_path(tmp_path, name) is None
+    assert name not in families
+
+
+@pytest.mark.parametrize(("source", "name", "match"), TIER1_VIOLATIONS)
+def test_tier1_invariant_violation_caught_through_the_in_process_gate(
+    tmp_path, source, name, match
+):
+    # Same shared funnel, no interpreter spawn — the in-process runner inherits every check.
+    with pytest.raises(StrategyValidationError, match=match):
+        _validate(tmp_path, source, name=name)
+
+
 @pytest.mark.parametrize(
     ("mutate", "why"),
     [
