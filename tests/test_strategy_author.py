@@ -193,6 +193,95 @@ def test_author_forwards_the_spec_so_the_gate_owns_the_oracle(tmp_path, families
     assert "compile_spec(" in installed and "spec_from_json(" in installed
 
 
+# ── 1e. On the spec path the coder is briefed against the FIXED ORACLE (#85) ──────────────────
+def _spec_suite():
+    from noctis.strategies.scenario_spec import Behavior, LegSpec, ScenarioSpec, SpecSuite
+
+    return SpecSuite(
+        [
+            ScenarioSpec("rally", [LegSpec("trend", 60, pct=0.15)], Behavior.ENTER_LONG, leg=0),
+            ScenarioSpec("grind", [LegSpec("flat", 60)], Behavior.NEVER_TRADE),
+        ]
+    )
+
+
+def _spec_named(name: str) -> str:
+    """A no-scenarios spec-path candidate (the gate stamps the oracle) re-pointed at ``name``."""
+    from tests.test_write_gate_spec import SPEC_CANDIDATE
+
+    return SPEC_CANDIDATE.replace('name = "probe"', f'name = "{name}"')
+
+
+def test_spec_path_user_prompt_briefs_the_fixed_oracle_and_forbids_scenarios(
+    tmp_path, families, fast_gate
+):
+    # On the spec path the coder prompt presents the FIXED ORACLE concretely (tape shapes,
+    # behaviors, target legs, the declared-warmup rule) and tells the coder NOT to author a
+    # scenarios() block — the gate stamps it. No free-prose scenario sketch remains.
+    from noctis.strategies.scenario_spec import describe_spec
+
+    suite = _spec_suite()
+    engine, client = _author(tmp_path, families, [fenced(_spec_named("probe"))])
+    engine.author("probe", BRIEF, spec=suite)
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    # The oracle is rendered faithfully from the SpecSuite (bars, kinds, behaviors, target legs).
+    assert describe_spec(suite) in prompt
+    assert "rally: trend(60) — enter long during leg 0" in prompt
+    assert "never trade" in prompt
+    # It tells the coder not to author scenarios() (the gate owns the oracle) and states the
+    # declared-warmup rule (each tape is preceded by a setup pad sized to the declared warmup).
+    low = prompt.lower()
+    assert "do not author" in low and "scenarios()" in prompt
+    assert "warmup" in low and ("setup pad" in low or "warms up" in low)
+    # The free-prose scenario-sketch line is gone on the spec path.
+    assert f"Scenario sketch: {BRIEF.scenarios}" not in prompt
+
+
+def test_spec_less_user_prompt_keeps_the_free_prose_scenario_sketch(tmp_path, families, fast_gate):
+    # Without a spec the prompt is byte-identical to before: the coder still owns tape construction
+    # and reads the brief's scenario sketch. Nothing on the spec-less path changes.
+    engine, client = _author(tmp_path, families, [fenced(PROBE)])
+    engine.author("probe", BRIEF)  # no spec
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert f"Scenario sketch: {BRIEF.scenarios}" in prompt
+    assert "FIXED SCENARIO ORACLE" not in prompt
+
+
+def test_spec_reaches_the_gate_on_every_attempt_including_retries(
+    tmp_path, families, fast_gate, monkeypatch
+):
+    # Retries may change ONLY the code — the fixed oracle is frozen. Prove the SAME spec reaches
+    # the write gate on the initial attempt AND every private retry, so no retry path can alter the
+    # tape or behavior contract. Attempt 1 fails the gate (name mismatch), attempt 2 lands.
+    suite = _spec_suite()
+    seen_specs = []
+    real_write = library.write_strategy
+
+    def spy(strategies_dir, name, source, fams, *, spec=None):
+        seen_specs.append(spec)
+        return real_write(strategies_dir, name, source, fams, spec=spec)
+
+    monkeypatch.setattr(library, "write_strategy", spy)
+    # The engine imports write_strategy via the `library` module attribute, so patch is seen.
+    monkeypatch.setattr("noctis.research.author.library.write_strategy", spy, raising=False)
+
+    bad = _spec_named("mismatch")  # class name attr != file name → gate rejects, triggers a retry
+    engine, client = _author(tmp_path, families, [fenced(bad), fenced(_spec_named("probe"))])
+    result = engine.author("probe", BRIEF, spec=suite)
+
+    assert result["name"] == "probe"
+    assert len(seen_specs) == 2  # the gate was reached twice (initial + one retry)
+    assert all(s is suite for s in seen_specs)  # the SAME fixed spec each time — never re-derived
+    # The retry prompt still presents the fixed oracle and never asks the coder for scenarios().
+    retry = client.calls[1]["messages"][0]["content"]
+    from noctis.strategies.scenario_spec import describe_spec
+
+    assert describe_spec(suite) in retry
+    assert "do not author" in retry.lower() and "scenarios()" in retry
+
+
 def test_engine_needs_no_api_key(tmp_path, families, fast_gate, monkeypatch):
     # The autouse _clean_env already pins these empty; assert the engine authors regardless.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")

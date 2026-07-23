@@ -1802,6 +1802,74 @@ def test_escalation_that_also_fails_is_still_counted_and_skips_the_strategy(tmp_
     assert library.strategy_path(box.strategies_dir, "esc_probe") is None  # nothing landed
 
 
+def _oracle_suite():
+    from noctis.strategies.scenario_spec import Behavior, LegSpec, ScenarioSpec, SpecSuite
+
+    return SpecSuite(
+        [
+            ScenarioSpec("rally", [LegSpec("trend", 60, pct=0.15)], Behavior.ENTER_LONG, leg=0),
+            ScenarioSpec("grind", [LegSpec("flat", 60)], Behavior.NEVER_TRADE),
+        ]
+    )
+
+
+def _spec_named(name: str) -> str:
+    """A no-scenarios spec-path candidate (the gate stamps the oracle) re-pointed at ``name``."""
+    from tests.test_write_gate_spec import SPEC_CANDIDATE
+
+    return SPEC_CANDIDATE.replace('name = "probe"', f'name = "{name}"')
+
+
+def test_tool_write_strategy_threads_the_spec_to_the_gate_on_the_brief_path(tmp_path, monkeypatch):
+    # #85 wiring: a spec passed to tool_write_strategy reaches the write gate down the coder-brief
+    # path, so the gate owns the oracle and machine-stamps the file (byte-identical to author()).
+    box = _make_toolbox(tmp_path, coder_client=_FakeCoder([_fenced(_spec_named("probe"))]))
+    suite = _oracle_suite()
+
+    out = box.tool_write_strategy(name="probe", brief=BRIEF_ARGS, spec=suite)
+
+    assert out.get("ok") is True
+    installed = library.strategy_source(box.strategies_dir, "probe")
+    assert "compile_spec(" in installed and "spec_from_json(" in installed
+
+
+def test_escalated_author_inherits_the_same_fixed_oracle(tmp_path, monkeypatch):
+    # Criterion 4 (#85): an escalated coder attempt inherits the IDENTICAL fixed oracle. The local
+    # coder burns its budget, the SAME brief AND the SAME spec escalate to the paid fallback, and
+    # every gate call — local retries and the escalated attempt alike — carries that one spec.
+    seen_specs = []
+    real_write = library.write_strategy
+
+    def spy(strategies_dir, name, source, fams, *, spec=None):
+        seen_specs.append(spec)
+        return real_write(strategies_dir, name, source, fams, spec=spec)
+
+    monkeypatch.setattr(library, "write_strategy", spy)
+    monkeypatch.setattr("noctis.research.tools.library.write_strategy", spy, raising=False)
+    monkeypatch.setattr("noctis.research.author.library.write_strategy", spy, raising=False)
+
+    box, local, fallback = _escalation_box(
+        tmp_path,
+        [_fenced(_spec_named("mismatch"))] * 3,  # local always mismatches → burns its budget
+        [_fenced(_spec_named("esc_probe"))],  # the paid fallback authors a valid no-scenarios file
+        max_escalations=1,
+    )
+    suite = _oracle_suite()
+
+    out = box.tool_write_strategy(name="esc_probe", brief=BRIEF_ARGS, spec=suite)
+
+    assert out.get("ok") is True and out["escalated"] is True
+    assert box.escalations == 1
+    assert len(local.calls) == 3 and len(fallback.calls) == 1
+    # Every gate call — 3 local + 1 escalated — received the SAME fixed oracle, never re-derived.
+    assert len(seen_specs) == 4
+    assert all(s is suite for s in seen_specs)
+    # And the paid fallback was briefed against the fixed oracle exactly like the local coder.
+    from noctis.strategies.scenario_spec import describe_spec
+
+    assert describe_spec(suite) in fallback.calls[0]["messages"][0]["content"]
+
+
 def test_max_escalations_caps_paid_spend_across_the_session(tmp_path):
     """Criterion 2: with cap=1, the first failed local author escalates; a SECOND strategy's local
     failure with the cap already spent does NOT touch the fallback client at all."""

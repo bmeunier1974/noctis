@@ -27,6 +27,7 @@ from noctis.strategies.scenario_spec import (
     SpecSuite,
     compile_scenario,
     compile_spec,
+    describe_spec,
     spec_from_json,
     spec_to_json,
 )
@@ -78,6 +79,53 @@ def _directional_spec(
 
 def _never_trade_spec(*, name: str = "flat_tape", bars: int = 60) -> ScenarioSpec:
     return ScenarioSpec(name=name, legs=[_leg("flat", bars)], behavior=Behavior.NEVER_TRADE)
+
+
+# ── describe_spec: a faithful human-readable rendering of the fixed oracle (#85) ────────────
+def test_describe_spec_renders_tape_shapes_behaviors_and_target_leg():
+    # The coder-facing rendering names every leg (kind + decision-bar length) and the ONE behavior
+    # each tape proves with its target leg, so a coder reasons about the tape without a bar index.
+    suite = SpecSuite(
+        scenarios=[
+            ScenarioSpec(
+                name="rally",
+                legs=[_leg("flat", 20), _leg("trend", 60)],
+                behavior=Behavior.ENTER_LONG,
+                leg=1,
+            ),
+            _never_trade_spec(name="grind", bars=60),
+        ]
+    )
+
+    text = describe_spec(suite)
+
+    # Tape shapes: kind(bars) for each leg, in order.
+    assert "rally: flat(20) then trend(60)" in text
+    assert "grind: flat(60)" in text
+    # Behaviors with the target leg index (never a bar index).
+    assert "enter long during leg 1" in text
+    assert "never trade" in text
+    # No bar index leaks into the rendering.
+    assert "bar 0" not in text and "bar 1" not in text
+
+
+def test_describe_spec_covers_every_behavior_phrase():
+    # Each directional/flat-by tag renders a distinct, readable phrase; never_trade its own.
+    phrases = {
+        Behavior.ENTER_LONG: "enter long during leg 0",
+        Behavior.ENTER_SHORT: "enter short during leg 0",
+        Behavior.HOLD_LONG: "hold long through leg 0",
+        Behavior.HOLD_SHORT: "hold short through leg 0",
+    }
+    for tag, phrase in phrases.items():
+        assert phrase in describe_spec(SpecSuite(scenarios=[_directional_spec("trend", tag)]))
+
+
+def test_describe_spec_is_pure_and_deterministic():
+    suite = SpecSuite(
+        scenarios=[_directional_spec("trend", Behavior.ENTER_LONG), _never_trade_spec()]
+    )
+    assert describe_spec(suite) == describe_spec(suite)
 
 
 # ── acceptance: frozen dataclasses, vocabulary limited, no bar index ────────────────────────

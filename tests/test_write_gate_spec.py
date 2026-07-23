@@ -22,6 +22,7 @@ from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.library import (
     StrategyValidationError,
     fixture_frame,
+    is_warmup_too_large,
     load_and_register,
     strategy_path,
     strategy_source,
@@ -159,6 +160,28 @@ def test_huge_warmup_message_survives_the_subprocess_boundary(tmp_path, families
     assert "3000" in msg
     assert "shrink" in msg.lower() and "lookback" in msg.lower()
     assert strategy_path(tmp_path, "probe") is None
+
+
+# ── 2b. the warmup-too-large rejection is classifiable — the needs-more-history signal (#85) ─
+def test_is_warmup_too_large_classifies_the_gate_rejection(tmp_path, families, fast_gate):
+    # The message the gate raises for a too-large declared warmup is recognizable by the library's
+    # own classifier, so the episodic driver can route it to a REFINED BRIEF (a thesis needing less
+    # history) instead of a generic author skip — without re-compiling the spec itself.
+    with pytest.raises(StrategyValidationError) as exc:
+        write_strategy(tmp_path, "probe", HUGE_WARMUP_CANDIDATE, families, spec=_suite())
+    assert is_warmup_too_large(str(exc.value))
+    # It survives the REPAIR wrapping the toolbox adds around the raw message, too.
+    assert is_warmup_too_large(f"validation failed: {exc.value} REPAIR, don't abandon: ...")
+
+
+def test_is_warmup_too_large_is_false_for_other_rejections(tmp_path, families, fast_gate):
+    # A different spec-path rejection (a coder-authored scenarios() block) is NOT the
+    # needs-more-history signal, so the driver keeps treating it as a generic author failure.
+    with pytest.raises(StrategyValidationError) as exc:
+        write_strategy(tmp_path, "probe", CANDIDATE_WITH_CODER_SCENARIOS, families, spec=_suite())
+    assert not is_warmup_too_large(str(exc.value))
+    assert not is_warmup_too_large("")
+    assert not is_warmup_too_large("class sets name=... but the strategy/file name is ...")
 
 
 # ── 3. a coder-authored scenarios() block is rejected — the coder cannot re-fit the oracle ───

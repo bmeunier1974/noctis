@@ -117,6 +117,7 @@ from noctis.observability.events import Event, stage_event, tool_event
 from noctis.research import digests
 from noctis.research.briefings import decide_briefing, formulate_briefing
 from noctis.research.episode import EmitContract, EpisodeResult
+from noctis.strategies import library
 from noctis.strategies.scenario_spec import (
     Behavior,
     LegSpec,
@@ -124,6 +125,7 @@ from noctis.strategies.scenario_spec import (
     SpecError,
     SpecSuite,
     compile_spec,
+    describe_spec,
 )
 from noctis.strategies.scenarios import Scenario
 
@@ -821,70 +823,64 @@ def _match_stage(
     return MatchResult(fit, reserved, profile)
 
 
-# The AUTHOR episode-line outcomes for an ESCALATED authoring job (story #72): the paid fallback
-# either authored the file (``ok``) or also failed the write gate (``author_failed``). A
-# non-escalated (local-only) author records no episode line at all, so the episode stream is
-# unchanged when nothing escalated.
+# The AUTHOR episode-line outcomes. An ESCALATED authoring job (story #72) records whether the
+# paid fallback authored the file (``ok``) or also failed the gate (``author_failed``). The
+# needs-more-history case (#85) — a write rejected because the candidate's declared warmup is too
+# large for the fixed oracle and the lookback defaults cannot honestly shrink — records
+# ``refined_brief`` instead: the honest exit is a lighter thesis, so the next formulate round can
+# propose one, never a bent gate or a mutated tape. A local (non-escalated) author that simply
+# lands or fails generically records NO episode line, so the stream stays byte-identical to before
+# unless an escalation OR a refined-brief exit earns one.
 _AUTHOR_OK = "ok"
 _AUTHOR_FAILED = "author_failed"
+_AUTHOR_REFINED = "refined_brief"
 
 
-def _record_author_escalation(ledger: SessionLedger, write: dict[str, Any]) -> None:
-    """Ledger one AUTHOR episode line when — and only when — the write escalated to the paid coder
-    fallback (story #72). ``tool_write_strategy`` marks an escalated write ``escalated=True`` and
-    names the model that authored it (``author_model`` = the fallback model), so the line records
-    which paid model was spent and whether it landed (``ok``) or also failed (``author_failed``).
-    A local-only author carries no ``escalated`` flag, so this is a no-op and the episode stream
-    stays byte-identical to before this story."""
-    if not write.get("escalated"):
+def _record_author_outcome(
+    ledger: SessionLedger, write: dict[str, Any], *, coder_model: str
+) -> None:
+    """Ledger one AUTHOR episode line for the two outcomes that earn one: an escalation to the paid
+    fallback (story #72) or a refined-brief exit (#85). Everything else — a plain local success or
+    a generic local gate rejection — records no line, so the episode stream is unchanged from
+    before unless one of those two fired.
+
+    ``tool_write_strategy`` marks an escalated write ``escalated=True`` and names the model that
+    authored it (``author_model`` = the fallback model). A refined-brief exit is detected from the
+    gate error via :func:`noctis.strategies.library.is_warmup_too_large`; it can ride either an
+    escalated or a local write, so it takes precedence over the generic failure label. The line's
+    model is the escalated fallback model when escalated, else the session's local coder."""
+    escalated = bool(write.get("escalated"))
+    errored = "error" in write
+    refined = errored and library.is_warmup_too_large(str(write.get("error") or ""))
+    if not escalated and not refined:
         return
+    if refined:
+        outcome = _AUTHOR_REFINED
+    elif errored:
+        outcome = _AUTHOR_FAILED
+    else:
+        outcome = _AUTHOR_OK
     ledger.record_episode(
         stage=AUTHOR,
-        model=str(write.get("author_model") or ""),
-        outcome=_AUTHOR_FAILED if "error" in write else _AUTHOR_OK,
-        escalated=True,
+        model=str(write.get("author_model") or coder_model or ""),
+        outcome=outcome,
+        escalated=escalated,
     )
-
-
-# One readable phrase per behavior tag for the author brief's scenario summary. The write gate
-# (#84) will consume the compiled spec directly; until then the brief renders a human-readable
-# summary OF the spec so the author stage keeps compiling on the fixed oracle, not free prose.
-_BEHAVIOR_PHRASES = {
-    Behavior.ENTER_LONG: "enter long during",
-    Behavior.ENTER_SHORT: "enter short during",
-    Behavior.HOLD_LONG: "hold long through",
-    Behavior.HOLD_SHORT: "hold short through",
-    Behavior.FLAT_BY_END: "be flat by the end of",
-}
-
-
-def _leg_phrase(leg: LegSpec) -> str:
-    return f"{leg.kind}({leg.bars})"
-
-
-def _scenario_phrase(spec: ScenarioSpec) -> str:
-    tape = " then ".join(_leg_phrase(leg) for leg in spec.legs)
-    if spec.behavior is Behavior.NEVER_TRADE:
-        return f"{spec.name}: {tape} — stay flat throughout (never trade)"
-    return f"{spec.name}: {tape} — {_BEHAVIOR_PHRASES[spec.behavior]} leg {spec.leg}"
-
-
-def _scenario_summary(suite: SpecSuite) -> str:
-    """A human-readable summary of the structured scenario spec, one line per scenario tape — the
-    author-brief-facing rendering of the fixed oracle (the write gate #84 consumes the spec)."""
-    return "; ".join(_scenario_phrase(spec) for spec in suite.scenarios)
 
 
 def _brief_from_formulate(fo: FormulateOutput, symbols: Sequence[str]) -> dict[str, Any]:
     """Map a FORMULATE output onto the strategy author's brief (thesis, entry/exit, param space,
-    scenarios). Passed to ``tool_write_strategy(brief=…)`` — the coder author engine translates it
-    into one validated file. The ``scenarios`` field is a readable summary rendered from the fixed
-    ``scenario_spec`` (the compiled oracle the write gate #84 replays)."""
+    scenarios). Passed to ``tool_write_strategy(brief=…, spec=…)`` — the coder author engine
+    translates it into one validated file and the write gate (#84) owns the oracle. The
+    ``scenarios`` field is the fixed oracle rendered faithfully from the FORMULATE
+    ``scenario_spec`` (:func:`~noctis.strategies.scenario_spec.describe_spec` — tape shapes,
+    behaviors, target legs), never free-prose scenario intent (#85): the same ``SpecSuite`` is
+    threaded to the gate as ``spec`` so the coder authors no ``scenarios()`` block at all."""
     return {
         "thesis": fo.thesis,
         "entry_exit": _entry_exit_brief(fo),
         "param_space": fo.param_space_sketch,
-        "scenarios": _scenario_summary(fo.scenario_spec),
+        "scenarios": describe_spec(fo.scenario_spec),
         "style": fo.style,
         "symbols": list(symbols),
     }
@@ -1120,6 +1116,9 @@ def run_episodic_research(
     stop_event = stop_event or _NeverStop()
     digest_source = market_digest or (lambda: digests.market_digest(toolbox))
     exhausted = getattr(toolbox, "exhausted", None)
+    # The local coder model names the AUTHOR episode line for a non-escalated refined-brief exit
+    # (#85); an escalated write names its own paid fallback model. Read off the session models map.
+    coder_model = str((models or {}).get("coder") or "")
     summary = ResearchSummary()
     start = now()
     budget_seconds = budget_minutes * 60.0
@@ -1193,6 +1192,9 @@ def run_episodic_research(
         reserved_holdout = match.reserved  # held out by code — never tuned, DECIDE's holdout
 
         # ── AUTHOR ────────────────────────────────────────────────────────────
+        # The FORMULATE spec is the FIXED ORACLE: it is threaded into the write gate's spec path
+        # (the coder authors no scenarios(); the gate stamps it) and the same suite renders the
+        # brief's oracle summary (#85). The gate replays it at the candidate's own declared warmup.
         emit_stage(AUTHOR, name)
         ledger.record_stage(AUTHOR, strategy=name)
         write = _invoke(
@@ -1203,14 +1205,20 @@ def run_episodic_research(
             thesis=fo.thesis,
             parent_thesis=fo.parent_thesis,
             pivot_rationale=fo.pivot_rationale,
+            spec=fo.scenario_spec,
         )
         # The write's own coder-attempt `author` events already emitted from inside the toolbox;
         # this tool line is the write's outcome, mirroring the loop's post-dispatch line.
         emit_tool("write_strategy", {"name": name, "class_tag": fo.class_tag}, write)
-        _record_author_escalation(ledger, write)
+        _record_author_outcome(ledger, write, coder_model=coder_model)
         if "error" in write:
-            # A write-gate rejection is a code bug in one draft, not a verdict — skip and move on.
-            logger.info("author skipped %s: %s", name, write["error"])
+            # A write-gate rejection is a code bug in one draft, not a verdict on the thesis — skip
+            # and formulate the next idea. The one exception is the needs-more-history signal: a
+            # declared warmup too large for the fixed oracle ended this strategy in a REFINED BRIEF
+            # (recorded above), so the next formulate can propose a thesis needing less history.
+            refined = library.is_warmup_too_large(str(write["error"]))
+            verb = "refined-brief (needs less history)" if refined else "skipped"
+            logger.info("author %s %s: %s", verb, name, write["error"])
             continue
 
         # ── OPTIMIZE (v1 multi-fidelity tuning recipe, #70 — zero LLM) ──────────

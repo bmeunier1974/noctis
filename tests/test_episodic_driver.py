@@ -43,6 +43,7 @@ from noctis.research.episode import (
 )
 from noctis.research.ledger import SessionLedger
 from noctis.research.llm import ToolCall, Turn
+from noctis.strategies import library
 from noctis.strategies.scenario_spec import (
     Behavior,
     LegSpec,
@@ -51,7 +52,7 @@ from noctis.strategies.scenario_spec import (
     compile_spec,
 )
 from noctis.strategies.scenarios import Scenario
-from tests.test_research_tools import PROBE, _make_toolbox
+from tests.test_research_tools import _make_toolbox
 
 _FORMULATE_TOOL = FORMULATE_CONTRACT.name
 _DECIDE_TOOL = DECIDE_CONTRACT.name
@@ -524,6 +525,89 @@ def test_author_stage_passes_the_thesis_and_lineage_onto_the_brief(tmp_path):
     assert "rally" in brief["scenarios"] and "enter long during leg 0" in brief["scenarios"]
     assert "never trade" in brief["scenarios"]  # the no-trade tape is summarized too
     assert "1m" in brief["entry_exit"]
+
+
+# ── 1b. the AUTHOR stage carries the FIXED ORACLE into the write gate's spec path (#85) ──────
+def test_author_stage_forwards_the_fixed_spec_and_brief_renders_the_oracle(tmp_path):
+    from noctis.strategies.scenario_spec import describe_spec
+
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "s-oracle"))
+
+    write = box.writes[0]
+    # The compiled oracle (the FormulateOutput's SpecSuite) is threaded into the gate's spec path.
+    assert write["spec"] is _SPEC_SUITE
+    # The brief renders the fixed oracle faithfully from the SpecSuite — no free-prose intent.
+    assert write["brief"]["scenarios"] == describe_spec(_SPEC_SUITE)
+
+
+def test_warmup_too_large_ends_the_strategy_in_a_refined_brief(tmp_path):
+    # A thesis needing more history than the fixed oracle allows (declared warmup too large): the
+    # write gate rejects it with the needs-more-history signal, and the driver ends the episode in
+    # a REFINED BRIEF outcome — the honest exit is a lighter thesis, never a bent gate.
+    warmup_error = (
+        "validation failed: declared warmup_bars=3000 is too large for the fixed scenario "
+        "oracle: scenario 'rally' compiles to 3080 bars, outside [60, 2000]. Shrink the lookback "
+        "defaults in Params so the strategy warms up faster"
+    )
+    episodes = Episodes([formulate_ok()], [])
+    box = FakeToolbox(write_result={"error": warmup_error})
+    ledger = SessionLedger(tmp_path, "s-refine")
+
+    summary = _drive(episodes, box, max_episodes=1, ledger=ledger, models={"coder": "fake/coder"})
+
+    # The AUTHOR episode ends in a refined-brief outcome (not a generic author_failed), naming the
+    # coder that authored the too-heavy draft.
+    author_eps = [e for e in ledger.episodes() if e.stage == "author"]
+    assert len(author_eps) == 1
+    assert author_eps[0].outcome == "refined_brief"
+    assert author_eps[0].model == "fake/coder"
+    assert author_eps[0].escalated is False
+    # The strategy is skipped (no optimize, no verdict) and never enters the undecided set...
+    assert box.backtests == [] and box.sweeps == []
+    assert box.rejects == [] and box.evaluations == []
+    assert summary.undecided == []
+    # ...and the session continued past AUTHOR toward its budget rather than ending on it.
+    assert summary.stopped_reason == "max_episodes"
+
+
+def test_generic_author_failure_is_not_a_refined_brief(tmp_path):
+    # A non-warmup gate rejection is a generic author skip — no refined-brief episode line (the
+    # episode stream stays byte-identical to before this story for a local generic failure).
+    episodes = Episodes([formulate_ok()], [])
+    box = FakeToolbox(write_result={"error": "validation failed: bad scenario window"})
+    ledger = SessionLedger(tmp_path, "s-generic")
+
+    _drive(episodes, box, max_episodes=1, ledger=ledger)
+
+    assert [e for e in ledger.episodes() if e.stage == "author"] == []
+
+
+def test_escalated_warmup_too_large_records_a_refined_brief_line(tmp_path):
+    # The needs-more-history signal on an ESCALATED write (the paid fallback also hit the too-large
+    # warmup) still routes to a refined brief, naming the paid model on an escalated episode line.
+    warmup_error = (
+        "validation failed: declared warmup_bars=3000 is too large for the fixed scenario oracle"
+    )
+    episodes = Episodes([formulate_ok()], [])
+    box = FakeToolbox(
+        write_result={
+            "error": warmup_error,
+            "escalated": True,
+            "author_model": "fake/coder-paid",
+        }
+    )
+    ledger = SessionLedger(tmp_path, "s-refine-esc")
+
+    summary = _drive(episodes, box, max_episodes=1, ledger=ledger)
+
+    author_eps = [e for e in ledger.episodes() if e.stage == "author"]
+    assert len(author_eps) == 1
+    assert author_eps[0].outcome == "refined_brief"
+    assert author_eps[0].escalated is True
+    assert author_eps[0].model == "fake/coder-paid"
+    assert summary.escalations == 1  # the escalation is still metered
 
 
 # ── 2. per-stage failed-episode policies ────────────────────────────────────────────────────
@@ -1064,8 +1148,18 @@ class FakeEpisodeClient:
         return self._script.pop(0)
 
 
+# On the episodic path the gate owns the oracle (#84/#85): the coder authors NO scenarios() — the
+# gate stamps one from the FORMULATE spec. These e2e coders therefore emit a no-scenarios file
+# (SPEC_CANDIDATE), not PROBE (whose hand-declared scenarios() the spec path rejects).
+def _spec_source(name: str) -> str:
+    from tests.test_write_gate_spec import SPEC_CANDIDATE
+
+    return SPEC_CANDIDATE.replace('name = "probe"', f'name = "{name}"')
+
+
 class FakeCoder:
-    """A coder client: reads the requested name off the prompt and returns a valid renamed PROBE."""
+    """A coder client: reads the requested name off the prompt and returns a valid no-scenarios
+    file the spec-path gate stamps its oracle into."""
 
     def __init__(self):
         self.model = "fake/coder"
@@ -1073,8 +1167,7 @@ class FakeCoder:
 
     def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
         name = re.search(r"name:\s*(\S+)", messages[-1]["content"]).group(1)
-        source = PROBE.replace('name = "probe"', f'name = "{name}"')
-        block = f"```python\n{source}\n```"
+        block = f"```python\n{_spec_source(name)}\n```"
         return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
 
 
@@ -1089,7 +1182,24 @@ class FakeBrokenCoder:
 
     def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
         self.calls += 1
-        source = PROBE.replace('name = "probe"', 'name = "mismatch"')
+        block = f"```python\n{_spec_source('mismatch')}\n```"
+        return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
+
+
+class FakeHugeWarmupCoder:
+    """A coder that authors a valid no-scenarios file but declares a warmup far larger than the
+    fixed oracle's tape can hold — the needs-more-history case the driver routes to a refined
+    brief. It never lands, so it burns its whole validator-retry budget."""
+
+    def __init__(self):
+        self.model = "fake/coder"
+        self.capabilities = Capabilities()
+        self.calls = 0
+
+    def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
+        self.calls += 1
+        name = re.search(r"name:\s*(\S+)", messages[-1]["content"]).group(1)
+        source = _spec_source(name).replace("return params.lookback", "return 3000")
         block = f"```python\n{source}\n```"
         return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
 
@@ -1271,6 +1381,82 @@ def test_end_to_end_below_floor_verdict_is_refused_by_the_real_gate(tmp_path):
     # The re-asked decide episode carried the real gate refusal as corrective context.
     assert "exhaustion gate" in client.calls[2][0]["content"]
     assert [e.stage for e in ledger.episodes()] == ["formulate", "decide", "decide"]
+
+
+# ── 5b. end to end: FORMULATE spec → author → gated write against the compiled oracle (#85) ──
+def test_end_to_end_authors_against_the_fixed_oracle_and_stamps_the_installed_file(tmp_path):
+    # The whole inversion, end to end: FORMULATE emits a structured spec, the driver carries it
+    # into the write gate's spec path, the coder authors NO scenarios(), and the REAL gate replays
+    # the compiled oracle at the candidate's declared warmup and machine-stamps a scenarios() block
+    # into the installed file — which then optimizes and reaches a gated verdict.
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    ledger = SessionLedger(box.state_dir, session_id="ep-oracle-e2e")
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fit_symbols=["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+
+    name = "intraday_momentum_1"
+    # The installed file is machine-stamped from the FORMULATE spec — the coder authored none.
+    installed = library.strategy_source(box.strategies_dir, name)
+    assert "compile_spec(" in installed and "spec_from_json(" in installed
+    assert installed.count("def scenarios(cls):") == 1
+    # And the stamped candidate cleared the whole pipeline: optimized and reached a gated verdict.
+    assert box.journal.stats(name).sweep_completed
+    assert summary.rejections == 1 and summary.undecided == []
+    assert summary.author_calls == 1
+
+
+def test_end_to_end_warmup_too_large_ends_in_a_refined_brief(tmp_path):
+    # A coder that keeps declaring a warmup too large for the fixed oracle exhausts its retries; the
+    # REAL gate rejects it with the needs-more-history signal, and the driver ends the strategy in a
+    # REFINED BRIEF — no optimize, no verdict, nothing left undecided; the session runs to budget.
+    coder = FakeHugeWarmupCoder()
+    box = _make_toolbox(tmp_path, coder_client=coder)
+    ledger = SessionLedger(box.state_dir, session_id="ep-refine-e2e")
+    client = FakeEpisodeClient([_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD)])
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fit_symbols=["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=1,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+        models={"driver": "fake/model", "coder": "fake/coder"},
+    )
+
+    name = "intraday_momentum_1"
+    assert coder.calls == 3  # the coder burned its full retry budget on the too-heavy file
+    author_eps = [e for e in ledger.episodes() if e.stage == "author"]
+    assert len(author_eps) == 1 and author_eps[0].outcome == "refined_brief"
+    assert author_eps[0].model == "fake/coder"
+    # Skipped like any author failure — but recorded honestly, and nothing landed on disk.
+    assert library.strategy_path(box.strategies_dir, name) is None
+    assert summary.rejections == 0 and summary.undecided == []
+    assert [s.stage for s in ledger.stages() if s.stage == "optimize"] == []
 
 
 # ── 6. verbose narration: a fake-client episodic session reads as one continuous arc (#73) ───

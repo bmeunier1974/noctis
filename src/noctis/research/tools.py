@@ -1195,6 +1195,7 @@ class ResearchToolbox:
         thesis: str | None = None,
         parent_thesis: str | None = None,
         pivot_rationale: str | None = None,
+        spec: SpecSuite | None = None,
     ) -> dict:
         is_new = library.strategy_path(self.strategies_dir, name) is None
         # The guards that fire before any source exists (exhausted-class, undecided nudge) run
@@ -1248,7 +1249,7 @@ class ResearchToolbox:
         # Both surface a StrategyValidationError on a gate rejection, so the fixation/REPAIR
         # handling below and the success bookkeeping are shared, never duplicated.
         try:
-            result = self._author_source(name, source, brief)
+            result = self._author_source(name, source, brief, spec=spec)
         except library.StrategyValidationError as exc:
             self._write_gate_failures += 1
             self._last_failed_write = name
@@ -1342,9 +1343,10 @@ class ResearchToolbox:
         :class:`library.StrategyValidationError` on a gate rejection (brief mode re-surfaces the
         engine's final validation error), routing both paths through the shared REPAIR handling.
 
-        ``spec`` (#84) is the compiled scenario oracle: forwarded to the write gate down both
-        paths so it replays the spec at the candidate's warmup and machine-stamps the file.
-        Default ``None`` keeps today's behavior — the driver supplies no spec yet (#85).
+        ``spec`` is the compiled scenario oracle: forwarded to the write gate down both paths so it
+        replays the spec at the candidate's warmup and machine-stamps the file. The episodic driver
+        (#85) supplies the FORMULATE spec here so the gate owns the oracle end to end; ``None``
+        keeps the spec-less path (the conversation loop, hand-written source) byte-identical.
         """
         if brief is not None and self.author_engine is not None:
             return self._author_from_brief(name, brief, spec=spec)

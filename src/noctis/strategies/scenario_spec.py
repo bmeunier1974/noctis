@@ -244,6 +244,47 @@ def compile_scenario(spec: ScenarioSpec, warm: int) -> Scenario:
     return Scenario(name=spec.name, segments=(setup, *segments), expect=expect)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Human-readable rendering — the faithful coder-brief presentation of the fixed oracle (#85)
+# ─────────────────────────────────────────────────────────────────────────────
+# One readable phrase per indexed behavior tag; NEVER_TRADE renders its own no-trade sentence.
+_BEHAVIOR_PHRASES = {
+    Behavior.ENTER_LONG: "enter long during",
+    Behavior.ENTER_SHORT: "enter short during",
+    Behavior.HOLD_LONG: "hold long through",
+    Behavior.HOLD_SHORT: "hold short through",
+    Behavior.FLAT_BY_END: "be flat by the end of",
+}
+
+
+def _leg_phrase(leg: LegSpec) -> str:
+    """One leg as ``kind(bars)`` — the tape shape a coder reads (no bar index)."""
+    return f"{leg.kind}({leg.bars})"
+
+
+def describe_scenario(spec: ScenarioSpec) -> str:
+    """One scenario tape rendered as ``name: leg then leg — behavior leg <k>`` (or a no-trade
+    sentence for ``never_trade``). Faithful to the spec: leg kinds and decision-bar lengths in
+    order, plus the single behavior and its target leg index — never a compiled bar index."""
+    tape = " then ".join(_leg_phrase(leg) for leg in spec.legs)
+    if spec.behavior is Behavior.NEVER_TRADE:
+        return f"{spec.name}: {tape} — stay flat throughout (never trade)"
+    return f"{spec.name}: {tape} — {_BEHAVIOR_PHRASES[spec.behavior]} leg {spec.leg}"
+
+
+def describe_spec(suite: SpecSuite) -> str:
+    """A faithful human-readable rendering of the fixed oracle: one line per scenario tape naming
+    the ordered legs (kind + decision-bar length) and the single behavior each tape must prove
+    with its target leg index.
+
+    Pure and deterministic — the same suite always renders identically. Both the episodic driver's
+    author brief and the coder prompt present the fixed oracle from this one rendering, so a coder
+    can reason about the tape shape without inventing bar indices (#85). The compiler
+    (:func:`compile_spec`) derives every window from the leg lengths and the strategy's declared
+    warmup, so the rendering carries no absolute bar position."""
+    return "; ".join(describe_scenario(spec) for spec in suite.scenarios)
+
+
 def compile_spec(spec: SpecSuite, warm: int) -> tuple[Scenario, ...]:
     """Compile a :class:`SpecSuite` into contract-satisfying :class:`Scenario` objects.
 

@@ -131,6 +131,25 @@ class StrategyValidationError(Exception):
     """The submitted strategy source failed the import/smoke-backtest gate."""
 
 
+# The stable sentinel embedded in the spec-path "declared warmup too large for the fixed oracle"
+# rejection (see :func:`_validate_against_spec`). It is the one write-gate failure the episodic
+# driver routes to a REFINED BRIEF — a thesis genuinely needing more history than the fixed oracle
+# allows — rather than a generic author skip (#85). Kept as a constant so the message and the
+# classifier can never drift apart, and so the classifier matches on the wording that crosses the
+# subprocess validator boundary (which preserves the message text, not the exception type).
+WARMUP_TOO_LARGE_MARKER = "too large for the fixed scenario oracle"
+
+
+def is_warmup_too_large(message: str) -> bool:
+    """Whether a write-gate error message is the spec-path warmup-too-large rejection — the
+    needs-more-history signal the episodic driver routes to a refined brief (#85).
+
+    Matches on :data:`WARMUP_TOO_LARGE_MARKER`, the stable phrase the gate embeds, so it survives
+    both the subprocess validator boundary and the toolbox's REPAIR wrapping (the raw message is
+    carried verbatim inside both). Never recompiles the spec — the gate owns compilation (#84)."""
+    return WARMUP_TOO_LARGE_MARKER in (message or "")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Synthetic fixture — the smoke-backtest bars (also the ideation parity fixture)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -941,7 +960,7 @@ def _validate_against_spec(cls: type[TraderStrategy], spec: SpecSuite) -> None:
         compiled = compile_spec(spec, warm)
     except SpecError as exc:
         raise StrategyValidationError(
-            f"declared warmup_bars={warm} is too large for the fixed scenario oracle: "
+            f"declared warmup_bars={warm} is {WARMUP_TOO_LARGE_MARKER}: "
             f"{_one_line(exc)}. Shrink the lookback defaults in Params so the strategy warms up "
             f"faster — never enlarge the scenario tape to fit the warmup"
         ) from exc
