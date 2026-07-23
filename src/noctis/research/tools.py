@@ -589,6 +589,17 @@ class ResearchToolbox:
             )
         return None
 
+    def can_author_brief(self) -> bool:
+        """Whether a new brief-authoring job could still start under the coder budget (#94).
+
+        The episode-loop preflight seam: the driver asks this at each FORMULATE boundary so it does
+        not formulate a thesis it could never author. It is exactly the negation of the ceiling
+        :meth:`_author_budget_block` refuses a brief on — one definition of the arithmetic, reused
+        rather than re-derived — so the preflight can never drift from the block. ``True`` while the
+        budget can fund at least one more authoring attempt, ``False`` once it is spent.
+        """
+        return self._author_budget_block() is None
+
     # ── tool definitions (Anthropic tool-use schema) ─────────────────────────
     def tool_specs(self) -> list[dict]:
         sym_array = {"type": "array", "items": {"type": "string"}, "description": "Ticker symbols."}

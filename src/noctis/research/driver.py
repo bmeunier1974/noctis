@@ -95,7 +95,14 @@ so which check fired and how its re-ask resolved is visible to reports.
 ``completions`` counter — the episode runner's own per-completion tally, retries included — checked
 at every stage boundary; ``budget_minutes`` wall-clock is checked at the same boundaries; a
 ``stop_event`` (market open / time limit) is honored between stages. No work is interrupted
-mid-stage, so the journal, registry, and ledger are always left consistent.
+mid-stage, so the journal, registry, and ledger are always left consistent. One further check sits
+at the FORMULATE boundary only (#94): the **author-call budget preflight**. A new FORMULATE leads to
+a new authoring brief, so before each one the loop asks the toolbox's own ``can_author_brief`` — the
+exact ceiling that refuses to *start* a brief, one definition reused rather than re-derived — and
+when the coder budget can no longer fund a single attempt, ends the session with its own distinct
+``author_budget_exhausted`` note (told apart from ``formulate_failed``). It gates only NEW formulate
+work: an already-started brief's retries and the DECIDE of an already-authored strategy keep their
+existing semantics, so a session that never exhausts the budget is byte-identical.
 
 **Contract.** Returns the same :class:`~noctis.engine.research.ResearchSummary` the conversation
 loop returns, assembled from the toolbox's own counters, so the runtime, the ``research`` CLI, and
@@ -146,6 +153,11 @@ DECIDE = "decide"
 
 # The verdict vocabulary of a DECIDE episode.
 _APPROVE, _REJECT, _REVISE = "approve", "reject", "revise"
+
+# The distinct session-end note (#94) when the episode loop stops because the coder author-call
+# budget can no longer fund a single authoring attempt — an honest "ran out of coder budget", told
+# apart from "ran out of ideas" (``formulate_failed``) and the wall-clock/episode stops.
+_AUTHOR_BUDGET_EXHAUSTED = "author_budget_exhausted"
 
 # One re-ask on a failed/refused DECIDE, then undecided (see the module docstring). The same
 # two-attempt cap absorbs a `revise` verdict: the first revise earns the corrective re-ask, a
@@ -1186,6 +1198,18 @@ def run_episodic_research(
         stop = _budget_stop()
         if stop:
             summary.stopped_reason = stop
+            break
+
+        # ── author-call budget preflight (#94) ────────────────────────────────
+        # A new FORMULATE leads to a new authoring brief; once the coder budget can no longer fund
+        # a single authoring attempt, formulating more theses only burns driver tokens on work that
+        # dies on arrival at AUTHOR (formulated → matched → refused in 0.0s). Ask the toolbox's OWN
+        # predicate — the same ceiling that refuses to START a brief — at this boundary, and end the
+        # session with its own distinct note so the CLOSE rollup tells "out of coder budget" from
+        # "out of ideas". It only gates NEW formulate work: an already-started brief (and the DECIDE
+        # of an already-authored strategy) keep their existing budget semantics.
+        if not toolbox.can_author_brief():
+            summary.stopped_reason = _AUTHOR_BUDGET_EXHAUSTED
             break
 
         # ── FORMULATE (+ driver-side sanity checks, #71) ──────────────────────

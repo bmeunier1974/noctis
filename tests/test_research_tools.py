@@ -1562,6 +1562,25 @@ def test_exhausted_author_budget_refuses_brief_but_leaves_source_open(tmp_path):
     assert len(coder.calls) == spent  # still no coder completion
 
 
+def test_can_author_brief_is_the_budget_blocks_predicate(tmp_path):
+    """Story #94: the toolbox exposes the SAME ceiling `_author_budget_block` enforces as a
+    boolean preflight the episode loop consumes — True while a new brief could still start, False
+    once the coder budget is spent — so the ceiling arithmetic has exactly one definition and the
+    driver can preflight it before FORMULATE without re-deriving the arithmetic."""
+    box, _ = _coder_box(tmp_path, [_fenced(_named("first"))], max_author_calls=2)
+    assert box.can_author_brief() is True  # 0/2 spent — a brief could still start
+    box.author_calls = 1
+    assert box.can_author_brief() is True  # 1/2 — still below the ceiling
+    box.author_calls = 2
+    assert box.can_author_brief() is False  # 2/2 — spent, exactly what the block refuses
+    box.author_calls = 3
+    assert box.can_author_brief() is False  # over the ceiling reads spent too
+    # It is exactly the block's negation at every count — one definition, no drift.
+    for count in range(0, 5):
+        box.author_calls = count
+        assert box.can_author_brief() == (box._author_budget_block() is None)
+
+
 def test_research_summary_surfaces_the_author_call_count(tmp_path):
     """Criterion 4: the session summary object carries the author-call count (default 0)."""
     from noctis.engine.research import ResearchSummary

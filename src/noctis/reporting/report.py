@@ -74,6 +74,13 @@ def _render_research_sessions(lines: list[str], sessions: list) -> None:
         lines.append(f"  - Escalations: {rollup.get('escalations', 0)}")
         lines.append(f"  - Tokens by stage: {_fmt_counts(rollup.get('tokens_by_stage', {}))}")
         lines.append(f"  - Tokens by model: {_fmt_counts(rollup.get('tokens_by_model', {}))}")
+        # The session-end note (rendered generically): why the loop ended — e.g.
+        # author_budget_exhausted (#94), formulate_failed, max_episodes — so an operator tells
+        # "out of coder budget" from "out of ideas" at a glance. Omitted when the session carried
+        # none, so a note-less session's render is byte-identical to before.
+        note = rollup.get("note")
+        if note:
+            lines.append(f"  - Ended: {note}")
         candidates = s.get("candidates") or []
         if candidates:
             lines.append("  - Candidate trail:")
