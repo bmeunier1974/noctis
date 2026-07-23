@@ -47,6 +47,13 @@ import pandas as pd
 from noctis.strategies import scenarios as scenarios_mod
 from noctis.strategies.base import TraderStrategy, params_to_dict, replay_targets
 from noctis.strategies.families import FamilyRegistry
+from noctis.strategies.scenario_spec import (
+    SpecError,
+    SpecSuite,
+    compile_spec,
+    spec_from_json,
+    spec_to_json,
+)
 
 logger = logging.getLogger("noctis.library")
 
@@ -74,6 +81,9 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _ARCHIVE_SEQ_RE = re.compile(r"^(\d+)-")
 _NS_PER_MINUTE = 60 * 1_000_000_000
 _VALIDATE_TIMEOUT_S = 120
+# Project ruff line-length: the machine-stamped scenarios() block renders its embedded-spec call
+# inline below this width and wraps above it, so the stamp is byte-stable under ``ruff format``.
+_STAMP_LINE_WIDTH = 100
 _module_counter = itertools.count()
 
 
@@ -283,6 +293,78 @@ def _render_param_defaults(source: str, name: str, params: dict) -> str:
         raise StrategyValidationError(
             f"{name}: params {sorted(remaining)} not found as Params fields for write-back"
         )
+    return "".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario stamp — the gate machine-writes the oracle into the file (the write-back precedent)
+# ─────────────────────────────────────────────────────────────────────────────
+def _top_level_class(tree: ast.Module) -> ast.ClassDef:
+    """The single top-level class in a strategy file (its ``Params`` sits nested inside it)."""
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+    if len(classes) != 1:
+        raise StrategyValidationError(
+            f"expected exactly one top-level class to stamp scenarios into, found {len(classes)}"
+        )
+    return classes[0]
+
+
+def _scenarios_method_source(spec: SpecSuite, indent: int) -> str:
+    """Render a deterministic, ruff-format-stable warmup-parametric ``scenarios()`` classmethod.
+
+    The embedded spec literal re-compiles at runtime against the strategy's *own* declared warmup
+    (``cls.warmup_bars(cls.params_cls())``), so a later promotion write-back that changes the
+    tuned params re-derives the oracle consistently — the file stays the whole artifact. The
+    embedded-spec call renders inline below the ruff line width and wrapped above it, matching what
+    ``ruff format`` would produce so the stamped file is byte-stable under a later lint pass.
+    """
+    pad = " " * indent  # class-body indent (the method def sits here)
+    body = pad + "    "  # method-body indent
+    literal = repr(spec_to_json(spec))
+    inline = f"{body}suite = spec_from_json({literal})"
+    if len(inline) <= _STAMP_LINE_WIDTH:
+        suite_lines = [inline + "\n"]
+    else:
+        suite_lines = [
+            f"{body}suite = spec_from_json(\n",
+            f"{body}    {literal}\n",
+            f"{body})\n",
+        ]
+    return "".join(
+        [
+            f"{pad}@classmethod\n",
+            f"{pad}def scenarios(cls):\n",
+            f"{body}# Machine-stamped from the FORMULATE scenario spec (#84): the known-outcome\n",
+            f"{body}# oracle is fixed by the spec and re-derived at the strategy's declared\n",
+            f"{body}# warmup, so promotion write-back and a standalone backtest replay use\n",
+            f"{body}# exactly what the write gate validated. Change the trading logic, not this.\n",
+            f"{body}from noctis.strategies.scenario_spec import compile_spec, spec_from_json\n",
+            "\n",
+            *suite_lines,
+            f"{body}return list(compile_spec(suite, warm=cls.warmup_bars(cls.params_cls())))\n",
+        ]
+    )
+
+
+def _stamp_scenarios(source: str, spec: SpecSuite) -> str:
+    """Append the machine-stamped ``scenarios()`` classmethod to the strategy class.
+
+    The candidate reaches here having passed the spec-path gate, so it declares no ``scenarios()``
+    of its own; the method is spliced in after the class body's last statement, one blank line
+    down, at the class-body indent. Deterministic: the same spec yields the same bytes.
+    """
+    tree = ast.parse(source)
+    cls_node = _top_level_class(tree)
+    if not cls_node.body:  # pragma: no cover — a class that imported/parsed cannot be empty
+        raise StrategyValidationError("strategy class has no body to stamp scenarios into")
+    indent = cls_node.body[0].col_offset
+    insert_at = cls_node.body[-1].end_lineno  # 1-based; splice AFTER this line
+    assert insert_at is not None  # every parsed statement carries an end line
+    lines = source.splitlines(keepends=True)
+    if lines and not lines[insert_at - 1].endswith("\n"):
+        lines[insert_at - 1] += "\n"
+    method = _scenarios_method_source(spec, indent)
+    lines.insert(insert_at, "\n" + method)
     return "".join(lines)
 
 
@@ -539,10 +621,19 @@ def strategy_source(strategies_dir: LibrarySpec, name: str) -> str:
 # The validator seam — how the write gate runs :func:`_validate_file`
 # ─────────────────────────────────────────────────────────────────────────────
 class Validator(Protocol):
-    def __call__(self, path: Path, name: str, *, require_scenarios: bool = True) -> None: ...
+    def __call__(
+        self,
+        path: Path,
+        name: str,
+        *,
+        require_scenarios: bool = True,
+        spec: SpecSuite | None = None,
+    ) -> None: ...
 
 
-def validate_in_subprocess(path: Path, name: str, *, require_scenarios: bool = True) -> None:
+def validate_in_subprocess(
+    path: Path, name: str, *, require_scenarios: bool = True, spec: SpecSuite | None = None
+) -> None:
     """Run the import + smoke gate in an isolated interpreter; raise on any failure.
 
     The production default: a fresh subprocess is the only honest proof the file stands
@@ -553,28 +644,43 @@ def validate_in_subprocess(path: Path, name: str, *, require_scenarios: bool = T
     if the (agent-authored) file spawned anything that inherited the pipes, the research
     loop hangs there forever. The child gets its own process group (``start_new_session``)
     so a timeout kills the whole tree, and the drain after the kill is itself bounded.
+
+    A scenario ``spec`` (#84) crosses the process boundary as a JSON sidecar file: the uncompiled
+    :class:`SpecSuite` is serialized beside the candidate and its path passed as ``--spec``, so the
+    child resolves ``warm`` from the candidate's *own* declared warmup before compiling the oracle.
     """
     argv = [sys.executable, "-m", "noctis.strategies.library", str(path), name]
     if require_scenarios:
         argv.append("--require-scenarios")
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
+    spec_file: Path | None = None
+    if spec is not None:
+        spec_file = path.parent / f".spec-{name}.json"
+        spec_file.write_text(spec_to_json(spec), encoding="utf-8")
+        argv += ["--spec", str(spec_file)]
     try:
-        out, err = proc.communicate(timeout=_VALIDATE_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        _kill_validation_tree(proc)
-        raise StrategyValidationError(
-            f"validation timed out after {_VALIDATE_TIMEOUT_S}s — on_bar must be O(lookback) "
-            f"per bar with no I/O, subprocesses, or unbounded loops"
-        ) from None
-    if proc.returncode != 0:
-        detail = (err or out or "").strip()
-        raise StrategyValidationError(detail.splitlines()[-1] if detail else "validation failed")
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            out, err = proc.communicate(timeout=_VALIDATE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            _kill_validation_tree(proc)
+            raise StrategyValidationError(
+                f"validation timed out after {_VALIDATE_TIMEOUT_S}s — on_bar must be O(lookback) "
+                f"per bar with no I/O, subprocesses, or unbounded loops"
+            ) from None
+        if proc.returncode != 0:
+            detail = (err or out or "").strip()
+            raise StrategyValidationError(
+                detail.splitlines()[-1] if detail else "validation failed"
+            )
+    finally:
+        if spec_file is not None:
+            spec_file.unlink(missing_ok=True)
 
 
 def _kill_validation_tree(proc: subprocess.Popen) -> None:
@@ -597,7 +703,9 @@ def _kill_validation_tree(proc: subprocess.Popen) -> None:
                 stream.close()
 
 
-def validate_in_process(path: Path, name: str, *, require_scenarios: bool = True) -> None:
+def validate_in_process(
+    path: Path, name: str, *, require_scenarios: bool = True, spec: SpecSuite | None = None
+) -> None:
     """Run the same gate checks in THIS interpreter — the test runner for the seam.
 
     Identical checks to :func:`validate_in_subprocess` (both funnel into
@@ -607,7 +715,7 @@ def validate_in_process(path: Path, name: str, *, require_scenarios: bool = True
     carrying the same one-line message the subprocess entry point prints.
     """
     try:
-        _validate_file(path, name, require_scenarios=require_scenarios)
+        _validate_file(path, name, require_scenarios=require_scenarios, spec=spec)
     except StrategyValidationError:
         raise
     except Exception as exc:
@@ -627,7 +735,12 @@ def _install(path: Path, families: FamilyRegistry) -> type[TraderStrategy]:
 
 
 def write_strategy(
-    strategies_dir: LibrarySpec, name: str, source: str, families: FamilyRegistry
+    strategies_dir: LibrarySpec,
+    name: str,
+    source: str,
+    families: FamilyRegistry,
+    *,
+    spec: SpecSuite | None = None,
 ) -> dict:
     """Atomically write ``name``.py after the validation gate; register on success.
 
@@ -636,6 +749,13 @@ def write_strategy(
     replay of the file's declared known-outcome scenarios), and only then moved into
     place — so a broken file is never on disk under a library name, and a failed rewrite
     of an existing strategy leaves the old version untouched.
+
+    When a scenario ``spec`` is supplied (#84) the gate owns the oracle: it replays the spec
+    compiled at the *candidate's own* declared warmup (never the coder's hand-declared tapes,
+    which are rejected), then **machine-stamps** a warmup-parametric ``scenarios()`` block into
+    the file and re-validates the stamped artifact through the full gate — so champion
+    immutability, promotion write-back, and a standalone ``noctis backtest`` replay all use
+    exactly what gated. Without a spec the path is byte-identical to before: nothing is stamped.
     """
     if not _NAME_RE.match(name):
         raise StrategyValidationError(
@@ -651,6 +771,14 @@ def write_strategy(
     tmp = work / f".candidate-{name}.py"
     tmp.write_text(source, encoding="utf-8")
     try:
+        if spec is not None:
+            # 1) Validate the candidate against the compiled oracle: reject a coder-authored
+            #    scenarios() block and replay the spec at the candidate's declared warmup.
+            validator(tmp, name, require_scenarios=False, spec=spec)
+            # 2) Machine-stamp the warmup-parametric scenarios() into the source, then re-validate
+            #    the stamped artifact through the FULL gate (import + smoke + scenario replay).
+            source = _stamp_scenarios(source, spec)
+            tmp.write_text(source, encoding="utf-8")
         validator(tmp, name)
         final = work / f"{name}.py"
         tmp.replace(final)
@@ -782,7 +910,53 @@ def plan_promotion(
 # ─────────────────────────────────────────────────────────────────────────────
 # Subprocess validation entry point (``python -m noctis.strategies.library``)
 # ─────────────────────────────────────────────────────────────────────────────
-def _validate_file(path: Path, expected_name: str, require_scenarios: bool = True) -> None:
+def _one_line(text: object) -> str:
+    """Flatten to a single line — the gate subprocess surfaces only the last stderr line."""
+    return " ".join(str(text).split())
+
+
+def _validate_against_spec(cls: type[TraderStrategy], spec: SpecSuite) -> None:
+    """Replay the supplied scenario spec against the candidate — the gate owns the oracle (#84).
+
+    The spec is compiled at the candidate's *own* declared warmup (resolved here, at validation
+    time), so the assertion windows track the code being validated. A coder-authored
+    ``scenarios()`` is rejected outright — the oracle is fixed and only the trading logic may
+    change — and a warmup too large for the fixed tape surfaces as a precise, actionable failure
+    that names the declared warmup and points at shrinking the lookback defaults.
+    """
+    if "scenarios" in cls.__dict__:
+        raise StrategyValidationError(
+            "spec-driven write: the known-outcome oracle is fixed by the supplied scenario spec "
+            "and is machine-stamped by the gate — remove the scenarios() method from the source "
+            "and change only the trading logic (on_start/on_bar/param_space) to satisfy the "
+            "fixed oracle"
+        )
+    try:
+        warm = int(cls.warmup_bars(cls.params_cls()))
+    except Exception as exc:  # noqa: BLE001 — a broken warmup declaration is a contract failure
+        raise StrategyValidationError(
+            f"warmup_bars() raised {type(exc).__name__}: {_one_line(exc)}"
+        ) from exc
+    try:
+        compiled = compile_spec(spec, warm)
+    except SpecError as exc:
+        raise StrategyValidationError(
+            f"declared warmup_bars={warm} is too large for the fixed scenario oracle: "
+            f"{_one_line(exc)}. Shrink the lookback defaults in Params so the strategy warms up "
+            f"faster — never enlarge the scenario tape to fit the warmup"
+        ) from exc
+    for scenario in compiled:
+        msg = scenarios_mod.run_scenario(cls, scenario)
+        if msg:
+            raise StrategyValidationError(msg)
+
+
+def _validate_file(
+    path: Path,
+    expected_name: str,
+    require_scenarios: bool = True,
+    spec: SpecSuite | None = None,
+) -> None:
     module = _load_module(path)
     cls = _find_strategy_class(module)
     if cls.name != expected_name:
@@ -816,6 +990,9 @@ def _validate_file(path: Path, expected_name: str, require_scenarios: bool = Tru
             "signals() disagrees with the on_bar replay on the fixture (parity violation); "
             "drop the signals() override or fix it"
         )
+    if spec is not None:
+        _validate_against_spec(cls, spec)
+        return
     try:
         scenarios_mod.check_scenario_contract(cls, require=require_scenarios)
     except scenarios_mod.ScenarioError as exc:
@@ -825,14 +1002,23 @@ def _validate_file(path: Path, expected_name: str, require_scenarios: bool = Tru
 def _main(argv: list[str]) -> int:
     require_scenarios = "--require-scenarios" in argv
     argv = [a for a in argv if a != "--require-scenarios"]
+    spec: SpecSuite | None = None
+    if "--spec" in argv:
+        i = argv.index("--spec")
+        if i + 1 >= len(argv):
+            print("usage: --spec needs a JSON file path", file=sys.stderr)
+            return 2
+        spec = spec_from_json(Path(argv[i + 1]).read_text(encoding="utf-8"))
+        argv = argv[:i] + argv[i + 2 :]
     if len(argv) != 2:
         print(
-            "usage: python -m noctis.strategies.library <file.py> <name> [--require-scenarios]",
+            "usage: python -m noctis.strategies.library <file.py> <name> "
+            "[--require-scenarios] [--spec <spec.json>]",
             file=sys.stderr,
         )
         return 2
     try:
-        _validate_file(Path(argv[0]), argv[1], require_scenarios=require_scenarios)
+        _validate_file(Path(argv[0]), argv[1], require_scenarios=require_scenarios, spec=spec)
     except Exception as exc:  # noqa: BLE001 — report the reason on one line, exit nonzero
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

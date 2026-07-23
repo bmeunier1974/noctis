@@ -171,6 +171,28 @@ def test_happy_path_authors_validated_file_into_working_tier(tmp_path, families,
     assert len(client.calls) == 1  # exactly one completion for a first-try success
 
 
+def test_author_forwards_the_spec_so_the_gate_owns_the_oracle(tmp_path, families, fast_gate):
+    # #84 plumbing: an optional compiled spec passed to author() reaches the write gate, which
+    # replays it at the candidate's warmup and machine-stamps a scenarios() block. The coder
+    # source declares NONE of its own (the oracle is fixed by the spec).
+    from noctis.strategies.scenario_spec import Behavior, LegSpec, ScenarioSpec, SpecSuite
+    from tests.test_write_gate_spec import SPEC_CANDIDATE
+
+    suite = SpecSuite(
+        [
+            ScenarioSpec("rally", [LegSpec("trend", 60, pct=0.15)], Behavior.ENTER_LONG, leg=0),
+            ScenarioSpec("grind", [LegSpec("flat", 60)], Behavior.NEVER_TRADE),
+        ]
+    )
+    engine, _ = _author(tmp_path, families, [fenced(SPEC_CANDIDATE)])
+
+    result = engine.author("probe", BRIEF, spec=suite)
+
+    assert result["name"] == "probe"
+    installed = library.strategy_source(tmp_path, "probe")
+    assert "compile_spec(" in installed and "spec_from_json(" in installed
+
+
 def test_engine_needs_no_api_key(tmp_path, families, fast_gate, monkeypatch):
     # The autouse _clean_env already pins these empty; assert the engine authors regardless.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")

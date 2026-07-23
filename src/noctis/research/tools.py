@@ -51,6 +51,7 @@ from noctis.research.symbols import BANDS, SymbolScreener, screen, validate_prof
 from noctis.strategies import library
 from noctis.strategies.base import ParamSpec
 from noctis.strategies.families import FamilyRegistry
+from noctis.strategies.scenario_spec import SpecSuite
 
 if TYPE_CHECKING:
     from noctis.data.seam import MarketData
@@ -1326,7 +1327,13 @@ class ResearchToolbox:
             out["author_model"] = self.coder_fallback_model
         return out
 
-    def _author_source(self, name: str, source: str | None, brief: dict | None) -> dict:
+    def _author_source(
+        self,
+        name: str,
+        source: str | None,
+        brief: dict | None,
+        spec: SpecSuite | None = None,
+    ) -> dict:
         """Materialize a validated write result from a brief (coder mode) or hand-written source.
 
         Returns the :func:`library.write_strategy` result (name/path/header) either path lands,
@@ -1334,16 +1341,20 @@ class ResearchToolbox:
         A brief authors through the coder engine; anything else requires source. Raises
         :class:`library.StrategyValidationError` on a gate rejection (brief mode re-surfaces the
         engine's final validation error), routing both paths through the shared REPAIR handling.
+
+        ``spec`` (#84) is the compiled scenario oracle: forwarded to the write gate down both
+        paths so it replays the spec at the candidate's warmup and machine-stamps the file.
+        Default ``None`` keeps today's behavior — the driver supplies no spec yet (#85).
         """
         if brief is not None and self.author_engine is not None:
-            return self._author_from_brief(name, brief)
+            return self._author_from_brief(name, brief, spec=spec)
         if not source:
             raise library.StrategyValidationError(
                 "write_strategy needs `source` (or a `brief` when a coder model is configured)"
             )
-        return library.write_strategy(self.strategies_dir, name, source, self.families)
+        return library.write_strategy(self.strategies_dir, name, source, self.families, spec=spec)
 
-    def _author_from_brief(self, name: str, brief: dict) -> dict:
+    def _author_from_brief(self, name: str, brief: dict, spec: SpecSuite | None = None) -> dict:
         """Delegate to the coder engine: the driver's brief in, a validated file out.
 
         The (cheap/local) engine makes stateless coder completions with private retries and lands
@@ -1359,18 +1370,22 @@ class ResearchToolbox:
         assert engine is not None  # only reached in coder mode (guarded by _author_source)
         parsed = self._parse_brief(brief)
         try:
-            return engine.author(name, parsed, on_attempt=self._author_attempt_sink(name))
+            return engine.author(
+                name, parsed, on_attempt=self._author_attempt_sink(name), spec=spec
+            )
         except AuthoringError as exc:
             if not self._can_escalate():
                 raise self._as_validation_error(exc) from exc
-            return self._escalate_author(name, parsed)
+            return self._escalate_author(name, parsed, spec=spec)
 
     def _can_escalate(self) -> bool:
         """Whether a spent local author may escalate now: a fallback engine exists and the paid
         per-session cap is not yet spent (``max_escalations == 0`` disables escalation entirely)."""
         return self.fallback_author_engine is not None and self.escalations < self.max_escalations
 
-    def _escalate_author(self, name: str, parsed: StrategyBrief) -> dict:
+    def _escalate_author(
+        self, name: str, parsed: StrategyBrief, spec: SpecSuite | None = None
+    ) -> dict:
         """Escalate one spent local author to the paid fallback with the full validator-retry
         budget. The escalation is counted BEFORE the attempt (the cap bounds paid *spend*, whether
         or not the file then lands), and the fallback's completions bump ``author_calls`` through
@@ -1381,7 +1396,7 @@ class ResearchToolbox:
         self.escalations += 1
         sink = self._author_attempt_sink(name, model=self.coder_fallback_model)
         try:
-            return engine.author(name, parsed, on_attempt=sink)
+            return engine.author(name, parsed, on_attempt=sink, spec=spec)
         except AuthoringError as exc:
             raise self._as_validation_error(exc) from exc
 

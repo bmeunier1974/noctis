@@ -27,6 +27,8 @@ from noctis.strategies.scenario_spec import (
     SpecSuite,
     compile_scenario,
     compile_spec,
+    spec_from_json,
+    spec_to_json,
 )
 from noctis.strategies.scenarios import (
     MAX_SCENARIO_BARS,
@@ -338,6 +340,39 @@ def test_negative_warm_is_rejected():
     suite = SpecSuite([_directional_spec("trend", Behavior.ENTER_LONG), _never_trade_spec()])
     with pytest.raises(SpecError, match="non-negative"):
         compile_spec(suite, -1)
+
+
+# ── JSON round-trip: the pure carrier across the write-gate subprocess boundary (#84) ────────
+def _mixed_suite() -> SpecSuite:
+    """A suite exercising every field: shape params, a gap leg, an indexed leg, NEVER_TRADE."""
+    return SpecSuite(
+        [
+            ScenarioSpec(
+                "rally",
+                [LegSpec("flat", 30), LegSpec("gap", 0, pct=0.1), _leg("chop", 60)],
+                Behavior.HOLD_LONG,
+                leg=2,
+            ),
+            ScenarioSpec("dip", [_leg("selloff", 60)], Behavior.ENTER_SHORT, leg=0),
+            _never_trade_spec(name="grind", bars=80),
+        ]
+    )
+
+
+def test_spec_json_round_trip_reconstructs_the_suite_exactly():
+    suite = _mixed_suite()
+    assert spec_from_json(spec_to_json(suite)) == suite
+
+
+def test_spec_to_json_is_deterministic():
+    suite = _mixed_suite()
+    assert spec_to_json(suite) == spec_to_json(suite)
+
+
+def test_round_tripped_suite_compiles_identically():
+    suite = _mixed_suite()
+    restored = spec_from_json(spec_to_json(suite))
+    assert compile_spec(restored, 20) == compile_spec(suite, 20)
 
 
 # ── depth: a compiled suite passes the real scenario-contract end to end ─────────────────────

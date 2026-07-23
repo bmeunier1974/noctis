@@ -35,6 +35,7 @@ same spec compiled at the same ``warm`` yields identical ``Scenario`` objects.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -266,3 +267,62 @@ def compile_spec(spec: SpecSuite, warm: int) -> tuple[Scenario, ...]:
     if not any(s.behavior is Behavior.NEVER_TRADE for s in specs):
         raise SpecError("at least one scenario must be a no-trade tape (never_trade)")
     return compiled
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JSON round-trip — the pure carrier that crosses the write-gate subprocess boundary (#84)
+# ─────────────────────────────────────────────────────────────────────────────
+# The write gate resolves ``warm`` from the *candidate's* declared warmup, so it must carry the
+# uncompiled :class:`SpecSuite` — not compiled ``Scenario`` objects — into the fresh interpreter
+# it validates in. These two functions are the pure, deterministic (spec ⇄ text) round trip used
+# both to hand the spec to the subprocess validator and to embed it in the machine-stamped
+# ``scenarios()`` block, so the installed file re-derives the same oracle at runtime.
+def spec_to_json(suite: SpecSuite) -> str:
+    """Serialize a :class:`SpecSuite` to a deterministic JSON string (pure — no I/O, no clock)."""
+    return json.dumps(
+        {
+            "scenarios": [
+                {
+                    "name": s.name,
+                    "legs": [
+                        {
+                            "kind": leg.kind,
+                            "bars": leg.bars,
+                            "pct": leg.pct,
+                            "amplitude": leg.amplitude,
+                            "period": leg.period,
+                        }
+                        for leg in s.legs
+                    ],
+                    "behavior": s.behavior.name,
+                    "leg": s.leg,
+                }
+                for s in suite.scenarios
+            ]
+        }
+    )
+
+
+def spec_from_json(text: str) -> SpecSuite:
+    """Reconstruct a :class:`SpecSuite` from :func:`spec_to_json` output (its pure inverse)."""
+    payload = json.loads(text)
+    return SpecSuite(
+        scenarios=tuple(
+            ScenarioSpec(
+                name=s["name"],
+                legs=tuple(
+                    LegSpec(
+                        kind=leg["kind"],
+                        bars=leg["bars"],
+                        pct=leg["pct"],
+                        amplitude=leg["amplitude"],
+                        period=leg["period"],
+                    )
+                    for leg in s["legs"]
+                ),
+                behavior=Behavior[s["behavior"]],
+                leg=s["leg"],
+            )
+            for s in payload["scenarios"]
+        )
+    )

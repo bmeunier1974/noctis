@@ -532,10 +532,10 @@ def test_write_gate_fixation_backstop_redirects_to_the_library(toolbox, monkeypa
     real_write = library.write_strategy
     gate = {"fail": True}
 
-    def _gated_write(strategies_dir, name, source, families):
+    def _gated_write(strategies_dir, name, source, families, *, spec=None):
         if gate["fail"]:
             raise library.StrategyValidationError("smoke replay crashed")
-        return real_write(strategies_dir, name, source, families)
+        return real_write(strategies_dir, name, source, families, spec=spec)
 
     monkeypatch.setattr(library, "write_strategy", _gated_write)
 
@@ -559,7 +559,7 @@ def test_write_gate_backstop_is_silent_once_a_backtest_has_run(toolbox, monkeypa
     # a session that has already produced a backtest gets the plain rejection only.
     toolbox.dispatch("run_backtest", {"name": "probe", "symbols": ["AAA"]})
 
-    def _always_fail(strategies_dir, name, source):
+    def _always_fail(strategies_dir, name, source, families, *, spec=None):
         raise library.StrategyValidationError("smoke replay crashed")
 
     monkeypatch.setattr(library, "write_strategy", _always_fail)
@@ -1306,6 +1306,27 @@ def test_brief_authors_validated_file_same_shape_as_source(tmp_path):
     assert "brief_probe" in box.undecided
     assert "brief_probe" in box.strategies_touched
     assert len(coder.calls) == 1  # one completion for a first-try success
+
+
+def test_toolbox_author_path_forwards_the_spec_to_the_gate(tmp_path):
+    """#84 plumbing: a compiled scenario spec threaded through the toolbox's author path reaches
+    the write gate, which replays it at the candidate's warmup and machine-stamps a scenarios()
+    block. The coder source carries none of its own (the oracle is fixed by the spec)."""
+    from noctis.strategies.scenario_spec import Behavior, LegSpec, ScenarioSpec, SpecSuite
+    from tests.test_write_gate_spec import SPEC_CANDIDATE
+
+    suite = SpecSuite(
+        [
+            ScenarioSpec("rally", [LegSpec("trend", 60, pct=0.15)], Behavior.ENTER_LONG, leg=0),
+            ScenarioSpec("grind", [LegSpec("flat", 60)], Behavior.NEVER_TRADE),
+        ]
+    )
+    candidate = SPEC_CANDIDATE.replace('name = "probe"', 'name = "spec_probe"')
+    box, _ = _coder_box(tmp_path, [_fenced(candidate)])
+    out = box._author_source("spec_probe", None, BRIEF_ARGS, spec=suite)
+    assert out["name"] == "spec_probe"
+    installed = library.strategy_source(box.strategies_dir, "spec_probe")
+    assert "compile_spec(" in installed and "spec_from_json(" in installed
 
 
 def test_coder_max_tokens_config_threads_to_the_authoring_completion(tmp_path):

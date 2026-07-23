@@ -50,6 +50,7 @@ from noctis.research.contract_sheet import CONTRACT_SHEET, hint_for_gate_error
 from noctis.research.llm import LLMClient, cached_system
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
+from noctis.strategies.scenario_spec import SpecSuite
 
 # The coder's output-token ceiling — sized for a thinking-enabled hosted coder (on Anthropic
 # models the cap bounds thinking + text together) plus the current tokenizer, so a full ~200-line
@@ -250,6 +251,7 @@ class StrategyAuthor:
         brief: StrategyBrief,
         *,
         on_attempt: Callable[[int, Exception | None, str], None] | None = None,
+        spec: SpecSuite | None = None,
     ) -> dict:
         """Turn ``brief`` into a validated ``name`` strategy file in the working tier.
 
@@ -257,6 +259,11 @@ class StrategyAuthor:
         on success. Raises :class:`AuthoringError` when the coder cannot produce a file that
         passes the write gate within the retry budget. Every private retry is invisible to
         the caller.
+
+        ``spec`` (#84) is the compiled scenario oracle: when supplied it is forwarded to the write
+        gate, which replays it at the candidate's own declared warmup and machine-stamps a
+        ``scenarios()`` block into the file. Default ``None`` keeps today's behavior — the coder's
+        own declared scenarios validate as before.
 
         When ``brief.reference`` names a library strategy, its source is composed into the
         prompt as structure to adapt; an unknown reference raises
@@ -304,7 +311,9 @@ class StrategyAuthor:
                 self._report(on_attempt, attempt, last_error, turn.text or "")
                 continue
             try:
-                result = library.write_strategy(self._strategies_dir, name, source, self._families)
+                result = library.write_strategy(
+                    self._strategies_dir, name, source, self._families, spec=spec
+                )
             except library.StrategyValidationError as exc:
                 last_error = exc
                 prior = (source, str(exc))
