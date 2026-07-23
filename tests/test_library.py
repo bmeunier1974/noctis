@@ -182,6 +182,17 @@ def test_subprocess_gate_reports_the_reason_across_the_boundary(tmp_path, famili
     assert strategy_path(tmp_path, "probe") is None
 
 
+def test_scenario_diagnostics_survive_the_subprocess_boundary(tmp_path, families):
+    # The execution-feedback diagnostics (#79) are appended to the single-line scenario-failure
+    # message, so they survive the fresh-interpreter gate's last-stderr-line boundary — the
+    # DEFAULT subprocess validator, not the in-process fast_gate, must still carry them.
+    inverted = GOOD_SOURCE.replace("int(bar.close > mean", "int(bar.close < mean")
+    with pytest.raises(StrategyValidationError, match="observed: first went long at bar") as exc:
+        write_strategy(tmp_path, "probe", inverted, families)
+    assert "long spans" in str(exc.value)
+    assert strategy_path(tmp_path, "probe") is None
+
+
 def test_the_gate_seam_defaults_to_the_subprocess_runner():
     assert library.validator is library.validate_in_subprocess
 

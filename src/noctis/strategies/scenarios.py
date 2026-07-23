@@ -368,6 +368,47 @@ class Scenario:
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Observed behavior — execution feedback appended to every failure message
+# ─────────────────────────────────────────────────────────────────────────────
+def _position_spans(targets: list[int]) -> list[tuple[int, int, int]]:
+    """Maximal runs of a constant nonzero target as ``(lo, hi, direction)`` (inclusive)."""
+    spans: list[tuple[int, int, int]] = []
+    start = 0
+    for j in range(1, len(targets) + 1):
+        prev = targets[j - 1]
+        if j == len(targets) or targets[j] != prev:
+            if prev != 0:
+                spans.append((start, j - 1, prev))
+            start = j
+    return spans
+
+
+def _render_spans(spans: list[tuple[int, int, int]], direction: int) -> str:
+    """``"[lo–hi], [lo–hi]"`` for the runs in ``direction``, or ``"none"`` when there are none."""
+    rendered = [f"[{lo}–{hi}]" for lo, hi, d in spans if d == direction]
+    return ", ".join(rendered) if rendered else "none"
+
+
+def observed_behavior(targets: list[int]) -> str:
+    """A single-line summary of what the code *actually did* on the replayed tape.
+
+    The oracle's failure messages name the window a strategy missed; this names the behavior
+    it produced instead — the first nonzero-target bar and its direction, plus the long/short
+    position spans it held — so the coder reacts to execution feedback rather than guessing.
+    Single-line by construction, so it survives the write gate's last-stderr-line boundary.
+    """
+    first = next((j for j, t in enumerate(targets) if t != 0), None)
+    if first is None:
+        return f"observed: never took a position across all {len(targets)} bars"
+    direction = "long" if targets[first] == 1 else "short"
+    spans = _position_spans(targets)
+    return (
+        f"observed: first went {direction} at bar {first}; "
+        f"long spans {_render_spans(spans, 1)}; short spans {_render_spans(spans, -1)}"
+    )
+
+
 def run_scenario(cls, scenario: Scenario) -> str | None:
     """Replay one scenario; None on pass, else a single-line failure message."""
     try:
@@ -388,7 +429,7 @@ def run_scenario(cls, scenario: Scenario) -> str | None:
         msg = exp.check(targets)
         if msg:
             hint = _HINTS.get(type(exp), "")
-            return f"scenario {scenario.name!r}: {msg} — {hint}"
+            return f"scenario {scenario.name!r}: {msg} — {observed_behavior(targets)} — {hint}"
     return None
 
 

@@ -39,6 +39,11 @@ def _worked_example_source() -> str:
 # rejects it deterministically ("class sets name=...").
 BROKEN = PROBE.replace('name = "probe"', 'name = "mismatch"')
 
+# PROBE with its entry condition inverted: it goes long on a decline (where its own declared
+# scenarios expect flat/long the other way), so it fails scenario replay AFTER producing real
+# trades — the case that carries execution-feedback diagnostics.
+INVERTED = PROBE.replace("int(bar.close > mean", "int(bar.close < mean")
+
 BRIEF = StrategyBrief(
     thesis="Long above a short moving average; the drift persists intraday.",
     entry_exit="Long when close > SMA(lookback); flat otherwise.",
@@ -393,6 +398,24 @@ def test_scenario_builder_bad_kwarg_enriches_retry_with_true_signature(
     assert hint is not None
     assert hint in retry
     assert "trend(n, pct)" in retry
+
+
+# ── 2c. Scenario failures carry execution-feedback diagnostics into the retry prompt (#79) ─
+def test_scenario_failure_retry_prompt_carries_execution_diagnostics(tmp_path, families, fast_gate):
+    # When an attempt fails scenario replay, the retry prompt must describe what the code actually
+    # did — the first nonzero-target bar, its direction, and the observed position spans — so the
+    # coder reacts to execution feedback instead of guessing which window it missed.
+    engine, client = _author(tmp_path, families, [fenced(INVERTED), fenced(PROBE)])
+
+    result = engine.author("probe", BRIEF)
+
+    assert result["name"] == "probe"
+    assert len(client.calls) == 2
+    retry = client.calls[1]["messages"][0]["content"]
+    assert "violated" in retry  # the missed window is still named
+    assert "observed:" in retry  # and the execution feedback rides alongside it
+    assert "first went long at bar" in retry
+    assert "long spans" in retry and "short spans" in retry
 
 
 def test_unmatched_gate_error_keeps_the_raw_retry_behavior(tmp_path, families, fast_gate):

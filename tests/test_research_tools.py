@@ -1641,6 +1641,30 @@ def test_rejected_brief_attempt_persists_source_and_error_to_failed_area(tmp_pat
     assert "brief_probe" in body  # attributed to the strategy
 
 
+def _scenario_failer(name: str) -> str:
+    """A named PROBE whose entry condition is inverted: it trades, then fails scenario replay —
+    the case whose gate error carries execution-feedback diagnostics (#79)."""
+    return _named(name).replace("int(bar.close > mean", "int(bar.close < mean")
+
+
+def test_rejected_brief_attempt_persists_scenario_execution_diagnostics(tmp_path):
+    """A scenario-failing coder attempt persists BOTH the source and the enriched gate error — the
+    diagnostics (first nonzero-target bar, direction, observed spans) land in the failed record so
+    a post-mortem shows why the code missed its target, not just which window it missed (#79)."""
+    box, _ = _coder_box(
+        tmp_path, [_fenced(_scenario_failer("diag_probe")), _fenced(_named("diag_probe"))]
+    )
+    box.dispatch("write_strategy", {"name": "diag_probe", "brief": BRIEF_ARGS})
+
+    files = _failed_files(box)
+    assert len(files) == 1  # the inverted attempt failed replay; the corrected one landed
+    body = files[0].read_text(encoding="utf-8")
+    assert "violated" in body  # the missed window is still recorded
+    assert "observed:" in body  # and what the code actually did rides alongside it
+    assert "first went long at bar" in body
+    assert "long spans" in body and "short spans" in body
+
+
 def test_each_rejected_brief_attempt_persists_its_own_file(tmp_path):
     """Every private retry that fails writes its own failure record — three rejections, three
     files, so the whole failing job is on disk."""

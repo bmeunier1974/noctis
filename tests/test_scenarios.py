@@ -23,6 +23,7 @@ from noctis.strategies.scenarios import (
     holds_long_through,
     holds_short_through,
     long_within,
+    observed_behavior,
     recovery,
     run_scenario,
     selloff,
@@ -335,3 +336,143 @@ def test_bad_params_override_is_reported_not_raised():
     )
     msg = run_scenario(_Above, broken)
     assert msg is not None and "params override rejected" in msg
+
+
+# ── execution-feedback diagnostics on scenario failure (#79) ──────────────────────────────
+def test_observed_behavior_reports_first_entry_and_both_direction_spans():
+    # The observed-behavior summary names the first nonzero-target bar, its direction, and the
+    # position spans the code actually held on the tape (long and short, both listed).
+    obs = observed_behavior([0, 0, 1, 1, 1, 0, 0, -1, -1, 0])
+    assert "first went long at bar 2" in obs
+    assert "long spans [2–4]" in obs
+    assert "short spans [7–8]" in obs
+
+
+def test_observed_behavior_reports_a_short_first_entry():
+    obs = observed_behavior([0, 0, 0, -1, -1, 0, 1, 1])
+    assert "first went short at bar 3" in obs
+    assert "short spans [3–4]" in obs
+    assert "long spans [6–7]" in obs
+
+
+def test_observed_behavior_lists_multiple_spans_of_one_direction():
+    obs = observed_behavior([0, 1, 1, 0, 1, 1, 1, 0])
+    assert "first went long at bar 1" in obs
+    assert "long spans [1–2], [4–6]" in obs
+
+
+def test_observed_behavior_reports_never_traded_when_all_flat():
+    # No nonzero target anywhere: the honest diagnostic is that the code never took a position.
+    obs = observed_behavior([0] * 12)
+    assert "never took a position" in obs
+    assert "12 bars" in obs
+    assert "long spans" not in obs and "short spans" not in obs
+
+
+def _scripted(script: dict[int, int]):
+    """A strategy whose per-bar target is dictated by bar index, ignoring the tape.
+
+    Gives a test total control over the replayed target series, so the observed-behavior
+    diagnostics a scenario failure carries are exactly predictable per expectation type.
+    """
+
+    class _Scripted(TraderStrategy):
+        name = "scripted"
+
+        @dataclass(frozen=True)
+        class Params:
+            pass
+
+        params_cls = Params
+
+        def on_start(self, ctx):
+            self._i = -1
+
+        def on_bar(self, ctx, bar):
+            self._i += 1
+            ctx.set_target(script.get(self._i, 0))
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Scripted
+
+
+def _run(script: dict[int, int], expectation) -> str:
+    scenario = Scenario("diag", segments=[flat(90)], expect=[expectation])
+    msg = run_scenario(_scripted(script), scenario)
+    assert msg is not None, "expected the scenario to fail"
+    return msg
+
+
+def _span(lo: int, hi: int, direction: int) -> dict[int, int]:
+    return {i: direction for i in range(lo, hi + 1)}
+
+
+@pytest.mark.parametrize(
+    ("expectation", "script", "violation", "diagnostics"),
+    [
+        (
+            flat_until(20),
+            _span(5, 8, 1),
+            "flat_until(20) violated",
+            ("first went long at bar 5", "long spans [5–8]"),
+        ),
+        (
+            long_within(30, 40),
+            _span(50, 55, -1),
+            "long_within(30,40) violated",
+            ("first went short at bar 50", "short spans [50–55]", "long spans none"),
+        ),
+        (
+            holds_long_through(30, 40),
+            {**_span(30, 34, 1), **_span(36, 40, 1)},
+            "holds_long_through(30,40) violated",
+            ("first went long at bar 30", "long spans [30–34], [36–40]"),
+        ),
+        (
+            short_within(30, 40),
+            _span(50, 55, 1),
+            "short_within(30,40) violated",
+            ("first went long at bar 50", "long spans [50–55]", "short spans none"),
+        ),
+        (
+            holds_short_through(30, 40),
+            {**_span(30, 34, -1), **_span(36, 40, -1)},
+            "holds_short_through(30,40) violated",
+            ("first went short at bar 30", "short spans [30–34], [36–40]"),
+        ),
+        (
+            flat_by(50),
+            _span(55, 60, 1),
+            "flat_by(50) violated",
+            ("first went long at bar 55", "long spans [55–60]"),
+        ),
+        (
+            always_flat(),
+            _span(40, 45, -1),
+            "always_flat violated",
+            ("first went short at bar 40", "short spans [40–45]"),
+        ),
+    ],
+)
+def test_every_expectation_failure_carries_execution_diagnostics(
+    expectation, script, violation, diagnostics
+):
+    # Each expectation type's scenario-failure message still names the violated window AND now
+    # carries what the code actually did: the first nonzero-target bar, its direction, and the
+    # observed position spans.
+    msg = _run(script, expectation)
+    assert violation in msg
+    assert "observed:" in msg
+    for fragment in diagnostics:
+        assert fragment in msg, f"{fragment!r} missing from {msg!r}"
+
+
+def test_directional_failure_that_never_trades_reports_never_took_a_position():
+    # A long_within failure where the code stayed flat everywhere reports the honest observed
+    # behavior — no first entry, no spans — rather than fabricating one.
+    msg = _run({}, long_within(30, 40))
+    assert "long_within(30,40) violated" in msg
+    assert "observed:" in msg and "never took a position" in msg
