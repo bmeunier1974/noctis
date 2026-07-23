@@ -542,6 +542,37 @@ def test_author_stage_forwards_the_fixed_spec_and_brief_renders_the_oracle(tmp_p
     assert write["brief"]["scenarios"] == describe_spec(_SPEC_SUITE)
 
 
+def test_author_stage_records_and_narrates_the_fixed_oracle(tmp_path):
+    # The AUTHOR stage ledger record and its stage event name the spec's scenarios, so an operator
+    # can audit exactly which fixed oracle a candidate was gated against — both in the persisted
+    # trail and in the live narration (#86).
+    events: list = []
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "s-oracle-trail")
+    _drive(episodes, box, max_episodes=2, ledger=ledger, on_event=events.append)
+
+    author_stage = next(s for s in ledger.stages() if s.stage == "author")
+    assert author_stage.detail.get("oracle") == ["rally", "selloff_flat"]  # the spec's scenarios
+
+    author_event = next(e for e in events if e.kind == "stage" and e.meta.get("stage") == "author")
+    assert author_event.meta.get("oracle") == ["rally", "selloff_flat"]
+    assert "rally" in author_event.text  # named in the live narration too
+
+
+def test_candidate_trail_surfaces_the_gated_oracle(tmp_path):
+    # The per-candidate trail (the session rollup's audit view) shows the fixed oracle each
+    # candidate was gated against, greppable per candidate for the parity re-measure (#87).
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "s-oracle-cand")
+    _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    trail = ledger.candidate_trails()[0]
+    assert trail.oracle == ("rally", "selloff_flat")
+    assert trail.to_dict()["oracle"] == ["rally", "selloff_flat"]
+
+
 def test_warmup_too_large_ends_the_strategy_in_a_refined_brief(tmp_path):
     # A thesis needing more history than the fixed oracle allows (declared warmup too large): the
     # write gate rejects it with the needs-more-history signal, and the driver ends the episode in

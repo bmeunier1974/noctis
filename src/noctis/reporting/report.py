@@ -88,6 +88,11 @@ def _render_research_sessions(lines: list[str], sessions: list) -> None:
                 thesis = c.get("thesis")
                 if thesis:
                     lines.append(f"      thesis: {thesis}")
+                oracle = c.get("oracle")
+                if oracle:
+                    # The fixed spec's scenarios the candidate was gated against (#86) — so a
+                    # post-mortem audits which oracle each candidate met, not just its outcome.
+                    lines.append(f"      oracle: {', '.join(oracle)}")
 
 
 def render_report(data: ReportData) -> str:

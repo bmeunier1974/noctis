@@ -374,6 +374,28 @@ def test_candidate_trails_walk_each_candidate_formulate_to_decide(ledger):
     assert dud.verdict is None and dud.outcome == "undecided"
 
 
+def test_candidate_trail_surfaces_the_author_stage_oracle(tmp_path):
+    # The AUTHOR stage's oracle detail (the spec's scenario names, #86) rides the candidate trail,
+    # so a post-mortem audits which fixed oracle each candidate was gated against.
+    led = SessionLedger(tmp_path, "oracle")
+    led.record_thesis("momo_1", "buy strength")
+    led.record_stage("author", strategy="momo_1", detail={"oracle": ["rally", "grind"]})
+    trail = led.candidate_trails()[0]
+    assert trail.oracle == ("rally", "grind")
+    assert trail.to_dict()["oracle"] == ["rally", "grind"]
+
+
+def test_candidate_trail_oracle_defaults_empty_for_a_spec_less_author(tmp_path):
+    # An author stage with no oracle detail (a spec-less/older ledger) reads a clean empty oracle,
+    # so a reader never branches on presence.
+    led = SessionLedger(tmp_path, "no-oracle")
+    led.record_thesis("momo_1", "buy strength")
+    led.record_stage("author", strategy="momo_1")
+    trail = led.candidate_trails()[0]
+    assert trail.oracle == ()
+    assert trail.to_dict()["oracle"] == []
+
+
 def test_report_view_is_json_safe_or_none_on_an_empty_ledger(ledger, tmp_path):
     assert ledger.report_view() is None  # nothing written ⇒ nothing to render (graceful)
     _full_arc(ledger)

@@ -51,7 +51,7 @@ from noctis.research.symbols import BANDS, SymbolScreener, screen, validate_prof
 from noctis.strategies import library
 from noctis.strategies.base import ParamSpec
 from noctis.strategies.families import FamilyRegistry
-from noctis.strategies.scenario_spec import SpecSuite
+from noctis.strategies.scenario_spec import SpecSuite, describe_spec
 
 if TYPE_CHECKING:
     from noctis.data.seam import MarketData
@@ -1373,7 +1373,7 @@ class ResearchToolbox:
         parsed = self._parse_brief(brief)
         try:
             return engine.author(
-                name, parsed, on_attempt=self._author_attempt_sink(name), spec=spec
+                name, parsed, on_attempt=self._author_attempt_sink(name, spec=spec), spec=spec
             )
         except AuthoringError as exc:
             if not self._can_escalate():
@@ -1396,7 +1396,7 @@ class ResearchToolbox:
         engine = self.fallback_author_engine
         assert engine is not None  # guarded by _can_escalate
         self.escalations += 1
-        sink = self._author_attempt_sink(name, model=self.coder_fallback_model)
+        sink = self._author_attempt_sink(name, model=self.coder_fallback_model, spec=spec)
         try:
             return engine.author(name, parsed, on_attempt=sink, spec=spec)
         except AuthoringError as exc:
@@ -1419,7 +1419,9 @@ class ResearchToolbox:
         """The final gate error an exhausted authoring job carries, for the shared REPAIR path."""
         return exc.validation_error or library.StrategyValidationError(str(exc))
 
-    def _author_attempt_sink(self, name: str, *, model: str | None = None):
+    def _author_attempt_sink(
+        self, name: str, *, model: str | None = None, spec: SpecSuite | None = None
+    ):
         """Adapt the engine's per-attempt hook into (a) a session authoring event and (b) an
         on-disk failure record for ``name``.
 
@@ -1431,13 +1433,18 @@ class ResearchToolbox:
 
         ``model`` names which coder authored this attempt — the local coder by default, the paid
         fallback for an escalated job (story #72) — so the watch feed attributes each completion to
-        the model that actually made it.
+        the model that actually made it. ``spec`` is the fixed scenario oracle the attempt was gated
+        against on the spec path (#86); when present its canonical rendering
+        (:func:`~noctis.strategies.scenario_spec.describe_spec`) rides the failure record beside the
+        gate error's observed-behavior diagnostics, so a post-mortem shows the missed target too.
+        ``None`` (a spec-less write) leaves the record unchanged.
         """
+        oracle = describe_spec(spec) if spec is not None else None
 
         def sink(attempt: int, error: Exception | None, source: str) -> None:
             self._emit_author_event(name, attempt, error, model=model)
             if error is not None:
-                self.failed_store.record(name, attempt, source, str(error))
+                self.failed_store.record(name, attempt, source, str(error), oracle=oracle)
 
         return sink
 

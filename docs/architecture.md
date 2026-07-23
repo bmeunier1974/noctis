@@ -75,7 +75,49 @@ warning (see [development.md](development.md)).
 The agent loop (`src/noctis/research/agent.py` + the curated `ResearchToolbox`) and the legacy
 proposer/Optuna loop return the *same* `ResearchSummary`, so the runtime calls either behind one
 seam — no LLM configured means the legacy path runs over the same strategy library, exactly as
-before. See [research.md](research.md) for how a strategy earns promotion.
+before. The agent loop itself runs one of two ways behind a further seam — the **conversation**
+transcript or the small-context **episodic** driver — and the episodic path adds the
+machine-fixed scenario oracle (FORMULATE authors the tape, the coder only satisfies it; see
+[research.md](research.md)). See [research.md](research.md) for how a strategy earns promotion.
+
+## Validation-on-write: the shared funnel and the Tier-1 invariants
+
+`write_strategy` (`src/noctis/strategies/library.py`) is the one gate every authored file passes,
+and it validates in a **fresh subprocess** (clean import → smoke replay → scenario replay →
+`signals`/`on_bar` parity) so a broken or non-deterministic file can never land or poison an
+import cache. The scenario replay is the file's own correctness oracle — its declared
+known-outcome tapes — and each tape additionally runs the **Tier-1 invariant suite**
+(`src/noctis/strategies/scenarios.py`, `check_invariants`): one extensible, ordered chain of pure
+structural-honesty checks replayed over every tape, so both validator runners inherit every check
+with no drift.
+
+1. **Warmup honesty** — no nonzero target before the strategy's declared `warmup_bars(params)`;
+   a default of `0` is undeclared and exempt (strategies outside the library are untouched).
+2. **Determinism** — a second replay must produce an identical target series (it gates the
+   replay-and-compare checks below, which a non-deterministic strategy would make meaningless).
+3. **Truncation no-lookahead** — `signals(tape[:k]) == signals(tape)[:k]` at a handful of cut
+   points: a vectorised `signals()` override that peeks at the future (a centered window, a
+   full-series `max`/`mean`, a `shift(-k)`) is exposed by a prefix decision that changes when
+   later bars are removed. The event `on_bar` path is causal by construction.
+4. **Price-scale invariance** — scaling every price column ×10 must leave the target series
+   unchanged, so an absolute-price threshold (which can't transfer across a symbol panel) is a
+   structural defect, not a scale-free feature.
+
+**The tolerant-both write gate.** `write_strategy` takes an optional compiled scenario spec. With
+**no spec** (a hand-written source, the conversation loop) the path is byte-identical to before —
+the file's own `scenarios()` are validated as authored. With a **spec** (the episodic driver's
+fixed oracle) the gate resolves `warm` from the candidate's *own* declared warmup, replays the
+compiled oracle at that warmup, **rejects** any coder-authored `scenarios()` block, and — on
+success — machine-stamps a warmup-parametric `scenarios()` into the installed file. Either way one
+validated file lands; the spec path just moves who authors the tape from the coder to the machine.
+
+**Where the compiler sits.** The scenario spec vocabulary and the pure compiler
+(`src/noctis/strategies/scenario_spec.py`: `LegSpec` / `Behavior` / `ScenarioSpec` / `SpecSuite`,
+`compile_spec`, `describe_spec`) live in the **strategy layer**, not the research layer.
+Compilation is a pure, deterministic function of `(spec, warm)` — no LLM, no I/O, no clock, no
+randomness — and the module imports nothing from `noctis.research`, so the same spec always
+compiles to the same `Scenario` objects and the gate owns the oracle independently of who proposed
+it.
 
 ## The fill model
 

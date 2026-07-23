@@ -1686,6 +1686,44 @@ def test_rejected_brief_attempt_persists_scenario_execution_diagnostics(tmp_path
     assert "long spans" in body and "short spans" in body
 
 
+def _spec_scenario_failer(name: str) -> str:
+    """A spec-path candidate whose entry is inverted: on a rising rally leg it stays flat, so it
+    never enters long during the ENTER_LONG tape the gate stamps — the case whose spec-path gate
+    error carries execution-feedback diagnostics (#79) beside the fixed-oracle identity (#86)."""
+    return _spec_named(name).replace("1 if bar.close > mean else 0", "1 if bar.close < mean else 0")
+
+
+def test_rejected_spec_path_attempt_persists_the_oracle_and_the_diagnostics(tmp_path):
+    """On the spec path a gate-rejected attempt persists BOTH the fixed-oracle identity (the target
+    the code was gated against) and the observed-behavior diagnostics (what the code actually did),
+    so a post-mortem shows the missed target as well as the miss (#86)."""
+    from noctis.strategies.scenario_spec import describe_spec
+
+    suite = _oracle_suite()
+    box, _ = _coder_box(
+        tmp_path, [_fenced(_spec_scenario_failer("spec_fail")), _fenced(_spec_named("spec_fail"))]
+    )
+    box.tool_write_strategy(name="spec_fail", brief=BRIEF_ARGS, spec=suite)
+
+    files = _failed_files(box)
+    assert len(files) == 1  # the inverted attempt failed replay; the corrected one landed
+    body = files[0].read_text(encoding="utf-8")
+    assert "violated" in body  # the missed window is recorded
+    assert "observed:" in body  # what the code actually did rides alongside it (#79)
+    assert describe_spec(suite) in body  # and the fixed-oracle identity it was gated against (#86)
+
+
+def test_spec_less_brief_failure_carries_no_oracle_header(tmp_path):
+    """A spec-less coder failure (the conversation loop / hand-written oracle) persists no
+    fixed-oracle header — the record is unchanged from before #86."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN), _fenced(_named("brief_probe"))])
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    files = _failed_files(box)
+    assert len(files) == 1
+    assert "fixed oracle" not in files[0].read_text(encoding="utf-8").lower()
+
+
 def test_each_rejected_brief_attempt_persists_its_own_file(tmp_path):
     """Every private retry that fails writes its own failure record — three rejections, three
     files, so the whole failing job is on disk."""

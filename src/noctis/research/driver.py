@@ -1128,9 +1128,11 @@ def run_episodic_research(
     # deterministic toolbox action, both no-ops without a sink so a bare run is unchanged.
     emit_tool = _tool_emitter(on_event, toolbox)
 
-    def emit_stage(stage: str, strategy: str | None = None) -> None:
+    def emit_stage(
+        stage: str, strategy: str | None = None, *, oracle: list[str] | None = None
+    ) -> None:
         if on_event is not None:
-            on_event(stage_event(stage, strategy))
+            on_event(stage_event(stage, strategy, oracle=oracle))
 
     ledger.record_session_start(
         mandate=mandate_source,
@@ -1195,8 +1197,13 @@ def run_episodic_research(
         # The FORMULATE spec is the FIXED ORACLE: it is threaded into the write gate's spec path
         # (the coder authors no scenarios(); the gate stamps it) and the same suite renders the
         # brief's oracle summary (#85). The gate replays it at the candidate's own declared warmup.
-        emit_stage(AUTHOR, name)
-        ledger.record_stage(AUTHOR, strategy=name)
+        # The oracle's scenario names ride both the stage boundary Event and the AUTHOR ledger line
+        # (#86), so an operator audits which fixed oracle this candidate was gated against — in the
+        # live narration and, via the candidate trail, in the session rollup. The names are the
+        # canonical identity from the FORMULATE spec (never a second rendering).
+        oracle = [s.name for s in fo.scenario_spec.scenarios]
+        emit_stage(AUTHOR, name, oracle=oracle)
+        ledger.record_stage(AUTHOR, strategy=name, detail={"oracle": oracle})
         write = _invoke(
             toolbox.tool_write_strategy,
             name=name,

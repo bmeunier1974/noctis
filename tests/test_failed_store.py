@@ -24,6 +24,29 @@ def test_records_source_and_error_in_one_file(tmp_path):
     assert "attempt 2" in body
 
 
+def test_records_the_fixed_oracle_when_supplied(tmp_path):
+    # On the spec path the fixed oracle is the target the code missed: persisted in the header
+    # alongside the attempted source and the gate error, so a post-mortem shows both what the code
+    # did (the observed-behavior diagnostics riding the error) and the target it was gated against.
+    store = FailedAttemptStore(tmp_path / "failed")
+    oracle = "rally: trend(60) — enter long during leg 0; grind: flat(60) — never trade"
+    path = store.record("spec_probe", 1, "source-body", "gate error: boom", oracle=oracle)
+
+    body = path.read_text(encoding="utf-8")
+    assert "source-body" in body
+    assert "gate error: boom" in body
+    assert "fixed oracle" in body.lower()  # the section header
+    assert "enter long during leg 0" in body  # the oracle identity itself
+
+
+def test_omits_the_oracle_section_when_absent(tmp_path):
+    # Spec-less writes carry no oracle: the record is unchanged (no fixed-oracle header).
+    store = FailedAttemptStore(tmp_path / "failed")
+    path = store.record("hand_written", 1, "src", "err")
+
+    assert "fixed oracle" not in path.read_text(encoding="utf-8").lower()
+
+
 def test_first_record_creates_the_area_lazily(tmp_path):
     # No failures ⇒ no failed/ dir; the first record materializes it.
     store = FailedAttemptStore(tmp_path / "failed")
