@@ -261,11 +261,16 @@ class FakeToolbox:
         backtest_results=None,
         sweep_results=None,
         exhausted=(),
+        max_author_calls=12,
     ):
         self.exhausted = FakeExhausted(exhausted)
         self.promotions = 0
         self.rejections = 0
         self.author_calls = 0
+        # The coder Class-B ceiling the author-budget preflight (#94) reads — mirrors the real
+        # toolbox: `can_author_brief` is the negation of `author_calls >= max_author_calls`, so a
+        # default well above any test session keeps the preflight inert unless a test opts in.
+        self.max_author_calls = max_author_calls
         self.escalations = 0
         self.strategies_touched: list[str] = []
         self.undecided: set[str] = set()
@@ -298,6 +303,12 @@ class FakeToolbox:
 
     def market_context(self):
         return dict(_FAKE_DIGEST)
+
+    def can_author_brief(self):
+        """The author-budget preflight seam the driver calls before each FORMULATE (#94): whether a
+        new brief could still start. Mirrors the real toolbox — the negation of the ceiling the
+        write gate refuses a brief on."""
+        return self.author_calls < self.max_author_calls
 
     def result_brief(self, result):
         """The gate-facing slice the driver's tool-line emitter prints — a small honest subset of
@@ -1213,6 +1224,42 @@ def test_stop_event_stops_between_stages(tmp_path):
     )
     assert summary.stopped_reason == "stop_event"
     assert episodes.formulate_calls == 0
+
+
+# ── 3b. author-call budget preflight ends the session honestly (story #94) ──────────────────
+def test_author_budget_preflight_ends_the_session_at_the_next_formulate(tmp_path):
+    # Once the coder budget can no longer fund a single authoring attempt, no further FORMULATE
+    # episode starts: the loop stops at the next boundary (before formulating) with its OWN note,
+    # so an operator tells "out of coder budget" from "out of ideas". The first cycle — which
+    # authored within budget — is unaffected: it optimizes and reaches a verdict as usual.
+    episodes = Episodes([formulate_ok(), formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox(max_author_calls=1)  # exactly one authoring attempt funds the session
+    ledger = SessionLedger(tmp_path, "ab1")
+
+    summary = _drive(episodes, box, max_episodes=10, ledger=ledger)
+
+    assert episodes.formulate_calls == 1  # the second FORMULATE never started
+    assert box.author_calls == 1  # only the one authoring attempt the budget funded
+    assert box.rejects and summary.rejections == 1  # the first cycle still reached a verdict
+    assert summary.stopped_reason == "author_budget_exhausted"  # the distinct end reason
+    # The ledger and the derived rollup both surface the distinct note.
+    end = ledger.session_end()
+    assert end is not None and end.note == "author_budget_exhausted"
+    assert ledger.rollup().note == "author_budget_exhausted"
+    # No second thesis was formulated: exactly one formulate stage/thesis landed in the ledger.
+    assert [t.strategy for t in ledger.theses()] == ["intraday_momentum_1"]
+    assert [s.stage for s in ledger.stages()].count("formulate") == 1
+
+
+def test_below_the_author_budget_the_session_is_byte_identical(tmp_path):
+    # A session that never exhausts the coder budget behaves exactly as before the preflight: the
+    # budget check is inert, and max_episodes (not the new note) still ends the run — byte-identical
+    # to test_max_episodes_stops_at_the_next_stage_boundary above.
+    episodes = Episodes([formulate_ok(), formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()  # default (high) author budget — the preflight never fires
+    summary = _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "ab2"))
+    assert summary.stopped_reason == "max_episodes"
+    assert episodes.formulate_calls == 1
 
 
 # ── 4. the driver imports no LLM code (structural) ──────────────────────────────────────────

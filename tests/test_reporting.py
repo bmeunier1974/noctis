@@ -251,6 +251,16 @@ def test_report_renders_escalations_as_zero_when_none_occurred():
     assert "Escalations: 0" in text
 
 
+def test_report_surfaces_the_session_end_note(tmp_path):
+    # Story #94: the session rollup surfaces its session_end note (rendered generically), so an
+    # operator distinguishes "ran out of coder budget" (author_budget_exhausted) from "ran out of
+    # ideas" (formulate_failed) or a plain budget stop at a glance.
+    research = _ledgered_research()
+    research["sessions"][0]["rollup"]["note"] = "author_budget_exhausted"
+    text = render_report(ReportData(as_of="2026-07-03", research=research))
+    assert "author_budget_exhausted" in text
+
+
 def test_ledgerless_report_is_byte_for_byte_unchanged():
     """A session without a ledger carries no ``sessions`` key; its render must be byte-identical
     to the pre-#74 output (the graceful-degradation acceptance criterion)."""
