@@ -46,6 +46,12 @@ class RsiMeanRev(TraderStrategy):
         ctx.set_target(self._pos)
 
     @classmethod
+    def warmup_bars(cls, params) -> int:
+        # Cutler RSI needs `period` deltas (period + 1 closes); ind.rsi returns None until the
+        # bar at index `period`, so the strategy stays flat through then.
+        return params.period
+
+    @classmethod
     def param_space(cls) -> list[ParamSpec]:
         return [
             ParamSpec("period", "int", low=5, high=30, step=1),

@@ -476,3 +476,58 @@ def test_directional_failure_that_never_trades_reports_never_took_a_position():
     msg = _run({}, long_within(30, 40))
     assert "long_within(30,40) violated" in msg
     assert "observed:" in msg and "never took a position" in msg
+
+
+# ── Tier-1 invariant: declared-warmup honesty (#80) ────────────────────────────────────────
+def _with_warmup(base, warmup):
+    """A subclass of ``base`` that declares a fixed ``warmup_bars`` (ignores params)."""
+
+    class _W(base):
+        @classmethod
+        def warmup_bars(cls, params):
+            return warmup
+
+    return _W
+
+
+def test_warmup_bars_defaults_to_zero_on_the_base_contract():
+    # The only model-owned number in the oracle defaults to 0 = undeclared = exempt.
+    assert _Above.warmup_bars(_Above.Params()) == 0
+
+
+def test_declared_warmup_lie_is_caught_naming_the_bar_and_the_declared_warmup():
+    # The code enters at bar 5 but declares a warmup of 20 — a lie the invariant catches on
+    # the tape, naming the scenario, the offending bar, and the declared warmup.
+    lying = _with_warmup(_scripted(_span(5, 40, 1)), 20)
+    scenario = Scenario("premature", segments=[flat(90)], expect=[long_within(5, 40)])
+    msg = run_scenario(lying, scenario)
+    assert msg is not None
+    assert "premature" in msg
+    assert "bar 5" in msg
+    assert "warmup_bars=20" in msg
+
+
+def test_honest_warmup_declaration_passes_the_invariant():
+    # First entry lands at bar 25, at or after the declared warmup of 20 — no lie.
+    honest = _with_warmup(_scripted(_span(25, 40, 1)), 20)
+    scenario = Scenario("honest", segments=[flat(90)], expect=[long_within(25, 40)])
+    assert run_scenario(honest, scenario) is None
+
+
+def test_undeclared_warmup_is_exempt_from_the_honesty_check():
+    # warmup_bars default 0: a strategy may take a position at bar 0 without the invariant
+    # firing, so nothing outside the library breaks.
+    early = _scripted(_span(0, 40, 1))
+    scenario = Scenario("from_the_open", segments=[flat(90)], expect=[long_within(0, 40)])
+    assert run_scenario(early, scenario) is None
+
+
+def test_a_warmup_bars_that_raises_is_reported_not_propagated():
+    class _Boom(_scripted(_span(5, 40, 1))):
+        @classmethod
+        def warmup_bars(cls, params):
+            raise RuntimeError("kaput")
+
+    scenario = Scenario("boom", segments=[flat(90)], expect=[long_within(5, 40)])
+    msg = run_scenario(_Boom, scenario)
+    assert msg is not None and "warmup_bars()" in msg and "kaput" in msg

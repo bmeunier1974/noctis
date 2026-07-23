@@ -39,6 +39,7 @@ Each file defines exactly one `TraderStrategy` subclass (`src/noctis/strategies/
 | `on_bar(ctx, bar)` | React to one bar; call `ctx.set_target(1)` (long), `ctx.set_target(-1)` (short), or `ctx.set_target(0)` (flat). `bar.ts_event` is the UTC-ns timestamp if the thesis needs a session/clock gate. |
 | `param_space()` | `list[ParamSpec]` — the domain `run_sweep`/Optuna explores. |
 | `scenarios()` | 2–8 known-outcome `Scenario`s (see below) — the file's own correctness oracle. |
+| `warmup_bars(params)` | Optional `int` — decision bars before which the strategy promises to stay flat (derive it from your own lookback; multiply for higher-timeframe filters). Default `0` = undeclared = exempt. |
 
 `signals()` (the vectorised pre-filter path) is **optional**: the base class default replays
 `on_bar` over the frame, so both code paths agree by construction. Override it only as a
@@ -49,7 +50,10 @@ Rules the validation gate enforces on `write_strategy`:
 - exactly one strategy class, `name` matches the file, a docstring header exists;
 - long/short/flat targets (+1/−1/0), no exceptions, `signals()`/`on_bar` parity;
 - the declared known-outcome scenarios replay clean (≥ 1 tape demanding a directional
-  (long or short) entry, ≥ 1 `always_flat()` no-trade tape).
+  (long or short) entry, ≥ 1 `always_flat()` no-trade tape);
+- **warmup honesty** — if the file declares `warmup_bars(params)`, no scenario tape may take
+  a nonzero position before that bar; a declaration the code's own tapes contradict is rejected,
+  naming the offending bar and the declared warmup.
 
 Keep `on_bar` O(lookback): bounded `deque`s + the `ind` tail helpers. No I/O, no globals,
 no randomness — a strategy must be a pure function of the bars it has seen.

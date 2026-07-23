@@ -197,6 +197,77 @@ def test_the_gate_seam_defaults_to_the_subprocess_runner():
     assert library.validator is library.validate_in_subprocess
 
 
+# ── warmup honesty (#80): the shared funnel catches a lying warmup through BOTH runners ────
+# A strategy that deterministically enters at bar 5 (ignoring price) yet declares warmup 40 —
+# an honest scenario set (directional + no-trade tape) with a dishonest warmup declaration.
+LYING_WARMUP_SOURCE = '''"""Toy probe that lies about its warmup: enters at bar 5, declares 40.
+
+status: draft
+style: momentum
+"""
+from dataclasses import dataclass
+
+from noctis.strategies import scenarios as sc
+from noctis.strategies.base import Bar, Context, ParamSpec, TraderStrategy
+
+
+class LiarProbe(TraderStrategy):
+    name = "liar"
+
+    @dataclass(frozen=True)
+    class Params:
+        enter_at: int = 5
+
+    params_cls = Params
+
+    def on_start(self, ctx: Context) -> None:
+        self._i = -1
+
+    def on_bar(self, ctx: Context, bar: Bar) -> None:
+        self._i += 1
+        ctx.set_target(1 if self._i >= self.params.enter_at else 0)
+
+    @classmethod
+    def warmup_bars(cls, params) -> int:
+        return 40  # a lie: the code enters at bar `enter_at` = 5
+
+    @classmethod
+    def param_space(cls):
+        return [ParamSpec("enter_at", "int", 1, 30, 1)]
+
+    @classmethod
+    def scenarios(cls):
+        return [
+            sc.Scenario(
+                "enters_early",
+                segments=[sc.flat(90)],
+                expect=[sc.long_within(5, 89)],
+            ),
+            sc.Scenario(
+                "quiet_tape",
+                segments=[sc.flat(90)],
+                expect=[sc.always_flat()],
+            ),
+        ]
+'''
+
+
+def test_lying_warmup_is_caught_through_the_subprocess_gate(tmp_path, families):
+    # The DEFAULT fresh-interpreter validator: the actionable warmup message survives the
+    # gate's last-stderr-line boundary and nothing lands on disk.
+    with pytest.raises(StrategyValidationError, match="warmup_bars=40") as exc:
+        write_strategy(tmp_path, "liar", LYING_WARMUP_SOURCE, families)
+    assert "bar 5" in str(exc.value)
+    assert strategy_path(tmp_path, "liar") is None
+
+
+def test_lying_warmup_is_caught_through_the_in_process_gate(tmp_path):
+    # Same shared funnel, no interpreter spawn — the in-process runner inherits the check.
+    with pytest.raises(StrategyValidationError, match="warmup_bars=40") as exc:
+        _validate(tmp_path, LYING_WARMUP_SOURCE, name="liar")
+    assert "bar 5" in str(exc.value)
+
+
 @pytest.mark.parametrize(
     ("mutate", "why"),
     [
@@ -413,6 +484,25 @@ def test_seed_scenarios_satisfy_the_contract(families, name):
 
 def test_template_scenarios_satisfy_the_contract():
     cls = _find_strategy_class(_load_module(Path(SEED_DIR) / "TEMPLATE.py"))
+    check_scenario_contract(cls)
+
+
+# Each seed declares an honest warmup derived from its own lookback logic, and the contract check
+# (now running the warmup-honesty invariant) still passes on the declaration — the warmup is true.
+@pytest.mark.parametrize(
+    ("name", "expected_warmup"),
+    [("sma_crossover", 30), ("rsi_meanrev", 14), ("donchian_breakout", 20)],
+)
+def test_seed_declares_an_honest_warmup(families, name, expected_warmup):
+    load_and_register(SEED_DIR, families)
+    cls = families.get_class(name)
+    assert cls.warmup_bars(cls.params_cls()) == expected_warmup
+    check_scenario_contract(cls)  # the warmup invariant confirms the declaration is not a lie
+
+
+def test_template_declares_an_honest_warmup():
+    cls = _find_strategy_class(_load_module(Path(SEED_DIR) / "TEMPLATE.py"))
+    assert cls.warmup_bars(cls.params_cls()) == 20  # its SMA lookback default
     check_scenario_contract(cls)
 
 

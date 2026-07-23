@@ -90,6 +90,19 @@ class MyStrategy(TraderStrategy):
         ctx.set_target(1 if bar.close > mean * self.params.threshold else 0)
 
     @classmethod
+    def warmup_bars(cls, params) -> int:
+        """Decision bars before which this strategy promises to stay flat.
+
+        The only model-owned number in the oracle — derive it from your own lookback logic
+        (here the SMA needs `lookback` closes before it yields a value). The write gate replays
+        your scenarios() and rejects the file if any nonzero target appears before this bar, so
+        an honest declaration is one your own tapes prove. Multiply here for higher-timeframe
+        filters (a 1h EMA(20) over 5m bars warms up in ~20 completed hours of base bars). Leave
+        the base default of 0 only if the strategy genuinely trades from the first bar.
+        """
+        return params.lookback
+
+    @classmethod
     def param_space(cls) -> list[ParamSpec]:
         """The search domain run_sweep explores. Cover every Params field worth tuning."""
         return [

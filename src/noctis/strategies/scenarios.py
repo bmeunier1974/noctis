@@ -409,6 +409,54 @@ def observed_behavior(targets: list[int]) -> str:
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Tier-1 invariants — structural honesty checks replayed over every tape
+# ─────────────────────────────────────────────────────────────────────────────
+# One extensible step in the shared write-gate funnel: each invariant is a pure check over a
+# single replayed tape, returning a single-line failure message or None. Warmup honesty is the
+# first (and, today, only) member; the rest of the Tier-1 suite lands here later behind the same
+# seam, so both validator runners inherit every check with no drift.
+def _check_warmup_honesty(cls, scenario: Scenario, params, targets: list[int]) -> str | None:
+    """The declared warmup must not lie: no nonzero target before it.
+
+    ``warmup_bars(params)`` is the only model-owned number in the oracle — the author's promise
+    to stay flat through indicator warmup. Default 0 is undeclared and exempt, so strategies
+    outside the library are untouched. A nonzero target before the declared warmup is a lie the
+    gate rejects, naming the offending bar and the declared warmup so the fix is unambiguous.
+    """
+    try:
+        warmup = int(cls.warmup_bars(params))
+    except Exception as exc:  # noqa: BLE001 — a broken declaration is a contract failure
+        return (
+            f"scenario {scenario.name!r}: warmup_bars() raised "
+            f"{type(exc).__name__}: {_one_line(exc)}"
+        )
+    if warmup <= 0:
+        return None
+    for j in range(min(warmup, len(targets))):
+        if targets[j] != 0:
+            direction = "long" if targets[j] == 1 else "short"
+            return (
+                f"scenario {scenario.name!r}: warmup dishonest — took a {direction} position "
+                f"at bar {j}, before the declared warmup_bars={warmup} "
+                f"(promised flat through bar {warmup - 1}); raise warmup_bars or delay the entry"
+            )
+    return None
+
+
+# Ordered — warmup honesty is the first member; later Tier-1 checks (a separate story) append here.
+_INVARIANTS = (_check_warmup_honesty,)
+
+
+def check_invariants(cls, scenario: Scenario, params, targets: list[int]) -> str | None:
+    """Run the Tier-1 invariant suite over one replayed tape; None on pass, else one line."""
+    for invariant in _INVARIANTS:
+        msg = invariant(cls, scenario, params, targets)
+        if msg:
+            return msg
+    return None
+
+
 def run_scenario(cls, scenario: Scenario) -> str | None:
     """Replay one scenario; None on pass, else a single-line failure message."""
     try:
@@ -425,6 +473,9 @@ def run_scenario(cls, scenario: Scenario) -> str | None:
                 f"scenario {scenario.name!r}: target {t} at bar {j} is outside "
                 f"long/short/flat {{-1,0,1}}"
             )
+    invariant_msg = check_invariants(cls, scenario, params, targets)
+    if invariant_msg:
+        return invariant_msg
     for exp in scenario.expect:
         msg = exp.check(targets)
         if msg:
