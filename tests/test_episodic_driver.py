@@ -31,6 +31,7 @@ from noctis.research.driver import (
     FormulateOutput,
     character_to_profile,
     make_episodes,
+    parse_formulate,
     run_episodic_research,
 )
 from noctis.research.episode import (
@@ -42,7 +43,16 @@ from noctis.research.episode import (
 )
 from noctis.research.ledger import SessionLedger
 from noctis.research.llm import ToolCall, Turn
-from tests.test_research_tools import PROBE, _make_toolbox
+from noctis.strategies import library
+from noctis.strategies.scenario_spec import (
+    Behavior,
+    LegSpec,
+    ScenarioSpec,
+    SpecSuite,
+    compile_spec,
+)
+from noctis.strategies.scenarios import Scenario
+from tests.test_research_tools import _make_toolbox
 
 _FORMULATE_TOOL = FORMULATE_CONTRACT.name
 _DECIDE_TOOL = DECIDE_CONTRACT.name
@@ -54,6 +64,17 @@ _EXHAUSTION_REFUSAL = (
 )
 
 
+# A valid structured scenario spec (one directional long tape, one no-trade tape) compiled at the
+# parse-time warmup, exactly as parse_formulate carries it on a real FormulateOutput.
+_SPEC_SUITE = SpecSuite(
+    scenarios=(
+        ScenarioSpec("rally", (LegSpec("trend", 60, pct=0.05),), Behavior.ENTER_LONG, leg=0),
+        ScenarioSpec("selloff_flat", (LegSpec("selloff", 60, pct=0.05),), Behavior.NEVER_TRADE),
+    )
+)
+_COMPILED_SCENARIOS = compile_spec(_SPEC_SUITE, 0)
+
+
 # ── typed episode-output builders (what a formulate/decide episode emits) ───────────────────
 def formulate_ok(**over) -> EpisodeResult[FormulateOutput]:
     fields = {
@@ -63,7 +84,8 @@ def formulate_ok(**over) -> EpisodeResult[FormulateOutput]:
         "timeframe": "1m",
         "cost_arithmetic": "median 1m move ~8bp vs the 4bp round trip",
         "symbol_character": "liquid trending names",
-        "scenario_intent": "one directional long tape and one no-trade selloff tape",
+        "scenario_spec": _SPEC_SUITE,
+        "scenarios": _COMPILED_SCENARIOS,
         "param_space_sketch": "lookback 5-40",
     }
     fields.update(over)
@@ -494,12 +516,129 @@ def test_author_stage_passes_the_thesis_and_lineage_onto_the_brief(tmp_path):
     assert write["thesis"].startswith("Buy strength")
     assert write["parent_thesis"] == "older idea"
     assert write["pivot_rationale"] == "cost too high before"
-    # The formulate output is mapped onto a StrategyBrief the author engine translates.
+    # The formulate output is mapped onto a StrategyBrief the author engine translates. Its
+    # `scenarios` field is a readable summary rendered from the structured scenario_spec (#83) —
+    # the tape shape and the behavior each tape must prove, never a bar index.
     brief = write["brief"]
     assert brief["thesis"].startswith("Buy strength")
     assert brief["param_space"] == "lookback 5-40"
-    assert brief["scenarios"] == "one directional long tape and one no-trade selloff tape"
+    assert "rally" in brief["scenarios"] and "enter long during leg 0" in brief["scenarios"]
+    assert "never trade" in brief["scenarios"]  # the no-trade tape is summarized too
     assert "1m" in brief["entry_exit"]
+
+
+# ── 1b. the AUTHOR stage carries the FIXED ORACLE into the write gate's spec path (#85) ──────
+def test_author_stage_forwards_the_fixed_spec_and_brief_renders_the_oracle(tmp_path):
+    from noctis.strategies.scenario_spec import describe_spec
+
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "s-oracle"))
+
+    write = box.writes[0]
+    # The compiled oracle (the FormulateOutput's SpecSuite) is threaded into the gate's spec path.
+    assert write["spec"] is _SPEC_SUITE
+    # The brief renders the fixed oracle faithfully from the SpecSuite — no free-prose intent.
+    assert write["brief"]["scenarios"] == describe_spec(_SPEC_SUITE)
+
+
+def test_author_stage_records_and_narrates_the_fixed_oracle(tmp_path):
+    # The AUTHOR stage ledger record and its stage event name the spec's scenarios, so an operator
+    # can audit exactly which fixed oracle a candidate was gated against — both in the persisted
+    # trail and in the live narration (#86).
+    events: list = []
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "s-oracle-trail")
+    _drive(episodes, box, max_episodes=2, ledger=ledger, on_event=events.append)
+
+    author_stage = next(s for s in ledger.stages() if s.stage == "author")
+    assert author_stage.detail.get("oracle") == ["rally", "selloff_flat"]  # the spec's scenarios
+
+    author_event = next(e for e in events if e.kind == "stage" and e.meta.get("stage") == "author")
+    assert author_event.meta.get("oracle") == ["rally", "selloff_flat"]
+    assert "rally" in author_event.text  # named in the live narration too
+
+
+def test_candidate_trail_surfaces_the_gated_oracle(tmp_path):
+    # The per-candidate trail (the session rollup's audit view) shows the fixed oracle each
+    # candidate was gated against, greppable per candidate for the parity re-measure (#87).
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "s-oracle-cand")
+    _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    trail = ledger.candidate_trails()[0]
+    assert trail.oracle == ("rally", "selloff_flat")
+    assert trail.to_dict()["oracle"] == ["rally", "selloff_flat"]
+
+
+def test_warmup_too_large_ends_the_strategy_in_a_refined_brief(tmp_path):
+    # A thesis needing more history than the fixed oracle allows (declared warmup too large): the
+    # write gate rejects it with the needs-more-history signal, and the driver ends the episode in
+    # a REFINED BRIEF outcome — the honest exit is a lighter thesis, never a bent gate.
+    warmup_error = (
+        "validation failed: declared warmup_bars=3000 is too large for the fixed scenario "
+        "oracle: scenario 'rally' compiles to 3080 bars, outside [60, 2000]. Shrink the lookback "
+        "defaults in Params so the strategy warms up faster"
+    )
+    episodes = Episodes([formulate_ok()], [])
+    box = FakeToolbox(write_result={"error": warmup_error})
+    ledger = SessionLedger(tmp_path, "s-refine")
+
+    summary = _drive(episodes, box, max_episodes=1, ledger=ledger, models={"coder": "fake/coder"})
+
+    # The AUTHOR episode ends in a refined-brief outcome (not a generic author_failed), naming the
+    # coder that authored the too-heavy draft.
+    author_eps = [e for e in ledger.episodes() if e.stage == "author"]
+    assert len(author_eps) == 1
+    assert author_eps[0].outcome == "refined_brief"
+    assert author_eps[0].model == "fake/coder"
+    assert author_eps[0].escalated is False
+    # The strategy is skipped (no optimize, no verdict) and never enters the undecided set...
+    assert box.backtests == [] and box.sweeps == []
+    assert box.rejects == [] and box.evaluations == []
+    assert summary.undecided == []
+    # ...and the session continued past AUTHOR toward its budget rather than ending on it.
+    assert summary.stopped_reason == "max_episodes"
+
+
+def test_generic_author_failure_is_not_a_refined_brief(tmp_path):
+    # A non-warmup gate rejection is a generic author skip — no refined-brief episode line (the
+    # episode stream stays byte-identical to before this story for a local generic failure).
+    episodes = Episodes([formulate_ok()], [])
+    box = FakeToolbox(write_result={"error": "validation failed: bad scenario window"})
+    ledger = SessionLedger(tmp_path, "s-generic")
+
+    _drive(episodes, box, max_episodes=1, ledger=ledger)
+
+    assert [e for e in ledger.episodes() if e.stage == "author"] == []
+
+
+def test_escalated_warmup_too_large_records_a_refined_brief_line(tmp_path):
+    # The needs-more-history signal on an ESCALATED write (the paid fallback also hit the too-large
+    # warmup) still routes to a refined brief, naming the paid model on an escalated episode line.
+    warmup_error = (
+        "validation failed: declared warmup_bars=3000 is too large for the fixed scenario oracle"
+    )
+    episodes = Episodes([formulate_ok()], [])
+    box = FakeToolbox(
+        write_result={
+            "error": warmup_error,
+            "escalated": True,
+            "author_model": "fake/coder-paid",
+        }
+    )
+    ledger = SessionLedger(tmp_path, "s-refine-esc")
+
+    summary = _drive(episodes, box, max_episodes=1, ledger=ledger)
+
+    author_eps = [e for e in ledger.episodes() if e.stage == "author"]
+    assert len(author_eps) == 1
+    assert author_eps[0].outcome == "refined_brief"
+    assert author_eps[0].escalated is True
+    assert author_eps[0].model == "fake/coder-paid"
+    assert summary.escalations == 1  # the escalation is still metered
 
 
 # ── 2. per-stage failed-episode policies ────────────────────────────────────────────────────
@@ -1040,8 +1179,18 @@ class FakeEpisodeClient:
         return self._script.pop(0)
 
 
+# On the episodic path the gate owns the oracle (#84/#85): the coder authors NO scenarios() — the
+# gate stamps one from the FORMULATE spec. These e2e coders therefore emit a no-scenarios file
+# (SPEC_CANDIDATE), not PROBE (whose hand-declared scenarios() the spec path rejects).
+def _spec_source(name: str) -> str:
+    from tests.test_write_gate_spec import SPEC_CANDIDATE
+
+    return SPEC_CANDIDATE.replace('name = "probe"', f'name = "{name}"')
+
+
 class FakeCoder:
-    """A coder client: reads the requested name off the prompt and returns a valid renamed PROBE."""
+    """A coder client: reads the requested name off the prompt and returns a valid no-scenarios
+    file the spec-path gate stamps its oracle into."""
 
     def __init__(self):
         self.model = "fake/coder"
@@ -1049,8 +1198,7 @@ class FakeCoder:
 
     def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
         name = re.search(r"name:\s*(\S+)", messages[-1]["content"]).group(1)
-        source = PROBE.replace('name = "probe"', f'name = "{name}"')
-        block = f"```python\n{source}\n```"
+        block = f"```python\n{_spec_source(name)}\n```"
         return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
 
 
@@ -1065,7 +1213,24 @@ class FakeBrokenCoder:
 
     def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
         self.calls += 1
-        source = PROBE.replace('name = "probe"', 'name = "mismatch"')
+        block = f"```python\n{_spec_source('mismatch')}\n```"
+        return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
+
+
+class FakeHugeWarmupCoder:
+    """A coder that authors a valid no-scenarios file but declares a warmup far larger than the
+    fixed oracle's tape can hold — the needs-more-history case the driver routes to a refined
+    brief. It never lands, so it burns its whole validator-retry budget."""
+
+    def __init__(self):
+        self.model = "fake/coder"
+        self.capabilities = Capabilities()
+        self.calls = 0
+
+    def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
+        self.calls += 1
+        name = re.search(r"name:\s*(\S+)", messages[-1]["content"]).group(1)
+        source = _spec_source(name).replace("return params.lookback", "return 3000")
         block = f"```python\n{source}\n```"
         return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
 
@@ -1087,7 +1252,21 @@ _FORMULATE_PAYLOAD = {
     "timeframe": "1m",
     "cost_arithmetic": "median 1m move ~8bp vs the 4bp round trip",
     "symbol_character": "liquid trending names",
-    "scenario_intent": "one directional long tape and one no-trade selloff tape",
+    "scenario_spec": {
+        "scenarios": [
+            {
+                "name": "rally",
+                "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}],
+                "behavior": "enter_long_during_leg",
+                "leg": 0,
+            },
+            {
+                "name": "grind",
+                "legs": [{"kind": "flat", "bars": 60}],
+                "behavior": "never_trade",
+            },
+        ]
+    },
     "param_space_sketch": "lookback 5-40",
 }
 _REJECT_PAYLOAD = {
@@ -1235,6 +1414,82 @@ def test_end_to_end_below_floor_verdict_is_refused_by_the_real_gate(tmp_path):
     assert [e.stage for e in ledger.episodes()] == ["formulate", "decide", "decide"]
 
 
+# ── 5b. end to end: FORMULATE spec → author → gated write against the compiled oracle (#85) ──
+def test_end_to_end_authors_against_the_fixed_oracle_and_stamps_the_installed_file(tmp_path):
+    # The whole inversion, end to end: FORMULATE emits a structured spec, the driver carries it
+    # into the write gate's spec path, the coder authors NO scenarios(), and the REAL gate replays
+    # the compiled oracle at the candidate's declared warmup and machine-stamps a scenarios() block
+    # into the installed file — which then optimizes and reaches a gated verdict.
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    ledger = SessionLedger(box.state_dir, session_id="ep-oracle-e2e")
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fit_symbols=["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+
+    name = "intraday_momentum_1"
+    # The installed file is machine-stamped from the FORMULATE spec — the coder authored none.
+    installed = library.strategy_source(box.strategies_dir, name)
+    assert "compile_spec(" in installed and "spec_from_json(" in installed
+    assert installed.count("def scenarios(cls):") == 1
+    # And the stamped candidate cleared the whole pipeline: optimized and reached a gated verdict.
+    assert box.journal.stats(name).sweep_completed
+    assert summary.rejections == 1 and summary.undecided == []
+    assert summary.author_calls == 1
+
+
+def test_end_to_end_warmup_too_large_ends_in_a_refined_brief(tmp_path):
+    # A coder that keeps declaring a warmup too large for the fixed oracle exhausts its retries; the
+    # REAL gate rejects it with the needs-more-history signal, and the driver ends the strategy in a
+    # REFINED BRIEF — no optimize, no verdict, nothing left undecided; the session runs to budget.
+    coder = FakeHugeWarmupCoder()
+    box = _make_toolbox(tmp_path, coder_client=coder)
+    ledger = SessionLedger(box.state_dir, session_id="ep-refine-e2e")
+    client = FakeEpisodeClient([_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD)])
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fit_symbols=["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=1,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+        models={"driver": "fake/model", "coder": "fake/coder"},
+    )
+
+    name = "intraday_momentum_1"
+    assert coder.calls == 3  # the coder burned its full retry budget on the too-heavy file
+    author_eps = [e for e in ledger.episodes() if e.stage == "author"]
+    assert len(author_eps) == 1 and author_eps[0].outcome == "refined_brief"
+    assert author_eps[0].model == "fake/coder"
+    # Skipped like any author failure — but recorded honestly, and nothing landed on disk.
+    assert library.strategy_path(box.strategies_dir, name) is None
+    assert summary.rejections == 0 and summary.undecided == []
+    assert [s.stage for s in ledger.stages() if s.stage == "optimize"] == []
+
+
 # ── 6. verbose narration: a fake-client episodic session reads as one continuous arc (#73) ───
 def test_verbose_episodic_session_narrates_the_full_arc(tmp_path):
     # A whole fake-client session narrated through one recording sink shows the full arc: the
@@ -1284,3 +1539,198 @@ def test_verbose_episodic_session_narrates_the_full_arc(tmp_path):
     assert stage_positions["decide"] < reject_pos
     # The ledger frames the arc: a session start and a rollup at the close.
     assert ledger.session_start() is not None and ledger.session_end() is not None
+
+
+# ── 7. FORMULATE emits a structured scenario_spec with compile-failure re-prompt (#83) ───────
+def _valid_spec_payload() -> dict:
+    """A well-formed, compilable structured scenario_spec: one directional long tape and one
+    no-trade tape — the two rules a suite must satisfy (>=1 directional, >=1 never_trade)."""
+    return {
+        "scenarios": [
+            {
+                "name": "rally",
+                "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}],
+                "behavior": "enter_long_during_leg",
+                "leg": 0,
+            },
+            {
+                "name": "grind",
+                "legs": [{"kind": "flat", "bars": 60}],
+                "behavior": "never_trade",
+            },
+        ]
+    }
+
+
+def _uncompilable_spec_payload() -> dict:
+    """A schema-valid JSON spec that still fails compile_spec: two directional tapes and NO
+    never_trade tape (a suite-shape rule the compiler enforces). The compile failure surfaces the
+    precise 'no-trade' message the runner folds into the re-prompt."""
+    return {
+        "scenarios": [
+            {
+                "name": "rally",
+                "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}],
+                "behavior": "enter_long_during_leg",
+                "leg": 0,
+            },
+            {
+                "name": "dip",
+                "legs": [{"kind": "selloff", "bars": 60, "pct": 0.05}],
+                "behavior": "enter_short_during_leg",
+                "leg": 0,
+            },
+        ]
+    }
+
+
+def _formulate_payload(**over) -> dict:
+    payload = {
+        "thesis": "Buy strength above the moving average while the up-move clears cost.",
+        "style": "momentum",
+        "class_tag": "intraday momentum",
+        "timeframe": "1m",
+        "cost_arithmetic": "median 1m move ~8bp vs the 4bp round trip",
+        "symbol_character": "liquid trending names",
+        "scenario_spec": _valid_spec_payload(),
+        "param_space_sketch": "lookback 5-40",
+    }
+    payload.update(over)
+    return payload
+
+
+def test_formulate_schema_requires_scenario_spec_and_drops_the_free_prose_intent():
+    # The schema requires a STRUCTURED scenario_spec; the old free-prose scenario_intent is gone.
+    schema = FORMULATE_CONTRACT.schema
+    assert "scenario_spec" in schema["required"]
+    assert "scenario_intent" not in schema["properties"]
+    assert "scenario_intent" not in schema["required"]
+    spec = schema["properties"]["scenario_spec"]
+    assert spec["type"] == "object" and "scenarios" in spec["properties"]
+    item = spec["properties"]["scenarios"]["items"]
+    assert set(item["required"]) == {"name", "legs", "behavior"}
+    # the behavior tag is constrained to the #82 vocabulary, and legs carry a kind + a length
+    assert set(item["properties"]["behavior"]["enum"]) == {b.value for b in Behavior}
+    leg = item["properties"]["legs"]["items"]
+    assert set(leg["properties"]["kind"]["enum"]) == {
+        "flat",
+        "trend",
+        "selloff",
+        "recovery",
+        "chop",
+        "vol_spike",
+        "gap",
+    }
+
+
+def test_formulate_output_carries_the_spec_not_a_free_prose_intent():
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(FormulateOutput)}
+    assert "scenario_intent" not in fields
+    assert "scenario_spec" in fields and "scenarios" in fields
+
+
+def test_parse_formulate_compiles_the_spec_at_parse_time_and_carries_it():
+    # A valid spec is parsed into the frozen #82 dataclasses AND compiled at parse time (warm=0),
+    # both carried on the formulate output for downstream stages (#84/#85).
+    fo = parse_formulate(_formulate_payload())
+    assert isinstance(fo.scenario_spec, SpecSuite)
+    assert [s.name for s in fo.scenario_spec.scenarios] == ["rally", "grind"]
+    assert fo.scenario_spec.scenarios[0].behavior is Behavior.ENTER_LONG
+    assert fo.scenario_spec.scenarios[1].behavior is Behavior.NEVER_TRADE
+    # compiled to real Scenario objects — the fixed oracle the write gate (#84) will replay
+    assert len(fo.scenarios) == 2
+    assert all(isinstance(s, Scenario) for s in fo.scenarios)
+
+
+def test_parse_formulate_treats_an_uncompilable_spec_as_a_schema_misfire():
+    # A suite with no no-trade tape is schema-valid JSON but fails compile_spec; parse raises with
+    # the compiler's precise message so the episode runner re-prompts it as a schema misfire.
+    bad = _formulate_payload(scenario_spec=_uncompilable_spec_payload())
+    with pytest.raises(Exception) as exc:  # noqa: PT011 — the runner catches any raise as a misfire
+        parse_formulate(bad)
+    assert "no-trade" in str(exc.value)
+
+
+def test_parse_formulate_treats_an_unknown_leg_kind_as_a_schema_misfire():
+    bad = _formulate_payload(
+        scenario_spec={
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [{"kind": "mystery", "bars": 60}],
+                    "behavior": "enter_long_during_leg",
+                    "leg": 0,
+                },
+                {
+                    "name": "grind",
+                    "legs": [{"kind": "flat", "bars": 60}],
+                    "behavior": "never_trade",
+                },
+            ]
+        }
+    )
+    with pytest.raises(Exception) as exc:  # noqa: PT011
+        parse_formulate(bad)
+    assert "unknown leg kind" in str(exc.value)
+
+
+def test_parse_formulate_rejects_a_malformed_spec_shape_missing_behavior():
+    bad = _formulate_payload(
+        scenario_spec={
+            "scenarios": [
+                {"name": "rally", "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}], "leg": 0},
+                {
+                    "name": "grind",
+                    "legs": [{"kind": "flat", "bars": 60}],
+                    "behavior": "never_trade",
+                },
+            ]
+        }
+    )
+    with pytest.raises(Exception) as exc:  # noqa: PT011
+        parse_formulate(bad)
+    assert "behavior" in str(exc.value)
+
+
+def test_parse_formulate_missing_scenario_spec_is_a_missing_field_misfire():
+    payload = _formulate_payload()
+    del payload["scenario_spec"]
+    with pytest.raises(Exception) as exc:  # noqa: PT011
+        parse_formulate(payload)
+    assert "scenario_spec" in str(exc.value)
+
+
+def test_uncompilable_spec_reprompts_through_the_misfire_path_like_a_missing_field():
+    # Through the real EpisodeRunner + FORMULATE_CONTRACT: an uncompilable spec misfires exactly
+    # like a missing field — the runner re-prompts with the compiler's precise message and recovers
+    # when the re-emit compiles. The corrective carries the message so the model can fix the spec.
+    bad = _formulate_payload(scenario_spec=_uncompilable_spec_payload())
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, bad), _emit(_FORMULATE_TOOL, _formulate_payload())]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    result = runner.run(contract=FORMULATE_CONTRACT, system="SYS", briefing="B")
+
+    assert result.ok  # recovered after the compile-failure re-prompt
+    assert result.value is not None and isinstance(result.value.scenario_spec, SpecSuite)
+    assert result.misfires == 1  # one schema misfire, then a clean re-emit
+    corrective = client.calls[1][1]["content"]
+    assert "no-trade" in corrective  # the compiler's precise message rode into the corrective
+
+
+def test_missing_field_and_uncompilable_spec_take_the_same_misfire_path():
+    # The two failure modes are indistinguishable to the runner: both raise from parse, both are a
+    # single misfire that recovers on a clean re-emit. This locks the "same as a missing field"
+    # contract the story requires.
+    missing = _formulate_payload()
+    del missing["thesis"]
+    uncompilable = _formulate_payload(scenario_spec=_uncompilable_spec_payload())
+    for bad in (missing, uncompilable):
+        client = FakeEpisodeClient(
+            [_emit(_FORMULATE_TOOL, bad), _emit(_FORMULATE_TOOL, _formulate_payload())]
+        )
+        runner = EpisodeRunner(client=client, retries=2)
+        result = runner.run(contract=FORMULATE_CONTRACT, system="SYS", briefing="B")
+        assert result.ok and result.misfires == 1

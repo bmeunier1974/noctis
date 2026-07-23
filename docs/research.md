@@ -103,6 +103,64 @@ driver-authored mode at composition time — a warning, and the session still as
 driver writing source itself. Nothing else moves: this is purely an authoring seam, so the
 promotion gates, the exhaustion floor, journaling, and both out-of-sample holdouts are untouched.
 
+## The fixed oracle: the machine simulates, the model reacts
+
+A strategy's own `scenarios()` are its correctness oracle — known-outcome tapes the write gate
+replays to prove the code does what its thesis claims. Letting the *coder* author code, tape, and
+assertion windows together is the self-fulfilling-oracle trap: it can quietly draw the target
+around whatever the code happened to do. The **episodic** driver closes that by inverting who
+authors the tape — the machine fixes the oracle, the model only reacts to it.
+
+**FORMULATE emits a structured `scenario_spec`, not prose.** The FORMULATE episode returns a
+`SpecSuite` (`src/noctis/strategies/scenario_spec.py`) in a small fixed vocabulary — the model
+reasons about tape *shape* and one behavior per tape and **never writes a bar index**:
+
+- **Leg kinds** — the segment builders each tape is made of: `flat`, `trend`, `selloff`,
+  `recovery`, `chop`, `vol_spike`, `gap`. A leg carries a `kind`, a decision-bar **length**
+  (`bars` — a length, never an index; `0` for a `gap`), and its shape numbers (`pct` for
+  trend/selloff/recovery/gap; `amplitude`/`period` for chop/vol_spike).
+- **Behavior tags** — the one thing a scenario asserts: `enter_long_during_leg`,
+  `enter_short_during_leg`, `hold_long_through_leg`, `hold_short_through_leg`,
+  `flat_by_end_of_leg`, `never_trade`. A directional tag names its target leg by index;
+  `never_trade` targets none.
+- **Suite shape rules** — 2–8 scenarios, unique names, at least one directional entry and at least
+  one `never_trade` tape, each compiling to 60–2000 bars.
+
+The pure, warmup-parametric compiler (`compile_spec`) derives every assertion window from the leg
+lengths and the strategy's declared warmup — the model authors none of that arithmetic.
+
+**Compile-failure re-prompt.** FORMULATE compiles the spec at parse time (a structural validity
+check) as it parses the episode; a spec that violates a shape rule surfaces the compiler's precise
+`SpecError`, and the model re-formulates through the same schema-misfire path a missing field takes
+— the message folded into the correction so it fixes the spec on the re-prompt.
+
+**The fixed-oracle AUTHOR brief.** On the spec path the coder is briefed against the fixed oracle,
+rendered faithfully by `describe_spec` (tape shapes, behaviors, target legs — no bar index), and
+told **not** to author a `scenarios()` method: the write gate stamps one from the spec and rejects
+any `scenarios()` the coder writes. The coder changes only the trading logic (`on_start` / `on_bar`
+/ `param_space` / `Params`) to satisfy the fixed tape. Every private retry re-authors that logic
+against the *same* oracle — the tape and behaviors never move — and an **escalation** to the paid
+fallback coder (see below) inherits the identical brief and spec, so a candidate is judged against
+one unchanging target end to end.
+
+**The needs-more-history exit.** Each tape is preceded by a flat setup pad sized to the strategy's
+own declared warmup, so a modest warmup always fits. A warmup too large for the fixed tape (the
+compiled scenario overruns the 2000-bar maximum) is rejected with an actionable message, and the
+driver ends that strategy in a **refined-brief** outcome — the honest move is a lighter thesis that
+needs less history, never a bent gate or a stretched tape. The next FORMULATE round can propose one.
+
+**Machine-stamped `scenarios()`.** On success the gate stamps a warmup-parametric `scenarios()`
+block into the installed file — it embeds the spec and re-derives the identical oracle at runtime —
+so the file stays the whole artifact and `noctis backtest <name>` replays exactly what was gated.
+See `strategies/README.md` for the stamped-block contract and the tolerant-both write gate.
+
+**Auditability.** The AUTHOR stage names the spec's scenarios on both the session ledger and the
+live `-v` narration, so an operator can see which fixed oracle each candidate was gated against —
+carried through to the per-candidate trail in the CLOSE report's research rollup. A gate-rejected
+coder attempt persists that oracle alongside the observed-behavior diagnostics (what the code
+actually did on the tape) in the capped `__tmp/failed/` store, so a post-mortem shows both the
+target the code missed and the miss.
+
 ## Panel research: out-of-sample on two axes
 
 Research is cross-sectional, not single-symbol. Every candidate is tuned and validated on a

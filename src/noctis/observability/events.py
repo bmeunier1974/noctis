@@ -133,15 +133,26 @@ def tool_event(name: str, args: dict, result: dict, brief: dict) -> Event:
     return Event("tool", text, meta=meta, level=1)
 
 
-def stage_event(stage: str, strategy: str | None = None) -> Event:
+def stage_event(
+    stage: str, strategy: str | None = None, *, oracle: list[str] | None = None
+) -> Event:
     """One :class:`Event` marking an episodic-driver protocol boundary (#73). The stage label is
     uppercased for a clear boundary line — ``FORMULATE`` / ``MATCH · <strategy>`` — with the
     structured ``stage`` (and ``strategy`` when named) in ``meta``. Level 1, so it shows at ``-v``
     like a tool line: stage boundaries are the episodic session's skeleton, not the ``-vv``
-    firehose."""
+    firehose.
+
+    ``oracle`` (the AUTHOR stage, #86) names the fixed spec's scenarios the candidate is gated
+    against — the canonical scenario names from the FORMULATE spec, not a second rendering. When
+    present it is both appended to the boundary line (``AUTHOR · <strategy> · oracle: a, b``) and
+    carried structurally in ``meta['oracle']``, so an operator audits which oracle a candidate met
+    from the live narration. Absent (every other stage) it is omitted, so the line is unchanged."""
     label = stage.upper()
     text = f"{label} · {strategy}" if strategy else label
     meta: dict = {"stage": stage}
     if strategy:
         meta["strategy"] = strategy
+    if oracle:
+        meta["oracle"] = list(oracle)
+        text += f" · oracle: {', '.join(oracle)}"
     return Event("stage", text, meta=meta, level=1)

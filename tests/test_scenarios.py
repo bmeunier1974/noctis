@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import random
 from collections import deque
 from dataclasses import dataclass
 
+import pandas as pd
 import pytest
 
 from noctis.strategies import indicators as ind
@@ -14,6 +16,7 @@ from noctis.strategies.scenarios import (
     ScenarioError,
     Segment,
     always_flat,
+    check_invariants,
     check_scenario_contract,
     chop,
     flat,
@@ -23,6 +26,7 @@ from noctis.strategies.scenarios import (
     holds_long_through,
     holds_short_through,
     long_within,
+    observed_behavior,
     recovery,
     run_scenario,
     selloff,
@@ -335,3 +339,359 @@ def test_bad_params_override_is_reported_not_raised():
     )
     msg = run_scenario(_Above, broken)
     assert msg is not None and "params override rejected" in msg
+
+
+# ── execution-feedback diagnostics on scenario failure (#79) ──────────────────────────────
+def test_observed_behavior_reports_first_entry_and_both_direction_spans():
+    # The observed-behavior summary names the first nonzero-target bar, its direction, and the
+    # position spans the code actually held on the tape (long and short, both listed).
+    obs = observed_behavior([0, 0, 1, 1, 1, 0, 0, -1, -1, 0])
+    assert "first went long at bar 2" in obs
+    assert "long spans [2–4]" in obs
+    assert "short spans [7–8]" in obs
+
+
+def test_observed_behavior_reports_a_short_first_entry():
+    obs = observed_behavior([0, 0, 0, -1, -1, 0, 1, 1])
+    assert "first went short at bar 3" in obs
+    assert "short spans [3–4]" in obs
+    assert "long spans [6–7]" in obs
+
+
+def test_observed_behavior_lists_multiple_spans_of_one_direction():
+    obs = observed_behavior([0, 1, 1, 0, 1, 1, 1, 0])
+    assert "first went long at bar 1" in obs
+    assert "long spans [1–2], [4–6]" in obs
+
+
+def test_observed_behavior_reports_never_traded_when_all_flat():
+    # No nonzero target anywhere: the honest diagnostic is that the code never took a position.
+    obs = observed_behavior([0] * 12)
+    assert "never took a position" in obs
+    assert "12 bars" in obs
+    assert "long spans" not in obs and "short spans" not in obs
+
+
+def _scripted(script: dict[int, int]):
+    """A strategy whose per-bar target is dictated by bar index, ignoring the tape.
+
+    Gives a test total control over the replayed target series, so the observed-behavior
+    diagnostics a scenario failure carries are exactly predictable per expectation type.
+    """
+
+    class _Scripted(TraderStrategy):
+        name = "scripted"
+
+        @dataclass(frozen=True)
+        class Params:
+            pass
+
+        params_cls = Params
+
+        def on_start(self, ctx):
+            self._i = -1
+
+        def on_bar(self, ctx, bar):
+            self._i += 1
+            ctx.set_target(script.get(self._i, 0))
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Scripted
+
+
+def _run(script: dict[int, int], expectation) -> str:
+    scenario = Scenario("diag", segments=[flat(90)], expect=[expectation])
+    msg = run_scenario(_scripted(script), scenario)
+    assert msg is not None, "expected the scenario to fail"
+    return msg
+
+
+def _span(lo: int, hi: int, direction: int) -> dict[int, int]:
+    return {i: direction for i in range(lo, hi + 1)}
+
+
+@pytest.mark.parametrize(
+    ("expectation", "script", "violation", "diagnostics"),
+    [
+        (
+            flat_until(20),
+            _span(5, 8, 1),
+            "flat_until(20) violated",
+            ("first went long at bar 5", "long spans [5–8]"),
+        ),
+        (
+            long_within(30, 40),
+            _span(50, 55, -1),
+            "long_within(30,40) violated",
+            ("first went short at bar 50", "short spans [50–55]", "long spans none"),
+        ),
+        (
+            holds_long_through(30, 40),
+            {**_span(30, 34, 1), **_span(36, 40, 1)},
+            "holds_long_through(30,40) violated",
+            ("first went long at bar 30", "long spans [30–34], [36–40]"),
+        ),
+        (
+            short_within(30, 40),
+            _span(50, 55, 1),
+            "short_within(30,40) violated",
+            ("first went long at bar 50", "long spans [50–55]", "short spans none"),
+        ),
+        (
+            holds_short_through(30, 40),
+            {**_span(30, 34, -1), **_span(36, 40, -1)},
+            "holds_short_through(30,40) violated",
+            ("first went short at bar 30", "short spans [30–34], [36–40]"),
+        ),
+        (
+            flat_by(50),
+            _span(55, 60, 1),
+            "flat_by(50) violated",
+            ("first went long at bar 55", "long spans [55–60]"),
+        ),
+        (
+            always_flat(),
+            _span(40, 45, -1),
+            "always_flat violated",
+            ("first went short at bar 40", "short spans [40–45]"),
+        ),
+    ],
+)
+def test_every_expectation_failure_carries_execution_diagnostics(
+    expectation, script, violation, diagnostics
+):
+    # Each expectation type's scenario-failure message still names the violated window AND now
+    # carries what the code actually did: the first nonzero-target bar, its direction, and the
+    # observed position spans.
+    msg = _run(script, expectation)
+    assert violation in msg
+    assert "observed:" in msg
+    for fragment in diagnostics:
+        assert fragment in msg, f"{fragment!r} missing from {msg!r}"
+
+
+def test_directional_failure_that_never_trades_reports_never_took_a_position():
+    # A long_within failure where the code stayed flat everywhere reports the honest observed
+    # behavior — no first entry, no spans — rather than fabricating one.
+    msg = _run({}, long_within(30, 40))
+    assert "long_within(30,40) violated" in msg
+    assert "observed:" in msg and "never took a position" in msg
+
+
+# ── Tier-1 invariant: declared-warmup honesty (#80) ────────────────────────────────────────
+def _with_warmup(base, warmup):
+    """A subclass of ``base`` that declares a fixed ``warmup_bars`` (ignores params)."""
+
+    class _W(base):
+        @classmethod
+        def warmup_bars(cls, params):
+            return warmup
+
+    return _W
+
+
+def test_warmup_bars_defaults_to_zero_on_the_base_contract():
+    # The only model-owned number in the oracle defaults to 0 = undeclared = exempt.
+    assert _Above.warmup_bars(_Above.Params()) == 0
+
+
+def test_declared_warmup_lie_is_caught_naming_the_bar_and_the_declared_warmup():
+    # The code enters at bar 5 but declares a warmup of 20 — a lie the invariant catches on
+    # the tape, naming the scenario, the offending bar, and the declared warmup.
+    lying = _with_warmup(_scripted(_span(5, 40, 1)), 20)
+    scenario = Scenario("premature", segments=[flat(90)], expect=[long_within(5, 40)])
+    msg = run_scenario(lying, scenario)
+    assert msg is not None
+    assert "premature" in msg
+    assert "bar 5" in msg
+    assert "warmup_bars=20" in msg
+
+
+def test_honest_warmup_declaration_passes_the_invariant():
+    # First entry lands at bar 25, at or after the declared warmup of 20 — no lie.
+    honest = _with_warmup(_scripted(_span(25, 40, 1)), 20)
+    scenario = Scenario("honest", segments=[flat(90)], expect=[long_within(25, 40)])
+    assert run_scenario(honest, scenario) is None
+
+
+def test_undeclared_warmup_is_exempt_from_the_honesty_check():
+    # warmup_bars default 0: a strategy may take a position at bar 0 without the invariant
+    # firing, so nothing outside the library breaks.
+    early = _scripted(_span(0, 40, 1))
+    scenario = Scenario("from_the_open", segments=[flat(90)], expect=[long_within(0, 40)])
+    assert run_scenario(early, scenario) is None
+
+
+def test_a_warmup_bars_that_raises_is_reported_not_propagated():
+    class _Boom(_scripted(_span(5, 40, 1))):
+        @classmethod
+        def warmup_bars(cls, params):
+            raise RuntimeError("kaput")
+
+    scenario = Scenario("boom", segments=[flat(90)], expect=[long_within(5, 40)])
+    msg = run_scenario(_Boom, scenario)
+    assert msg is not None and "warmup_bars()" in msg and "kaput" in msg
+
+
+# ── Tier-1 invariants: determinism, truncation no-lookahead, price-scale (#81) ──────────────
+def _trivial_params():
+    """A frozen empty Params for the throwaway invariant probes below."""
+
+    @dataclass(frozen=True)
+    class _P:
+        pass
+
+    return _P
+
+
+def _nondeterministic():
+    """A strategy carrying class-level state that survives across replays (a determinism bug).
+
+    A shared class flag flips permanently on the first bar of the first replay, so a second
+    replay of the same tape through a fresh instance produces a different target series —
+    exactly what class-level mutable state or a missing on_start reset looks like.
+    """
+
+    class _Flaky(TraderStrategy):
+        name = "flaky"
+        params_cls = _trivial_params()
+        _ran_before = False  # class-level: never reset in on_start (the bug)
+
+        def on_start(self, ctx):
+            pass
+
+        def on_bar(self, ctx, bar):
+            ctx.set_target(1 if _Flaky._ran_before else 0)
+            _Flaky._ran_before = True
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Flaky
+
+
+def _random_targets():
+    """A strategy that draws its target from the ``random`` module (a determinism bug)."""
+
+    class _Rng(TraderStrategy):
+        name = "rng"
+        params_cls = _trivial_params()
+
+        def on_start(self, ctx):
+            pass
+
+        def on_bar(self, ctx, bar):
+            ctx.set_target(random.choice([0, 1]))
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Rng
+
+
+def _lookahead_signals():
+    """A vectorised ``signals`` override whose decision at bar t depends on the total bar count.
+
+    ``i >= len(data) // 2`` means truncating the tape shifts every earlier decision — the
+    canonical vectorised-override lookahead the event path cannot express.
+    """
+
+    class _Peek(TraderStrategy):
+        name = "peek"
+        params_cls = _trivial_params()
+
+        def on_start(self, ctx):
+            pass
+
+        def on_bar(self, ctx, bar):
+            ctx.set_target(0)
+
+        @classmethod
+        def signals(cls, data, params):
+            n = len(data)
+            return pd.Series([1 if i >= n // 2 else 0 for i in range(n)], dtype=int)
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Peek
+
+
+def _absolute_threshold(level: float = 105.0):
+    """A strategy comparing close to an absolute price level (a price-scale bug)."""
+
+    class _Abs(TraderStrategy):
+        name = "abs"
+        params_cls = _trivial_params()
+
+        def on_start(self, ctx):
+            pass
+
+        def on_bar(self, ctx, bar):
+            ctx.set_target(1 if bar.close > level else 0)
+
+        @classmethod
+        def param_space(cls):
+            return []
+
+    return _Abs
+
+
+def test_nondeterministic_replay_is_caught_naming_the_first_diverging_bar():
+    # Two replays of the same tape disagree at bar 0 — the invariant names the bar and points
+    # at the two structural causes (class-level state / randomness).
+    scenario = Scenario("flips", segments=[flat(90)], expect=[long_within(1, 89)])
+    msg = run_scenario(_nondeterministic(), scenario)
+    assert msg is not None
+    assert "non-deterministic" in msg
+    assert "bar 0" in msg
+    assert "class-level" in msg or "randomness" in msg
+
+
+def test_randomness_is_caught_as_nondeterminism():
+    # A strategy reading random.* is non-deterministic across replays — caught the same way.
+    scenario = Scenario("noise", segments=[flat(90)], expect=[long_within(1, 89)])
+    msg = run_scenario(_random_targets(), scenario)
+    assert msg is not None and "non-deterministic" in msg
+
+
+def test_lookahead_signals_override_is_caught_by_truncation():
+    # signals(tape[:k]) disagrees with signals(tape)[:k]: the override peeks at the future.
+    scenario = Scenario("halves", segments=[flat(90)], expect=[always_flat()])
+    msg = run_scenario(_lookahead_signals(), scenario)
+    assert msg is not None
+    assert "looks ahead" in msg
+    assert "bar" in msg
+
+
+def test_absolute_price_threshold_is_caught_by_price_scale():
+    # Scaling every price ×10 flips the target at bar 0 — the close>105 level is not scale-free.
+    scenario = Scenario("rally", segments=[flat(20), trend(60, 0.2)], expect=[long_within(30, 79)])
+    msg = run_scenario(_absolute_threshold(), scenario)
+    assert msg is not None
+    assert "price-scale" in msg
+    assert "bar 0" in msg
+
+
+def test_check_invariants_runs_the_whole_tier1_suite_in_order():
+    # Warmup honesty stays first; the three new checks are all reachable through the dispatcher.
+    flaky = _nondeterministic()
+    scenario = Scenario("flips", segments=[flat(90)], expect=[long_within(1, 89)])
+    params = flaky.params_cls()
+    from noctis.strategies.base import replay_targets
+
+    targets = replay_targets(flaky(params), scenario.frame())
+    assert "non-deterministic" in (check_invariants(flaky, scenario, params, targets) or "")
+
+
+def test_scale_free_deterministic_causal_strategy_passes_every_invariant():
+    # The SMA probe is deterministic, causal (default signals), and scale-free — no invariant
+    # fires, so a legitimate strategy sails through the whole suite.
+    for scen in (POSITIVE, NEGATIVE):
+        assert run_scenario(_with_scenarios(POSITIVE, NEGATIVE), scen) is None

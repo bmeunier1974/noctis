@@ -51,6 +51,7 @@ from noctis.research.symbols import BANDS, SymbolScreener, screen, validate_prof
 from noctis.strategies import library
 from noctis.strategies.base import ParamSpec
 from noctis.strategies.families import FamilyRegistry
+from noctis.strategies.scenario_spec import SpecSuite, describe_spec
 
 if TYPE_CHECKING:
     from noctis.data.seam import MarketData
@@ -1194,6 +1195,7 @@ class ResearchToolbox:
         thesis: str | None = None,
         parent_thesis: str | None = None,
         pivot_rationale: str | None = None,
+        spec: SpecSuite | None = None,
     ) -> dict:
         is_new = library.strategy_path(self.strategies_dir, name) is None
         # The guards that fire before any source exists (exhausted-class, undecided nudge) run
@@ -1247,7 +1249,7 @@ class ResearchToolbox:
         # Both surface a StrategyValidationError on a gate rejection, so the fixation/REPAIR
         # handling below and the success bookkeeping are shared, never duplicated.
         try:
-            result = self._author_source(name, source, brief)
+            result = self._author_source(name, source, brief, spec=spec)
         except library.StrategyValidationError as exc:
             self._write_gate_failures += 1
             self._last_failed_write = name
@@ -1326,7 +1328,13 @@ class ResearchToolbox:
             out["author_model"] = self.coder_fallback_model
         return out
 
-    def _author_source(self, name: str, source: str | None, brief: dict | None) -> dict:
+    def _author_source(
+        self,
+        name: str,
+        source: str | None,
+        brief: dict | None,
+        spec: SpecSuite | None = None,
+    ) -> dict:
         """Materialize a validated write result from a brief (coder mode) or hand-written source.
 
         Returns the :func:`library.write_strategy` result (name/path/header) either path lands,
@@ -1334,16 +1342,21 @@ class ResearchToolbox:
         A brief authors through the coder engine; anything else requires source. Raises
         :class:`library.StrategyValidationError` on a gate rejection (brief mode re-surfaces the
         engine's final validation error), routing both paths through the shared REPAIR handling.
+
+        ``spec`` is the compiled scenario oracle: forwarded to the write gate down both paths so it
+        replays the spec at the candidate's warmup and machine-stamps the file. The episodic driver
+        (#85) supplies the FORMULATE spec here so the gate owns the oracle end to end; ``None``
+        keeps the spec-less path (the conversation loop, hand-written source) byte-identical.
         """
         if brief is not None and self.author_engine is not None:
-            return self._author_from_brief(name, brief)
+            return self._author_from_brief(name, brief, spec=spec)
         if not source:
             raise library.StrategyValidationError(
                 "write_strategy needs `source` (or a `brief` when a coder model is configured)"
             )
-        return library.write_strategy(self.strategies_dir, name, source, self.families)
+        return library.write_strategy(self.strategies_dir, name, source, self.families, spec=spec)
 
-    def _author_from_brief(self, name: str, brief: dict) -> dict:
+    def _author_from_brief(self, name: str, brief: dict, spec: SpecSuite | None = None) -> dict:
         """Delegate to the coder engine: the driver's brief in, a validated file out.
 
         The (cheap/local) engine makes stateless coder completions with private retries and lands
@@ -1359,18 +1372,22 @@ class ResearchToolbox:
         assert engine is not None  # only reached in coder mode (guarded by _author_source)
         parsed = self._parse_brief(brief)
         try:
-            return engine.author(name, parsed, on_attempt=self._author_attempt_sink(name))
+            return engine.author(
+                name, parsed, on_attempt=self._author_attempt_sink(name, spec=spec), spec=spec
+            )
         except AuthoringError as exc:
             if not self._can_escalate():
                 raise self._as_validation_error(exc) from exc
-            return self._escalate_author(name, parsed)
+            return self._escalate_author(name, parsed, spec=spec)
 
     def _can_escalate(self) -> bool:
         """Whether a spent local author may escalate now: a fallback engine exists and the paid
         per-session cap is not yet spent (``max_escalations == 0`` disables escalation entirely)."""
         return self.fallback_author_engine is not None and self.escalations < self.max_escalations
 
-    def _escalate_author(self, name: str, parsed: StrategyBrief) -> dict:
+    def _escalate_author(
+        self, name: str, parsed: StrategyBrief, spec: SpecSuite | None = None
+    ) -> dict:
         """Escalate one spent local author to the paid fallback with the full validator-retry
         budget. The escalation is counted BEFORE the attempt (the cap bounds paid *spend*, whether
         or not the file then lands), and the fallback's completions bump ``author_calls`` through
@@ -1379,9 +1396,9 @@ class ResearchToolbox:
         engine = self.fallback_author_engine
         assert engine is not None  # guarded by _can_escalate
         self.escalations += 1
-        sink = self._author_attempt_sink(name, model=self.coder_fallback_model)
+        sink = self._author_attempt_sink(name, model=self.coder_fallback_model, spec=spec)
         try:
-            return engine.author(name, parsed, on_attempt=sink)
+            return engine.author(name, parsed, on_attempt=sink, spec=spec)
         except AuthoringError as exc:
             raise self._as_validation_error(exc) from exc
 
@@ -1402,7 +1419,9 @@ class ResearchToolbox:
         """The final gate error an exhausted authoring job carries, for the shared REPAIR path."""
         return exc.validation_error or library.StrategyValidationError(str(exc))
 
-    def _author_attempt_sink(self, name: str, *, model: str | None = None):
+    def _author_attempt_sink(
+        self, name: str, *, model: str | None = None, spec: SpecSuite | None = None
+    ):
         """Adapt the engine's per-attempt hook into (a) a session authoring event and (b) an
         on-disk failure record for ``name``.
 
@@ -1414,13 +1433,18 @@ class ResearchToolbox:
 
         ``model`` names which coder authored this attempt — the local coder by default, the paid
         fallback for an escalated job (story #72) — so the watch feed attributes each completion to
-        the model that actually made it.
+        the model that actually made it. ``spec`` is the fixed scenario oracle the attempt was gated
+        against on the spec path (#86); when present its canonical rendering
+        (:func:`~noctis.strategies.scenario_spec.describe_spec`) rides the failure record beside the
+        gate error's observed-behavior diagnostics, so a post-mortem shows the missed target too.
+        ``None`` (a spec-less write) leaves the record unchanged.
         """
+        oracle = describe_spec(spec) if spec is not None else None
 
         def sink(attempt: int, error: Exception | None, source: str) -> None:
             self._emit_author_event(name, attempt, error, model=model)
             if error is not None:
-                self.failed_store.record(name, attempt, source, str(error))
+                self.failed_store.record(name, attempt, source, str(error), oracle=oracle)
 
         return sink
 

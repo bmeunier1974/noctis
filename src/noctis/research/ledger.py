@@ -261,7 +261,8 @@ class CandidateTrail:
     post-mortem walks structured records instead of prose. ``stages`` is the strategy-scoped stage
     labels it reached in order (its thesis is the FORMULATE step); ``trials`` / ``best_metric``
     come from its OPTIMIZE detail; ``verdict`` / ``promoted`` are ``None`` when it never reached a
-    verdict (left undecided)."""
+    verdict (left undecided); ``oracle`` is the fixed spec's scenario names the AUTHOR stage gated
+    it against (#86) — an empty tuple for a spec-less/older author stage that carried none."""
 
     strategy: str
     thesis: str
@@ -270,6 +271,7 @@ class CandidateTrail:
     best_metric: float | None
     verdict: str | None
     promoted: bool | None
+    oracle: tuple[str, ...] = ()
 
     @property
     def outcome(self) -> str:
@@ -292,6 +294,7 @@ class CandidateTrail:
             "verdict": self.verdict,
             "promoted": self.promoted,
             "outcome": self.outcome,
+            "oracle": list(self.oracle),
         }
 
 
@@ -419,7 +422,9 @@ class SessionLedger:
             name = t.strategy
             my_stages = [s for s in stages if s.strategy == name]
             optimize = next((s for s in my_stages if s.stage == "optimize"), None)
+            author = next((s for s in my_stages if s.stage == "author"), None)
             verdict = verdicts.get(name)
+            oracle = tuple(str(x) for x in (author.detail.get("oracle") or ())) if author else ()
             trails.append(
                 CandidateTrail(
                     strategy=name,
@@ -429,6 +434,7 @@ class SessionLedger:
                     best_metric=_num(optimize.detail.get("best_metric")) if optimize else None,
                     verdict=verdict.verdict if verdict else None,
                     promoted=verdict.promoted if verdict else None,
+                    oracle=oracle,
                 )
             )
         return trails

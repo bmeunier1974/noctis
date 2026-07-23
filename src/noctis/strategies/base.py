@@ -140,6 +140,16 @@ class TraderStrategy(ABC):
         """
         return []
 
+    @classmethod
+    def warmup_bars(cls, params) -> int:
+        """Decision bars before which this strategy promises to stay flat.
+
+        Higher-timeframe filters included — the author multiplies here, once,
+        in code it can see. Default 0 means undeclared (exempt from the
+        honesty check), so nothing outside the library breaks.
+        """
+        return 0
+
 
 class TargetContext:
     """The concrete :class:`Context` every driver uses: captures the target ``on_bar`` sets.

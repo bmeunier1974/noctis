@@ -9,8 +9,9 @@ was only readable from scrollback). The store lives under the strategy library's
 never grow unbounded on disk.
 
 One file per attempt carries BOTH halves a human needs — a comment header with the strategy
-name, attempt number, UTC timestamp, and the gate error, then the exact attempted source below
-— so opening one file shows what the coder wrote and why the gate refused it. Files are named
+name, attempt number, UTC timestamp, the gate error, and (on the spec path) the fixed oracle the
+attempt was gated against, then the exact attempted source below — so opening one file shows what
+the coder wrote, why the gate refused it, and the target it missed. Files are named
 with a zero-padded monotonic sequence (``000042-<name>-attempt<N>.py``) so insertion order is
 total: eviction always drops the lowest sequence, and the next sequence keeps climbing even
 after a rollover (a number is never reused). The store is **stateless across calls** — the next
@@ -49,12 +50,21 @@ class FailedAttemptStore:
     def root(self) -> Path:
         return self._root
 
-    def record(self, name: str, attempt: int, source: str, error: str) -> Path:
-        """Persist one rejected attempt; return its file path. Evicts the oldest over the cap."""
+    def record(
+        self, name: str, attempt: int, source: str, error: str, *, oracle: str | None = None
+    ) -> Path:
+        """Persist one rejected attempt; return its file path. Evicts the oldest over the cap.
+
+        ``oracle`` is the fixed scenario oracle the attempt was gated against on the spec path
+        (#86) — the rendered target the code missed, persisted in the header beside the gate error
+        (whose text already carries the observed-behavior diagnostics of what the code *did*, #79),
+        so a post-mortem shows both halves. ``None`` (a spec-less write) omits the section entirely,
+        leaving the record byte-identical to before.
+        """
         self._root.mkdir(parents=True, exist_ok=True)
         seq = self._next_seq()
         path = self._root / f"{seq:06d}-{self._safe(name)}-attempt{attempt}.py"
-        path.write_text(self._render(name, attempt, source, error), encoding="utf-8")
+        path.write_text(self._render(name, attempt, source, error, oracle), encoding="utf-8")
         self._evict()
         return path
 
@@ -84,8 +94,9 @@ class FailedAttemptStore:
         return cleaned or "unnamed"
 
     @staticmethod
-    def _render(name: str, attempt: int, source: str, error: str) -> str:
-        """One inspectable file: a commented header (name, attempt, time, error) then source."""
+    def _render(name: str, attempt: int, source: str, error: str, oracle: str | None = None) -> str:
+        """One inspectable file: a commented header (name, attempt, time, error, and — on the spec
+        path — the fixed oracle it was gated against) then the attempted source."""
         stamp = datetime.now(UTC).isoformat()
         error_lines = (error or "").splitlines() or [""]
         header = [
@@ -93,6 +104,8 @@ class FailedAttemptStore:
             f"# recorded: {stamp}",
             "# gate error:",
             *[f"#   {line}" for line in error_lines],
-            "# --- attempted source below ---",
         ]
+        if oracle:
+            header += ["# fixed oracle:", *[f"#   {line}" for line in oracle.splitlines() or [""]]]
+        header.append("# --- attempted source below ---")
         return "\n".join(header) + "\n" + (source or "")

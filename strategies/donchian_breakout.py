@@ -50,6 +50,12 @@ class DonchianBreakout(TraderStrategy):
         self._lows.append(bar.low)
 
     @classmethod
+    def warmup_bars(cls, params) -> int:
+        # The channel reads the prior `channel` bars (highest/lowest return None until the
+        # deque holds `channel` values), so no breakout can fire before then.
+        return params.channel
+
+    @classmethod
     def param_space(cls) -> list[ParamSpec]:
         return [ParamSpec("channel", "int", low=5, high=60, step=1)]
 

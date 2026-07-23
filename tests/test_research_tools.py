@@ -532,10 +532,10 @@ def test_write_gate_fixation_backstop_redirects_to_the_library(toolbox, monkeypa
     real_write = library.write_strategy
     gate = {"fail": True}
 
-    def _gated_write(strategies_dir, name, source, families):
+    def _gated_write(strategies_dir, name, source, families, *, spec=None):
         if gate["fail"]:
             raise library.StrategyValidationError("smoke replay crashed")
-        return real_write(strategies_dir, name, source, families)
+        return real_write(strategies_dir, name, source, families, spec=spec)
 
     monkeypatch.setattr(library, "write_strategy", _gated_write)
 
@@ -559,7 +559,7 @@ def test_write_gate_backstop_is_silent_once_a_backtest_has_run(toolbox, monkeypa
     # a session that has already produced a backtest gets the plain rejection only.
     toolbox.dispatch("run_backtest", {"name": "probe", "symbols": ["AAA"]})
 
-    def _always_fail(strategies_dir, name, source):
+    def _always_fail(strategies_dir, name, source, families, *, spec=None):
         raise library.StrategyValidationError("smoke replay crashed")
 
     monkeypatch.setattr(library, "write_strategy", _always_fail)
@@ -1308,6 +1308,27 @@ def test_brief_authors_validated_file_same_shape_as_source(tmp_path):
     assert len(coder.calls) == 1  # one completion for a first-try success
 
 
+def test_toolbox_author_path_forwards_the_spec_to_the_gate(tmp_path):
+    """#84 plumbing: a compiled scenario spec threaded through the toolbox's author path reaches
+    the write gate, which replays it at the candidate's warmup and machine-stamps a scenarios()
+    block. The coder source carries none of its own (the oracle is fixed by the spec)."""
+    from noctis.strategies.scenario_spec import Behavior, LegSpec, ScenarioSpec, SpecSuite
+    from tests.test_write_gate_spec import SPEC_CANDIDATE
+
+    suite = SpecSuite(
+        [
+            ScenarioSpec("rally", [LegSpec("trend", 60, pct=0.15)], Behavior.ENTER_LONG, leg=0),
+            ScenarioSpec("grind", [LegSpec("flat", 60)], Behavior.NEVER_TRADE),
+        ]
+    )
+    candidate = SPEC_CANDIDATE.replace('name = "probe"', 'name = "spec_probe"')
+    box, _ = _coder_box(tmp_path, [_fenced(candidate)])
+    out = box._author_source("spec_probe", None, BRIEF_ARGS, spec=suite)
+    assert out["name"] == "spec_probe"
+    installed = library.strategy_source(box.strategies_dir, "spec_probe")
+    assert "compile_spec(" in installed and "spec_from_json(" in installed
+
+
 def test_coder_max_tokens_config_threads_to_the_authoring_completion(tmp_path):
     """External behavior: with research.agent.coder_max_tokens set, an authoring completion asks
     the coder client for exactly that ceiling — the compat/sizing lever threads through the single
@@ -1641,6 +1662,68 @@ def test_rejected_brief_attempt_persists_source_and_error_to_failed_area(tmp_pat
     assert "brief_probe" in body  # attributed to the strategy
 
 
+def _scenario_failer(name: str) -> str:
+    """A named PROBE whose entry condition is inverted: it trades, then fails scenario replay —
+    the case whose gate error carries execution-feedback diagnostics (#79)."""
+    return _named(name).replace("int(bar.close > mean", "int(bar.close < mean")
+
+
+def test_rejected_brief_attempt_persists_scenario_execution_diagnostics(tmp_path):
+    """A scenario-failing coder attempt persists BOTH the source and the enriched gate error — the
+    diagnostics (first nonzero-target bar, direction, observed spans) land in the failed record so
+    a post-mortem shows why the code missed its target, not just which window it missed (#79)."""
+    box, _ = _coder_box(
+        tmp_path, [_fenced(_scenario_failer("diag_probe")), _fenced(_named("diag_probe"))]
+    )
+    box.dispatch("write_strategy", {"name": "diag_probe", "brief": BRIEF_ARGS})
+
+    files = _failed_files(box)
+    assert len(files) == 1  # the inverted attempt failed replay; the corrected one landed
+    body = files[0].read_text(encoding="utf-8")
+    assert "violated" in body  # the missed window is still recorded
+    assert "observed:" in body  # and what the code actually did rides alongside it
+    assert "first went long at bar" in body
+    assert "long spans" in body and "short spans" in body
+
+
+def _spec_scenario_failer(name: str) -> str:
+    """A spec-path candidate whose entry is inverted: on a rising rally leg it stays flat, so it
+    never enters long during the ENTER_LONG tape the gate stamps — the case whose spec-path gate
+    error carries execution-feedback diagnostics (#79) beside the fixed-oracle identity (#86)."""
+    return _spec_named(name).replace("1 if bar.close > mean else 0", "1 if bar.close < mean else 0")
+
+
+def test_rejected_spec_path_attempt_persists_the_oracle_and_the_diagnostics(tmp_path):
+    """On the spec path a gate-rejected attempt persists BOTH the fixed-oracle identity (the target
+    the code was gated against) and the observed-behavior diagnostics (what the code actually did),
+    so a post-mortem shows the missed target as well as the miss (#86)."""
+    from noctis.strategies.scenario_spec import describe_spec
+
+    suite = _oracle_suite()
+    box, _ = _coder_box(
+        tmp_path, [_fenced(_spec_scenario_failer("spec_fail")), _fenced(_spec_named("spec_fail"))]
+    )
+    box.tool_write_strategy(name="spec_fail", brief=BRIEF_ARGS, spec=suite)
+
+    files = _failed_files(box)
+    assert len(files) == 1  # the inverted attempt failed replay; the corrected one landed
+    body = files[0].read_text(encoding="utf-8")
+    assert "violated" in body  # the missed window is recorded
+    assert "observed:" in body  # what the code actually did rides alongside it (#79)
+    assert describe_spec(suite) in body  # and the fixed-oracle identity it was gated against (#86)
+
+
+def test_spec_less_brief_failure_carries_no_oracle_header(tmp_path):
+    """A spec-less coder failure (the conversation loop / hand-written oracle) persists no
+    fixed-oracle header — the record is unchanged from before #86."""
+    box, _ = _coder_box(tmp_path, [_fenced(BROKEN), _fenced(_named("brief_probe"))])
+    box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    files = _failed_files(box)
+    assert len(files) == 1
+    assert "fixed oracle" not in files[0].read_text(encoding="utf-8").lower()
+
+
 def test_each_rejected_brief_attempt_persists_its_own_file(tmp_path):
     """Every private retry that fails writes its own failure record — three rejections, three
     files, so the whole failing job is on disk."""
@@ -1755,6 +1838,74 @@ def test_escalation_that_also_fails_is_still_counted_and_skips_the_strategy(tmp_
     assert box.escalations == 1  # counted once — the escalation attempt, not its outcome
     assert len(fallback.calls) == 3  # the fallback got its full budget before giving up
     assert library.strategy_path(box.strategies_dir, "esc_probe") is None  # nothing landed
+
+
+def _oracle_suite():
+    from noctis.strategies.scenario_spec import Behavior, LegSpec, ScenarioSpec, SpecSuite
+
+    return SpecSuite(
+        [
+            ScenarioSpec("rally", [LegSpec("trend", 60, pct=0.15)], Behavior.ENTER_LONG, leg=0),
+            ScenarioSpec("grind", [LegSpec("flat", 60)], Behavior.NEVER_TRADE),
+        ]
+    )
+
+
+def _spec_named(name: str) -> str:
+    """A no-scenarios spec-path candidate (the gate stamps the oracle) re-pointed at ``name``."""
+    from tests.test_write_gate_spec import SPEC_CANDIDATE
+
+    return SPEC_CANDIDATE.replace('name = "probe"', f'name = "{name}"')
+
+
+def test_tool_write_strategy_threads_the_spec_to_the_gate_on_the_brief_path(tmp_path, monkeypatch):
+    # #85 wiring: a spec passed to tool_write_strategy reaches the write gate down the coder-brief
+    # path, so the gate owns the oracle and machine-stamps the file (byte-identical to author()).
+    box = _make_toolbox(tmp_path, coder_client=_FakeCoder([_fenced(_spec_named("probe"))]))
+    suite = _oracle_suite()
+
+    out = box.tool_write_strategy(name="probe", brief=BRIEF_ARGS, spec=suite)
+
+    assert out.get("ok") is True
+    installed = library.strategy_source(box.strategies_dir, "probe")
+    assert "compile_spec(" in installed and "spec_from_json(" in installed
+
+
+def test_escalated_author_inherits_the_same_fixed_oracle(tmp_path, monkeypatch):
+    # Criterion 4 (#85): an escalated coder attempt inherits the IDENTICAL fixed oracle. The local
+    # coder burns its budget, the SAME brief AND the SAME spec escalate to the paid fallback, and
+    # every gate call — local retries and the escalated attempt alike — carries that one spec.
+    seen_specs = []
+    real_write = library.write_strategy
+
+    def spy(strategies_dir, name, source, fams, *, spec=None):
+        seen_specs.append(spec)
+        return real_write(strategies_dir, name, source, fams, spec=spec)
+
+    monkeypatch.setattr(library, "write_strategy", spy)
+    monkeypatch.setattr("noctis.research.tools.library.write_strategy", spy, raising=False)
+    monkeypatch.setattr("noctis.research.author.library.write_strategy", spy, raising=False)
+
+    box, local, fallback = _escalation_box(
+        tmp_path,
+        [_fenced(_spec_named("mismatch"))] * 3,  # local always mismatches → burns its budget
+        [_fenced(_spec_named("esc_probe"))],  # the paid fallback authors a valid no-scenarios file
+        max_escalations=1,
+    )
+    suite = _oracle_suite()
+
+    out = box.tool_write_strategy(name="esc_probe", brief=BRIEF_ARGS, spec=suite)
+
+    assert out.get("ok") is True and out["escalated"] is True
+    assert box.escalations == 1
+    assert len(local.calls) == 3 and len(fallback.calls) == 1
+    # Every gate call — 3 local + 1 escalated — received the SAME fixed oracle, never re-derived.
+    assert len(seen_specs) == 4
+    assert all(s is suite for s in seen_specs)
+    # And the paid fallback was briefed against the fixed oracle exactly like the local coder.
+    from noctis.strategies.scenario_spec import describe_spec
+
+    assert describe_spec(suite) in fallback.calls[0]["messages"][0]["content"]
 
 
 def test_max_escalations_caps_paid_spend_across_the_session(tmp_path):

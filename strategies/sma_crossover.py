@@ -39,6 +39,12 @@ class SmaCrossover(TraderStrategy):
         ctx.set_target(1 if fast > slow else 0)
 
     @classmethod
+    def warmup_bars(cls, params) -> int:
+        # The slow SMA is the last indicator to come online — it needs `slow` closes before
+        # ind.sma returns a value, so nothing can trade until then.
+        return params.slow
+
+    @classmethod
     def param_space(cls) -> list[ParamSpec]:
         return [
             ParamSpec("fast", "int", low=3, high=30, step=1),

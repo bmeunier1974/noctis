@@ -39,6 +39,7 @@ Each file defines exactly one `TraderStrategy` subclass (`src/noctis/strategies/
 | `on_bar(ctx, bar)` | React to one bar; call `ctx.set_target(1)` (long), `ctx.set_target(-1)` (short), or `ctx.set_target(0)` (flat). `bar.ts_event` is the UTC-ns timestamp if the thesis needs a session/clock gate. |
 | `param_space()` | `list[ParamSpec]` — the domain `run_sweep`/Optuna explores. |
 | `scenarios()` | 2–8 known-outcome `Scenario`s (see below) — the file's own correctness oracle. |
+| `warmup_bars(params)` | Optional `int` — decision bars before which the strategy promises to stay flat (derive it from your own lookback; multiply for higher-timeframe filters). Default `0` = undeclared = exempt. |
 
 `signals()` (the vectorised pre-filter path) is **optional**: the base class default replays
 `on_bar` over the frame, so both code paths agree by construction. Override it only as a
@@ -49,7 +50,10 @@ Rules the validation gate enforces on `write_strategy`:
 - exactly one strategy class, `name` matches the file, a docstring header exists;
 - long/short/flat targets (+1/−1/0), no exceptions, `signals()`/`on_bar` parity;
 - the declared known-outcome scenarios replay clean (≥ 1 tape demanding a directional
-  (long or short) entry, ≥ 1 `always_flat()` no-trade tape).
+  (long or short) entry, ≥ 1 `always_flat()` no-trade tape);
+- **warmup honesty** — if the file declares `warmup_bars(params)`, no scenario tape may take
+  a nonzero position before that bar; a declaration the code's own tapes contradict is rejected,
+  naming the offending bar and the declared warmup.
 
 Keep `on_bar` O(lookback): bounded `deque`s + the `ind` tail helpers. No I/O, no globals,
 no randomness — a strategy must be a pure function of the bars it has seen.
@@ -114,6 +118,46 @@ short) and ≥ 1 `always_flat()` tape across the set. Replays run with the curre
 (override per scenario via `Scenario(..., params={...})`), so **derive windows from
 `cls.params_cls()` defaults** — champion promotion rewrites the defaults, re-runs the gate,
 and `evaluate_vs_champion` refuses tuned params that break the declared scenarios.
+
+Every tape also runs the **Tier-1 invariant suite** — structural-honesty checks the write gate
+replays over each scenario regardless of what it declares: *warmup honesty* (above), *determinism*
+(a second replay must match), *truncation no-lookahead* (a vectorised `signals()` override may not
+peek at the future — `signals(tape[:k]) == signals(tape)[:k]`), and *price-scale invariance*
+(scaling every price ×10 must not move the target series, so an absolute-price threshold is
+rejected). Decide from scale-free features and bars ≤ *t* only, and these pass by construction.
+
+### Machine-stamped scenarios (the fixed-oracle path)
+
+A `scenarios()` block gets into a file one of two ways, and the write gate is **tolerant of both**:
+
+- **You author it** (a hand-written or conversation-loop file). The gate validates the tapes you
+  declared, exactly as above — nothing is stamped.
+- **The machine stamps it** (the episodic research driver's fixed-oracle path). There, the oracle
+  is authored *upstream* by FORMULATE as a structured spec, the coder is told **not** to write a
+  `scenarios()` method (the gate rejects one that does), and on success the gate machine-stamps a
+  warmup-parametric `scenarios()` into the installed file. See `docs/research.md` for the flow.
+
+So a champion authored on the fixed-oracle path carries a **machine-authored** `scenarios()` that
+embeds the spec and re-derives the oracle at the strategy's own declared warmup:
+
+```python
+@classmethod
+def scenarios(cls):
+    # Machine-stamped from the FORMULATE scenario spec: the known-outcome oracle is fixed by
+    # the spec and re-derived at the strategy's declared warmup ...
+    from noctis.strategies.scenario_spec import compile_spec, spec_from_json
+
+    suite = spec_from_json('{"scenarios": [...]}')
+    return list(compile_spec(suite, warm=cls.warmup_bars(cls.params_cls())))
+```
+
+This is deterministic and `ruff format`-stable, so `noctis backtest <name>` and a later promotion
+write-back both replay exactly what the write gate validated. If you edit such a file by hand,
+change the trading logic (`on_start` / `on_bar` / `param_space` / `Params`) — not the stamped
+block; the tape and behaviors are the fixed target the logic must satisfy. (Because the setup pad
+in front of each stamped tape is sized to your declared `warmup_bars`, keep the `Params` defaults'
+warmup modest: a warmup too large for the fixed tape is a rejection, answered by a lighter thesis,
+never a stretched tape.)
 
 ## Indicator helpers (`noctis.strategies.indicators`)
 

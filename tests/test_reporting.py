@@ -205,6 +205,7 @@ def _ledgered_research(escalations: int = 1) -> dict:
                         "verdict": "reject",
                         "promoted": False,
                         "outcome": "rejected",
+                        "oracle": ["rally", "grind"],
                     },
                     {
                         "strategy": "rev_2",
@@ -215,6 +216,7 @@ def _ledgered_research(escalations: int = 1) -> dict:
                         "verdict": "approve",
                         "promoted": True,
                         "outcome": "promoted",
+                        "oracle": ["spike_fade", "calm"],
                     },
                 ],
             }
@@ -239,6 +241,9 @@ def test_report_renders_the_session_rollup_and_candidate_trail():
     assert "momo_1" in text and "rejected" in text
     assert "rev_2" in text and "promoted" in text
     assert "fade the spike" in text  # the thesis (the FORMULATE step) frames the trail
+    # The fixed oracle each candidate was gated against (#86) — auditable per candidate.
+    assert "rally, grind" in text
+    assert "spike_fade, calm" in text
 
 
 def test_report_renders_escalations_as_zero_when_none_occurred():

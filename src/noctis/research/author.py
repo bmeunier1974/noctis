@@ -50,6 +50,7 @@ from noctis.research.contract_sheet import CONTRACT_SHEET, hint_for_gate_error
 from noctis.research.llm import LLMClient, cached_system
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
+from noctis.strategies.scenario_spec import SpecSuite, describe_spec
 
 # The coder's output-token ceiling — sized for a thinking-enabled hosted coder (on Anthropic
 # models the cap bounds thinking + text together) plus the current tokenizer, so a full ~200-line
@@ -147,6 +148,29 @@ class AuthoringError(Exception):
     def __init__(self, message: str, *, validation_error: Exception | None = None) -> None:
         super().__init__(message)
         self.validation_error = validation_error
+
+
+def _fixed_oracle_block(spec: SpecSuite) -> str:
+    """The coder-facing presentation of the FIXED scenario oracle on the spec path (#85).
+
+    Renders the oracle faithfully from the :class:`SpecSuite` (tape shapes, behaviors, target
+    legs — via :func:`describe_spec`) and states the two structural facts that flip the coder's
+    job from authoring tapes to satisfying a fixed one: the gate stamps ``scenarios()`` (so the
+    coder must NOT author one), and each tape is preceded by a flat setup pad sized to the
+    strategy's own declared warmup (so the Params defaults' warmup must stay modest — a warmup too
+    large for the fixed tape is rejected; shrink the lookback defaults, never enlarge the tape)."""
+    return (
+        "FIXED SCENARIO ORACLE — do NOT author a scenarios() method: the write gate stamps one "
+        "from the fixed spec below and REJECTS any scenarios() you write. The tape shape and the "
+        "one behavior each tape must prove are FIXED; change only the trading logic "
+        "(on_start / on_bar / param_space / Params) to satisfy them. Each tape is preceded by a "
+        "flat setup pad sized to your strategy's declared warmup — warmup_bars(Params defaults) — "
+        "so keep the Params defaults' warmup modest; a warmup too large for the fixed tape is "
+        "rejected, so shrink the lookback defaults rather than trying to enlarge the tape. The "
+        "fixed oracle (leg kind(bars) in order — the compiler derives every bar window from the "
+        "leg lengths and your warmup, so you never write a bar index):\n"
+        f"{describe_spec(spec)}"
+    )
 
 
 def _extract_code_block(text: str) -> str | None:
@@ -250,6 +274,7 @@ class StrategyAuthor:
         brief: StrategyBrief,
         *,
         on_attempt: Callable[[int, Exception | None, str], None] | None = None,
+        spec: SpecSuite | None = None,
     ) -> dict:
         """Turn ``brief`` into a validated ``name`` strategy file in the working tier.
 
@@ -257,6 +282,11 @@ class StrategyAuthor:
         on success. Raises :class:`AuthoringError` when the coder cannot produce a file that
         passes the write gate within the retry budget. Every private retry is invisible to
         the caller.
+
+        ``spec`` (#84) is the compiled scenario oracle: when supplied it is forwarded to the write
+        gate, which replays it at the candidate's own declared warmup and machine-stamps a
+        ``scenarios()`` block into the file. Default ``None`` keeps today's behavior — the coder's
+        own declared scenarios validate as before.
 
         When ``brief.reference`` names a library strategy, its source is composed into the
         prompt as structure to adapt; an unknown reference raises
@@ -287,6 +317,7 @@ class StrategyAuthor:
                 prior,
                 reference_source=reference_source,
                 current_source=current_source,
+                spec=spec,
             )
             turn = self._client.complete(
                 system=self._system,
@@ -304,7 +335,9 @@ class StrategyAuthor:
                 self._report(on_attempt, attempt, last_error, turn.text or "")
                 continue
             try:
-                result = library.write_strategy(self._strategies_dir, name, source, self._families)
+                result = library.write_strategy(
+                    self._strategies_dir, name, source, self._families, spec=spec
+                )
             except library.StrategyValidationError as exc:
                 last_error = exc
                 prior = (source, str(exc))
@@ -404,6 +437,7 @@ class StrategyAuthor:
         *,
         reference_source: str | None = None,
         current_source: str | None = None,
+        spec: SpecSuite | None = None,
     ) -> str:
         lines = [
             f"Author the strategy file for name: {name}",
@@ -412,8 +446,14 @@ class StrategyAuthor:
             f"Thesis: {brief.thesis}",
             f"Entry/exit rules: {brief.entry_exit}",
             f"Parameter space: {brief.param_space}",
-            f"Scenario sketch: {brief.scenarios}",
         ]
+        # On the spec path (#85) the oracle is FIXED and machine-stamped by the gate: the coder is
+        # briefed against it and must NOT author scenarios(). Without a spec the coder owns tape
+        # construction, so it reads the brief's free-prose scenario sketch, exactly as before.
+        if spec is not None:
+            lines.append(_fixed_oracle_block(spec))
+        else:
+            lines.append(f"Scenario sketch: {brief.scenarios}")
         if brief.style:
             lines.append(f"Style: {brief.style}")
         if brief.symbols:

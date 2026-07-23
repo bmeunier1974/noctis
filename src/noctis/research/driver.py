@@ -117,6 +117,17 @@ from noctis.observability.events import Event, stage_event, tool_event
 from noctis.research import digests
 from noctis.research.briefings import decide_briefing, formulate_briefing
 from noctis.research.episode import EmitContract, EpisodeResult
+from noctis.strategies import library
+from noctis.strategies.scenario_spec import (
+    Behavior,
+    LegSpec,
+    ScenarioSpec,
+    SpecError,
+    SpecSuite,
+    compile_spec,
+    describe_spec,
+)
+from noctis.strategies.scenarios import Scenario
 
 if TYPE_CHECKING:
     from noctis.research.episode import EpisodeRunner
@@ -257,8 +268,17 @@ def character_to_profile(symbol_character: str) -> dict[str, str]:
 @dataclass(frozen=True)
 class FormulateOutput:
     """The typed record a FORMULATE episode emits: one falsifiable thesis with the cost
-    arithmetic, timeframe, symbol character, scenario intent, and param-space sketch that make it
-    authorable, plus optional pivot lineage."""
+    arithmetic, timeframe, symbol character, a structured **scenario spec**, and a param-space
+    sketch that make it authorable, plus optional pivot lineage.
+
+    The scenario oracle is inverted (epic #78): FORMULATE emits a structured
+    :class:`~noctis.strategies.scenario_spec.SpecSuite` (``scenario_spec``) in the #82 vocabulary —
+    the model reasons about tape shape and one behavior tag per scenario and never writes a bar
+    index. The driver compiles it at parse time (a structural validity check at ``warm=0``) into
+    the ``scenarios`` tuple; the write gate (#84) re-compiles the *same* spec at the strategy's real
+    declared warmup. Both the parsed suite and the parse-time compilation are carried so downstream
+    stages (author brief #84/#85, write gate #84) consume the fixed oracle rather than re-parsing
+    free prose."""
 
     thesis: str
     style: str
@@ -266,7 +286,8 @@ class FormulateOutput:
     timeframe: str
     cost_arithmetic: str
     symbol_character: str
-    scenario_intent: str
+    scenario_spec: SpecSuite
+    scenarios: tuple[Scenario, ...]
     param_space_sketch: str
     parent_thesis: str | None = None
     pivot_rationale: str | None = None
@@ -300,8 +321,101 @@ def _opt(payload: dict[str, Any], key: str) -> str | None:
     return str(value) if value else None
 
 
+# The representative warmup FORMULATE compiles a spec at *parse* time — purely a structural
+# validity check of the spec's shape (the write gate #84 re-compiles at the strategy's real
+# declared warmup). Zero, so a directional entry leg begins right after the setup pad.
+PARSE_WARM = 0
+
+# The allowed leg kinds (the #82 segment builders) the FORMULATE schema advertises to the model.
+_LEG_KINDS = ("flat", "trend", "selloff", "recovery", "chop", "vol_spike", "gap")
+
+
+def _build_leg(payload: Any, scenario_name: str, index: int) -> LegSpec:
+    """Construct one frozen :class:`LegSpec` from the model's JSON leg; raise on a malformed shape
+    (a non-object leg, a missing kind, a non-integer length) so it re-prompts as a schema misfire.
+    ``pct``/``amplitude``/``period`` default to 0 and are ignored per kind by the compiler."""
+    if not isinstance(payload, dict):
+        raise ValueError(f"scenario {scenario_name!r} leg {index}: each leg must be an object")
+    kind = payload.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError(f"scenario {scenario_name!r} leg {index}: a leg 'kind' is required")
+    bars = payload.get("bars", 0)
+    if isinstance(bars, bool) or not isinstance(bars, int):
+        raise ValueError(
+            f"scenario {scenario_name!r} leg {index}: 'bars' must be an integer length (0 for gap)"
+        )
+    return LegSpec(
+        kind=kind,
+        bars=bars,
+        pct=float(payload.get("pct", 0.0) or 0.0),
+        amplitude=float(payload.get("amplitude", 0.0) or 0.0),
+        period=int(payload.get("period", 0) or 0),
+    )
+
+
+def _build_behavior(value: Any, scenario_name: str) -> Behavior:
+    """Map the model's behavior string onto the #82 :class:`Behavior` tag; raise with the allowed
+    vocabulary on an unknown/missing tag so it re-prompts as a schema misfire."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"scenario {scenario_name!r}: a 'behavior' tag is required")
+    try:
+        return Behavior(value)
+    except ValueError:
+        allowed = ", ".join(b.value for b in Behavior)
+        raise ValueError(
+            f"scenario {scenario_name!r}: unknown behavior {value!r}; use one of {allowed}"
+        ) from None
+
+
+def _build_scenario(payload: Any, index: int) -> ScenarioSpec:
+    """Construct one frozen :class:`ScenarioSpec` from the model's JSON scenario; raise on any
+    malformed shape (missing name/legs, a non-integer leg reference) so it re-prompts as a
+    misfire."""
+    if not isinstance(payload, dict):
+        raise ValueError(f"scenario {index}: each scenario must be an object")
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"scenario {index}: a non-empty 'name' is required")
+    raw_legs = payload.get("legs")
+    if not isinstance(raw_legs, list) or not raw_legs:
+        raise ValueError(f"scenario {name!r}: a non-empty 'legs' list is required")
+    legs = tuple(_build_leg(leg, name, i) for i, leg in enumerate(raw_legs))
+    behavior = _build_behavior(payload.get("behavior"), name)
+    leg_ref = payload.get("leg")
+    if leg_ref is not None and (isinstance(leg_ref, bool) or not isinstance(leg_ref, int)):
+        raise ValueError(f"scenario {name!r}: 'leg' must be an integer leg index or omitted")
+    return ScenarioSpec(name=name, legs=legs, behavior=behavior, leg=leg_ref)
+
+
+def _parse_scenario_spec(payload: dict[str, Any]) -> tuple[SpecSuite, tuple[Scenario, ...]]:
+    """Parse the structured ``scenario_spec`` into a :class:`SpecSuite` and compile it at
+    :data:`PARSE_WARM` as a structural validity check.
+
+    Any malformed shape raises :class:`ValueError`; an uncompilable spec re-raises the compiler's
+    precise :class:`SpecError` message as a :class:`ValueError`. Both are caught by the episode
+    runner as a schema misfire (exactly like a missing field), and the message rides into the
+    corrective so the model can fix the spec on the re-prompt."""
+    raw = _require(payload, "scenario_spec")
+    if not isinstance(raw, dict):
+        raise ValueError("scenario_spec must be an object with a 'scenarios' list")
+    raw_scenarios = raw.get("scenarios")
+    if not isinstance(raw_scenarios, list) or not raw_scenarios:
+        raise ValueError("scenario_spec.scenarios must be a non-empty list of scenarios")
+    suite = SpecSuite(scenarios=tuple(_build_scenario(s, i) for i, s in enumerate(raw_scenarios)))
+    try:
+        compiled = compile_spec(suite, PARSE_WARM)
+    except SpecError as exc:
+        raise ValueError(str(exc)) from exc
+    return suite, compiled
+
+
 def parse_formulate(payload: dict[str, Any]) -> FormulateOutput:
-    """The single typed parse both episode transports meet at for FORMULATE."""
+    """The single typed parse both episode transports meet at for FORMULATE.
+
+    The structured ``scenario_spec`` is parsed into the #82 dataclasses and compiled at parse time
+    (:func:`_parse_scenario_spec`); a malformed or uncompilable spec raises here, so the episode
+    runner re-prompts it as a schema misfire exactly like any missing/invalid field."""
+    scenario_spec, scenarios = _parse_scenario_spec(payload)
     return FormulateOutput(
         thesis=str(_require(payload, "thesis")),
         style=str(_require(payload, "style")),
@@ -309,7 +423,8 @@ def parse_formulate(payload: dict[str, Any]) -> FormulateOutput:
         timeframe=str(_require(payload, "timeframe")),
         cost_arithmetic=str(_require(payload, "cost_arithmetic")),
         symbol_character=str(_require(payload, "symbol_character")),
-        scenario_intent=str(_require(payload, "scenario_intent")),
+        scenario_spec=scenario_spec,
+        scenarios=scenarios,
         param_space_sketch=str(_require(payload, "param_space_sketch")),
         parent_thesis=_opt(payload, "parent_thesis"),
         pivot_rationale=_opt(payload, "pivot_rationale"),
@@ -334,6 +449,72 @@ def parse_decide(payload: dict[str, Any]) -> DecideOutput:
     )
 
 
+# The structured scenario_spec the model emits — a 1:1 mapping onto the #82 vocabulary. The model
+# reasons about tape SHAPE (legs) and ONE behavior tag per scenario; it NEVER writes a bar index —
+# the compiler derives every window from the leg boundaries and the strategy's declared warmup.
+_LEG_SPEC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": list(_LEG_KINDS),
+            "description": "The segment shape of this leg.",
+        },
+        "bars": {
+            "type": "integer",
+            "description": "The leg's LENGTH in decision bars (never a bar index); 0 for a gap.",
+        },
+        "pct": {
+            "type": "number",
+            "description": "Signed total move for trend/selloff/recovery/gap (0.05 = +5%).",
+        },
+        "amplitude": {
+            "type": "number",
+            "description": "Oscillation amplitude for chop / vol_spike (e.g. 0.03).",
+        },
+        "period": {"type": "integer", "description": "Wave length in bars for chop (default 8)."},
+    },
+    "required": ["kind", "bars"],
+}
+
+_SCENARIO_SPEC_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "A unique name for this scenario tape."},
+        "legs": {
+            "type": "array",
+            "items": _LEG_SPEC_SCHEMA,
+            "description": "The ordered legs of the tape, in decision-bar lengths.",
+        },
+        "behavior": {
+            "type": "string",
+            "enum": [b.value for b in Behavior],
+            "description": "The ONE behavior this tape must prove (the thesis's contribution).",
+        },
+        "leg": {
+            "type": "integer",
+            "description": "0-based index into 'legs' the behavior targets; omit for never_trade.",
+        },
+    },
+    "required": ["name", "legs", "behavior"],
+}
+
+_SCENARIO_SPEC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "scenarios": {
+            "type": "array",
+            "items": _SCENARIO_SPEC_ITEM_SCHEMA,
+            "description": (
+                "2-8 known-outcome tapes: at least one directional entry (enter/hold "
+                "long/short) and at least one never_trade tape. You author tape SHAPE and "
+                "behavior only — never a bar index."
+            ),
+        },
+    },
+    "required": ["scenarios"],
+}
+
 _FORMULATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -346,10 +527,7 @@ _FORMULATE_SCHEMA: dict[str, Any] = {
             "description": "Captured move per trade vs the round-trip cost (aim >= 3x).",
         },
         "symbol_character": {"type": "string", "description": "The KIND of symbol it needs."},
-        "scenario_intent": {
-            "type": "string",
-            "description": "Each known-outcome tape's shape and the behavior it must prove.",
-        },
+        "scenario_spec": _SCENARIO_SPEC_SCHEMA,
         "param_space_sketch": {"type": "string", "description": "Tunable knobs + ranges."},
         "parent_thesis": {"type": "string", "description": "Optional: the thesis this pivots off."},
         "pivot_rationale": {"type": "string", "description": "Optional: why it pivots."},
@@ -361,7 +539,7 @@ _FORMULATE_SCHEMA: dict[str, Any] = {
         "timeframe",
         "cost_arithmetic",
         "symbol_character",
-        "scenario_intent",
+        "scenario_spec",
         "param_space_sketch",
     ],
 }
@@ -645,40 +823,64 @@ def _match_stage(
     return MatchResult(fit, reserved, profile)
 
 
-# The AUTHOR episode-line outcomes for an ESCALATED authoring job (story #72): the paid fallback
-# either authored the file (``ok``) or also failed the write gate (``author_failed``). A
-# non-escalated (local-only) author records no episode line at all, so the episode stream is
-# unchanged when nothing escalated.
+# The AUTHOR episode-line outcomes. An ESCALATED authoring job (story #72) records whether the
+# paid fallback authored the file (``ok``) or also failed the gate (``author_failed``). The
+# needs-more-history case (#85) — a write rejected because the candidate's declared warmup is too
+# large for the fixed oracle and the lookback defaults cannot honestly shrink — records
+# ``refined_brief`` instead: the honest exit is a lighter thesis, so the next formulate round can
+# propose one, never a bent gate or a mutated tape. A local (non-escalated) author that simply
+# lands or fails generically records NO episode line, so the stream stays byte-identical to before
+# unless an escalation OR a refined-brief exit earns one.
 _AUTHOR_OK = "ok"
 _AUTHOR_FAILED = "author_failed"
+_AUTHOR_REFINED = "refined_brief"
 
 
-def _record_author_escalation(ledger: SessionLedger, write: dict[str, Any]) -> None:
-    """Ledger one AUTHOR episode line when — and only when — the write escalated to the paid coder
-    fallback (story #72). ``tool_write_strategy`` marks an escalated write ``escalated=True`` and
-    names the model that authored it (``author_model`` = the fallback model), so the line records
-    which paid model was spent and whether it landed (``ok``) or also failed (``author_failed``).
-    A local-only author carries no ``escalated`` flag, so this is a no-op and the episode stream
-    stays byte-identical to before this story."""
-    if not write.get("escalated"):
+def _record_author_outcome(
+    ledger: SessionLedger, write: dict[str, Any], *, coder_model: str
+) -> None:
+    """Ledger one AUTHOR episode line for the two outcomes that earn one: an escalation to the paid
+    fallback (story #72) or a refined-brief exit (#85). Everything else — a plain local success or
+    a generic local gate rejection — records no line, so the episode stream is unchanged from
+    before unless one of those two fired.
+
+    ``tool_write_strategy`` marks an escalated write ``escalated=True`` and names the model that
+    authored it (``author_model`` = the fallback model). A refined-brief exit is detected from the
+    gate error via :func:`noctis.strategies.library.is_warmup_too_large`; it can ride either an
+    escalated or a local write, so it takes precedence over the generic failure label. The line's
+    model is the escalated fallback model when escalated, else the session's local coder."""
+    escalated = bool(write.get("escalated"))
+    errored = "error" in write
+    refined = errored and library.is_warmup_too_large(str(write.get("error") or ""))
+    if not escalated and not refined:
         return
+    if refined:
+        outcome = _AUTHOR_REFINED
+    elif errored:
+        outcome = _AUTHOR_FAILED
+    else:
+        outcome = _AUTHOR_OK
     ledger.record_episode(
         stage=AUTHOR,
-        model=str(write.get("author_model") or ""),
-        outcome=_AUTHOR_FAILED if "error" in write else _AUTHOR_OK,
-        escalated=True,
+        model=str(write.get("author_model") or coder_model or ""),
+        outcome=outcome,
+        escalated=escalated,
     )
 
 
 def _brief_from_formulate(fo: FormulateOutput, symbols: Sequence[str]) -> dict[str, Any]:
     """Map a FORMULATE output onto the strategy author's brief (thesis, entry/exit, param space,
-    scenarios). Passed to ``tool_write_strategy(brief=…)`` — the coder author engine translates it
-    into one validated file."""
+    scenarios). Passed to ``tool_write_strategy(brief=…, spec=…)`` — the coder author engine
+    translates it into one validated file and the write gate (#84) owns the oracle. The
+    ``scenarios`` field is the fixed oracle rendered faithfully from the FORMULATE
+    ``scenario_spec`` (:func:`~noctis.strategies.scenario_spec.describe_spec` — tape shapes,
+    behaviors, target legs), never free-prose scenario intent (#85): the same ``SpecSuite`` is
+    threaded to the gate as ``spec`` so the coder authors no ``scenarios()`` block at all."""
     return {
         "thesis": fo.thesis,
         "entry_exit": _entry_exit_brief(fo),
         "param_space": fo.param_space_sketch,
-        "scenarios": fo.scenario_intent,
+        "scenarios": describe_spec(fo.scenario_spec),
         "style": fo.style,
         "symbols": list(symbols),
     }
@@ -914,6 +1116,9 @@ def run_episodic_research(
     stop_event = stop_event or _NeverStop()
     digest_source = market_digest or (lambda: digests.market_digest(toolbox))
     exhausted = getattr(toolbox, "exhausted", None)
+    # The local coder model names the AUTHOR episode line for a non-escalated refined-brief exit
+    # (#85); an escalated write names its own paid fallback model. Read off the session models map.
+    coder_model = str((models or {}).get("coder") or "")
     summary = ResearchSummary()
     start = now()
     budget_seconds = budget_minutes * 60.0
@@ -923,9 +1128,11 @@ def run_episodic_research(
     # deterministic toolbox action, both no-ops without a sink so a bare run is unchanged.
     emit_tool = _tool_emitter(on_event, toolbox)
 
-    def emit_stage(stage: str, strategy: str | None = None) -> None:
+    def emit_stage(
+        stage: str, strategy: str | None = None, *, oracle: list[str] | None = None
+    ) -> None:
         if on_event is not None:
-            on_event(stage_event(stage, strategy))
+            on_event(stage_event(stage, strategy, oracle=oracle))
 
     ledger.record_session_start(
         mandate=mandate_source,
@@ -987,8 +1194,16 @@ def run_episodic_research(
         reserved_holdout = match.reserved  # held out by code — never tuned, DECIDE's holdout
 
         # ── AUTHOR ────────────────────────────────────────────────────────────
-        emit_stage(AUTHOR, name)
-        ledger.record_stage(AUTHOR, strategy=name)
+        # The FORMULATE spec is the FIXED ORACLE: it is threaded into the write gate's spec path
+        # (the coder authors no scenarios(); the gate stamps it) and the same suite renders the
+        # brief's oracle summary (#85). The gate replays it at the candidate's own declared warmup.
+        # The oracle's scenario names ride both the stage boundary Event and the AUTHOR ledger line
+        # (#86), so an operator audits which fixed oracle this candidate was gated against — in the
+        # live narration and, via the candidate trail, in the session rollup. The names are the
+        # canonical identity from the FORMULATE spec (never a second rendering).
+        oracle = [s.name for s in fo.scenario_spec.scenarios]
+        emit_stage(AUTHOR, name, oracle=oracle)
+        ledger.record_stage(AUTHOR, strategy=name, detail={"oracle": oracle})
         write = _invoke(
             toolbox.tool_write_strategy,
             name=name,
@@ -997,14 +1212,20 @@ def run_episodic_research(
             thesis=fo.thesis,
             parent_thesis=fo.parent_thesis,
             pivot_rationale=fo.pivot_rationale,
+            spec=fo.scenario_spec,
         )
         # The write's own coder-attempt `author` events already emitted from inside the toolbox;
         # this tool line is the write's outcome, mirroring the loop's post-dispatch line.
         emit_tool("write_strategy", {"name": name, "class_tag": fo.class_tag}, write)
-        _record_author_escalation(ledger, write)
+        _record_author_outcome(ledger, write, coder_model=coder_model)
         if "error" in write:
-            # A write-gate rejection is a code bug in one draft, not a verdict — skip and move on.
-            logger.info("author skipped %s: %s", name, write["error"])
+            # A write-gate rejection is a code bug in one draft, not a verdict on the thesis — skip
+            # and formulate the next idea. The one exception is the needs-more-history signal: a
+            # declared warmup too large for the fixed oracle ended this strategy in a REFINED BRIEF
+            # (recorded above), so the next formulate can propose a thesis needing less history.
+            refined = library.is_warmup_too_large(str(write["error"]))
+            verb = "refined-brief (needs less history)" if refined else "skipped"
+            logger.info("author %s %s: %s", verb, name, write["error"])
             continue
 
         # ── OPTIMIZE (v1 multi-fidelity tuning recipe, #70 — zero LLM) ──────────

@@ -105,8 +105,12 @@ header (`status`/`style`/`symbols`/`tuned`), a frozen `Params`, `on_bar` (long/s
 O(lookback), no I/O/globals/randomness), `param_space()`, and `scenarios()` (2–8 known-outcome tapes
 that are the file's own correctness oracle). `signals()` is an optional vectorised override — the
 base class replays `on_bar` so both paths agree by construction. `write_strategy` validates in a
-**fresh subprocess** (import + smoke replay + scenario replay + signals/on_bar parity) so a broken
-file can never land. The library lives in **three tiers** (`src/noctis/strategies/library.py`,
+**fresh subprocess** (import + smoke replay + scenario replay + the Tier-1 structural invariants —
+warmup honesty, determinism, truncation no-lookahead, price-scale — + signals/on_bar parity) so a
+broken file can never land; it is *tolerant-both* — a hand-authored `scenarios()` validates as
+written, while the episodic driver's FORMULATE-authored fixed oracle (a structured
+`scenario_spec`) is machine-stamped in and re-validated. The library lives in **three tiers**
+(`src/noctis/strategies/library.py`,
 `LibraryPaths`), discovered lowest-precedence first: committed **seeds** in `strategies/`
 (`TEMPLATE.py` + the three worked examples, the *only* files in the public repo — read-only input)
 → the `workspace/strategies/__tmp/` working area (drafts/candidates/rejects, local-only) → the
