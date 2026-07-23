@@ -13,6 +13,7 @@ from noctis.strategies import library
 from noctis.strategies.base import TraderStrategy, replay_targets
 from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.library import (
+    NAME_RE,
     VALID_STATUSES,
     StrategyValidationError,
     _find_strategy_class,
@@ -813,6 +814,19 @@ def test_gate_rejects_class_file_name_mismatch(tmp_path):
     bad = GOOD_SOURCE.replace('name = "probe"', 'name = "other"')
     with pytest.raises(StrategyValidationError, match="class sets name='other'"):
         _validate(tmp_path, bad)
+
+
+def test_name_rule_is_exported_and_the_gate_enforces_it(tmp_path, families, fast_gate):
+    # The write-gate name rule has ONE exported definition (story #92): the research driver derives
+    # names to satisfy exactly this rule. A leading-digit name (the pre-#92 defect) is both rejected
+    # by NAME_RE and refused by the gate with the byte-identical message — same rule, one source.
+    assert NAME_RE.match("rsi_meanrev") and not NAME_RE.match("15m_impulse")
+    with pytest.raises(
+        StrategyValidationError,
+        match=r"invalid strategy name '15m_impulse' \(want lower_snake_case, e\.g\. rsi_meanrev\)",
+    ):
+        write_strategy(tmp_path, "15m_impulse", GOOD_SOURCE, families)
+    assert strategy_path(tmp_path, "15m_impulse") is None
 
 
 def test_gate_requires_a_module_docstring(tmp_path):

@@ -29,6 +29,7 @@ from noctis.research.driver import (
     FORMULATE_CONTRACT,
     DecideOutput,
     FormulateOutput,
+    _slug,
     character_to_profile,
     make_episodes,
     parse_formulate,
@@ -109,6 +110,80 @@ def decide_ok(verdict: str = "reject", **over) -> EpisodeResult[DecideOutput]:
 
 def decide_fail() -> EpisodeResult[DecideOutput]:
     return EpisodeResult(API_ERROR, None, "fake/model", tokens=2, misfires=0, note="backend down")
+
+
+# ── driver-derived strategy names are gate-valid by construction (story #92) ─────────────────
+# The driver derives each strategy's name from the FORMULATE class tag; the write gate enforces
+# ``library.NAME_RE`` (one shared rule). ``_slug`` must be TOTAL: for any tag it yields a name the
+# SAME rule accepts, so a derived name can never burn a coder attempt on "invalid strategy name".
+_ADVERSARIAL_TAGS = [
+    "15m impulse pullback failed auction continuation",  # the parity-run defect: leading digit
+    "5",  # a bare digit
+    "42m breakout",  # digit-led multiword
+    "10x   leverage___scalp",  # digit lead + whitespace/underscore runs
+    "3.5 sigma reversion",  # digits + punctuation
+    "!!!",  # symbols only
+    "",  # empty
+    "   ",  # whitespace only
+    "___",  # underscores only
+    "———",  # unicode dashes only
+    "🚀 moon shot",  # unicode lead
+    "café momentum",  # non-ascii inside a word
+    "MACD Cross",  # uppercase input
+]
+
+
+@pytest.mark.parametrize("tag", _ADVERSARIAL_TAGS)
+def test_slug_is_total_every_tag_derives_a_gate_valid_name(tag):
+    # The derived slug AND the full driver-constructed name (slug + a numeric suffix, always ≥ 1)
+    # both satisfy the shared library rule the write gate enforces — for every adversarial tag.
+    slug = _slug(tag)
+    assert library.NAME_RE.match(slug), f"{tag!r} → {slug!r} breaks the shared rule"
+    assert library.NAME_RE.match(f"{slug}_1")
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        # A digit/symbol lead is PREFIXED (content preserved), not stripped down to nothing.
+        (
+            "15m impulse pullback failed auction continuation",
+            "s_15m_impulse_pullback_failed_auction_continuation",
+        ),
+        ("5", "s_5"),
+        ("42m breakout", "s_42m_breakout"),
+        ("10x   leverage___scalp", "s_10x_leverage_scalp"),
+        ("3.5 sigma reversion", "s_3_5_sigma_reversion"),
+        # Degenerate/empty tags fall back to a valid, distinguishable base (the numeric suffix
+        # keeps successive degenerate names distinct: strategy_1, strategy_2, …).
+        ("", "strategy"),
+        ("   ", "strategy"),
+        ("___", "strategy"),
+        ("!!!", "strategy"),
+        ("———", "strategy"),
+        # A leading letter survives unicode/symbol stripping without a spurious prefix.
+        ("🚀 moon shot", "moon_shot"),
+        ("café momentum", "caf_momentum"),
+    ],
+)
+def test_slug_prefixes_content_rather_than_obliterating_it(tag, expected):
+    assert _slug(tag) == expected
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("intraday momentum", "intraday_momentum"),  # the suite-wide default — must not move
+        ("mean reversion", "mean_reversion"),
+        ("rsi_meanrev", "rsi_meanrev"),
+        ("gap fade", "gap_fade"),
+        ("MACD Cross", "macd_cross"),
+    ],
+)
+def test_slug_leaves_already_valid_tags_byte_identical(tag, expected):
+    # Strictly additive: a tag that already derived to a valid name derives to the SAME name — no
+    # spurious prefix, no changed separators (the pre-#92 behavior for gate-valid tags).
+    assert _slug(tag) == expected
 
 
 # ── fake episodes (a completions counter mirrors the episode runner's budget tally) ─────────
@@ -1322,6 +1397,46 @@ def test_end_to_end_episodic_session_produces_a_gated_verdict_and_a_complete_led
     verdicts = ledger.verdicts()
     assert len(verdicts) == 1 and verdicts[0].verdict == "reject"
     assert ledger.session_end() is not None
+
+
+def test_end_to_end_digit_leading_class_tag_reaches_the_gate_with_a_valid_name(tmp_path):
+    # The parity-run defect (#92): a thesis whose class tag LEADS WITH A DIGIT derived to a
+    # gate-invalid name and burned every coder attempt on "invalid strategy name". Now the driver
+    # derives a valid name by construction, so the SAME session authors, optimizes, and reaches a
+    # gated verdict — the REAL write gate accepts the derived name, no attempt wasted on it.
+    payload = dict(_FORMULATE_PAYLOAD, class_tag="15m impulse pullback")
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    ledger = SessionLedger(box.state_dir, session_id="ep-digit-tag")
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, payload), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fit_symbols=["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+
+    name = "s_15m_impulse_pullback_1"  # digit lead rescued by the "s_" prefix, content intact
+    assert library.NAME_RE.match(name)  # the derived name satisfies the shared gate rule
+    # The real gate ACCEPTED the derived name: the candidate reached AUTHOR, was authored on disk,
+    # optimized, and cleared a gated verdict — nothing burned on an invalid-name rejection.
+    assert summary.candidates == [name]
+    assert summary.author_calls == 1
+    assert library.strategy_path(box.strategies_dir, name) is not None
+    assert box.journal.stats(name).sweep_completed
+    assert summary.rejections == 1 and summary.undecided == []
+    assert [t.strategy for t in ledger.theses()] == [name]
 
 
 def test_end_to_end_escalation_authors_via_the_paid_fallback_and_ledgers_it(tmp_path):

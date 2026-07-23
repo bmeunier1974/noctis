@@ -77,7 +77,10 @@ UNDECIDED_STATUSES = ("draft", "candidate")
 ARCHIVE_CAP = 50
 HEADER_FIELDS = ("status", "style", "symbols", "tuned")
 VALID_STATUSES = ("draft", "candidate", "champion", "rejected")
-_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+# The one strategy-name rule: lower_snake_case starting with a letter. Exported so the research
+# driver derives names to satisfy exactly the rule the write gate enforces (:func:`write_strategy`)
+# — one definition, so the two can never drift (story #92).
+NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _ARCHIVE_SEQ_RE = re.compile(r"^(\d+)-")
 _NS_PER_MINUTE = 60 * 1_000_000_000
 _VALIDATE_TIMEOUT_S = 120
@@ -776,7 +779,7 @@ def write_strategy(
     immutability, promotion write-back, and a standalone ``noctis backtest`` replay all use
     exactly what gated. Without a spec the path is byte-identical to before: nothing is stamped.
     """
-    if not _NAME_RE.match(name):
+    if not NAME_RE.match(name):
         raise StrategyValidationError(
             f"invalid strategy name {name!r} (want lower_snake_case, e.g. rsi_meanrev)"
         )
