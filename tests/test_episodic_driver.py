@@ -31,6 +31,7 @@ from noctis.research.driver import (
     FormulateOutput,
     character_to_profile,
     make_episodes,
+    parse_formulate,
     run_episodic_research,
 )
 from noctis.research.episode import (
@@ -42,6 +43,14 @@ from noctis.research.episode import (
 )
 from noctis.research.ledger import SessionLedger
 from noctis.research.llm import ToolCall, Turn
+from noctis.strategies.scenario_spec import (
+    Behavior,
+    LegSpec,
+    ScenarioSpec,
+    SpecSuite,
+    compile_spec,
+)
+from noctis.strategies.scenarios import Scenario
 from tests.test_research_tools import PROBE, _make_toolbox
 
 _FORMULATE_TOOL = FORMULATE_CONTRACT.name
@@ -54,6 +63,17 @@ _EXHAUSTION_REFUSAL = (
 )
 
 
+# A valid structured scenario spec (one directional long tape, one no-trade tape) compiled at the
+# parse-time warmup, exactly as parse_formulate carries it on a real FormulateOutput.
+_SPEC_SUITE = SpecSuite(
+    scenarios=(
+        ScenarioSpec("rally", (LegSpec("trend", 60, pct=0.05),), Behavior.ENTER_LONG, leg=0),
+        ScenarioSpec("selloff_flat", (LegSpec("selloff", 60, pct=0.05),), Behavior.NEVER_TRADE),
+    )
+)
+_COMPILED_SCENARIOS = compile_spec(_SPEC_SUITE, 0)
+
+
 # ── typed episode-output builders (what a formulate/decide episode emits) ───────────────────
 def formulate_ok(**over) -> EpisodeResult[FormulateOutput]:
     fields = {
@@ -63,7 +83,8 @@ def formulate_ok(**over) -> EpisodeResult[FormulateOutput]:
         "timeframe": "1m",
         "cost_arithmetic": "median 1m move ~8bp vs the 4bp round trip",
         "symbol_character": "liquid trending names",
-        "scenario_intent": "one directional long tape and one no-trade selloff tape",
+        "scenario_spec": _SPEC_SUITE,
+        "scenarios": _COMPILED_SCENARIOS,
         "param_space_sketch": "lookback 5-40",
     }
     fields.update(over)
@@ -494,11 +515,14 @@ def test_author_stage_passes_the_thesis_and_lineage_onto_the_brief(tmp_path):
     assert write["thesis"].startswith("Buy strength")
     assert write["parent_thesis"] == "older idea"
     assert write["pivot_rationale"] == "cost too high before"
-    # The formulate output is mapped onto a StrategyBrief the author engine translates.
+    # The formulate output is mapped onto a StrategyBrief the author engine translates. Its
+    # `scenarios` field is a readable summary rendered from the structured scenario_spec (#83) —
+    # the tape shape and the behavior each tape must prove, never a bar index.
     brief = write["brief"]
     assert brief["thesis"].startswith("Buy strength")
     assert brief["param_space"] == "lookback 5-40"
-    assert brief["scenarios"] == "one directional long tape and one no-trade selloff tape"
+    assert "rally" in brief["scenarios"] and "enter long during leg 0" in brief["scenarios"]
+    assert "never trade" in brief["scenarios"]  # the no-trade tape is summarized too
     assert "1m" in brief["entry_exit"]
 
 
@@ -1087,7 +1111,21 @@ _FORMULATE_PAYLOAD = {
     "timeframe": "1m",
     "cost_arithmetic": "median 1m move ~8bp vs the 4bp round trip",
     "symbol_character": "liquid trending names",
-    "scenario_intent": "one directional long tape and one no-trade selloff tape",
+    "scenario_spec": {
+        "scenarios": [
+            {
+                "name": "rally",
+                "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}],
+                "behavior": "enter_long_during_leg",
+                "leg": 0,
+            },
+            {
+                "name": "grind",
+                "legs": [{"kind": "flat", "bars": 60}],
+                "behavior": "never_trade",
+            },
+        ]
+    },
     "param_space_sketch": "lookback 5-40",
 }
 _REJECT_PAYLOAD = {
@@ -1284,3 +1322,198 @@ def test_verbose_episodic_session_narrates_the_full_arc(tmp_path):
     assert stage_positions["decide"] < reject_pos
     # The ledger frames the arc: a session start and a rollup at the close.
     assert ledger.session_start() is not None and ledger.session_end() is not None
+
+
+# ── 7. FORMULATE emits a structured scenario_spec with compile-failure re-prompt (#83) ───────
+def _valid_spec_payload() -> dict:
+    """A well-formed, compilable structured scenario_spec: one directional long tape and one
+    no-trade tape — the two rules a suite must satisfy (>=1 directional, >=1 never_trade)."""
+    return {
+        "scenarios": [
+            {
+                "name": "rally",
+                "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}],
+                "behavior": "enter_long_during_leg",
+                "leg": 0,
+            },
+            {
+                "name": "grind",
+                "legs": [{"kind": "flat", "bars": 60}],
+                "behavior": "never_trade",
+            },
+        ]
+    }
+
+
+def _uncompilable_spec_payload() -> dict:
+    """A schema-valid JSON spec that still fails compile_spec: two directional tapes and NO
+    never_trade tape (a suite-shape rule the compiler enforces). The compile failure surfaces the
+    precise 'no-trade' message the runner folds into the re-prompt."""
+    return {
+        "scenarios": [
+            {
+                "name": "rally",
+                "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}],
+                "behavior": "enter_long_during_leg",
+                "leg": 0,
+            },
+            {
+                "name": "dip",
+                "legs": [{"kind": "selloff", "bars": 60, "pct": 0.05}],
+                "behavior": "enter_short_during_leg",
+                "leg": 0,
+            },
+        ]
+    }
+
+
+def _formulate_payload(**over) -> dict:
+    payload = {
+        "thesis": "Buy strength above the moving average while the up-move clears cost.",
+        "style": "momentum",
+        "class_tag": "intraday momentum",
+        "timeframe": "1m",
+        "cost_arithmetic": "median 1m move ~8bp vs the 4bp round trip",
+        "symbol_character": "liquid trending names",
+        "scenario_spec": _valid_spec_payload(),
+        "param_space_sketch": "lookback 5-40",
+    }
+    payload.update(over)
+    return payload
+
+
+def test_formulate_schema_requires_scenario_spec_and_drops_the_free_prose_intent():
+    # The schema requires a STRUCTURED scenario_spec; the old free-prose scenario_intent is gone.
+    schema = FORMULATE_CONTRACT.schema
+    assert "scenario_spec" in schema["required"]
+    assert "scenario_intent" not in schema["properties"]
+    assert "scenario_intent" not in schema["required"]
+    spec = schema["properties"]["scenario_spec"]
+    assert spec["type"] == "object" and "scenarios" in spec["properties"]
+    item = spec["properties"]["scenarios"]["items"]
+    assert set(item["required"]) == {"name", "legs", "behavior"}
+    # the behavior tag is constrained to the #82 vocabulary, and legs carry a kind + a length
+    assert set(item["properties"]["behavior"]["enum"]) == {b.value for b in Behavior}
+    leg = item["properties"]["legs"]["items"]
+    assert set(leg["properties"]["kind"]["enum"]) == {
+        "flat",
+        "trend",
+        "selloff",
+        "recovery",
+        "chop",
+        "vol_spike",
+        "gap",
+    }
+
+
+def test_formulate_output_carries_the_spec_not_a_free_prose_intent():
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(FormulateOutput)}
+    assert "scenario_intent" not in fields
+    assert "scenario_spec" in fields and "scenarios" in fields
+
+
+def test_parse_formulate_compiles_the_spec_at_parse_time_and_carries_it():
+    # A valid spec is parsed into the frozen #82 dataclasses AND compiled at parse time (warm=0),
+    # both carried on the formulate output for downstream stages (#84/#85).
+    fo = parse_formulate(_formulate_payload())
+    assert isinstance(fo.scenario_spec, SpecSuite)
+    assert [s.name for s in fo.scenario_spec.scenarios] == ["rally", "grind"]
+    assert fo.scenario_spec.scenarios[0].behavior is Behavior.ENTER_LONG
+    assert fo.scenario_spec.scenarios[1].behavior is Behavior.NEVER_TRADE
+    # compiled to real Scenario objects — the fixed oracle the write gate (#84) will replay
+    assert len(fo.scenarios) == 2
+    assert all(isinstance(s, Scenario) for s in fo.scenarios)
+
+
+def test_parse_formulate_treats_an_uncompilable_spec_as_a_schema_misfire():
+    # A suite with no no-trade tape is schema-valid JSON but fails compile_spec; parse raises with
+    # the compiler's precise message so the episode runner re-prompts it as a schema misfire.
+    bad = _formulate_payload(scenario_spec=_uncompilable_spec_payload())
+    with pytest.raises(Exception) as exc:  # noqa: PT011 — the runner catches any raise as a misfire
+        parse_formulate(bad)
+    assert "no-trade" in str(exc.value)
+
+
+def test_parse_formulate_treats_an_unknown_leg_kind_as_a_schema_misfire():
+    bad = _formulate_payload(
+        scenario_spec={
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [{"kind": "mystery", "bars": 60}],
+                    "behavior": "enter_long_during_leg",
+                    "leg": 0,
+                },
+                {
+                    "name": "grind",
+                    "legs": [{"kind": "flat", "bars": 60}],
+                    "behavior": "never_trade",
+                },
+            ]
+        }
+    )
+    with pytest.raises(Exception) as exc:  # noqa: PT011
+        parse_formulate(bad)
+    assert "unknown leg kind" in str(exc.value)
+
+
+def test_parse_formulate_rejects_a_malformed_spec_shape_missing_behavior():
+    bad = _formulate_payload(
+        scenario_spec={
+            "scenarios": [
+                {"name": "rally", "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}], "leg": 0},
+                {
+                    "name": "grind",
+                    "legs": [{"kind": "flat", "bars": 60}],
+                    "behavior": "never_trade",
+                },
+            ]
+        }
+    )
+    with pytest.raises(Exception) as exc:  # noqa: PT011
+        parse_formulate(bad)
+    assert "behavior" in str(exc.value)
+
+
+def test_parse_formulate_missing_scenario_spec_is_a_missing_field_misfire():
+    payload = _formulate_payload()
+    del payload["scenario_spec"]
+    with pytest.raises(Exception) as exc:  # noqa: PT011
+        parse_formulate(payload)
+    assert "scenario_spec" in str(exc.value)
+
+
+def test_uncompilable_spec_reprompts_through_the_misfire_path_like_a_missing_field():
+    # Through the real EpisodeRunner + FORMULATE_CONTRACT: an uncompilable spec misfires exactly
+    # like a missing field — the runner re-prompts with the compiler's precise message and recovers
+    # when the re-emit compiles. The corrective carries the message so the model can fix the spec.
+    bad = _formulate_payload(scenario_spec=_uncompilable_spec_payload())
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, bad), _emit(_FORMULATE_TOOL, _formulate_payload())]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    result = runner.run(contract=FORMULATE_CONTRACT, system="SYS", briefing="B")
+
+    assert result.ok  # recovered after the compile-failure re-prompt
+    assert result.value is not None and isinstance(result.value.scenario_spec, SpecSuite)
+    assert result.misfires == 1  # one schema misfire, then a clean re-emit
+    corrective = client.calls[1][1]["content"]
+    assert "no-trade" in corrective  # the compiler's precise message rode into the corrective
+
+
+def test_missing_field_and_uncompilable_spec_take_the_same_misfire_path():
+    # The two failure modes are indistinguishable to the runner: both raise from parse, both are a
+    # single misfire that recovers on a clean re-emit. This locks the "same as a missing field"
+    # contract the story requires.
+    missing = _formulate_payload()
+    del missing["thesis"]
+    uncompilable = _formulate_payload(scenario_spec=_uncompilable_spec_payload())
+    for bad in (missing, uncompilable):
+        client = FakeEpisodeClient(
+            [_emit(_FORMULATE_TOOL, bad), _emit(_FORMULATE_TOOL, _formulate_payload())]
+        )
+        runner = EpisodeRunner(client=client, retries=2)
+        result = runner.run(contract=FORMULATE_CONTRACT, system="SYS", briefing="B")
+        assert result.ok and result.misfires == 1

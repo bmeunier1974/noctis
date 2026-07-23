@@ -44,10 +44,22 @@ _FORMULATE_HEADER = (
     "Propose ONE falsifiable strategy thesis for this session. Before any code, state the cost "
     "arithmetic against MARKET ECONOMICS below: the move captured per trade must clear the "
     "round-trip cost by a comfortable multiple (aim >=3x), which fixes the timeframe. Emit "
-    "thesis, style, class_tag, timeframe, cost_arithmetic, symbol_character, scenario_intent, "
+    "thesis, style, class_tag, timeframe, cost_arithmetic, symbol_character, scenario_spec, "
     "and param_space_sketch (plus parent_thesis / pivot_rationale when this pivots off an "
     "earlier idea). Do NOT re-propose an idea under ALREADY TRIED THIS SESSION, and do not "
-    "re-mine a class under EXHAUSTED CLASSES."
+    "re-mine a class under EXHAUSTED CLASSES.\n\n"
+    "scenario_spec is a STRUCTURED known-outcome test suite — you reason about tape SHAPE and the "
+    "behavior each tape must prove; you NEVER write a bar index (the compiler derives every window "
+    'from the leg lengths and the strategy\'s warmup). Emit {"scenarios": [ ... ]} with 2-8 '
+    "scenarios; each scenario is {name, legs, behavior, leg?}. A leg is {kind, bars, pct?, "
+    "amplitude?, period?}: kind is one of flat / trend / selloff / recovery / chop / vol_spike / "
+    "gap; bars is the leg's LENGTH in decision bars (0 for a gap); pct is the signed total move "
+    "for trend/selloff/recovery/gap (0.05 = +5%); amplitude/period shape chop and vol_spike. "
+    "behavior is exactly one of enter_long_during_leg / enter_short_during_leg / "
+    "hold_long_through_leg / hold_short_through_leg / flat_by_end_of_leg / never_trade, and 'leg' "
+    "is the 0-based index into that scenario's legs the behavior targets (omit it for "
+    "never_trade). The suite MUST include at least one directional entry (enter/hold long/short) "
+    "and at least one never_trade tape."
 )
 
 

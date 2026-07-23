@@ -117,6 +117,15 @@ from noctis.observability.events import Event, stage_event, tool_event
 from noctis.research import digests
 from noctis.research.briefings import decide_briefing, formulate_briefing
 from noctis.research.episode import EmitContract, EpisodeResult
+from noctis.strategies.scenario_spec import (
+    Behavior,
+    LegSpec,
+    ScenarioSpec,
+    SpecError,
+    SpecSuite,
+    compile_spec,
+)
+from noctis.strategies.scenarios import Scenario
 
 if TYPE_CHECKING:
     from noctis.research.episode import EpisodeRunner
@@ -257,8 +266,17 @@ def character_to_profile(symbol_character: str) -> dict[str, str]:
 @dataclass(frozen=True)
 class FormulateOutput:
     """The typed record a FORMULATE episode emits: one falsifiable thesis with the cost
-    arithmetic, timeframe, symbol character, scenario intent, and param-space sketch that make it
-    authorable, plus optional pivot lineage."""
+    arithmetic, timeframe, symbol character, a structured **scenario spec**, and a param-space
+    sketch that make it authorable, plus optional pivot lineage.
+
+    The scenario oracle is inverted (epic #78): FORMULATE emits a structured
+    :class:`~noctis.strategies.scenario_spec.SpecSuite` (``scenario_spec``) in the #82 vocabulary —
+    the model reasons about tape shape and one behavior tag per scenario and never writes a bar
+    index. The driver compiles it at parse time (a structural validity check at ``warm=0``) into
+    the ``scenarios`` tuple; the write gate (#84) re-compiles the *same* spec at the strategy's real
+    declared warmup. Both the parsed suite and the parse-time compilation are carried so downstream
+    stages (author brief #84/#85, write gate #84) consume the fixed oracle rather than re-parsing
+    free prose."""
 
     thesis: str
     style: str
@@ -266,7 +284,8 @@ class FormulateOutput:
     timeframe: str
     cost_arithmetic: str
     symbol_character: str
-    scenario_intent: str
+    scenario_spec: SpecSuite
+    scenarios: tuple[Scenario, ...]
     param_space_sketch: str
     parent_thesis: str | None = None
     pivot_rationale: str | None = None
@@ -300,8 +319,101 @@ def _opt(payload: dict[str, Any], key: str) -> str | None:
     return str(value) if value else None
 
 
+# The representative warmup FORMULATE compiles a spec at *parse* time — purely a structural
+# validity check of the spec's shape (the write gate #84 re-compiles at the strategy's real
+# declared warmup). Zero, so a directional entry leg begins right after the setup pad.
+PARSE_WARM = 0
+
+# The allowed leg kinds (the #82 segment builders) the FORMULATE schema advertises to the model.
+_LEG_KINDS = ("flat", "trend", "selloff", "recovery", "chop", "vol_spike", "gap")
+
+
+def _build_leg(payload: Any, scenario_name: str, index: int) -> LegSpec:
+    """Construct one frozen :class:`LegSpec` from the model's JSON leg; raise on a malformed shape
+    (a non-object leg, a missing kind, a non-integer length) so it re-prompts as a schema misfire.
+    ``pct``/``amplitude``/``period`` default to 0 and are ignored per kind by the compiler."""
+    if not isinstance(payload, dict):
+        raise ValueError(f"scenario {scenario_name!r} leg {index}: each leg must be an object")
+    kind = payload.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError(f"scenario {scenario_name!r} leg {index}: a leg 'kind' is required")
+    bars = payload.get("bars", 0)
+    if isinstance(bars, bool) or not isinstance(bars, int):
+        raise ValueError(
+            f"scenario {scenario_name!r} leg {index}: 'bars' must be an integer length (0 for gap)"
+        )
+    return LegSpec(
+        kind=kind,
+        bars=bars,
+        pct=float(payload.get("pct", 0.0) or 0.0),
+        amplitude=float(payload.get("amplitude", 0.0) or 0.0),
+        period=int(payload.get("period", 0) or 0),
+    )
+
+
+def _build_behavior(value: Any, scenario_name: str) -> Behavior:
+    """Map the model's behavior string onto the #82 :class:`Behavior` tag; raise with the allowed
+    vocabulary on an unknown/missing tag so it re-prompts as a schema misfire."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"scenario {scenario_name!r}: a 'behavior' tag is required")
+    try:
+        return Behavior(value)
+    except ValueError:
+        allowed = ", ".join(b.value for b in Behavior)
+        raise ValueError(
+            f"scenario {scenario_name!r}: unknown behavior {value!r}; use one of {allowed}"
+        ) from None
+
+
+def _build_scenario(payload: Any, index: int) -> ScenarioSpec:
+    """Construct one frozen :class:`ScenarioSpec` from the model's JSON scenario; raise on any
+    malformed shape (missing name/legs, a non-integer leg reference) so it re-prompts as a
+    misfire."""
+    if not isinstance(payload, dict):
+        raise ValueError(f"scenario {index}: each scenario must be an object")
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"scenario {index}: a non-empty 'name' is required")
+    raw_legs = payload.get("legs")
+    if not isinstance(raw_legs, list) or not raw_legs:
+        raise ValueError(f"scenario {name!r}: a non-empty 'legs' list is required")
+    legs = tuple(_build_leg(leg, name, i) for i, leg in enumerate(raw_legs))
+    behavior = _build_behavior(payload.get("behavior"), name)
+    leg_ref = payload.get("leg")
+    if leg_ref is not None and (isinstance(leg_ref, bool) or not isinstance(leg_ref, int)):
+        raise ValueError(f"scenario {name!r}: 'leg' must be an integer leg index or omitted")
+    return ScenarioSpec(name=name, legs=legs, behavior=behavior, leg=leg_ref)
+
+
+def _parse_scenario_spec(payload: dict[str, Any]) -> tuple[SpecSuite, tuple[Scenario, ...]]:
+    """Parse the structured ``scenario_spec`` into a :class:`SpecSuite` and compile it at
+    :data:`PARSE_WARM` as a structural validity check.
+
+    Any malformed shape raises :class:`ValueError`; an uncompilable spec re-raises the compiler's
+    precise :class:`SpecError` message as a :class:`ValueError`. Both are caught by the episode
+    runner as a schema misfire (exactly like a missing field), and the message rides into the
+    corrective so the model can fix the spec on the re-prompt."""
+    raw = _require(payload, "scenario_spec")
+    if not isinstance(raw, dict):
+        raise ValueError("scenario_spec must be an object with a 'scenarios' list")
+    raw_scenarios = raw.get("scenarios")
+    if not isinstance(raw_scenarios, list) or not raw_scenarios:
+        raise ValueError("scenario_spec.scenarios must be a non-empty list of scenarios")
+    suite = SpecSuite(scenarios=tuple(_build_scenario(s, i) for i, s in enumerate(raw_scenarios)))
+    try:
+        compiled = compile_spec(suite, PARSE_WARM)
+    except SpecError as exc:
+        raise ValueError(str(exc)) from exc
+    return suite, compiled
+
+
 def parse_formulate(payload: dict[str, Any]) -> FormulateOutput:
-    """The single typed parse both episode transports meet at for FORMULATE."""
+    """The single typed parse both episode transports meet at for FORMULATE.
+
+    The structured ``scenario_spec`` is parsed into the #82 dataclasses and compiled at parse time
+    (:func:`_parse_scenario_spec`); a malformed or uncompilable spec raises here, so the episode
+    runner re-prompts it as a schema misfire exactly like any missing/invalid field."""
+    scenario_spec, scenarios = _parse_scenario_spec(payload)
     return FormulateOutput(
         thesis=str(_require(payload, "thesis")),
         style=str(_require(payload, "style")),
@@ -309,7 +421,8 @@ def parse_formulate(payload: dict[str, Any]) -> FormulateOutput:
         timeframe=str(_require(payload, "timeframe")),
         cost_arithmetic=str(_require(payload, "cost_arithmetic")),
         symbol_character=str(_require(payload, "symbol_character")),
-        scenario_intent=str(_require(payload, "scenario_intent")),
+        scenario_spec=scenario_spec,
+        scenarios=scenarios,
         param_space_sketch=str(_require(payload, "param_space_sketch")),
         parent_thesis=_opt(payload, "parent_thesis"),
         pivot_rationale=_opt(payload, "pivot_rationale"),
@@ -334,6 +447,72 @@ def parse_decide(payload: dict[str, Any]) -> DecideOutput:
     )
 
 
+# The structured scenario_spec the model emits — a 1:1 mapping onto the #82 vocabulary. The model
+# reasons about tape SHAPE (legs) and ONE behavior tag per scenario; it NEVER writes a bar index —
+# the compiler derives every window from the leg boundaries and the strategy's declared warmup.
+_LEG_SPEC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": list(_LEG_KINDS),
+            "description": "The segment shape of this leg.",
+        },
+        "bars": {
+            "type": "integer",
+            "description": "The leg's LENGTH in decision bars (never a bar index); 0 for a gap.",
+        },
+        "pct": {
+            "type": "number",
+            "description": "Signed total move for trend/selloff/recovery/gap (0.05 = +5%).",
+        },
+        "amplitude": {
+            "type": "number",
+            "description": "Oscillation amplitude for chop / vol_spike (e.g. 0.03).",
+        },
+        "period": {"type": "integer", "description": "Wave length in bars for chop (default 8)."},
+    },
+    "required": ["kind", "bars"],
+}
+
+_SCENARIO_SPEC_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "A unique name for this scenario tape."},
+        "legs": {
+            "type": "array",
+            "items": _LEG_SPEC_SCHEMA,
+            "description": "The ordered legs of the tape, in decision-bar lengths.",
+        },
+        "behavior": {
+            "type": "string",
+            "enum": [b.value for b in Behavior],
+            "description": "The ONE behavior this tape must prove (the thesis's contribution).",
+        },
+        "leg": {
+            "type": "integer",
+            "description": "0-based index into 'legs' the behavior targets; omit for never_trade.",
+        },
+    },
+    "required": ["name", "legs", "behavior"],
+}
+
+_SCENARIO_SPEC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "scenarios": {
+            "type": "array",
+            "items": _SCENARIO_SPEC_ITEM_SCHEMA,
+            "description": (
+                "2-8 known-outcome tapes: at least one directional entry (enter/hold "
+                "long/short) and at least one never_trade tape. You author tape SHAPE and "
+                "behavior only — never a bar index."
+            ),
+        },
+    },
+    "required": ["scenarios"],
+}
+
 _FORMULATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -346,10 +525,7 @@ _FORMULATE_SCHEMA: dict[str, Any] = {
             "description": "Captured move per trade vs the round-trip cost (aim >= 3x).",
         },
         "symbol_character": {"type": "string", "description": "The KIND of symbol it needs."},
-        "scenario_intent": {
-            "type": "string",
-            "description": "Each known-outcome tape's shape and the behavior it must prove.",
-        },
+        "scenario_spec": _SCENARIO_SPEC_SCHEMA,
         "param_space_sketch": {"type": "string", "description": "Tunable knobs + ranges."},
         "parent_thesis": {"type": "string", "description": "Optional: the thesis this pivots off."},
         "pivot_rationale": {"type": "string", "description": "Optional: why it pivots."},
@@ -361,7 +537,7 @@ _FORMULATE_SCHEMA: dict[str, Any] = {
         "timeframe",
         "cost_arithmetic",
         "symbol_character",
-        "scenario_intent",
+        "scenario_spec",
         "param_space_sketch",
     ],
 }
@@ -670,15 +846,45 @@ def _record_author_escalation(ledger: SessionLedger, write: dict[str, Any]) -> N
     )
 
 
+# One readable phrase per behavior tag for the author brief's scenario summary. The write gate
+# (#84) will consume the compiled spec directly; until then the brief renders a human-readable
+# summary OF the spec so the author stage keeps compiling on the fixed oracle, not free prose.
+_BEHAVIOR_PHRASES = {
+    Behavior.ENTER_LONG: "enter long during",
+    Behavior.ENTER_SHORT: "enter short during",
+    Behavior.HOLD_LONG: "hold long through",
+    Behavior.HOLD_SHORT: "hold short through",
+    Behavior.FLAT_BY_END: "be flat by the end of",
+}
+
+
+def _leg_phrase(leg: LegSpec) -> str:
+    return f"{leg.kind}({leg.bars})"
+
+
+def _scenario_phrase(spec: ScenarioSpec) -> str:
+    tape = " then ".join(_leg_phrase(leg) for leg in spec.legs)
+    if spec.behavior is Behavior.NEVER_TRADE:
+        return f"{spec.name}: {tape} — stay flat throughout (never trade)"
+    return f"{spec.name}: {tape} — {_BEHAVIOR_PHRASES[spec.behavior]} leg {spec.leg}"
+
+
+def _scenario_summary(suite: SpecSuite) -> str:
+    """A human-readable summary of the structured scenario spec, one line per scenario tape — the
+    author-brief-facing rendering of the fixed oracle (the write gate #84 consumes the spec)."""
+    return "; ".join(_scenario_phrase(spec) for spec in suite.scenarios)
+
+
 def _brief_from_formulate(fo: FormulateOutput, symbols: Sequence[str]) -> dict[str, Any]:
     """Map a FORMULATE output onto the strategy author's brief (thesis, entry/exit, param space,
     scenarios). Passed to ``tool_write_strategy(brief=…)`` — the coder author engine translates it
-    into one validated file."""
+    into one validated file. The ``scenarios`` field is a readable summary rendered from the fixed
+    ``scenario_spec`` (the compiled oracle the write gate #84 replays)."""
     return {
         "thesis": fo.thesis,
         "entry_exit": _entry_exit_brief(fo),
         "param_space": fo.param_space_sketch,
-        "scenarios": fo.scenario_intent,
+        "scenarios": _scenario_summary(fo.scenario_spec),
         "style": fo.style,
         "symbols": list(symbols),
     }
