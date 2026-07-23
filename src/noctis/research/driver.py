@@ -711,10 +711,29 @@ class _NeverStop:
         return False
 
 
+# A short letter prefix that rescues a slug whose content begins with a non-letter (a digit, once
+# symbols/unicode are stripped). "s_" reads as "strategy" in the final name, is unambiguous, and —
+# crucially — keeps the tag's words intact for auditability instead of truncating meaning.
+_NAME_PREFIX = "s_"
+
+
 def _slug(text: str) -> str:
-    """A lower_snake_case slug for a strategy name, derived from the thesis class tag."""
+    """A gate-valid lower_snake_case slug for a strategy name, derived from the thesis class tag.
+
+    Total by construction: for ANY input the result satisfies the SHARED write-gate rule
+    (:data:`noctis.strategies.library.NAME_RE`), so a driver-derived name can never burn a coder
+    attempt on an ``invalid strategy name`` rejection. Tag content is preserved where possible: a
+    slug whose first character is a non-letter (a digit — e.g. ``15m impulse`` → ``s_15m_impulse``)
+    is PREFIXED with ``s_`` rather than truncated, and a degenerate tag that slugs to empty falls
+    back to ``strategy`` (the caller's numeric suffix keeps successive names distinct).
+    """
     slug = re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
-    return re.sub(r"_+", "_", slug)
+    slug = re.sub(r"_+", "_", slug)
+    if not slug:
+        slug = "strategy"
+    if not library.NAME_RE.match(slug):
+        slug = f"{_NAME_PREFIX}{slug}"
+    return slug
 
 
 def _invoke(fn: Callable[..., Any], **kwargs: Any) -> dict[str, Any]:
@@ -1179,7 +1198,7 @@ def run_episodic_research(
             summary.stopped_reason = "formulate_failed"
             break
         formulated += 1
-        name = f"{_slug(fo.class_tag) or 'strategy'}_{formulated}"
+        name = f"{_slug(fo.class_tag)}_{formulated}"  # _slug is total: always gate-valid
         ledger.record_thesis(
             name, fo.thesis, parent_thesis=fo.parent_thesis, pivot_rationale=fo.pivot_rationale
         )
