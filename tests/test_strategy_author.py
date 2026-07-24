@@ -732,11 +732,16 @@ def test_coder_calls_are_stateless_single_completions(tmp_path, families, fast_g
     engine.author("probe", BRIEF)
 
     for call in client.calls:
-        # A bare codegen completion: no tool-use loop, no forced tool, no streaming (the
-        # coder's thinking dial rides on the client built at the composition root, not here).
+        # A bare codegen completion: no tool-use loop, no forced tool (the coder's thinking
+        # dial rides on the client built at the composition root, not here). Every completion
+        # carries a discard delta hook (#98) — purely a transport measure so a streaming-capable
+        # client bounds its timeout per chunk read, never a rendering path: the hook renders
+        # nothing and swallows any delta without raising.
         assert call["tools"] == []
         assert call["tool_choice"] is None
-        assert call["on_delta"] is None
+        assert callable(call["on_delta"])
+        assert call["on_delta"]("think", "…") is None
+        assert call["on_delta"]("say", "…") is None
         # Each completion is a fresh, self-contained prompt — one user turn, no carried
         # assistant/tool history the client would have to hold between calls.
         assert len(call["messages"]) == 1
@@ -756,11 +761,11 @@ def test_a_fresh_authoring_job_carries_no_prior_state(tmp_path, families, fast_g
     assert "probe_two" in second_call["messages"][0]["content"]
 
 
-# ── 5b. The built-in output ceiling is sized for a thinking-enabled hosted coder ──────────
+# ── 5b. The output ceiling is the FILE's budget; thinking rides its own allowance (#98) ────
 def test_builtin_output_ceiling_is_threaded_to_the_coder_completion(tmp_path, families, fast_gate):
     # External behavior: the engine's built-in default max_tokens (16000, raised from the driver
-    # loop's smaller ceiling so a full strategy file plus the coder's thinking never truncates
-    # mid-source) is the value the coder client is actually asked for on a completion.
+    # loop's smaller ceiling so a full strategy file never truncates mid-source) is the value a
+    # non-thinking coder client is actually asked for on a completion.
     engine, client = _author(tmp_path, families, [fenced(PROBE)])
     engine.author("probe", BRIEF)
 
@@ -780,6 +785,33 @@ def test_explicit_max_tokens_override_is_threaded_to_the_coder_completion(
     engine.author("probe", BRIEF)
 
     assert client.calls[0]["max_tokens"] == 8192
+
+
+def test_thinking_client_gets_the_allowance_on_top_of_the_ceiling(tmp_path, families, fast_gate):
+    # A client that runs provider thinking (its `thinking_enabled` is True — an Anthropic adaptive
+    # pin, where thinking and text share max_tokens) is asked for the ceiling PLUS the thinking
+    # allowance, so the configured ceiling stays a pure file budget: a full file of headroom
+    # survives the thinking by construction (#98 — sonnet-5's adaptive thinking ate most of a 32k
+    # ceiling and truncated every escalated file).
+    client = FakeCoder([fenced(PROBE)])
+    client.thinking_enabled = True
+    engine = StrategyAuthor(client=client, strategies_dir=tmp_path, families=families)
+    engine.author("probe", BRIEF)
+
+    assert client.calls[0]["max_tokens"] == 16000 + 32000
+
+
+def test_thinking_allowance_rides_on_top_of_an_explicit_override(tmp_path, families, fast_gate):
+    # The allowance is additive over coder_max_tokens too — the operator sizes the FILE's budget,
+    # the engine sizes the thinking headroom; neither can silently eat the other (#98).
+    client = FakeCoder([fenced(PROBE)])
+    client.thinking_enabled = True
+    engine = StrategyAuthor(
+        client=client, strategies_dir=tmp_path, families=families, max_tokens=8192
+    )
+    engine.author("probe", BRIEF)
+
+    assert client.calls[0]["max_tokens"] == 8192 + 32000
 
 
 # ── 6. Reference adaptation: a named library strategy's source enters the prompt ──────────

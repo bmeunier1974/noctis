@@ -527,7 +527,8 @@ def test_coder_fallback_client_not_built_when_knob_unset(tmp_path, monkeypatch):
 
 def test_coder_fallback_client_built_when_configured(tmp_path, monkeypatch):
     """``coder_fallback_model`` set + provider available ⇒ a stateless paid client reaches the
-    toolbox, built like the local coder (thinking ON, a deliberate/budgeted decision)."""
+    toolbox, built on its OWN thinking dial defaulting OFF (#98): the strong fallback spends its
+    whole output ceiling on the file, so the dial tuned for weak local coders can't sink it."""
     monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
     local, fallback = _fake_coder(), _fake_coder()
     seen: list[tuple] = []
@@ -543,6 +544,7 @@ def test_coder_fallback_client_built_when_configured(tmp_path, monkeypatch):
         coder_fallback_model="anthropic/claude-opus-4-8",
         max_escalations=2,
     )
+    assert settings.research.agent.coder_fallback_thinking == "off"  # the #98 default
     session = build_research_session(
         settings=settings,
         lake=object(),
@@ -554,7 +556,40 @@ def test_coder_fallback_client_built_when_configured(tmp_path, monkeypatch):
     assert session.toolbox.coder_client is local
     assert session.toolbox.coder_fallback_client is fallback
     assert session.toolbox.max_escalations == 2
-    # The fallback client was built for the configured fallback model, thinking ON (deliberate).
+    # The fallback client was built for the configured fallback model, thinking OFF by default
+    # (#98) — while the LOCAL coder keeps its own dial's default (ON).
+    fb = next(kw for model, kw in seen if model == "anthropic/claude-opus-4-8")
+    assert fb.get("thinking") == "off"
+    assert fb.get("deliberate") is True
+    lc = next(kw for model, kw in seen if model == "anthropic/claude-sonnet-5")
+    assert lc.get("thinking") == "on"
+
+
+def test_coder_fallback_thinking_opt_in(tmp_path, monkeypatch):
+    """``coder_fallback_thinking: on`` opts the escalated coder back into deliberate thinking —
+    the operator's budgeted decision, independent of the local coder's dial (#98)."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    seen: list[tuple] = []
+
+    def fake_client_for(settings, model, **kwargs):
+        seen.append((model, kwargs))
+        return _fake_coder()
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    settings = _session_settings(
+        tmp_path,
+        coder_model="anthropic/claude-sonnet-5",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+    )
+    settings.research.agent.coder_fallback_thinking = "on"
+    session = build_research_session(
+        settings=settings,
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    assert session is not None
     fb = next(kw for model, kw in seen if model == "anthropic/claude-opus-4-8")
     assert fb.get("thinking") == "on"
     assert fb.get("deliberate") is True

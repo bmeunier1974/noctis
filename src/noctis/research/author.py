@@ -13,11 +13,14 @@ The engine owns no toolbox state, so it is exercised in isolation with a fake LL
 1. Compose a **stateless** prompt from the strategy contract (``TEMPLATE.py``, the API
    contract sheet, one complete worked-example seed, and the header/scenario rules) plus the
    brief.
-2. One completion against the injected coder client — a bare, single, tool-free codegen call.
-   Thinking rides on the client the composition root builds (``coder_thinking``, default on —
-   authoring is the reasoning-heavy sub-task, #17), and the byte-stable system prompt carries a
-   cache breakpoint (gated on the client's ``prompt_cache``) so private retries re-read, never
-   re-pay, the enlarged contract/worked-example prefix.
+2. One completion against the injected coder client — a bare, single, tool-free codegen call,
+   streamed where the client can so the transport timeout bounds silence between chunks, never
+   the whole thinking+generation wall clock (#98). Thinking rides on the client the composition
+   root builds (``coder_thinking``, default on — authoring is the reasoning-heavy sub-task, #17;
+   a thinking client's output ceiling grows by a thinking allowance so the file's budget
+   survives, #98), and the byte-stable system prompt carries a cache breakpoint (gated on the
+   client's ``prompt_cache``) so private retries re-read, never re-pay, the enlarged
+   contract/worked-example prefix.
 3. Extract the fenced code block; a reply carrying none is rejected and counts as an attempt.
 4. Validate through the existing library write path
    (:func:`noctis.strategies.library.write_strategy`) — the same fresh-subprocess gate every
@@ -52,12 +55,19 @@ from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.scenario_spec import SpecSuite, describe_spec
 
-# The coder's output-token ceiling — sized for a thinking-enabled hosted coder (on Anthropic
-# models the cap bounds thinking + text together) plus the current tokenizer, so a full ~200-line
-# strategy file AND the reasoning that authors it never truncate mid-source. It deliberately
-# diverges from — sits above — the driver loop's smaller ceiling (agent._MAX_TOKENS); unused
-# output headroom is billed as generated, so the slack costs nothing.
+# The coder's output-token ceiling — the FILE's budget: sized so a full ~200-line strategy file
+# never truncates mid-source under the current tokenizer. It deliberately diverges from — sits
+# above — the driver loop's smaller ceiling (agent._MAX_TOKENS); output tokens are billed only as
+# generated, so the slack costs nothing. A client that runs provider thinking gets
+# _THINKING_ALLOWANCE added ON TOP, so this stays a pure file budget either way.
 _MAX_TOKENS = 16000
+# Extra output-token headroom for a coder client that runs provider thinking (Anthropic adaptive):
+# on those models thinking and text share max_tokens, and the first field exercise of escalation
+# (#98) showed sonnet-5's adaptive thinking eating most of a 32k ceiling — the file never fit in
+# what remained, three attempts straight. Sized to cover that observed depth in full and added ON
+# TOP of the configured ceiling, so the ceiling keeps a whole strategy file of headroom AFTER
+# thinking by construction. Unused headroom is never billed.
+_THINKING_ALLOWANCE = 32000
 # Private re-prompts after the first attempt: initial + _CODER_RETRIES ≤ 3 coder completions
 # per authoring job, whether an attempt failed as a non-code reply or a validation error.
 _CODER_RETRIES = 2
@@ -179,6 +189,14 @@ def _extract_code_block(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _discard_delta(kind: str, text: str) -> None:
+    """Discard one streaming delta — passed on every coder completion as a transport measure, not
+    a rendering path (#98). A streaming-capable client then streams the completion, so its per-read
+    timeout bounds *silence between chunks* instead of the whole thinking+generation wall clock —
+    which a thinking hosted coder on a full authoring brief can legitimately exceed. The engine
+    renders nothing; a non-streaming client ignores the hook and completes exactly as before."""
+
+
 def _extraction_error(stop_reason: str) -> library.StrategyValidationError:
     """The retry correction for a reply whose code block would not extract — keyed on why.
 
@@ -252,7 +270,14 @@ class StrategyAuthor:
         self._client = client
         self._strategies_dir = strategies_dir
         self._families = families
-        self._max_tokens = max_tokens
+        # The per-call output ceiling. ``max_tokens`` (the config's coder_max_tokens, or the
+        # built-in default) is the FILE's budget; a client that runs provider thinking — its
+        # ``thinking_enabled`` is duck-typed, absent ⇒ False — shares that ceiling with its
+        # thinking on Anthropic models, so the allowance rides on top and a full file of headroom
+        # survives the thinking by construction (#98).
+        self._max_tokens = max_tokens + (
+            _THINKING_ALLOWANCE if getattr(client, "thinking_enabled", False) else 0
+        )
         self._max_attempts = 1 + max(0, retries)
         template = (
             template_source if template_source is not None else _seed_template(strategies_dir)
@@ -324,6 +349,7 @@ class StrategyAuthor:
                 tools=[],
                 messages=[{"role": "user", "content": content}],
                 max_tokens=self._max_tokens,
+                on_delta=_discard_delta,  # stream where the client can — a transport bound (#98)
             )
             source = _extract_code_block(turn.text)
             if source is None:

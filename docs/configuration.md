@@ -25,7 +25,8 @@ alternate file.
 | `research.max_iterations`, `max_backtests`, `sweep_trials`, `web_search` | Agent session budgets |
 | `research.agent.coder_model`, `max_author_calls` | Dedicated authoring model + its Class-B budget: coder completions/session (retries included); exhausted → brief authoring refused, hand-written `source` stays open |
 | `research.agent.coder_thinking` | `on` (default) / `off` — the coder reasons through scenario-window/warmup arithmetic (deliberate, budgeted by `max_author_calls`); separate from the driver `thinking` dial |
-| `research.agent.coder_max_tokens` | The coder's output-token ceiling — `null` (default) defers to the built-in `16000`; a number resizes it for a different coder backend. A compat/sizing lever, **not** a cost budget (unused headroom is never billed); inert without a `coder_model` |
+| `research.agent.coder_fallback_model`, `max_escalations`, `coder_fallback_thinking` | Paid escalation coder (#72): a local authoring job that spends its validator retries escalates the same brief, bounded per session by `max_escalations` (`0` = default = never). The escalated coder's thinking dial defaults `off` (#98) |
+| `research.agent.coder_max_tokens` | The coder's output-token ceiling — the *file's* budget: `null` (default) defers to the built-in `16000`; a number resizes it for a different coder backend. A thinking coder client gets a thinking allowance added on top (#98). A compat/sizing lever, **not** a cost budget (unused headroom is never billed); inert without a `coder_model` |
 | `research.cost_profile` | `full` / `balanced` / `economy` — resource ceilings only, never quality gates |
 | `research.agent.thinking` | `off` (default) / `on` — opt a **watch** session into provider-native reasoning; costs output tokens (see below) |
 | `research.agent.max_tokens`, `context_window` | Small-context-backend compatibility levers (see **Local backends** below) — not cost budgets. A declared `context_window` ≤ 32,768 also flips `research.agent.loop: auto` to the episodic driver (#76) |
@@ -161,13 +162,27 @@ research:
   by `max_author_calls`. Set it `off` to run a cheaper coder. The coder's (enlarged) system prompt
   is prompt-cached, so private validation retries within a job re-read it rather than re-paying it.
   Inert without a `coder_model`. Separate from the driver's `thinking` watch dial (next section).
-- **`coder_max_tokens`** is the coder's output-token ceiling. It defaults to `null` = the author
-  engine's built-in ceiling (`16000`), sized so a full ~200-line strategy file *and* the reasoning
-  that authors it never truncate mid-source; a number **pins** it. This is a compatibility/sizing
-  lever — resize it for a coder backend whose output window differs — **not** a cost budget: output
-  tokens are billed only as they are generated, so unused headroom costs nothing (the coder's spend
-  is bounded by `max_author_calls`, not by this ceiling). Like the other `coder_*` knobs it is inert
-  without a `coder_model`.
+- **`coder_max_tokens`** is the coder's output-token ceiling — the **file's** budget. It defaults
+  to `null` = the author engine's built-in ceiling (`16000`), sized so a full ~200-line strategy
+  file never truncates mid-source; a number **pins** it. A coder client that runs provider
+  thinking gets the engine's thinking allowance (`32000`) added *on top* — on Anthropic models
+  thinking and text share `max_tokens`, and the first field run of escalation (#98) showed
+  adaptive thinking eating a 32k ceiling until no file fit — so this ceiling stays all text by
+  construction. This is a compatibility/sizing lever — resize it for a coder backend whose output
+  window differs — **not** a cost budget: output tokens are billed only as they are generated, so
+  unused headroom costs nothing (the coder's spend is bounded by `max_author_calls`, not by this
+  ceiling). Like the other `coder_*` knobs it is inert without a `coder_model`.
+- **`coder_fallback_model`** + **`max_escalations`** are the paid escalation path (#72): when the
+  local coder spends its whole validator-retry budget on a brief, the *same* brief escalates once
+  to this (typically stronger, hosted) model with the full retry budget. `max_escalations`
+  defaults to `0` = never escalate, so the paid coder is strictly opt-in bounded spend; each
+  escalation counts whether or not the file then lands. **`coder_fallback_thinking`** is the
+  escalated coder's own thinking dial, **off by default** (#98): the fallback is the strong model,
+  and the field run that first exercised escalation showed a thinking sonnet-5 fallback timing out
+  and thinking-truncating every file — with it off, the escalated call spends its whole ceiling on
+  the file. Set it `on` to opt the fallback into the same deliberate thinking as the local coder
+  (authoring completions stream, and the thinking allowance above applies, so it is survivable —
+  just slower and costlier). All three are inert without a `coder_model`.
 
 ## Watching the model reason
 
