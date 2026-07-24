@@ -28,7 +28,11 @@ from typing import TYPE_CHECKING
 from noctis.engine.research import ResearchSummary, StopEvent
 from noctis.observability.events import Event, render_plain, tool_event, usage_line
 from noctis.research.llm import WEB_SEARCH_TOOL_TYPE, cached_system, effective_web_search
-from noctis.research.misfire import classify_completion_error, classify_turn
+from noctis.research.misfire import (
+    PREMATURE_CONCLUSION,
+    classify_completion_error,
+    classify_turn,
+)
 from noctis.research.prompt import build_system_prompt
 
 if TYPE_CHECKING:
@@ -39,6 +43,13 @@ logger = logging.getLogger("noctis.research.agent")
 
 _MAX_TOKENS = 8000
 _RESULT_CHAR_CAP = 20_000  # hard cap per tool result so one dump can't flood the context
+
+# The zero-verdict liveness guard: a clean prose turn while nothing has been decided is a
+# protocol stall (a thesis statement awaiting a go-ahead), not a conclusion — nudge the model
+# onward at most this many times per session. Small on purpose: past the cap a prose turn is
+# honored as the deliberate ``agent_done`` conclusion it always was, so a model that truly
+# has nothing left can still end the session.
+_MAX_PROSE_NUDGES = 2
 
 # Context-budget levers (plan P5) — all inert unless research.agent.context_window is set.
 # The size estimate is provider-neutral (chars // 4 ≈ tokens): it must work on any backend,
@@ -447,6 +458,7 @@ def run_agent_research(
     messages: list[dict] = [{"role": "user", "content": kickoff}]
 
     usage_totals = dict.fromkeys(_USAGE_FIELDS, 0)
+    prose_nudges = 0
 
     while True:
         if stop_event.is_set():
@@ -520,6 +532,22 @@ def run_agent_research(
             if stumble is not None:
                 emit(f"[misfire] {stumble.note}")
                 messages = messages + [{"role": "user", "content": stumble.retry}]
+                continue
+            if toolbox.promotions + toolbox.rejections == 0 and prose_nudges < _MAX_PROSE_NUDGES:
+                # The zero-verdict liveness guard: clean prose with nothing decided is a
+                # stall, not a conclusion (the FORMULATE step invites exactly this turn
+                # shape). Unlike the misfire faces above, the prose IS appended — it is
+                # valid, replayable context, usually the very thesis the nudge asks the
+                # model to act on. Each nudged round burned an iteration above, and the
+                # separate cap keeps a deliberate zero-verdict conclusion reachable.
+                prose_nudges += 1
+                emit(f"[misfire] {PREMATURE_CONCLUSION.note} ({prose_nudges}/{_MAX_PROSE_NUDGES})")
+                if turn.text.strip():
+                    emit(Event("say", turn.text.strip(), level=2))
+                messages = messages + [
+                    turn.assistant_message,
+                    {"role": "user", "content": PREMATURE_CONCLUSION.retry},
+                ]
                 continue
             summary.stopped_reason = "agent_done"
             # The agent's deliberate final conclusion — level-1 so it shows at -v like today; the
