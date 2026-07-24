@@ -94,6 +94,16 @@ def text_turn(text="done", usage=None, stop_reason="end_turn"):
     )
 
 
+def prose_ending(text="done", usage=None):
+    """A deliberate zero-verdict session ending under the liveness guard: the loop nudges a
+    prose turn ``_MAX_PROSE_NUDGES`` times before honoring one as ``agent_done``, so a script
+    that concludes without a verdict must end with cap+1 prose turns. Only the FIRST carries
+    ``usage`` (the later turns are the model repeating itself)."""
+    from noctis.research.agent import _MAX_PROSE_NUDGES
+
+    return [text_turn(text, usage), *(text_turn(text) for _ in range(_MAX_PROSE_NUDGES))]
+
+
 def misfire_turn(channel="reasoning"):
     """A tool-call misfire: a small local backend wrote its tool call as literal markup in the
     thinking (or text) channel, where no template parses it — so the parsed turn arrives with
@@ -230,8 +240,9 @@ def test_summary_tokens_total_sums_every_completions_usage(tmp_path):
     already accumulates — one comparable spend axis the parity harness reads (story #75). A
     no-usage backend contributes 0, so the field stays honest on any provider."""
     toolbox = _make_toolbox(tmp_path)
-    # Two rounds: a tool round with usage, then the plain-text conclusion with usage. tokens_total
-    # sums input+output+cache_w+cache_r across both = (100+20+5+3) + (40+10+0+0) = 178.
+    # A tool round with usage, then a zero-verdict prose ending whose first turn carries usage
+    # (the nudged repeats are usage-free). tokens_total sums input+output+cache_w+cache_r
+    # across every completion = (100+20+5+3) + (40+10+0+0) = 178.
     client = FakeLLM(
         [
             tool_turn(
@@ -243,7 +254,7 @@ def test_summary_tokens_total_sums_every_completions_usage(tmp_path):
                     "cache_read_input_tokens": 3,
                 },
             ),
-            text_turn("done", usage={"input_tokens": 40, "output_tokens": 10}),
+            *prose_ending("done", usage={"input_tokens": 40, "output_tokens": 10}),
         ]
     )
 
@@ -309,19 +320,50 @@ def test_persistent_misfires_end_via_iteration_budget(tmp_path):
     assert len(client.calls) == 5  # not one API call past the budget
 
 
-def test_plain_text_conclusion_is_not_retried(tmp_path):
-    """A turn WITH plain text and no tool calls is the agent's deliberate conclusion — it must
-    keep ending the session on the first try, not trigger a misfire retry."""
+def test_prose_stall_with_no_verdict_is_nudged_not_fatal(tmp_path):
+    """The zero-verdict liveness guard: a clean prose turn while nothing has been decided is a
+    protocol stall (a thesis statement awaiting a go-ahead), not a conclusion — the loop keeps
+    the prose as context, appends the corrective, and the session resumes to a real verdict."""
     toolbox = _make_toolbox(tmp_path)
-    client = FakeLLM([text_turn("No viable edge this session.")], capabilities=NO_CAPS)
+    thesis = "FORMULATE: overnight gap continuation on 1d bars; 0.6% gap clears 15x the 4bp cost."
+    client = FakeLLM([text_turn(thesis), *_script()], capabilities=NO_CAPS)
+
+    summary = run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=25
+    )
+
+    # The session recovered and played the whole protocol; the stalled round still burned an
+    # iteration against the budget.
+    assert summary.stopped_reason == "agent_done"
+    assert summary.promotions == 1
+    assert summary.iterations == 12
+
+    # The corrective is a user-role message naming the missing verdict — and unlike the parse
+    # misfires, the prose assistant turn WAS appended (it is the thesis the nudge acts on).
+    assistant, retry = client.calls[1]["messages"][-2:]
+    assert assistant["role"] == "assistant" and thesis in _msg_text(assistant)
+    assert retry["role"] == "user"
+    assert "verdict" in _msg_text(retry).lower()
+
+
+def test_prose_nudges_are_bounded_then_conclusion_honored(tmp_path):
+    """The guard's cap is its own escape hatch: after ``_MAX_PROSE_NUDGES`` corrections a model
+    that still answers in prose is ending the session deliberately — honored as ``agent_done``,
+    never an infinite nudge loop."""
+    from noctis.research.agent import _MAX_PROSE_NUDGES
+
+    toolbox = _make_toolbox(tmp_path)
+    turns = [text_turn(f"Still just talking ({i}).") for i in range(_MAX_PROSE_NUDGES + 1)]
+    client = FakeLLM(turns, capabilities=NO_CAPS)
 
     summary = run_agent_research(
         toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=25
     )
 
     assert summary.stopped_reason == "agent_done"
-    assert summary.iterations == 1
-    assert len(client.calls) == 1
+    assert summary.iterations == _MAX_PROSE_NUDGES + 1
+    assert len(client.calls) == _MAX_PROSE_NUDGES + 1
+    assert summary.promotions == 0 and summary.rejections == 0
 
 
 def test_truncated_turn_is_retried_not_fatal(tmp_path):
@@ -490,12 +532,12 @@ def test_max_tokens_pin_reaches_every_completion(tmp_path):
     from noctis.research.agent import _MAX_TOKENS
 
     toolbox = _make_toolbox(tmp_path)
-    client = FakeLLM([tool_turn(("list_strategies", {}, "tu_0")), text_turn()])
+    client = FakeLLM([tool_turn(("list_strategies", {}, "tu_0")), *prose_ending()])
     run_agent_research(toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=5)
     assert all(c["max_tokens"] == _MAX_TOKENS for c in client.calls)
 
     toolbox = _make_toolbox(tmp_path)
-    pinned = FakeLLM([tool_turn(("list_strategies", {}, "tu_0")), text_turn()])
+    pinned = FakeLLM([tool_turn(("list_strategies", {}, "tu_0")), *prose_ending()])
     run_agent_research(
         toolbox=toolbox, client=pinned, budget_minutes=60.0, max_iterations=5, max_tokens=2048
     )
@@ -690,7 +732,7 @@ def test_usage_rollup_emitted_once(tmp_path, caplog):
                     "cache_read_input_tokens": 0,
                 },
             ),
-            text_turn(
+            *prose_ending(
                 usage={
                     "input_tokens": 50,
                     "output_tokens": 20,
@@ -706,7 +748,7 @@ def test_usage_rollup_emitted_once(tmp_path, caplog):
     rollups = [r.getMessage() for r in caplog.records if "agent research usage:" in r.getMessage()]
     assert len(rollups) == 1
     line = rollups[0]
-    assert "2 rounds" in line
+    assert "4 rounds" in line  # tool round + prose ending (2 nudged repeats + the conclusion)
     assert "input=150" in line and "output=30" in line
     assert "cache_write=2000" in line and "cache_read=2000" in line
     # cache_read / (cache_read + input + cache_write) = 2000 / (2000 + 150 + 2000) = 0.4819…
@@ -716,7 +758,7 @@ def test_usage_rollup_emitted_once(tmp_path, caplog):
 def test_usage_rollup_zero_cache_on_fresh_session(tmp_path, caplog):
     """A fresh session with no usage on the fake client: no raise, cache-read is 0."""
     toolbox = _make_toolbox(tmp_path)
-    client = FakeLLM([text_turn()])
+    client = FakeLLM(prose_ending())
     with caplog.at_level("INFO", logger="noctis.research.agent"):
         summary = run_agent_research(
             toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=5
@@ -732,7 +774,7 @@ def test_system_prompt_carries_cache_breakpoint(tmp_path):
     """With prompt_cache capability, the system prefix is one cached block reused by identity."""
     toolbox = _make_toolbox(tmp_path)
     client = FakeLLM(
-        [tool_turn(("list_strategies", {}, "tu_0")), text_turn()], capabilities=ANTHROPIC_CAPS
+        [tool_turn(("list_strategies", {}, "tu_0")), *prose_ending()], capabilities=ANTHROPIC_CAPS
     )
     run_agent_research(toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=5)
 
@@ -751,7 +793,7 @@ def test_no_prompt_cache_capability_sends_plain_string(tmp_path):
     """A provider whose caching is automatic (OpenAI) or unsupported (local): no breakpoints."""
     toolbox = _make_toolbox(tmp_path)
     client = FakeLLM(
-        [tool_turn(("list_strategies", {}, "tu_0")), text_turn()], capabilities=NO_CAPS
+        [tool_turn(("list_strategies", {}, "tu_0")), *prose_ending()], capabilities=NO_CAPS
     )
     run_agent_research(toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=5)
     assert isinstance(client.calls[0]["system"], str)
@@ -767,7 +809,7 @@ def test_moving_breakpoint_on_tool_result_history(tmp_path):
         [
             tool_turn(("list_strategies", {}, "tu_0"), ("get_champions", {}, "tu_1")),
             tool_turn(("list_symbols", {}, "tu_2")),
-            text_turn(),
+            *prose_ending(),
         ],
         capabilities=ANTHROPIC_CAPS,
     )
@@ -804,7 +846,7 @@ def test_capabilities_gate_web_search(tmp_path):
     """
     # Anthropic: server-side tool offered; the client tool of the same name is withdrawn.
     toolbox = _make_toolbox(tmp_path)
-    with_caps = FakeLLM([text_turn()], capabilities=ANTHROPIC_CAPS)
+    with_caps = FakeLLM(prose_ending(), capabilities=ANTHROPIC_CAPS)
     run_agent_research(toolbox=toolbox, client=with_caps, budget_minutes=60.0, web_search=True)
     a_tools = with_caps.calls[0]["tools"]
     assert any(t.get("name") == "web_search" and "type" in t for t in a_tools)
@@ -812,7 +854,7 @@ def test_capabilities_gate_web_search(tmp_path):
 
     # $0 local backend: no server-side capability, so the client sidecar tool stands in.
     toolbox2 = _make_toolbox(tmp_path / "b")
-    no_caps = FakeLLM([text_turn()], capabilities=NO_CAPS)
+    no_caps = FakeLLM(prose_ending(), capabilities=NO_CAPS)
     run_agent_research(toolbox=toolbox2, client=no_caps, budget_minutes=60.0, web_search=True)
     l_tools = no_caps.calls[0]["tools"]
     assert any(t.get("name") == "web_search" and "input_schema" in t for t in l_tools)
@@ -820,7 +862,7 @@ def test_capabilities_gate_web_search(tmp_path):
 
     # Operator flag off: neither implementation is offered.
     toolbox3 = _make_toolbox(tmp_path / "c")
-    off = FakeLLM([text_turn()], capabilities=NO_CAPS)
+    off = FakeLLM(prose_ending(), capabilities=NO_CAPS)
     run_agent_research(toolbox=toolbox3, client=off, budget_minutes=60.0, web_search=False)
     assert not any(t.get("name") == "web_search" for t in off.calls[0]["tools"])
 
@@ -968,7 +1010,7 @@ def test_directive_reaches_prompt_and_kickoff(tmp_path):
     # Through the loop: the system prompt carries the full body; the kickoff carries only the
     # one-line SUMMARY, never the full body (a multi-KB mandate must not be embedded twice).
     # NO_CAPS keeps the kickoff a plain string (no cache wrapping) so we can read it directly.
-    client = FakeLLM([text_turn()], capabilities=NO_CAPS)
+    client = FakeLLM(prose_ending(), capabilities=NO_CAPS)
     run_agent_research(toolbox=toolbox, client=client, budget_minutes=60.0, mandate=mandate)
     call = client.calls[0]
     system_text = _system_text(call)
@@ -1187,7 +1229,15 @@ def test_reasoning_narration_and_usage_are_teed_as_events(tmp_path):
         "cache_read_input_tokens": 0,
     }
     client = FakeLLM(
-        [_reasoning_turn(reasoning, narration, usage), text_turn("done")], capabilities=NO_CAPS
+        # Distinct texts: the nudged prose repeats surface as level-2 says, so only the final
+        # "done" turn is the level-1 conclusion the assertion below targets.
+        [
+            _reasoning_turn(reasoning, narration, usage),
+            text_turn("mulling"),
+            text_turn("mulling"),
+            text_turn("done"),
+        ],
+        capabilities=NO_CAPS,
     )
     events: list = []
     run_agent_research(
@@ -1244,7 +1294,7 @@ def test_tool_event_surfaces_gate_facing_numbers(tmp_path):
                 )
             ),
             tool_turn(("run_backtest", {"name": "ghost", "symbols": ["AAA"]}, "tu_1")),
-            text_turn("done"),
+            *prose_ending("done"),
         ],
         capabilities=NO_CAPS,
     )
@@ -1318,7 +1368,7 @@ def _ending_client(reason: str):
     """A minimal client that drives the loop to the requested stop reason in as few rounds as
     possible, so the session-end honesty check runs on each distinct exit path."""
     if reason == "agent_done":
-        return FakeLLM([text_turn("No verdict this session.")], capabilities=NO_CAPS)
+        return FakeLLM(prose_ending("No verdict this session."), capabilities=NO_CAPS)
     if reason == "max_iterations":
         # A model that never resolves a native tool call — bounded by the iteration budget.
         return FakeLLM([misfire_turn() for _ in range(3)], capabilities=NO_CAPS)
@@ -1363,7 +1413,7 @@ def test_no_undecided_leaves_field_empty_and_logs_no_warning(tmp_path, caplog):
     """A clean session (nothing left undecided) leaves the summary field empty and emits no
     undecided WARNING — the honesty check adds zero noise on the common path."""
     toolbox = _make_toolbox(tmp_path)
-    client = FakeLLM([text_turn("Rejected; nothing carried forward.")], capabilities=NO_CAPS)
+    client = FakeLLM(prose_ending("Rejected; nothing carried forward."), capabilities=NO_CAPS)
 
     with caplog.at_level("WARNING", logger="noctis.research.agent"):
         summary = run_agent_research(
@@ -1384,7 +1434,7 @@ def test_undecided_populated_organically_through_the_write_gate(tmp_path):
     client = FakeLLM(
         [
             tool_turn(("write_strategy", {"name": "probe", "source": PROBE}, "tu_0")),
-            text_turn("Out of time before a verdict."),
+            *prose_ending("Out of time before a verdict."),
         ],
         capabilities=NO_CAPS,
     )

@@ -85,6 +85,27 @@ _INVALID_CALL = Misfire(
 )
 
 
+# Not a parse stumble like the faces above: the turn is clean prose, but the session has
+# reached no verdict yet, so the "conclusion" is a protocol stall, not an ending. The system
+# prompt's FORMULATE step invites a written thesis, and a chat model naturally ends its turn
+# there, waiting for a go-ahead that a headless session never sends. The loop applies this
+# only while nothing has been decided and bounds it with its own small cap (unlike the faces
+# above, the model must retain the ability to end a session deliberately) — see the
+# zero-verdict guard in :mod:`noctis.research.agent`. The prose turn IS appended to history
+# (it is valid, replayable context — the thesis the nudge asks the model to act on).
+PREMATURE_CONCLUSION = Misfire(
+    note="prose-only turn with no verdict this session — a stall, not a conclusion; nudging on",
+    retry=(
+        "Your reply had no tool call, but this session has not reached a verdict, so it cannot "
+        "conclude yet — a thesis statement or a plan is progress, not an ending. Continue the "
+        "protocol NOW with native tool calls in this same turn: ground the thesis "
+        "(screen_symbols/preview_bars), author it (write_strategy), exhaust it "
+        "(run_sweep/run_backtest), and end with an explicit verdict (evaluate_vs_champion or "
+        "reject_strategy). Keep narration in the same turn as your tool calls."
+    ),
+)
+
+
 def classify_turn(turn: Turn) -> Misfire | None:
     """Classify a turn that produced zero usable native tool calls: a :class:`Misfire` to
     correct and retry, or ``None`` — the turn carries plain text and is the agent's
