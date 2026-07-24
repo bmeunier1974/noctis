@@ -28,7 +28,7 @@ alternate file.
 | `research.agent.coder_max_tokens` | The coder's output-token ceiling — `null` (default) defers to the built-in `16000`; a number resizes it for a different coder backend. A compat/sizing lever, **not** a cost budget (unused headroom is never billed); inert without a `coder_model` |
 | `research.cost_profile` | `full` / `balanced` / `economy` — resource ceilings only, never quality gates |
 | `research.agent.thinking` | `off` (default) / `on` — opt a **watch** session into provider-native reasoning; costs output tokens (see below) |
-| `research.agent.max_tokens`, `context_window` | Small-context-backend compatibility levers (see **Local backends** below) — not cost budgets |
+| `research.agent.max_tokens`, `context_window` | Small-context-backend compatibility levers (see **Local backends** below) — not cost budgets. A declared `context_window` ≤ 32,768 also flips `research.agent.loop: auto` to the episodic driver (#76) |
 | `research.agent.sweep_workers` | Parallel workers for sweep trials + panel symbols (`1` = sequential) |
 | `research.fit_set_size`, `symbol_holdout_size` | Panel geometry: fit set + symbol holdout sizes |
 | `research.focus_size` | Cap on symbols enumerated into each session's prompt — a prompt-size lever, never the trading roster |
@@ -115,7 +115,11 @@ completion inside the window (a thinking model needs room to reason *and* emit a
 call), and `context_window` bounds the whole request — per-result caps tier down, the
 oldest tool results evict to pointer lines, and a decided strategy's history collapses at
 its verdict. Both are compatibility levers, not cost budgets: the on-disk experiment
-journal stays the ground truth, so no gate or holdout is affected. A non-Ollama endpoint
+journal stays the ground truth, so no gate or holdout is affected. Declaring a
+`context_window` of at most 32,768 also flips the default `research.agent.loop: auto` to
+the **episodic** driver — the loop built for exactly this class of backend (see
+[research.md](research.md) and the parity evidence in [parity.md](parity.md); set
+`loop: conversation` to opt out). A non-Ollama endpoint
 (vLLM, a proxy) uses `research.base_url` plus its own model id. On a free/local provider
 the `cost_profile` automatically resolves to `full`.
 

@@ -19,6 +19,7 @@ import pytest
 
 import noctis.research as research_mod
 from noctis.bootstrap import (
+    _EPISODIC_WINDOW_MAX,
     MissingVendorKey,
     ResearchSession,
     UsageError,
@@ -691,7 +692,9 @@ def test_build_research_session_draft_ttl_none_disables_prune(tmp_path, monkeypa
 
 
 # ── the research-loop knob (#68): conversation vs the episodic driver, selected here ──────────
-def _loop_settings(tmp_path, *, loop: str | None = None, distill: int | None = None):
+def _loop_settings(
+    tmp_path, *, loop: str | None = None, distill: int | None = None, window: int | None = None
+):
     lines = [
         "research_time_budget_minutes: 42",
         f"state_dir: {tmp_path}/state/",
@@ -700,11 +703,17 @@ def _loop_settings(tmp_path, *, loop: str | None = None, distill: int | None = N
     research = []
     if distill is not None:
         research.append(f"  memory_distill_every: {distill}")
+    agent = []
     if loop is not None:
-        research += ["  agent:", f"    loop: {loop}"]
+        agent.append(f"    loop: {loop}")
+    if window is not None:
+        agent.append(f"    context_window: {window}")
+    if agent:
+        research += ["  agent:", *agent]
     if research:
         lines = [*lines, "research:", *research]
-    return load_settings(config_path=_config(tmp_path, lines, f"loop-{loop}-{distill}.yaml"))
+    name = f"loop-{loop}-{distill}-{window}.yaml"
+    return load_settings(config_path=_config(tmp_path, lines, name))
 
 
 def test_loop_config_knob_defaults_to_auto_and_accepts_the_three_values(tmp_path):
@@ -717,18 +726,33 @@ def test_loop_config_knob_defaults_to_auto_and_accepts_the_three_values(tmp_path
         AgentResearchConfig(loop="nonsense")
 
 
-def test_resolve_research_loop_maps_auto_and_unset_to_conversation(tmp_path):
-    assert resolve_research_loop(_loop_settings(tmp_path)) == "conversation"  # unset
-    assert resolve_research_loop(_loop_settings(tmp_path, loop="auto")) == "conversation"
-    assert resolve_research_loop(_loop_settings(tmp_path, loop="conversation")) == "conversation"
+def test_resolve_research_loop_explicit_picks_always_win(tmp_path):
+    small = _EPISODIC_WINDOW_MAX
     assert resolve_research_loop(_loop_settings(tmp_path, loop="episodic")) == "episodic"
+    conv = _loop_settings(tmp_path, loop="conversation", window=small)
+    assert resolve_research_loop(conv) == "conversation"  # explicit beats a small window
 
 
-def _session(tmp_path, monkeypatch, *, loop=None, distill=None):
+def test_resolve_research_loop_auto_flips_on_small_context_window(tmp_path):
+    """The evidence-gated flip (#76): ``auto`` selects episodic when the declared context window
+    is at or below the documented threshold, conversation for larger or unset windows."""
+    assert _EPISODIC_WINDOW_MAX == 32_768  # the documented constant, not folklore
+    assert resolve_research_loop(_loop_settings(tmp_path)) == "conversation"  # unset window
+    assert resolve_research_loop(_loop_settings(tmp_path, loop="auto")) == "conversation"
+    at = _loop_settings(tmp_path, loop="auto", window=_EPISODIC_WINDOW_MAX)
+    assert resolve_research_loop(at) == "episodic"  # inclusive: the canonical 32k local box
+    assert resolve_research_loop(_loop_settings(tmp_path, loop="auto", window=8_192)) == "episodic"
+    above = _loop_settings(tmp_path, loop="auto", window=_EPISODIC_WINDOW_MAX + 1)
+    assert resolve_research_loop(above) == "conversation"
+    implicit = _loop_settings(tmp_path, window=16_384)  # loop unset = auto
+    assert resolve_research_loop(implicit) == "episodic"
+
+
+def _session(tmp_path, monkeypatch, *, loop=None, distill=None, window=None):
     client = SimpleNamespace(model="fake/model", capabilities=Capabilities())
     monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: client)
     return build_research_session(
-        settings=_loop_settings(tmp_path, loop=loop, distill=distill),
+        settings=_loop_settings(tmp_path, loop=loop, distill=distill, window=window),
         lake=object(),
         registry=object(),
         families=object(),
@@ -765,9 +789,17 @@ def _which_loop_ran(session, monkeypatch) -> set[str]:
 
 
 @pytest.mark.parametrize("loop", [None, "auto"])
-def test_loop_auto_and_unset_still_select_the_conversation_loop(tmp_path, monkeypatch, loop):
+def test_loop_auto_without_a_declared_window_selects_the_conversation_loop(
+    tmp_path, monkeypatch, loop
+):
     session = _session(tmp_path, monkeypatch, loop=loop)
     assert _which_loop_ran(session, monkeypatch) == {"conversation"}
+
+
+@pytest.mark.parametrize("loop", [None, "auto"])
+def test_loop_auto_with_a_small_window_selects_the_episodic_driver(tmp_path, monkeypatch, loop):
+    session = _session(tmp_path, monkeypatch, loop=loop, window=_EPISODIC_WINDOW_MAX)
+    assert _which_loop_ran(session, monkeypatch) == {"episodic"}
 
 
 def test_conversation_loop_kwargs_unchanged_under_auto(tmp_path, monkeypatch):
