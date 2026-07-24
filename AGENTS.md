@@ -123,7 +123,10 @@ A champion file is immutable — improving one means a new name. Full contract: 
 
 **Two research paths, one contract.** `src/noctis/research/agent.py` (Claude + `src/noctis/research/tools.py`
 `ResearchToolbox`) and the legacy proposer/Optuna loop return the *same* `ResearchSummary`, so the
-runtime calls either behind one seam. The agent's discipline is entirely structural: the exhaustion
+runtime calls either behind one seam. Within the agent path, `research.agent.loop` selects the
+conversation transcript or the episodic driver; `auto` flips to episodic when the declared
+`context_window` is ≤ 32,768 (#76 — evidence-gated by the parity harness, decided in one place:
+`bootstrap.resolve_research_loop`). The agent's discipline is entirely structural: the exhaustion
 gate refuses a verdict until ≥ `research.min_trials` distinct param sets are journaled to
 `workspace/state/experiments/<name>.jsonl`, backtests return aggregate scorecards only, previews never cross
 into holdout bars, and data spend sits behind a budget preflight. `run_sweep`'s execution engine —

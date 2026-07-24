@@ -4,10 +4,13 @@ The **evidence gate** for flipping `auto` to the episodic loop on small-context 
 runs research two ways behind one seam — the **conversation** loop (one long tool-use transcript)
 and the **episodic** driver (a deterministic state machine that calls the model only at narrow
 judgment points and keeps the cross-strategy story in a session ledger, not a growing chat
-context). Both return the same `ResearchSummary`. Before `auto` should prefer episodic (that flip is
-a separate change), an operator needs legible proof that episodic is **at least as effective per
-session at materially lower spend**. This harness produces that proof: it runs both loops on the
-**same model, the same lake fixture, and the same mandate**, then prints a side-by-side comparison.
+context). Both return the same `ResearchSummary`. Before `auto` prefers episodic, an operator needs
+legible proof that episodic is **at least as effective per session at materially lower spend**.
+This harness produces that proof: it runs both loops on the **same model, the same lake fixture,
+and the same mandate**, then prints a side-by-side comparison. That evidence read **PASS** on
+2026-07-23, and #76 flipped `auto` accordingly: it now selects episodic when
+`research.agent.context_window` is declared at or below **32,768** tokens (`_EPISODIC_WINDOW_MAX`
+in `noctis.bootstrap`). The harness stays the instrument for re-judging that call.
 
 It is a **dev tool, not a CLI subcommand** — it runs *paid* model sessions, so it lives in
 `scripts/` and is the operator's explicit action, never CI. The metric math is pure and tested
@@ -102,9 +105,10 @@ The harness prints the verdict on the last line:
 - **INCONCLUSIVE** — a tokens/verdict is `n/a` (a loop reached zero verdicts), so spend can't be
   compared; re-run with a fixture/mandate that produces verdicts on both loops.
 
-A PASS here is the evidence an operator (or a follow-up change) leans on to prefer episodic when
-`research.agent.loop: auto` meets a small context window. This harness only *reports* — it never
-changes the loop selection itself.
+A PASS here is the evidence behind the #76 flip: `research.agent.loop: auto` prefers episodic at
+or below the documented 32,768-token window. This harness only *reports* — it never changes the
+loop selection itself; re-run it whenever the backend or the authoring contract changes enough to
+re-open the question.
 
 See [research.md](research.md) for how each loop drives `formulate → match → optimize → decide`, and
 [development.md](development.md) for the quality gates the parity module ships under.

@@ -272,9 +272,18 @@ With a client, the same protocol runs one of two ways behind one seam (`research
 **conversation** loop (one long tool-use transcript) or the **episodic** driver (a deterministic
 state machine that calls the model only at narrow judgment points and keeps the cross-strategy story
 in a session ledger, not a growing chat context — built for small-context backends). Both return the
-same `ResearchSummary`. To decide when `auto` should prefer episodic, the **parity harness**
-(`scripts/parity_harness.py`) runs both loops on the same model, fixture, and mandate and reports
-verdicts/session and tokens/verdict side by side — see [parity.md](parity.md).
+same `ResearchSummary`.
+
+`auto` (the default) is an **evidence-gated flip** (#76): it selects the episodic driver when the
+operator has declared a `research.agent.context_window` of at most **32,768 tokens**
+(`_EPISODIC_WINDOW_MAX` in `noctis.bootstrap`, inclusive so the canonical 32k noctis-ollama box
+flips), and the conversation loop for larger or unset windows (hosted backends). The evidence is
+the **parity harness** (`scripts/parity_harness.py`), which runs both loops on the same model,
+fixture, and mandate and reports verdicts/session and tokens/verdict side by side — see
+[parity.md](parity.md). The flip criterion read **PASS** on 2026-07-23: episodic held
+verdicts/session at 45% fewer tokens/verdict, and subsequent leak fixes (#89, #90) cut its
+tokens/verdict a further ~4× on the same fixture. Loop selection lives in one place
+(`bootstrap.resolve_research_loop`); an explicit `conversation`/`episodic` always wins over `auto`.
 
 ## The legacy fallback
 

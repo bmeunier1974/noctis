@@ -408,20 +408,33 @@ _EPISODIC_DISTILL_DEFAULT = 1
 # The context window the episodic briefings assert against when the operator left
 # ``research.agent.context_window`` unset. Generous so the build-time fit assertion is effectively
 # inert (matching the conversation loop's unlimited history); an operator on a small-context
-# backend sets ``context_window`` to engage the real discipline (the evidence-gated flip is #76).
+# backend sets ``context_window`` to engage the real discipline (and, at or below
+# ``_EPISODIC_WINDOW_MAX``, the ``auto`` flip).
 _EPISODIC_CONTEXT_WINDOW = 128_000
+
+# The ``auto`` flip threshold (#76): a declared ``research.agent.context_window`` at or below this
+# selects the episodic driver. 32_768 — confirmed against the real local box (a 32k ``num_ctx``
+# backend is exactly the small-context machine the episodic loop was built for), inclusive so the
+# canonical noctis-ollama config flips. The evidence gate is the parity harness (docs/parity.md):
+# PASS on 2026-07-23 — episodic held verdicts/session at 45% fewer tokens/verdict.
+_EPISODIC_WINDOW_MAX = 32_768
 
 
 def resolve_research_loop(settings) -> str:
     """Which research loop this session runs — ``"conversation"`` | ``"episodic"`` — from
     ``research.agent.loop``.
 
-    ``"episodic"`` selects the deterministic episodic driver; ``"auto"`` (the default) and
-    anything else resolve to the conversation loop in this story. The evidence-gated flip of
-    ``"auto"`` to episodic-on-small-window lands in #76 — the one place that decision moves is
-    this function, so the entrypoints never learn about it.
+    ``"conversation"`` and ``"episodic"`` are explicit operator picks. ``"auto"`` (the default)
+    is the evidence-gated flip (#76): episodic when the operator declared a
+    ``research.agent.context_window`` of at most ``_EPISODIC_WINDOW_MAX`` tokens, conversation
+    for larger or unset windows (hosted backends). The one place this decision lives is this
+    function, so the entrypoints never learn about it.
     """
-    return "episodic" if settings.research.agent.loop == "episodic" else "conversation"
+    loop = settings.research.agent.loop
+    if loop in ("conversation", "episodic"):
+        return loop
+    window = settings.research.agent.context_window
+    return "episodic" if window is not None and window <= _EPISODIC_WINDOW_MAX else "conversation"
 
 
 def effective_memory_distill_every(settings) -> int:
