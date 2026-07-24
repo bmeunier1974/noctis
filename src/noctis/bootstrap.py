@@ -603,13 +603,17 @@ def _build_coder_fallback_client(settings):
     Escalation is a fallback FROM local authoring, so this is built only when BOTH a local
     ``coder_model`` and a ``coder_fallback_model`` are configured; either unset ⇒ ``None`` (no
     escalation path, and no wasted client). Built stateless beside the local coder through the
-    shared :func:`~noctis.research.client_for` constructor with the same *deliberate*, budgeted
-    thinking decision (``coder_thinking``, ``deliberate=True``) — the paid coder reasons through
-    authoring just like the local one. If that client can't be built (its provider's key or the
-    ``[llm]`` extra is missing) the degradation is loud, never silent: warn and fall back to
-    ``None``, so the session still assembles and a failed local author is simply skipped as today
-    — the same graceful-degradation contract as :func:`_build_coder_client`, never a mid-session
-    failure. Bounded per session by ``research.agent.max_escalations`` (0 = never escalate)."""
+    shared :func:`~noctis.research.client_for` constructor, on its OWN thinking dial
+    (``coder_fallback_thinking``, default off — #98): the fallback is the strong model, and the
+    reasoning dial tuned for weak local coders broke the escalation insurance in the field (a
+    thinking sonnet-5 timed out and thinking-truncated every file), so by default the escalated
+    call spends its whole output ceiling on the file. ``deliberate=True`` still marks the opt-in
+    (``coder_fallback_thinking: on``) as the budgeted coder decision, so even a Sonnet fallback
+    then reasons. If that client can't be built (its provider's key or the ``[llm]`` extra is
+    missing) the degradation is loud, never silent: warn and fall back to ``None``, so the session
+    still assembles and a failed local author is simply skipped as today — the same
+    graceful-degradation contract as :func:`_build_coder_client`, never a mid-session failure.
+    Bounded per session by ``research.agent.max_escalations`` (0 = never escalate)."""
     from noctis.research import client_for
 
     agent = settings.research.agent
@@ -618,7 +622,7 @@ def _build_coder_fallback_client(settings):
     fallback = client_for(
         settings,
         agent.coder_fallback_model,
-        thinking=agent.coder_thinking,
+        thinking=agent.coder_fallback_thinking,
         deliberate=True,
     )
     if fallback is None:

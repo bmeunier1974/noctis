@@ -202,12 +202,23 @@ class AgentResearchConfig(BaseModel):
     # Sonnet coder (whose driver-side thinking stays the cheap-path pin). Its cost is already
     # bounded by ``max_author_calls``; set ``off`` to opt a coder out. Inert without a coder_model.
     coder_thinking: Literal["off", "on"] = "on"
-    # The coder's output-token ceiling. ``None`` (the default) defers to the author engine's
-    # built-in ceiling (``StrategyAuthor._MAX_TOKENS``, sized so a full strategy file plus the
-    # coder's thinking never truncates mid-source); a number pins it. A compatibility/sizing lever
-    # — resize it for a coder backend whose output window differs — NOT a cost budget: output tokens
-    # are billed as generated, so unused headroom costs nothing (spend is bounded by
-    # ``max_author_calls``, not this). Inert without a configured ``coder_model``.
+    # The ESCALATED (paid-fallback) coder's own thinking dial (#98), default OFF. The fallback is
+    # by definition the strong model, and ``coder_thinking`` above is a dial tuned for weak local
+    # coders: the first field exercise of escalation (#98) showed a thinking sonnet-5 fallback both
+    # outrunning the transport timeout and spending the shared output ceiling on thinking until no
+    # file fit — the insurance never paid out. Off, the escalated call spends its whole ceiling on
+    # the file. Set ``on`` to opt the fallback into the same deliberate adaptive thinking as the
+    # local coder (streamed authoring and the author engine's thinking allowance make that
+    # survivable). Inert without a configured ``coder_fallback_model``.
+    coder_fallback_thinking: Literal["off", "on"] = "off"
+    # The coder's output-token ceiling — the FILE's budget. ``None`` (the default) defers to the
+    # author engine's built-in ceiling (``StrategyAuthor._MAX_TOKENS``, sized so a full strategy
+    # file never truncates mid-source); a number pins it. A coder client that runs provider
+    # thinking gets the engine's thinking allowance added ON TOP (on Anthropic models thinking and
+    # text share ``max_tokens`` — #98), so this ceiling is all text either way. A
+    # compatibility/sizing lever — resize it for a coder backend whose output window differs — NOT
+    # a cost budget: output tokens are billed as generated, so unused headroom costs nothing (spend
+    # is bounded by ``max_author_calls``, not this). Inert without a configured ``coder_model``.
     coder_max_tokens: int | None = None
     # Provider-native reasoning dial (verbose-observability P2), default OFF. ``"on"`` opts a
     # *watch* session into provider-native reasoning where it exists: for the Anthropic (non-Sonnet)

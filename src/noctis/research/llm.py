@@ -333,6 +333,11 @@ class LiteLLMClient:
         self._base_url = base_url
         self._thinking = thinking  # e.g. {"type": "disabled"} for Sonnet; None sends nothing
         self._effort = effort  # profile reasoning effort ("high"/"medium"); capability-gated
+        # Whether this client's pinned thinking parameter is an actual on-mode — an Anthropic
+        # adaptive pin, not ``None`` (nothing sent) and not the Sonnet ``disabled`` pin. On
+        # Anthropic models thinking and text share ``max_tokens``, so a caller sizing an output
+        # ceiling (the author engine, #98) reads this to leave the thinking its own headroom.
+        self.thinking_enabled = bool(thinking) and thinking.get("type") != "disabled"
 
     def _completion_kwargs(self, *, system, tools, messages, max_tokens, tool_choice=None) -> dict:
         """Assemble the ``litellm.completion`` kwargs. Pure and side-effect-free so the thinking

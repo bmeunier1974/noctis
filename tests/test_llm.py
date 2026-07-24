@@ -303,6 +303,27 @@ def test_client_for_deliberate_threads_coder_thinking_to_completion_kwargs(monke
     assert driver._thinking == {"type": "disabled"}
 
 
+def test_client_exposes_whether_its_thinking_pin_is_an_on_mode(monkeypatch):
+    """``thinking_enabled`` (#98): True only for a client whose pinned thinking parameter is an
+    actual on-mode (an adaptive pin) — the Sonnet ``disabled`` pin and a no-parameter client both
+    read False. On Anthropic models thinking and text share ``max_tokens``, so the author engine
+    reads this flag to add its thinking allowance on top of the file's output ceiling."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "litellm", types.ModuleType("litellm"))
+    s = Settings(anthropic_api_key="ak", openai_api_key="ok")
+
+    thinking = client_for(s, "anthropic/claude-sonnet-5", thinking="on", deliberate=True)
+    assert thinking.thinking_enabled is True
+    pinned_off = client_for(s, "anthropic/claude-sonnet-5", thinking="off", deliberate=True)
+    assert pinned_off.thinking_enabled is False
+    no_param = client_for(s, "anthropic/claude-opus-4-8", thinking="off", deliberate=True)
+    assert no_param.thinking_enabled is False
+    no_dial = client_for(s, "openai/gpt-5.6-luna", thinking="on", deliberate=True)
+    assert no_dial.thinking_enabled is False
+
+
 def test_cached_system_wraps_only_when_caching_is_supported():
     """The shared static-system cache helper: a ``prompt_cache`` provider gets one cached content
     block; an auto-caching/no-caching provider gets the plain string (a clean no-op breakpoint)."""

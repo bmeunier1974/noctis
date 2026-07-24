@@ -82,7 +82,12 @@ request), makes one tool-free completion, and flows its output through the exact
 (`research.agent.coder_thinking`) — authoring is the reasoning-heavy sub-task, so it reasons
 through the scenario-window and warmup arithmetic instead of repeating an error it was just shown;
 the (enlarged) system prompt is prompt-cached where the provider supports it, so the private
-retries below re-read it rather than re-paying it. On a validation failure the coder is re-prompted
+retries below re-read it rather than re-paying it. Authoring completions **stream** where the
+provider can, so the transport timeout bounds silence between chunks rather than the whole
+thinking+generation wall clock, and a thinking coder's output ceiling grows by a fixed thinking
+allowance so the file's token budget survives the reasoning that authors it (#98). The paid
+*escalation* fallback (`coder_fallback_model`, [configuration.md](configuration.md)) runs its own
+thinking dial, **off by default** — the strong model spends its whole ceiling on the file (#98). On a validation failure the coder is re-prompted
 privately with the error, up to two retries; those retries are invisible to the driver. When the
 retries are spent the last gate error comes back as a **repairable code bug** — refine the brief
 and resubmit the *same* name — never as a verdict on the thesis. Validation stays the sole arbiter
@@ -140,8 +145,8 @@ told **not** to author a `scenarios()` method: the write gate stamps one from th
 any `scenarios()` the coder writes. The coder changes only the trading logic (`on_start` / `on_bar`
 / `param_space` / `Params`) to satisfy the fixed tape. Every private retry re-authors that logic
 against the *same* oracle — the tape and behaviors never move — and an **escalation** to the paid
-fallback coder (see below) inherits the identical brief and spec, so a candidate is judged against
-one unchanging target end to end.
+fallback coder (`coder_fallback_model`, [configuration.md](configuration.md)) inherits the
+identical brief and spec, so a candidate is judged against one unchanging target end to end.
 
 **The needs-more-history exit.** Each tape is preceded by a flat setup pad sized to the strategy's
 own declared warmup, so a modest warmup always fits. A warmup too large for the fixed tape (the
