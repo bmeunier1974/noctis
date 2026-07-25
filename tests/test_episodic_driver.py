@@ -375,12 +375,14 @@ class FakeToolbox:
 
 
 def _drive(episodes, toolbox, *, max_episodes, ledger, **over):
+    # The MATCH fallback panel is a zero-arg source (#110); the default wraps the same fixed panel
+    # the frozen list held, so every behavior locked below stays byte-identical.
     kwargs = dict(
         toolbox=toolbox,
         ledger=ledger,
         formulate=episodes.formulate,
         decide=episodes.decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=max_episodes,
         completions=lambda: episodes.completions,
@@ -1228,6 +1230,59 @@ def test_match_fallback_is_ledgered_when_the_screen_is_empty(tmp_path):
     assert match.detail["fallback"]  # a non-empty reason string records why it fell back
 
 
+# ── 2c. the fallback panel is a lazily resolved source, not a frozen list (story #110) ───────
+def test_fallback_panel_resolves_at_each_match(tmp_path):
+    # The fallback panel is a zero-arg SOURCE resolved at each MATCH, not a list frozen at
+    # composition time: a symbol that becomes lake-ready mid-session (what a mandate preflight or
+    # a DISCOVER fetch will do) lands in a LATER MATCH's fallback panel instead of being frozen
+    # out. The screen already recomputed its pool per call; the fallback now does too.
+    ready = ["AAA", "BBB"]
+    episodes = Episodes(
+        [formulate_ok(), formulate_ok()], [decide_ok("reject"), decide_ok("reject")]
+    )
+
+    class LakeGrowsMidSession(FakeToolbox):
+        """DDD joins the lake between the two cycles (a mid-session ingest)."""
+
+        def tool_reject_strategy(self, **kwargs):
+            ready.append("DDD")
+            return super().tool_reject_strategy(**kwargs)
+
+    box = LakeGrowsMidSession()  # the default empty screen ⇒ every MATCH falls back
+    ledger = SessionLedger(tmp_path, "lz1")
+    _drive(
+        episodes,
+        box,
+        max_episodes=4,
+        ledger=ledger,
+        fallback_panel_source=lambda: list(ready),
+    )
+
+    fits = [s.detail["fit"] for s in ledger.stages() if s.stage == "match"]
+    assert fits == [["AAA", "BBB"], ["AAA", "BBB", "DDD"]]  # the second MATCH sees the newcomer
+    # ...and the tuning calls of each cycle followed the panel that MATCH resolved.
+    assert box.backtests[0]["symbols"] == ["AAA", "BBB"]
+    assert box.backtests[-1]["symbols"] == ["AAA", "BBB", "DDD"]
+
+
+def test_stale_precomputed_fit_panel_call_site_fails_loudly(tmp_path):
+    # The rename is the point (story #110): the old frozen-list parameter is GONE, so a call site
+    # that still hands over a precomputed panel raises instead of silently freezing a stale list
+    # into every MATCH of the session.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    with pytest.raises(TypeError):
+        run_episodic_research(
+            toolbox=FakeToolbox(),
+            ledger=SessionLedger(tmp_path, "lz2"),
+            formulate=episodes.formulate,
+            decide=episodes.decide,
+            fit_symbols=["AAA", "BBB", "CCC"],
+            budget_minutes=60.0,
+            max_episodes=2,
+            completions=lambda: episodes.completions,
+        )
+
+
 # ── 2e. observability: stage boundaries + deterministic tool lines (story #73) ──────────────
 def test_stage_events_are_emitted_in_protocol_order(tmp_path):
     # The driver emits a `stage` boundary Event beside each ledger stage write, in protocol order,
@@ -1570,7 +1625,7 @@ def test_end_to_end_revise_lock_resolves_through_the_final_binary_ask(tmp_path):
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=4,
         completions=lambda: runner.completions,
@@ -1604,7 +1659,7 @@ def test_end_to_end_episodic_session_produces_a_gated_verdict_and_a_complete_led
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,
@@ -1655,7 +1710,7 @@ def test_end_to_end_digit_leading_class_tag_reaches_the_gate_with_a_valid_name(t
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,
@@ -1702,7 +1757,7 @@ def test_end_to_end_escalation_authors_via_the_paid_fallback_and_ledgers_it(tmp_
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,
@@ -1748,7 +1803,7 @@ def test_end_to_end_below_floor_verdict_is_refused_by_the_real_gate(tmp_path):
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=3,
         completions=lambda: runner.completions,
@@ -1785,7 +1840,7 @@ def test_end_to_end_authors_against_the_fixed_oracle_and_stamps_the_installed_fi
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,
@@ -1821,7 +1876,7 @@ def test_end_to_end_warmup_too_large_ends_in_a_refined_brief(tmp_path):
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=1,
         completions=lambda: runner.completions,
@@ -1862,7 +1917,7 @@ def test_verbose_episodic_session_narrates_the_full_arc(tmp_path):
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,

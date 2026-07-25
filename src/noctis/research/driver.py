@@ -22,9 +22,13 @@ end to end with plain fakes and zero LLM involvement.
   AUTHOR/OPTIMIZE tune on; its ``reserved_holdout`` is held out *by code* — those names never
   enter a write/backtest/sweep and are submitted at DECIDE time as the symbol-holdout nominees.
   What was a soft prompt rule in the conversation loop ("keep reserved_holdout out of tuning") is
-  now a structural guarantee. An empty screen (no lake match) falls back to the composition-root
-  panel exactly as the pre-#69 passthrough did, ledgered as a fallback; the discover-episode that
-  would replace that fallback is out of this epic's scope for now.
+  now a structural guarantee. An empty screen (no lake match) falls back to a panel the
+  composition-root ``fallback_panel_source`` resolves — the ready trading-roster names capped at
+  ``research.fit_set_size`` — ledgered as a fallback. That panel is resolved **lazily, at each
+  MATCH that needs it** (#110), never frozen at session assembly: a symbol that joins the lake
+  mid-session is in the next MATCH's fallback panel, and a session whose screens all match pays no
+  readiness I/O for it. The discover-episode that would replace the fallback outright is a later
+  story in that epic.
 * **AUTHOR** — the formulate output is mapped onto a :class:`~noctis.research.author.StrategyBrief`
   and committed through ``toolbox.tool_write_strategy(brief=…)``; the coder author engine,
   fresh-subprocess validation, and thesis journaling all live behind that one gated method. (Brief
@@ -891,12 +895,21 @@ def _entry_exit_brief(fo: FormulateOutput) -> str:
     )
 
 
+# The MATCH fallback panel is a zero-arg SOURCE, not a frozen list (story #110): the composition
+# root builds it over the trading roster + the lake readiness check + ``research.fit_set_size``, and
+# MATCH resolves it at the moment it actually needs it. So a symbol that joins the lake mid-session
+# is visible to a later MATCH instead of being frozen out at assembly time, and a session whose
+# screens all match pays no readiness I/O at all.
+FallbackPanelSource = Callable[[], Sequence[str]]
+
+
 @dataclass(frozen=True)
 class MatchResult:
     """The deterministic MATCH outcome for one thesis: the ``fit`` set AUTHOR/OPTIMIZE tune on, the
     ``reserved`` symbol-holdout names held out by code (never tuned; DECIDE's holdout nominees), the
     screened band ``profile``, and a ``fallback`` reason (``None`` on a real screen, a short string
-    when the screen found no lake match and the composition-root panel was used instead)."""
+    when the screen found no lake match and the freshly resolved fallback panel was used
+    instead)."""
 
     fit: list[str]
     reserved: list[str]
@@ -916,17 +929,23 @@ def _match_stage(
     toolbox: ResearchToolbox,
     fo: FormulateOutput,
     *,
-    fallback_panel: Sequence[str],
+    fallback_panel_source: FallbackPanelSource,
     emit_tool: ToolEmitter = _no_emit,
 ) -> MatchResult:
     """Deterministic MATCH: screen the lake for the thesis's symbol character and reserve the
     symbol holdout — all in driver code, zero LLM. The band profile comes from
     :func:`character_to_profile`; the gated, budget-aware ``tool_screen_symbols`` (the same method
     the conversation loop used) ranks the lake and splits ``suggested_fit`` / ``reserved_holdout``
-    by the configured sizes. A screen error or an empty match falls back to ``fallback_panel``
-    (the composition-root fit set) with no reservation, so the toolbox's own out-of-fit holdout
+    by the configured sizes. A screen error or an empty match falls back to the panel
+    ``fallback_panel_source`` resolves — called *here*, at this MATCH, so the panel reflects the
+    lake as it stands now (#110) — with no reservation, so the toolbox's own out-of-fit holdout
     fallback still supplies a symbol holdout at verdict time (rule 4 stays honored)."""
     profile = character_to_profile(fo.symbol_character)
+
+    def fell_back(reason: str) -> MatchResult:
+        # The panel is resolved HERE, on the MATCH that needs it — the lake as it stands now.
+        return MatchResult(list(fallback_panel_source()), [], profile, fallback=reason)
+
     screen_args = {
         "trend": profile["trend"],
         "volatility": profile["volatility"],
@@ -935,13 +954,11 @@ def _match_stage(
     screen = _invoke(toolbox.tool_screen_symbols, **screen_args)
     emit_tool("screen_symbols", screen_args, screen)
     if "error" in screen:
-        return MatchResult(
-            list(fallback_panel), [], profile, fallback=f"screen_error: {screen['error']}"
-        )
+        return fell_back(f"screen_error: {screen['error']}")
     fit = [str(s) for s in (screen.get("suggested_fit") or [])]
     reserved = [str(s) for s in (screen.get("reserved_holdout") or [])]
     if not fit:
-        return MatchResult(list(fallback_panel), [], profile, fallback="no_lake_match")
+        return fell_back("no_lake_match")
     return MatchResult(fit, reserved, profile)
 
 
@@ -1203,7 +1220,7 @@ def run_episodic_research(
     ledger: SessionLedger,
     formulate: FormulateEpisode,
     decide: DecideEpisode,
-    fit_symbols: Sequence[str],
+    fallback_panel_source: FallbackPanelSource,
     budget_minutes: float,
     max_episodes: int,
     completions: Callable[[], int],
@@ -1221,9 +1238,12 @@ def run_episodic_research(
     behind them, never handed here); every other stage runs through the gated ``toolbox`` methods.
     ``completions`` returns the episode runner's per-completion count (retries included) that
     ``max_episodes`` budgets against; ``budget_minutes`` and ``stop_event`` bound wall-clock and
-    interruption. ``fit_symbols`` is now the MATCH *fallback* panel — deterministic screening
-    (:func:`_match_stage`) chooses the per-thesis fit set and reserves the symbol holdout, and only
-    an empty screen falls back to ``fit_symbols``. ``market_digest`` supplies the MARKET ECONOMICS
+    interruption. ``fallback_panel_source`` is the MATCH *fallback* panel as a zero-arg source
+    (#110): deterministic screening (:func:`_match_stage`) chooses the per-thesis fit set and
+    reserves the symbol holdout, and only a screen that matched nothing calls the source — freshly,
+    at that MATCH, so a symbol that joined the lake mid-session is in the panel rather than frozen
+    out. The composition root builds it over the trading roster, the lake readiness check, and
+    ``research.fit_set_size``. ``market_digest`` supplies the MARKET ECONOMICS
     digest text the FORMULATE cost-arithmetic sanity check overlaps against — the same source the
     formulate briefing embeds; it defaults to the toolbox's own digest. See the module docstring
     for the stage protocol, the per-stage failed-episode policies, and the sanity checks.
@@ -1326,7 +1346,9 @@ def run_episodic_research(
         # The boundary Event opens the stage before its screen runs; the ledger line lands after,
         # once the screen's profile/fit/reservation detail exists to carry.
         emit_stage(MATCH, name)
-        match = _match_stage(toolbox, fo, fallback_panel=fit_symbols, emit_tool=emit_tool)
+        match = _match_stage(
+            toolbox, fo, fallback_panel_source=fallback_panel_source, emit_tool=emit_tool
+        )
         ledger.record_stage(MATCH, strategy=name, detail=match.ledger_detail())
         symbols = match.fit  # AUTHOR/OPTIMIZE tune on the fit set ONLY
         reserved_holdout = match.reserved  # held out by code — never tuned, DECIDE's holdout

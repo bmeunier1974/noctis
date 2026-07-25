@@ -859,6 +859,98 @@ def test_conversation_loop_kwargs_unchanged_under_auto(tmp_path, monkeypatch):
     assert seen["max_iterations"] == 5
 
 
+# ── the episodic MATCH fallback panel: a lazy source built here (story #110) ──────────────────
+class _PanelLake:
+    """A lake fake for the fallback-panel source: readiness is a mutable set (so a mid-session
+    ingest can be simulated) and the coverage registry reports one discovered symbol, which the
+    trading roster appends after the config seed."""
+
+    def __init__(self, ready, discovered=()):
+        self.ready = set(ready)
+        self.coverage = SimpleNamespace(
+            all=lambda: [
+                SimpleNamespace(symbol=s, status="idle", row_count=100) for s in discovered
+            ]
+        )
+
+    def check_symbol_ready(self, symbol) -> bool:
+        return symbol in self.ready
+
+
+def _episodic_session(tmp_path, monkeypatch, lake):
+    monkeypatch.setattr(
+        research_mod,
+        "build_llm_client",
+        lambda settings: SimpleNamespace(model="fake/model", capabilities=Capabilities()),
+    )
+    settings = load_settings(
+        config_path=_config(
+            tmp_path,
+            [
+                f"state_dir: {tmp_path}/state/",
+                f"strategies_dir: {tmp_path}/strategies/",
+                "universe: [AAA, BBB, CCC]",
+                "research:",
+                "  fit_set_size: 2",
+                "  agent:",
+                "    loop: episodic",
+            ],
+            "panel.yaml",
+        )
+    )
+    return build_research_session(
+        settings=settings,
+        lake=lake,
+        registry=object(),
+        families=FamilyRegistry(),
+        memory=object(),
+    )
+
+
+def test_composition_root_builds_the_fallback_panel_source_over_roster_and_readiness(
+    tmp_path, monkeypatch
+):
+    """The composition root hands the episodic session a zero-arg SOURCE, not a precomputed list —
+    and it resolves to exactly the panel the precomputed list held: the ready trading-roster names
+    (config seed, then lake discoveries) capped at ``research.fit_set_size``."""
+    from noctis.research import driver as driver_mod
+
+    lake = _PanelLake(ready={"CCC", "ZZZ"}, discovered=["ZZZ"])
+    session = _episodic_session(tmp_path, monkeypatch, lake)
+    seen: dict = {}
+    monkeypatch.setattr(
+        driver_mod, "run_episodic_research", lambda **k: seen.update(k) or ResearchSummary()
+    )
+
+    session.run(max_iterations=1)
+
+    source = seen["fallback_panel_source"]
+    # AAA/BBB are seeded but not ready; CCC is; ZZZ joined via the coverage registry — capped at 2.
+    assert source() == ["CCC", "ZZZ"]
+
+    # A symbol that becomes lake-ready mid-session is visible to the NEXT call — the whole point of
+    # the source: the panel is no longer frozen at assembly time.
+    lake.ready.add("AAA")
+    assert source() == ["AAA", "CCC"]
+
+
+def test_composition_root_passes_no_precomputed_fit_panel(tmp_path, monkeypatch):
+    """The frozen-list parameter is gone from the session entry, so the composition root must not
+    hand one over — a stale panel can never be smuggled past the rename."""
+    from noctis.research import driver as driver_mod
+
+    session = _episodic_session(tmp_path, monkeypatch, _PanelLake(ready={"AAA"}))
+    seen: dict = {}
+    monkeypatch.setattr(
+        driver_mod, "run_episodic_research", lambda **k: seen.update(k) or ResearchSummary()
+    )
+
+    session.run(max_iterations=1)
+
+    assert "fit_symbols" not in seen
+    assert callable(seen["fallback_panel_source"])
+
+
 # ── memory_distill_every defaults ON in episodic mode; conversation stays bit-identical ──────
 def test_effective_memory_distill_every_defaults_on_only_for_episodic(tmp_path):
     # Episodic + operator left it at 0 ⇒ defaults on (a modest cadence).
