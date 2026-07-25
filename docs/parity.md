@@ -89,6 +89,26 @@ no ledger to derive author-vs-optimize counts from), and any ratio whose denomin
 comparison still makes the decision legible, because the two decision rows — verdicts/session and
 tokens/verdict — are computed identically for both loops.
 
+## Capability notes (what each loop can actually do)
+
+The table measures *effectiveness and spend*, not capability — both loops drive the same protocol
+through the same gated toolbox and the same promotion gates. These are the remaining behavioural
+differences an operator should read the numbers against:
+
+| Capability | Conversation | Episodic |
+|---|---|---|
+| Fetch mandate-declared symbols the lake lacks | The agent may call `ensure_data` itself | **Yes** — a deterministic `PREFLIGHT` stage at session start, one budget-gated `ensure_data` call over `data.history_days` (#111) |
+| Find symbols when nothing in the lake matches the thesis | `web_search` → `preview_bars` → `ensure_data` → `screen_symbols`, at the model's discretion | **Yes** — a `DISCOVER` episode on `no_lake_match`: 1–6 proposed tickers, validated deterministically, fetched budget-gated, then exactly one re-screen (#112). No `web_search` in v1: the proposal rests on the model's own knowledge of the universe (a deterministic pre-built query embedded in the briefing is the noted follow-up) |
+| Symbol-holdout reservation | A prompt rule the model is asked to honour | Owned by code — the screen's `reserved_holdout` never enters a write/backtest/sweep |
+| Free-form tool exploration | Any tool, any order | A fixed stage protocol; the model is invoked only at the three judgment episodes |
+| Zero-verdict prose stall | Possible (guarded, then reported as `prose_stall`) | Structurally impossible — the emit contract forces a structured answer |
+
+Two reading notes follow from discovery: a session that discovers spends an extra episode (or two,
+with its one corrective re-ask), so judge it on **tokens/verdict** rather than tokens/session — and
+the episodic ledger's `discover` stage rows (tickers proposed / kept / fetched, plus the MATCH
+fallback reason) tell a session that *discovered* from one that *fell back*, which the summary alone
+cannot.
+
 ## The flip criterion
 
 Episodic **meets the flip criterion** on a fixture when **both** hold:

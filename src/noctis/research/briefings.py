@@ -1,5 +1,5 @@
-"""Briefing builders for the v1 episodic stages — formulate and decide — with a build-time
-fit assertion that replaces mid-session eviction.
+"""Briefing builders for the episodic judgment stages — formulate, decide, and discover — with a
+build-time fit assertion that replaces mid-session eviction.
 
 The episodic research driver (epic #62) invokes the model only at narrow judgment points and
 rebuilds each episode's prompt *fresh from disk* — there is no accumulated transcript to evict.
@@ -12,9 +12,11 @@ function of what is on disk when it runs.
 The fit assertion trims only *advisory* blocks, in a fixed priority order — memory tail →
 library stubs → digest breadth — and never touches a gate-facing number (the cost arithmetic,
 the exhausted-class guard, the champion board, the ledger narrative, or, for decide, the
-candidate's journaled trial evidence). A briefing that still does not fit after every advisory
-block is trimmed fails loudly with :class:`BriefingTooLargeError` rather than truncating
-silently: silent truncation of a gate-facing number is structurally impossible here.
+candidate's journaled trial evidence; for discover, the thesis, the unmatched band profile, the
+lake inventory, and the spend context that make the symbol ask answerable). A briefing that still
+does not fit after every advisory block is trimmed fails loudly with
+:class:`BriefingTooLargeError` rather than truncating silently: silent truncation of a
+gate-facing number is structurally impossible here.
 
 Builders take explicit collaborators (the toolbox, the session ledger, an optional mandate) and
 the window size as parameters — no Settings reads. Token size is estimated with the loop's own
@@ -25,6 +27,7 @@ there is one token accounting across the codebase, not two.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,6 +63,18 @@ _FORMULATE_HEADER = (
     "is the 0-based index into that scenario's legs the behavior targets (omit it for "
     "never_trade). The suite MUST include at least one directional entry (enter/hold long/short) "
     "and at least one never_trade tape."
+)
+
+
+_DISCOVER_HEADER = (
+    "This session's structural screen found NO symbol in the data lake matching the band profile "
+    "below. Name the real, currently-listed US tickers (or liquid ETFs) whose character actually "
+    "expresses that profile: emit 1-6 symbols plus one line of rationale. Their history is then "
+    "fetched through the cost-gated data path and RE-SCREENED BY CODE — you are proposing "
+    "candidates, never choosing the fit set: the re-screen decides which names qualify and which "
+    "are held out of tuning. Rules: real tickers only (a name that does not exist wastes the "
+    "session's discovery), never a name already in the LAKE INVENTORY below, and prefer liquid, "
+    "long-listed names whose history a vendor actually has."
 )
 
 
@@ -270,6 +285,81 @@ def decide_briefing(
         _Section("library", "STRATEGY LIBRARY (rejected stubbed)", _json(_library(toolbox))),
     ]
     return _fit_or_raise(sections, window=context_window, kind="decide")
+
+
+def discover_briefing(
+    toolbox: Any,
+    ledger: SessionLedger,
+    *,
+    thesis: str,
+    symbol_character: str,
+    profile: Mapping[str, str],
+    window: Mapping[str, Any] | None = None,
+    mandate: Mandate | None = None,
+    context_window: int,
+) -> str:
+    """The DISCOVER episode briefing (story #112): which real tickers express the character the lake
+    could not match, rebuilt fresh from disk and asserted to fit ``context_window``.
+
+    Core (never trimmed) is the whole ask: the operator mandate (declared symbols included), the
+    thesis and its requested ``symbol_character``, the exact band ``profile`` the screen found no
+    lake name for, the lake inventory the proposal must not re-propose, the spend context (the
+    ``window`` a fetch would cover, plus the configured data budget when the lake seam exposes one),
+    and the session-ledger tail. Advisory, trimmable blocks are the per-symbol digest breadth (what
+    the lake's existing names look like) and the distilled memory tail — dropped in the shared trim
+    order, so the ask itself survives any window a small backend brings. The strategy library index
+    is deliberately absent: this episode reasons about symbols, not strategies."""
+    _market_core, _exhausted, breadth = _market_parts(toolbox)
+    findings, dead_ends = digests.memory_block(toolbox.memory)
+    sections = [
+        _Section("header", "DISCOVER TASK", _DISCOVER_HEADER),
+        _Section("mandate", "OPERATOR MANDATE", _mandate_body(mandate)),
+        _Section(
+            "thesis",
+            "THESIS NEEDING SYMBOLS",
+            _json({"thesis": thesis, "symbol_character": symbol_character}),
+        ),
+        _Section(
+            "profile", "REQUESTED BAND PROFILE (no lake name matched it)", _json(dict(profile))
+        ),
+        _Section(
+            "inventory",
+            "LAKE INVENTORY (already researchable — do NOT propose these)",
+            _json(digests.lake_inventory(toolbox)),
+        ),
+        _Section(
+            "budget",
+            "DATA SPEND (every fetch is cost-gated)",
+            _json(_spend_context(toolbox, window)),
+        ),
+        _Section("breadth", "MARKET BREADTH (per-symbol character)", breadth),
+        _Section("ledger", "ALREADY TRIED THIS SESSION", _json(_ledger_tail(ledger))),
+        _Section(
+            "memory", "MEMORY (advisory)", _json({"findings": findings, "dead_ends": dead_ends})
+        ),
+    ]
+    return _fit_or_raise(sections, window=context_window, kind="discover")
+
+
+def _spend_context(toolbox: Any, window: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The data-spend context a DISCOVER proposal is made inside: the history window a fetch would
+    cover and — when the lake seam exposes its cost preflight — the configured budget the fetch is
+    judged against. A seam without one (a test fake, a lake built without a vendor) simply omits the
+    number; it is never invented."""
+    out: dict[str, Any] = {
+        "note": (
+            "Each proposed ticker's history is fetched through the same cost-gated path every "
+            "other fetch uses, then re-screened by code. A refusal or a name that does not exist "
+            "costs the session its discovery, so propose FEW real, liquid, long-listed names."
+        )
+    }
+    if window:
+        out["fetch_window"] = dict(window)
+    budget = getattr(getattr(toolbox, "lake", None), "preflight", None)
+    usd = getattr(budget, "budget_usd", None)
+    if isinstance(usd, (int, float)) and not isinstance(usd, bool):
+        out["budget_usd"] = float(usd)
+    return out
 
 
 def _champions(toolbox: Any) -> list[dict[str, Any]]:

@@ -51,6 +51,20 @@ that cannot honestly supply it — never a fabricated number).**
   a non-zero conversation count explains a ``n/a`` tokens/verdict as a stalled model rather than a
   thin fixture.
 
+**Capability notes (the documented conversation-vs-episodic gap).** These metrics compare
+*effectiveness and spend*, never capability — both loops drive one protocol through the same gated
+toolbox and the same promotion gates. The data-acquisition gap that used to sit here has closed:
+the episodic driver now fetches mandate-declared symbols at session start (the deterministic
+``PREFLIGHT`` stage, #111) and spends a ``DISCOVER`` episode when a thesis's structural screen finds
+no lake match — validated tickers, one budget-gated ``ensure_data`` call, then a single re-screen
+that owns the fit/holdout split (#112). What remains: the conversation loop can ``web_search`` to
+shortlist names while DISCOVER v1 rests on the model's own knowledge of the universe, and the
+conversation loop may call any tool in any order while the episodic protocol is fixed (which is also
+why only it can end in a ``prose_stall``). One reading note: a discovering session spends an extra
+episode, so judge it on tokens/**verdict**, and read the ledger's ``discover`` stage rows (tickers
+proposed/kept/fetched) to tell a session that discovered from one that fell back.
+``docs/parity.md`` carries the full table.
+
 **The flip criterion** (:func:`assess_flip`, made legible by :func:`render_comparison`): episodic
 meets it when it holds **verdicts/session** (episodic ≥ conversation) **and** spends *materially*
 fewer **tokens/verdict** — at least :data:`MATERIAL_TOKEN_REDUCTION` fewer. When a tokens/verdict is

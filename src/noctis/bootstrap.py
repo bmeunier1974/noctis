@@ -552,7 +552,8 @@ class ResearchSession:
         )
         ledger = SessionLedger(settings.state_dir)
         context_window = agent_cfg.context_window or _EPISODIC_CONTEXT_WINDOW
-        formulate, decide = make_episodes(
+        # The three judgment episodes: formulate, decide, and the no-lake-match discover (#112).
+        formulate, decide, discover = make_episodes(
             runner=runner,
             toolbox=self.toolbox,
             ledger=ledger,
@@ -564,16 +565,21 @@ class ResearchSession:
             ledger=ledger,
             formulate=formulate,
             decide=decide,
+            # The DISCOVER episode a ``no_lake_match`` MATCH spends before accepting the fallback
+            # panel (#112). It rides the same runner as the other two, so its completions count
+            # against the one ``max_episodes`` budget below.
+            discover=discover,
             fallback_panel_source=build_fallback_panel_source(settings, self.toolbox.lake),
             budget_minutes=settings.research_time_budget_minutes,
             max_episodes=max_iterations or self.budgets.max_iterations,
             completions=lambda: runner.completions,
             stop_event=stop_event,
             mandate_source=self.mandate.source if self.mandate else None,
-            # The two inputs of the session-start mandate-symbol preflight (#111). The driver reads
-            # no settings, so they arrive as values: the resolved mandate's declared symbols
-            # (already upper-cased and deduped at parse) and the existing ``data.history_days``
-            # lookback — no mandate ⇒ an empty sequence ⇒ a strict no-op preflight.
+            # The two inputs of the session-start mandate-symbol preflight (#111) — and the same
+            # ``history_days`` window a DISCOVER fetch covers (#112). The driver reads no settings,
+            # so they arrive as values: the resolved mandate's declared symbols (already upper-cased
+            # and deduped at parse) and the existing ``data.history_days`` lookback — no mandate ⇒
+            # an empty sequence ⇒ a strict no-op preflight.
             mandate_symbols=self.mandate.symbols if self.mandate else (),
             history_days=settings.data.history_days,
             models={"driver": self.model, "coder": agent_cfg.coder_model},

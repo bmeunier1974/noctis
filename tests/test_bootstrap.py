@@ -1016,6 +1016,19 @@ def test_composition_root_threads_the_default_history_window(tmp_path, monkeypat
     assert seen["history_days"] == DataConfig().history_days
 
 
+# ── the DISCOVER episode is assembled here too (story #112) ───────────────────────────────────
+def test_composition_root_wires_the_discover_episode(tmp_path, monkeypatch):
+    """Every episodic session gets the third judgment episode wired, so a no-lake-match MATCH can
+    spend one on candidate tickers instead of silently falling back to the default panel. It rides
+    the same runner (one completions counter, one episode budget) as formulate/decide."""
+    seen = _episodic_kwargs(tmp_path, monkeypatch, mandate=_mandate(["QQQ"]), history_days=90)
+
+    assert callable(seen["discover"])
+    assert callable(seen["formulate"]) and callable(seen["decide"])
+    # The discover fetch covers the same window the mandate preflight fetches over.
+    assert seen["history_days"] == 90
+
+
 # ── memory_distill_every defaults ON in episodic mode; conversation stays bit-identical ──────
 def test_effective_memory_distill_every_defaults_on_only_for_episodic(tmp_path):
     # Episodic + operator left it at 0 ⇒ defaults on (a modest cadence).

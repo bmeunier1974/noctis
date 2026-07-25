@@ -15,6 +15,8 @@ fully-trimmed briefing still does not fit. These tests lock:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from noctis.research import Mandate
@@ -22,6 +24,7 @@ from noctis.research.agent import _estimate_tokens
 from noctis.research.briefings import (
     BriefingTooLargeError,
     decide_briefing,
+    discover_briefing,
     formulate_briefing,
 )
 from noctis.research.ledger import SessionLedger
@@ -271,10 +274,98 @@ def test_decide_gate_numbers_survive_trim_at_8k(tmp_path):
     assert '"lookback": 12' in fitted
 
 
+# ── the DISCOVER briefing: the no-lake-match symbol ask (story #112) ────────────────────────
+# Same machinery as the other two — core (gate-facing / decision-facing) sections plus the shared
+# advisory blocks in the fixed trim order — so a small-context backend can answer the one question
+# it is asked: which real tickers express the character the lake could not match.
+_PROFILE = {"trend": "low", "volatility": "high", "liquidity": "low"}
+_DISCOVER_WINDOW = {"start": "2026-02-08", "end": "2026-03-09", "history_days": 30}
+_DISCOVER_THESIS = "DISCOVERTHESIS fade panic in thin names once volatility clears cost"
+_DISCOVER_CHARACTER = "illiquid volatile small-caps that mean-revert"
+
+# What the discover episode must be able to see no matter how hard the briefing is trimmed.
+_DISCOVER_CORE_MARKERS = (
+    _DISCOVER_THESIS,  # the thesis the symbols are for
+    _DISCOVER_CHARACTER,  # the requested symbol character
+    '"volatility": "high"',  # the exact band profile that found no lake match
+    "CCC",  # the lake inventory — names the validator would drop
+    "2026-03-09",  # the fetch window the spend would cover
+    _LEDGER_SENTINEL,  # the session narrative
+)
+
+
+def _discover(box, ledger, mandate, *, context_window):
+    return discover_briefing(
+        box,
+        ledger,
+        thesis=_DISCOVER_THESIS,
+        symbol_character=_DISCOVER_CHARACTER,
+        profile=_PROFILE,
+        window=_DISCOVER_WINDOW,
+        mandate=mandate,
+        context_window=context_window,
+    )
+
+
+def test_discover_briefing_carries_the_mandate_thesis_profile_inventory_and_budget(tmp_path):
+    box, ledger, mandate = _populate(tmp_path)
+    brief = _discover(box, ledger, mandate, context_window=_HUGE)
+
+    assert "aggressive: liquid-name momentum" in brief  # the mandate body...
+    assert "declared symbols: AAA, BBB" in brief  # ...declared symbols included
+    for marker in _DISCOVER_CORE_MARKERS:
+        assert marker in brief
+    assert "1-6" in brief and "rationale" in brief  # the emit contract it must answer with
+    assert brief == _discover(box, ledger, mandate, context_window=_HUGE)  # no per-call state
+
+
+def test_discover_briefing_surfaces_the_configured_data_budget_when_the_seam_exposes_it(tmp_path):
+    # The spend context is read tolerantly off the lake seam's own cost preflight: present ⇒ the
+    # number the refusal would be judged against; absent (a fake lake) ⇒ omitted, never invented.
+    box, ledger, mandate = _populate(tmp_path)
+    assert "budget_usd" not in _discover(box, ledger, mandate, context_window=_HUGE)
+
+    box.lake.preflight = SimpleNamespace(budget_usd=125.0)
+    assert "125.0" in _discover(box, ledger, mandate, context_window=_HUGE)
+
+
+def test_discover_trim_order_drops_advisory_blocks_and_keeps_the_ask_intact(tmp_path):
+    box, ledger, mandate = _populate(tmp_path)
+
+    full = _discover(box, ledger, mandate, context_window=_HUGE)
+    assert _MEMORY_SENTINEL in full and _BREADTH_KEY in full
+
+    b1 = _discover(box, ledger, mandate, context_window=_tokens(full) - 1)
+    assert _MEMORY_SENTINEL not in b1  # the advisory memory tail goes first
+    for marker in _DISCOVER_CORE_MARKERS:
+        assert marker in b1
+
+    b2 = _discover(box, ledger, mandate, context_window=_tokens(b1) - 1)
+    assert _BREADTH_KEY not in b2  # then the per-symbol digest breadth
+    for marker in _DISCOVER_CORE_MARKERS:
+        assert marker in b2
+
+    # The un-trimmable ask still overflowing is a loud failure, never a silent truncation.
+    with pytest.raises(BriefingTooLargeError):
+        _discover(box, ledger, mandate, context_window=_tokens(b2) - 1)
+
+
+def test_discover_briefing_fits_a_small_window_on_realistic_state(tmp_path):
+    # The whole point of the episode: a small-context backend must be able to answer it.
+    box, ledger, mandate = _populate(tmp_path)
+    _bloat_memory(box)
+    fitted = _discover(box, ledger, mandate, context_window=8000)
+    assert _tokens(fitted) <= 8000
+    for marker in _DISCOVER_CORE_MARKERS:
+        assert marker in fitted
+
+
 # ── the ~1.5-3k token target band on realistic (un-bloated) state ───────────────────────────
 def test_briefings_land_in_target_token_band_on_realistic_state(tmp_path):
     box, ledger, mandate = _populate(tmp_path)
     formulate = _tokens(formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE))
     decide = _tokens(decide_briefing(box, ledger, "probe", mandate=mandate, context_window=_HUGE))
+    discover = _tokens(_discover(box, ledger, mandate, context_window=_HUGE))
     assert 800 < formulate < 3500, formulate
     assert 800 < decide < 3500, decide
+    assert 500 < discover < 3500, discover  # the smallest of the three asks
