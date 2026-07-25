@@ -368,6 +368,50 @@ def test_prose_nudges_are_bounded_then_stall_ends_labeled(tmp_path):
     assert summary.promotions == 0 and summary.rejections == 0
 
 
+def test_pause_turn_resumes_verbatim(tmp_path):
+    """``pause_turn`` (a server-tool loop pausing mid-turn) replays the paused assistant turn
+    verbatim and re-requests — the same resume idiom as the ideation loop."""
+    toolbox = _make_toolbox(tmp_path)
+    paused = Turn(
+        text="searching…",
+        tool_calls=[],
+        stop_reason="pause_turn",
+        usage={},
+        assistant_message={"role": "assistant", "content": "searching…"},
+    )
+    client = FakeLLM([paused, *prose_ending("nothing worth pursuing")], capabilities=NO_CAPS)
+
+    summary = run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=10
+    )
+
+    assert summary.stopped_reason == "prose_stall"
+    assert client.calls[1]["messages"][-1] == {"role": "assistant", "content": "searching…"}
+
+
+def test_empty_pause_turn_is_not_replayed(tmp_path):
+    """A paused turn whose only content was a server-tool call without a captured result arrives
+    empty after normalization (the unpaired call is dropped, #101) — the loop re-requests
+    without appending an empty assistant turn, which the API would reject."""
+    toolbox = _make_toolbox(tmp_path)
+    paused = Turn(
+        text="",
+        tool_calls=[],
+        stop_reason="pause_turn",
+        usage={},
+        assistant_message={"role": "assistant"},
+    )
+    client = FakeLLM([paused, *prose_ending("nothing worth pursuing")], capabilities=NO_CAPS)
+
+    summary = run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=10
+    )
+
+    assert summary.stopped_reason == "prose_stall"
+    # The paused round still burned an iteration; the re-request is byte-identical.
+    assert client.calls[1]["messages"] == client.calls[0]["messages"]
+
+
 def test_truncated_turn_is_retried_not_fatal(tmp_path):
     """A completion cut off by the output limit (``finish_reason="length"``) before it produced
     any tool call is a stumble, not a conclusion — the loop asks for a shorter turn and retries

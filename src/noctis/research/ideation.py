@@ -229,8 +229,11 @@ def _run_ideation_call(
             tool_choice=tool_choice,
         )
         if turn.stop_reason == "pause_turn":
-            # Server-tool loop paused mid-turn; resume it verbatim.
-            messages = messages + [turn.assistant_message]
+            # Server-tool loop paused mid-turn; resume it verbatim. A paused turn emptied by
+            # the unpaired-server-call drop (#101) has nothing to resume — just re-request
+            # (the for-loop's max_turns bounds a backend that pauses forever).
+            if turn.assistant_message.get("content") or turn.assistant_message.get("tool_calls"):
+                messages = messages + [turn.assistant_message]
             continue
         if any(tc.name == _TOOL_NAME for tc in turn.tool_calls):
             return turn  # the model emitted — done

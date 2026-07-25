@@ -127,6 +127,75 @@ def test_turn_normalization_from_openai_shape():
     }
 
 
+def _openai_call(call_id, name, arguments="{}"):
+    return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=arguments))
+
+
+@pytest.mark.parametrize(
+    ("results_key", "result_type"),
+    [
+        ("web_search_results", "web_search_tool_result"),
+        ("tool_results", "text_editor_code_execution_tool_result"),
+    ],
+)
+def test_server_tool_call_round_trips_with_its_result(results_key, result_type):
+    """An Anthropic server-executed tool call (``srvtoolu_`` id — LiteLLM folds the
+    ``server_tool_use`` block into ``tool_calls``) is never dispatchable — the server already
+    ran it — and its captured result blocks (parked on ``provider_specific_fields``) ride the
+    replayed assistant message so LiteLLM's request direction can re-pair them (#101). Covers
+    both result channels: web search and the code-execution suite."""
+    result_block = {"type": result_type, "tool_use_id": "srvtoolu_1", "content": []}
+    msg = SimpleNamespace(
+        content="found it",
+        tool_calls=[
+            _openai_call("srvtoolu_1", "web_search", '{"query": "momentum"}'),
+            _openai_call("c1", "run_backtest", '{"x": 1}'),
+        ],
+        provider_specific_fields={results_key: [result_block]},
+    )
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=None)
+    turn = _turn_from_openai(resp)
+    # Only the function call is dispatchable — a server web_search must never reach the loop
+    # (it would be double-dispatched to the client-side toolbox tool of the same name).
+    assert turn.tool_calls == [ToolCall(id="c1", name="run_backtest", arguments={"x": 1})]
+    # The replayed turn keeps both calls, plus the result blocks for the server pair.
+    replayed = turn.assistant_message
+    assert [c["id"] for c in replayed["tool_calls"]] == ["srvtoolu_1", "c1"]
+    assert replayed["provider_specific_fields"] == {results_key: [result_block]}
+
+
+def test_unpaired_server_tool_call_is_dropped_from_replay():
+    """#101: sonnet-5 ran a ``text_editor_code_execution`` server tool the session never
+    declared; without its captured result block the call cannot legally replay (the API rejects
+    a lone server tool_use in history), so it is dropped from the assistant message entirely."""
+    msg = SimpleNamespace(
+        content="let me edit that file",
+        tool_calls=[
+            _openai_call("srvtoolu_01Aeeh", "text_editor_code_execution", '{"command": "view"}')
+        ],
+    )
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=None)
+    turn = _turn_from_openai(resp)
+    assert turn.tool_calls == []
+    assert turn.assistant_message == {"role": "assistant", "content": "let me edit that file"}
+
+
+def test_all_server_calls_unpaired_yields_empty_replay_message():
+    """A turn that was *only* an unpaired server call normalizes to an empty assistant message —
+    the pause_turn seams check for exactly that and re-request instead of replaying nothing."""
+    msg = SimpleNamespace(
+        content="",
+        tool_calls=[_openai_call("srvtoolu_2", "text_editor_code_execution")],
+    )
+    resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=msg, finish_reason="pause_turn")], usage=None
+    )
+    turn = _turn_from_openai(resp)
+    assert turn.stop_reason == "pause_turn"
+    assert turn.tool_calls == []
+    assert turn.assistant_message == {"role": "assistant"}
+
+
 def test_turn_surfaces_reasoning_content():
     """A reasoning backend's thinking text (``reasoning_content``) reaches ``Turn.reasoning`` —
     the loop needs it to tell a tool-call misfire (markup in the thinking channel) from a
