@@ -34,6 +34,11 @@ and respects `data.budget_usd` — an over-budget backfill is refused cleanly (n
 crash) and the run continues. This initial backfill is the big one-time DataBento spend, so it
 needs `DATABENTO_API_KEY`; without the key, `run` warns and skips the backfill.
 
+The same `history_days` window (and the same cost preflight) governs the episodic research
+driver's session-start **mandate-symbol preflight**: declared `symbols:` the lake cannot research
+yet are fetched once, before the first thesis, so operator steering reaches the data layer on
+either research loop — see [research.md → Mandates + a growing universe](research.md#mandates--a-growing-universe).
+
 ## The live feed (opt-in)
 
 The live day-loop feed is **free** Yahoo Finance data via

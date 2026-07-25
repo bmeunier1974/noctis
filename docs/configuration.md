@@ -41,7 +41,7 @@ alternate file.
 | `data.provider` | Historical source *and* TRADING-phase feed — `yfinance` opts in to the live feed ([data.md](data.md)) |
 | `data.budget_usd` | Data spend cap enforced by the cost preflight (default `$125`) |
 | `data.dataset`, `data.lake_dir` | Vendor dataset; lake location |
-| `data.auto_backfill`, `data.history_days` | Pre-loop backfill of missing history (code default off; **shipped config enables it**, `history_days: 720`) |
+| `data.auto_backfill`, `data.history_days` | Pre-loop backfill of missing history (code default off; **shipped config enables it**, `history_days: 720`). `history_days` is also the lookback the episodic driver's mandate-symbol preflight fetches over ([research.md](research.md)) |
 | `live_feed.poll_interval_s` | Live-feed poll pacing (the feed self-throttles regardless) |
 | `observability.heartbeat_polls` | `-vv` live-trading heartbeat cadence in polls (0 disables; default `60` ≈ every ~2 min) |
 | `qa.keep_last_runs` | `--debug` QA-report retention: prune-on-start keeps the newest N run folders under `qa_dir` (default `20`; `0` keeps none). Housekeeping only — no decision path reads it. See [development.md → Reading a QA report](development.md#reading-a-qa-report) |

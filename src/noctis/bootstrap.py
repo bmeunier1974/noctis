@@ -570,6 +570,12 @@ class ResearchSession:
             completions=lambda: runner.completions,
             stop_event=stop_event,
             mandate_source=self.mandate.source if self.mandate else None,
+            # The two inputs of the session-start mandate-symbol preflight (#111). The driver reads
+            # no settings, so they arrive as values: the resolved mandate's declared symbols
+            # (already upper-cased and deduped at parse) and the existing ``data.history_days``
+            # lookback — no mandate ⇒ an empty sequence ⇒ a strict no-op preflight.
+            mandate_symbols=self.mandate.symbols if self.mandate else (),
+            history_days=settings.data.history_days,
             models={"driver": self.model, "coder": agent_cfg.coder_model},
             sweep_trials=self.toolbox.default_sweep_trials,
             on_event=self.on_event,

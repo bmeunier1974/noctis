@@ -877,12 +877,13 @@ class _PanelLake:
         return symbol in self.ready
 
 
-def _episodic_session(tmp_path, monkeypatch, lake):
+def _episodic_session(tmp_path, monkeypatch, lake, *, mandate=None, history_days=None):
     monkeypatch.setattr(
         research_mod,
         "build_llm_client",
         lambda settings: SimpleNamespace(model="fake/model", capabilities=Capabilities()),
     )
+    data = [] if history_days is None else ["data:", f"  history_days: {history_days}"]
     settings = load_settings(
         config_path=_config(
             tmp_path,
@@ -890,6 +891,7 @@ def _episodic_session(tmp_path, monkeypatch, lake):
                 f"state_dir: {tmp_path}/state/",
                 f"strategies_dir: {tmp_path}/strategies/",
                 "universe: [AAA, BBB, CCC]",
+                *data,
                 "research:",
                 "  fit_set_size: 2",
                 "  agent:",
@@ -904,6 +906,7 @@ def _episodic_session(tmp_path, monkeypatch, lake):
         registry=object(),
         families=FamilyRegistry(),
         memory=object(),
+        mandate=mandate,
     )
 
 
@@ -949,6 +952,68 @@ def test_composition_root_passes_no_precomputed_fit_panel(tmp_path, monkeypatch)
 
     assert "fit_symbols" not in seen
     assert callable(seen["fallback_panel_source"])
+
+
+# ── the mandate-symbol data preflight is threaded from here (story #111) ──────────────────────
+def _episodic_kwargs(tmp_path, monkeypatch, *, mandate=None, history_days=None) -> dict:
+    """Run one episodic session with the driver entry stubbed; returns the kwargs it was handed."""
+    from noctis.research import driver as driver_mod
+
+    session = _episodic_session(
+        tmp_path,
+        monkeypatch,
+        _PanelLake(ready={"AAA"}),
+        mandate=mandate,
+        history_days=history_days,
+    )
+    seen: dict = {}
+    monkeypatch.setattr(
+        driver_mod, "run_episodic_research", lambda **k: seen.update(k) or ResearchSummary()
+    )
+    session.run(max_iterations=1)
+    return seen
+
+
+def _mandate(symbols):
+    """A resolved mandate declaring ``symbols`` — the only field the preflight threading reads."""
+    from noctis.research.mandate import Mandate
+
+    return Mandate(
+        text="hunt liquid momentum",
+        source="cli",
+        summary="momentum",
+        references=[],
+        config_overrides={},
+        symbols=list(symbols),
+    )
+
+
+def test_composition_root_threads_the_mandate_symbols_and_history_window(tmp_path, monkeypatch):
+    """The driver imports no settings, so the two preflight inputs arrive as parameters: the
+    resolved mandate's declared symbols and ``data.history_days`` (an existing knob, unchanged)."""
+    seen = _episodic_kwargs(
+        tmp_path, monkeypatch, mandate=_mandate(["QQQ", "IWM"]), history_days=90
+    )
+
+    assert list(seen["mandate_symbols"]) == ["QQQ", "IWM"]
+    assert seen["history_days"] == 90
+
+
+def test_composition_root_declares_no_preflight_symbols_without_a_mandate(tmp_path, monkeypatch):
+    """No mandate ⇒ no declared symbols, so the preflight is a no-op and the session unchanged."""
+    seen = _episodic_kwargs(tmp_path, monkeypatch, history_days=90)
+
+    assert list(seen["mandate_symbols"]) == []
+    assert seen["history_days"] == 90
+
+
+def test_composition_root_threads_the_default_history_window(tmp_path, monkeypatch):
+    """An operator who never touched ``data.history_days`` still gets its shipped default."""
+    from noctis.config.settings import DataConfig
+
+    seen = _episodic_kwargs(tmp_path, monkeypatch, mandate=_mandate(["QQQ"]))
+
+    assert seen["history_days"] == DataConfig().history_days
 
 
 # ── memory_distill_every defaults ON in episodic mode; conversation stays bit-identical ──────

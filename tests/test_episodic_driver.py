@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1281,6 +1282,349 @@ def test_stale_precomputed_fit_panel_call_site_fails_loudly(tmp_path):
             max_episodes=2,
             completions=lambda: episodes.completions,
         )
+
+
+# ── 2d. the mandate-symbol data preflight at session start (story #111) ──────────────────────
+# The preflight is deterministic driver code (zero LLM): mandate-declared symbols that are not
+# lake-ready are fetched at session start through the SAME budget-gated ``ensure_data`` method the
+# conversation loop uses. The fakes below add the two surfaces it drives — a lake readiness check
+# and ``tool_ensure_data`` — to the shared FakeToolbox, and model the production consequence of a
+# landed fetch: the symbol becomes lake-ready, so the roster-wide screen and the fallback panel see
+# it. A toolbox WITHOUT those surfaces (the plain FakeToolbox above) must degrade to a no-op.
+
+# The session clock the window arithmetic is anchored to: 12:00 UTC = 07:00 ET the same day.
+_SESSION_NOW = datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
+# ...and the same session date reached from the overnight research window: 02:00 UTC on the 11th is
+# 22:00 ET on the 10th, so the UTC calendar has already rolled but the vendor's day has not.
+_SESSION_NOW_ET_ROLLOVER = datetime(2026, 3, 11, 2, 0, tzinfo=UTC)
+# The window both clocks must produce for a 30-day lookback: 30 days ending at the last full
+# vendor day (the T+1 boundary of the session date — the same arithmetic the run entrypoint's
+# auto-backfill uses over ``data.history_days``).
+_WINDOW = {"start": "2026-02-08", "end": "2026-03-09"}
+
+# What one symbol's ``ensure_data`` outcome looks like: a landed fetch, and a budget refusal in the
+# shape the data seam's own cost preflight returns.
+_INGESTED = {
+    "status": "ingested",
+    "fetch_calls": 1,
+    "rows_added": 500,
+    "cost_usd": 0.25,
+    "detail": "",
+}
+_REFUSED = {
+    "status": "refused",
+    "fetch_calls": 0,
+    "rows_added": 0,
+    "cost_usd": 0.0,
+    "detail": "estimated $9.00 would exceed the remaining budget",
+}
+
+
+class _ReadyLake:
+    """A lake fake exposing only ``check_symbol_ready`` — the readiness surface the preflight
+    feature-detects. Readiness is a mutable set: a landed fetch adds to it, exactly what the
+    coverage registry does in production."""
+
+    def __init__(self, ready=()):
+        self.ready = {s.upper() for s in ready}
+
+    def check_symbol_ready(self, symbol, dataset=None, schema=None):
+        return symbol.upper() in self.ready
+
+
+class MandateToolbox(FakeToolbox):
+    """FakeToolbox + the data surface the mandate preflight drives.
+
+    ``tool_ensure_data`` records every call and, by default, ingests each requested name into the
+    lake's ready set (what a successful fetch does in production). ``ensure_result`` scripts
+    another outcome (a budget refusal, the tool's own error result); ``ensure_raises`` makes the
+    call blow up the way a dead vendor key does.
+    """
+
+    def __init__(self, *, ready=(), ensure_result=None, ensure_raises=False, **kw):
+        super().__init__(**kw)
+        self.lake = _ReadyLake(ready)
+        self.ensure_calls: list[dict] = []
+        self._ensure_result = ensure_result
+        self._ensure_raises = ensure_raises
+
+    def tool_ensure_data(self, symbols, start, end):
+        self.ensure_calls.append({"symbols": list(symbols), "start": start, "end": end})
+        if self._ensure_raises:
+            raise RuntimeError("databento key rejected")
+        if self._ensure_result is not None:
+            return dict(self._ensure_result)
+        for sym in symbols:
+            self.lake.ready.add(str(sym).upper())
+        return {"results": {s: dict(_INGESTED) for s in symbols}}
+
+
+class ScreensTheReadyLake(MandateToolbox):
+    """A screen that ranks the lake-READY names, as the real roster-wide screen does — so whatever
+    the preflight fetched is visible to MATCH's fit/holdout split."""
+
+    def tool_screen_symbols(self, trend="any", volatility="any", liquidity="any", symbols=None):
+        self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
+        ready = sorted(self.lake.ready)
+        return {"suggested_fit": ready[:2], "reserved_holdout": ready[2:3]}
+
+
+def _drive_preflight(tmp_path, session, box, *, mandate_symbols, history_days=30, **over):
+    """Drive one full cycle (a reject verdict) with the mandate preflight wired; returns the
+    ledger so the preflight's own stage line can be read back."""
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    ledger = SessionLedger(tmp_path, session)
+    summary = _drive(
+        episodes,
+        box,
+        max_episodes=2,
+        ledger=ledger,
+        mandate_symbols=mandate_symbols,
+        history_days=history_days,
+        now=lambda: _SESSION_NOW,
+        **over,
+    )
+    return ledger, summary
+
+
+def _preflight_line(ledger):
+    return next(s for s in ledger.stages() if s.stage == "preflight")
+
+
+def test_preflight_fetches_only_the_unready_mandate_symbols_over_the_history_window(tmp_path):
+    # AAA is already lake-ready, so only the two unready declared names are fetched — in ONE
+    # ensure_data call over the history_days window (never one paid call per symbol).
+    box = MandateToolbox(ready=["AAA"])
+    _drive_preflight(tmp_path, "pf1", box, mandate_symbols=["AAA", "QQQ", "IWM"])
+
+    assert box.ensure_calls == [{"symbols": ["QQQ", "IWM"], **_WINDOW}]
+
+
+@pytest.mark.parametrize("session_now", [_SESSION_NOW, _SESSION_NOW_ET_ROLLOVER])
+def test_preflight_window_is_history_days_ending_at_the_session_date(tmp_path, session_now):
+    # The window is anchored to the session date and never crosses the vendor's T+1 boundary: an
+    # overnight session whose UTC date already rolled still asks for the last full vendor day.
+    box = MandateToolbox()
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    _drive(
+        episodes,
+        box,
+        max_episodes=2,
+        ledger=SessionLedger(tmp_path, f"pf2-{session_now:%d%H}"),
+        mandate_symbols=["QQQ"],
+        history_days=30,
+        now=lambda: session_now,
+    )
+
+    assert box.ensure_calls == [{"symbols": ["QQQ"], **_WINDOW}]
+
+
+def test_preflight_ledgers_the_per_symbol_outcome_and_emits_the_tool_line(tmp_path):
+    # The per-symbol outcome (status, rows, cost) lands under the dedicated preflight stage — so the
+    # CLOSE rollup can report data spend without parsing MATCH — beside the same observable
+    # ensure_data tool line the conversation loop emits, opened by a preflight stage boundary.
+    events: list = []
+    box = MandateToolbox(ready=["AAA"])
+    ledger, _ = _drive_preflight(
+        tmp_path, "pf3", box, mandate_symbols=["QQQ"], on_event=events.append
+    )
+
+    assert [s.stage for s in ledger.stages()] == [
+        "preflight",
+        "formulate",
+        "match",
+        "author",
+        "optimize",
+        "decide",
+    ]
+    pre = _preflight_line(ledger)
+    assert pre.detail["symbols"] == ["QQQ"]
+    assert pre.detail["window"] == {**_WINDOW, "history_days": 30}
+    assert pre.detail["results"]["QQQ"] == {
+        "status": "ingested",
+        "rows_added": 500,
+        "cost_usd": 0.25,
+        "detail": "",
+    }
+    assert pre.detail["fetched"] == ["QQQ"] and pre.detail["refused"] == []
+    assert pre.detail["cost_usd"] == 0.25  # the one comparable data-spend number
+
+    first = [(e.kind, e.meta.get("stage") or e.meta.get("tool")) for e in events][:2]
+    assert first == [("stage", "preflight"), ("tool", "ensure_data")]
+
+    # The new stage line perturbs nothing the rollup counts (it names no strategy).
+    rollup = ledger.rollup()
+    assert (rollup.theses, rollup.authored, rollup.validation_failures) == (1, 1, 0)
+
+
+def test_fetched_symbols_join_the_screen_fit_set_and_the_holdout_reservation(tmp_path):
+    # A fetched name joins the effective universe, so the roster-wide screen ranks it: it reaches
+    # the fit set AUTHOR/OPTIMIZE tune on and the code-owned symbol-holdout reservation.
+    box = ScreensTheReadyLake(ready=["AAA"], verdict_results=[{"ok": True, "promoted": True}])
+    episodes = Episodes([formulate_ok()], [decide_ok("approve")])
+    _drive(
+        episodes,
+        box,
+        max_episodes=2,
+        ledger=SessionLedger(tmp_path, "pf4"),
+        mandate_symbols=["IWM", "QQQ"],
+        history_days=30,
+        now=lambda: _SESSION_NOW,
+    )
+
+    # Ready after the preflight: AAA (seed) + IWM + QQQ ⇒ fit = AAA,IWM; reserved holdout = QQQ.
+    assert box.writes[0]["brief"]["symbols"] == ["AAA", "IWM"]
+    assert box.backtests[0]["symbols"] == ["AAA", "IWM"]
+    ev = box.evaluations[0]
+    assert ev["symbols"] == ["AAA", "IWM"]
+    assert ev["holdout_symbols"] == ["QQQ"]  # never tuned, submitted as the symbol holdout
+
+
+def test_fetched_symbols_join_the_lazily_resolved_fallback_panel(tmp_path):
+    # The #110 source resolves at MATCH over lake readiness, so a preflight fetch is in the panel a
+    # no-lake-match MATCH falls back to — the whole point of unfreezing it.
+    box = MandateToolbox(ready=["AAA"])  # the default empty screen ⇒ this MATCH falls back
+    ledger, _ = _drive_preflight(
+        tmp_path,
+        "pf5",
+        box,
+        mandate_symbols=["QQQ"],
+        fallback_panel_source=lambda: sorted(box.lake.ready),
+    )
+
+    match = next(s for s in ledger.stages() if s.stage == "match")
+    assert match.detail["fit"] == ["AAA", "QQQ"]
+    assert box.backtests[0]["symbols"] == ["AAA", "QQQ"]
+
+
+def test_budget_refusal_is_ledgered_and_the_session_continues(tmp_path):
+    # A refusal from the seam's cost preflight is data the driver ledgers and works around: the
+    # session runs its normal course on the lake it already has.
+    box = MandateToolbox(ensure_result={"results": {"QQQ": dict(_REFUSED)}})
+    ledger, summary = _drive_preflight(tmp_path, "pf6", box, mandate_symbols=["QQQ"])
+
+    pre = _preflight_line(ledger)
+    assert pre.detail["refused"] == ["QQQ"]
+    assert pre.detail["fetched"] == []
+    assert pre.detail["cost_usd"] == 0.0
+    assert "budget" in pre.detail["results"]["QQQ"]["detail"]
+    assert summary.rejections == 1  # the session still reached a verdict
+    assert [s.stage for s in ledger.stages()][1:] == [
+        "formulate",
+        "match",
+        "author",
+        "optimize",
+        "decide",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("over", "reason"),
+    [
+        ({"ensure_raises": True}, "databento key rejected"),
+        ({"ensure_result": {"error": "vendor unavailable"}}, "vendor unavailable"),
+    ],
+)
+def test_fetch_failure_is_ledgered_and_never_crashes_the_session(tmp_path, over, reason):
+    # A raising fetch and the tool's own error result degrade the same honest way: the reason is
+    # ledgered on the preflight line and the session continues with today's behavior.
+    box = MandateToolbox(**over)
+    ledger, summary = _drive_preflight(
+        tmp_path, f"pf7-{len(over)}{reason[:3]}", box, mandate_symbols=["QQQ"]
+    )
+
+    pre = _preflight_line(ledger)
+    assert reason in pre.detail["error"]
+    assert pre.detail["fetched"] == []
+    assert summary.rejections == 1
+
+
+def test_no_mandate_symbols_makes_no_ensure_data_call_and_an_unchanged_session(tmp_path):
+    # Byte-identical guard: the data surface EXISTS but nothing declares a symbol ⇒ zero ensure_data
+    # calls, no preflight stage line, the same stage flow as a session before the preflight existed.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = MandateToolbox(ready=["AAA"])
+    ledger = SessionLedger(tmp_path, "pf8")
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger, history_days=30)
+
+    assert box.ensure_calls == []
+    assert [s.stage for s in ledger.stages()] == [
+        "formulate",
+        "match",
+        "author",
+        "optimize",
+        "decide",
+    ]
+    assert summary.rejections == 1
+
+
+def test_all_declared_symbols_already_lake_ready_makes_no_ensure_data_call(tmp_path):
+    # The other byte-identical case: every declared name is already lake-ready (matched
+    # case-insensitively, as the mandate's own upper-casing implies) ⇒ nothing to fetch, no line.
+    box = MandateToolbox(ready=["QQQ", "IWM"])
+    ledger, summary = _drive_preflight(tmp_path, "pf9", box, mandate_symbols=["qqq", "IWM"])
+
+    assert box.ensure_calls == []
+    assert [s.stage for s in ledger.stages()][0] == "formulate"
+    assert summary.rejections == 1
+
+
+@pytest.mark.parametrize("box_factory", [FakeToolbox, lambda: _no_readiness_toolbox()])
+def test_a_lake_without_a_readiness_surface_degrades_to_a_no_op_preflight(tmp_path, box_factory):
+    # A toolbox with no lake at all, or a lake seam without a readiness surface, cannot tell what is
+    # unready — so the preflight spends nothing, ledgers nothing, and the session is unchanged.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = box_factory()
+    ledger = SessionLedger(tmp_path, f"pf10-{type(box).__name__}")
+    summary = _drive(
+        episodes,
+        box,
+        max_episodes=2,
+        ledger=ledger,
+        mandate_symbols=["QQQ"],
+        history_days=30,
+    )
+
+    assert not [s for s in ledger.stages() if s.stage == "preflight"]
+    assert [s.stage for s in ledger.stages()][0] == "formulate"
+    assert summary.rejections == 1
+
+
+def _no_readiness_toolbox():
+    box = FakeToolbox()
+    box.lake = object()  # a lake seam with no readiness/coverage surface at all
+    return box
+
+
+def test_preflight_fetches_through_the_real_toolbox_gated_path(tmp_path):
+    # Integration, zero LLM: driven against the REAL ResearchToolbox, the preflight's fetch reaches
+    # the lake seam's ``ensure_coverage`` — where the cost preflight against data.budget_usd lives —
+    # for the unready name only, over the window's calendar days.
+    from noctis.data.types import ns_to_date
+
+    toolbox = _make_toolbox(tmp_path)  # AAA..DDD are lake-ready; ZZZ is not
+    episodes = Episodes([], [])
+    ledger = SessionLedger(tmp_path, "pfr1")
+
+    # max_episodes=0 stops the loop at its first boundary, so this exercises the session-start
+    # preflight alone — no authoring, no episode.
+    _drive(
+        episodes,
+        toolbox,
+        max_episodes=0,
+        ledger=ledger,
+        mandate_symbols=["AAA", "ZZZ"],
+        history_days=30,
+        now=lambda: _SESSION_NOW,
+    )
+
+    assert len(toolbox.lake.ensure_calls) == 1
+    _dataset, _schema, symbols, start_ns, end_ns = toolbox.lake.ensure_calls[0]
+    assert symbols == ("ZZZ",)
+    assert ns_to_date(start_ns).isoformat() == _WINDOW["start"]
+    assert ns_to_date(end_ns).isoformat() == _WINDOW["end"]
+    # ...and the seam's own per-symbol status is what the ledger line carries.
+    assert _preflight_line(ledger).detail["results"]["ZZZ"]["status"] == "noop"
 
 
 # ── 2e. observability: stage boundaries + deterministic tool lines (story #73) ──────────────

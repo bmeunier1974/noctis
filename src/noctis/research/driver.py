@@ -12,6 +12,17 @@ end to end with plain fakes and zero LLM involvement.
 
 **The stages (minimal where follow-ups deepen them).**
 
+* **PREFLIGHT** — *once per session, before the first thesis*: the operator's mandate-declared
+  symbols that the lake cannot research yet are fetched through the gated, budget-aware
+  ``toolbox.tool_ensure_data`` over the ``data.history_days`` window ending at the session date
+  (:func:`_preflight_stage`, #111) — deterministic code, zero LLM, ONE call for all of them. Fetched
+  names join the effective universe through the lake's coverage registry, so the first screen, fit
+  set, symbol-holdout reservation, and (via the #110 source) fallback panel already see them. The
+  spend rides the data seam's own cost preflight against ``data.budget_usd``: a refusal, a
+  per-symbol vendor error, or a fetch that raises is ledgered under the stage's own
+  :data:`PREFLIGHT` label and the session continues on the lake it already has. Nothing declared,
+  everything already lake-ready, or a lake with no readiness surface ⇒ a strict no-op: no call, no
+  tool line, no stage line.
 * **FORMULATE** — one episode proposes a falsifiable thesis (a :class:`FormulateOutput`). Its
   thesis is recorded to the session ledger (so the next formulate's briefing tail already knows
   what this session tried) before any authoring.
@@ -128,11 +139,12 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from noctis.data.types import ns_to_date, t1_boundary_ns
 from noctis.engine.research import ResearchSummary, StopEvent
 from noctis.observability.events import Event, stage_event, tool_event
 from noctis.research import digests
@@ -159,6 +171,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("noctis.research.driver")
 
 # Stage labels — the ``stage`` string ledgered at each transition and read back by reports.
+# PREFLIGHT is the once-per-session, strategy-less data stage (#111): it carries its OWN label so a
+# CLOSE rollup reads the session's data spend off one line instead of parsing MATCH detail.
+PREFLIGHT = "preflight"
 FORMULATE = "formulate"
 MATCH = "match"
 AUTHOR = "author"
@@ -870,6 +885,11 @@ def _no_emit(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
     return None
 
 
+def _no_stage(stage: str) -> None:
+    """The no-sink stage-boundary no-op, so a stage function can be driven without narration."""
+    return None
+
+
 def _tool_emitter(on_event: Callable[[Event | str], None] | None, toolbox: Any) -> ToolEmitter:
     """Build the driver's tool-line emitter, or the no-op when no sink is wired. Each line uses the
     toolbox's own ``result_brief`` (the gate-facing slice) so the numbers a promotion/rejection
@@ -882,6 +902,132 @@ def _tool_emitter(on_event: Callable[[Event | str], None] | None, toolbox: Any) 
         on_event(tool_event(name, args, result, brief))
 
     return emit_tool
+
+
+# ── PREFLIGHT: the mandate-declared symbol data preflight (story #111) ───────────────────────
+# Deterministic session-start code, zero LLM: whatever the operator's mandate declared that the lake
+# cannot research yet is fetched ONCE, through the same budget-gated ``ensure_data`` method the
+# conversation loop uses, over the ``data.history_days`` window ending at the session date. Fetched
+# names join the effective universe through the lake's coverage registry, so the very first screen,
+# fit set, holdout reservation, and (via the #110 source) fallback panel already see them. Nothing
+# here loosens a gate: the spend rides the seam's cost preflight against ``data.budget_usd``, and a
+# refusal or error is data the driver ledgers and works around.
+_INGESTED = "ingested"  # the seam's status for a fetch that added coverage
+_REFUSED = "refused"  # ...and for one the cost preflight refused
+
+
+def _preflight_window(session_at: datetime, history_days: int) -> tuple[str, str]:
+    """The inclusive ``[start, end]`` ISO dates of the preflight fetch: a ``history_days`` lookback
+    ending at the session date's last vendor-available day.
+
+    The end is the **T+1 boundary** the run entrypoint's auto-backfill anchors on (UTC midnight of
+    the session's US-market date): vendor availability for US equities ends there and an end past it
+    is rejected outright, so the inclusive end date is the day before that boundary. That also makes
+    the window right for overnight research, when the UTC calendar has already rolled but the
+    vendor's trading day has not (22:00 ET = 02:00 UTC tomorrow).
+    """
+    boundary = ns_to_date(t1_boundary_ns(session_at))
+    start = boundary - timedelta(days=history_days)
+    end = boundary - timedelta(days=1)
+    return start.isoformat(), end.isoformat()
+
+
+def _unready_symbols(toolbox: Any, symbols: Sequence[str]) -> list[str]:
+    """The declared symbols this lake cannot research yet — normalized, deduped, declared order.
+
+    Readiness is asked of the lake's own ``check_symbol_ready``, the same surface the screener and
+    the fallback panel use. A lake seam without it (a test fake, a bare in-memory lake) cannot say
+    what is missing, so the honest answer is to fetch nothing: an empty list, a no-op preflight.
+    """
+    declared = list(dict.fromkeys(s.strip().upper() for s in symbols if s and s.strip()))
+    if not declared:
+        return []
+    ready = getattr(getattr(toolbox, "lake", None), "check_symbol_ready", None)
+    if not callable(ready):
+        logger.debug("lake exposes no readiness check — skipping the mandate-symbol preflight")
+        return []
+    return [s for s in declared if not ready(s)]
+
+
+def _fetch_outcome(payload: Any) -> dict[str, Any]:
+    """One symbol's ledgered fetch outcome: status, rows added, cost, and the seam's own detail (a
+    budget refusal's reason, a vendor error's message). A deliberately small, stable view of the
+    ``ensure_data`` result, so the preflight ledger line stays legible whatever the tool adds."""
+    row = payload if isinstance(payload, Mapping) else {}
+    return {
+        "status": str(row.get("status") or "unknown"),
+        "rows_added": int(row.get("rows_added") or 0),
+        "cost_usd": float(row.get("cost_usd") or 0.0),
+        "detail": str(row.get("detail") or ""),
+    }
+
+
+def _preflight_stage(
+    toolbox: ResearchToolbox,
+    ledger: SessionLedger,
+    *,
+    mandate_symbols: Sequence[str],
+    history_days: int,
+    session_at: datetime,
+    emit_stage: Callable[[str], None] = _no_stage,
+    emit_tool: ToolEmitter = _no_emit,
+) -> None:
+    """Fetch the mandate-declared symbols the lake lacks, once, at session start.
+
+    A strict no-op when there is nothing to do — no mandate symbols, every declared name already
+    lake-ready, or a lake with no readiness surface: no ``ensure_data`` call, no tool line, no stage
+    line, so a session that asks for nothing is byte-identical to one before this stage existed.
+    Otherwise ONE gated ``ensure_data`` call covers every unready name over
+    :func:`_preflight_window`, the same observable ``ensure_data`` tool line the conversation loop
+    emits is emitted, and the per-symbol outcome (status, rows, cost, refusals) plus the total
+    spend is ledgered under :data:`PREFLIGHT`. A budget refusal, a per-symbol vendor error, or a
+    fetch that raises outright is recorded and the session continues on the lake it already has —
+    research is never crashed by a data problem.
+    """
+    unready = _unready_symbols(toolbox, mandate_symbols)
+    if not unready:
+        return
+    if history_days <= 0:
+        logger.warning(
+            "the mandate declares %d symbol(s) the lake lacks (%s) but the history window is "
+            "%s days — fetching nothing; set data.history_days to fetch them",
+            len(unready),
+            ", ".join(unready),
+            history_days,
+        )
+        return
+
+    emit_stage(PREFLIGHT)  # the boundary opens the stage before its one observable action
+    start, end = _preflight_window(session_at, history_days)
+    args: dict[str, Any] = {"symbols": unready, "start": start, "end": end}
+    result = _invoke(toolbox.tool_ensure_data, **args)
+    emit_tool("ensure_data", args, result)
+
+    payload = result.get("results")
+    outcomes = {
+        str(sym): _fetch_outcome(row)
+        for sym, row in (payload.items() if isinstance(payload, Mapping) else ())
+    }
+    detail: dict[str, Any] = {
+        "symbols": unready,
+        "window": {"start": start, "end": end, "history_days": int(history_days)},
+        "results": outcomes,
+        "fetched": [s for s, o in outcomes.items() if o["status"] == _INGESTED],
+        "refused": [s for s, o in outcomes.items() if o["status"] == _REFUSED],
+        "cost_usd": round(sum(o["cost_usd"] for o in outcomes.values()), 4),
+    }
+    if "error" in result:
+        detail["error"] = str(result["error"])
+    ledger.record_stage(PREFLIGHT, detail=detail)
+    logger.info(
+        "mandate preflight over %s..%s: %d/%d symbol(s) fetched for $%s%s",
+        start,
+        end,
+        len(detail["fetched"]),
+        len(unready),
+        detail["cost_usd"],
+        f" — {detail['error']}" if "error" in detail else "",
+    )
 
 
 def _entry_exit_brief(fo: FormulateOutput) -> str:
@@ -1227,6 +1373,8 @@ def run_episodic_research(
     stop_event: StopEvent | None = None,
     now: Callable[[], datetime] = _utcnow,
     mandate_source: str | None = None,
+    mandate_symbols: Sequence[str] = (),
+    history_days: int = 0,
     models: dict[str, Any] | None = None,
     sweep_trials: int | None = None,
     market_digest: Callable[[], str] | None = None,
@@ -1248,9 +1396,16 @@ def run_episodic_research(
     formulate briefing embeds; it defaults to the toolbox's own digest. See the module docstring
     for the stage protocol, the per-stage failed-episode policies, and the sanity checks.
 
+    ``mandate_symbols`` and ``history_days`` are the session-start PREFLIGHT's two inputs (#111) —
+    the operator's declared symbols and the lookback window to fetch the unready ones over. The
+    driver reads no settings, so both arrive as values from the composition root (the resolved
+    mandate's ``symbols`` and ``data.history_days``); their defaults are the no-op, so a caller that
+    passes neither behaves exactly as before the stage existed.
+
     ``on_event`` (story #73) makes one observable episodic session read *better* than the
     conversation loop's inferred narration: a ``stage`` boundary Event opens each of
-    FORMULATE/MATCH/AUTHOR/OPTIMIZE/DECIDE, the driver's deterministic toolbox actions emit the
+    PREFLIGHT/FORMULATE/MATCH/AUTHOR/OPTIMIZE/DECIDE (PREFLIGHT only when it has work), the
+    driver's deterministic toolbox actions emit the
     same ``tool`` lines the loop does, and the injected episodes (via the episode runner's own
     ``on_event``) tee the think/say/usage the model returned — so the whole arc interleaves on one
     sink. ``None`` (a bare run) ⇒ no emission, byte-identical to before.
@@ -1280,6 +1435,20 @@ def run_episodic_research(
         mandate=mandate_source,
         budgets={"max_episodes": max_episodes, "budget_minutes": budget_minutes},
         models=dict(models or {}),
+    )
+
+    # ── PREFLIGHT (mandate-declared symbol history, #111 — deterministic, zero LLM) ────────
+    # Before the first thesis, so the very first screen, fit set, holdout reservation, and fallback
+    # panel already see whatever the operator's mandate asked for. A no-op — not one gated call —
+    # when nothing is declared or the lake already holds it all.
+    _preflight_stage(
+        toolbox,
+        ledger,
+        mandate_symbols=mandate_symbols,
+        history_days=history_days,
+        session_at=start,
+        emit_stage=emit_stage,
+        emit_tool=emit_tool,
     )
 
     def _budget_stop() -> str | None:

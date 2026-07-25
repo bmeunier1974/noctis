@@ -271,6 +271,19 @@ verdict time the agent may nominate `holdout_symbols` it deliberately kept out o
 the toolbox refuses any name found in the strategy's experiment journal. See
 `mandate/README.md` to author your own or pick a shipped profile.
 
+A mandate's front-matter `symbols:` are honored the same way on **both** loops. The episodic
+driver opens each session with a deterministic **PREFLIGHT** stage (#111, no model call): every
+declared symbol the lake cannot research yet is fetched in one `ensure_data` call over the
+`data.history_days` window ending at the session date (its end sits at the vendor's T+1
+boundary, like `run`'s auto-backfill), so the first screen, fit set, symbol-holdout reservation,
+and fallback panel already see the operator's names. The spend rides the same cost preflight
+against `data.budget_usd` — steering can never bypass the data budget — and a refusal or fetch
+error is ledgered on the stage's own `preflight` line (per-symbol status, rows, cost, plus the
+session's total data spend) while the session continues on the lake it already has. A session
+with no mandate, or one whose declared names are all lake-ready, makes zero `ensure_data` calls
+and behaves exactly as before. No new knobs: `data.history_days` and `data.budget_usd` keep
+their meanings, now honored by both loops.
+
 ## Two agent loops, one contract
 
 With a client, the same protocol runs one of two ways behind one seam (`research.agent.loop`): the
