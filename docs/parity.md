@@ -71,6 +71,7 @@ honestly supply** that metric — never a fabricated number.
 | Validator 1st-attempt % | Of the strategies a session tried to author, the fraction that passed the write gate on the first try. Episodic-only (from the ledger); the conversation loop keeps no ledger, so it reads `n/a`. |
 | Promotion-gate reach % | `verdicts ÷ candidates` — the fraction of strategies worked on that reached a gated verdict. |
 | Undecided (total) | Strategies authored but never carried to a verdict (archived after the TTL). |
+| Prose stalls (sessions) | Sessions that ended `stopped_reason: prose_stall` — the conversation loop's zero-verdict prose ending after the liveness guard's nudge cap (#100). The episodic driver's episode contract forces a structured emission, so its cell is an honest 0; a non-zero conversation count explains an `n/a` tokens/verdict as a stalled model, not a thin fixture. |
 
 ### How tokens are counted (the honesty note)
 
@@ -103,7 +104,11 @@ The harness prints the verdict on the last line:
 - **FAIL** — verdicts/session regressed, or the token cut was under the threshold; the summary names
   which.
 - **INCONCLUSIVE** — a tokens/verdict is `n/a` (a loop reached zero verdicts), so spend can't be
-  compared; re-run with a fixture/mandate that produces verdicts on both loops.
+  compared; re-run with a fixture/mandate that produces verdicts on both loops. One special case
+  is named outright: when **every** conversation session ended in a prose stall while episodic kept
+  reaching verdicts (#100), the verdict line says so instead of advising a re-run that will stall
+  the same way — the stall itself is the evidence, and the honest move is
+  `research.agent.loop: episodic` on that model regardless of window size.
 
 A PASS here is the evidence behind the #76 flip: `research.agent.loop: auto` prefers episodic at
 or below the documented 32,768-token window. This harness only *reports* — it never changes the

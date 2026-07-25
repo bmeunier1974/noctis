@@ -95,10 +95,11 @@ def text_turn(text="done", usage=None, stop_reason="end_turn"):
 
 
 def prose_ending(text="done", usage=None):
-    """A deliberate zero-verdict session ending under the liveness guard: the loop nudges a
-    prose turn ``_MAX_PROSE_NUDGES`` times before honoring one as ``agent_done``, so a script
-    that concludes without a verdict must end with cap+1 prose turns. Only the FIRST carries
-    ``usage`` (the later turns are the model repeating itself)."""
+    """A zero-verdict session ending under the liveness guard: the loop nudges a prose turn
+    ``_MAX_PROSE_NUDGES`` times before letting one end the session (labeled ``prose_stall``
+    when nothing was decided, #100), so a script that concludes without a verdict must end
+    with cap+1 prose turns. Only the FIRST carries ``usage`` (the later turns are the model
+    repeating itself)."""
     from noctis.research.agent import _MAX_PROSE_NUDGES
 
     return [text_turn(text, usage), *(text_turn(text) for _ in range(_MAX_PROSE_NUDGES))]
@@ -262,7 +263,7 @@ def test_summary_tokens_total_sums_every_completions_usage(tmp_path):
         toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=20
     )
 
-    assert summary.stopped_reason == "agent_done"
+    assert summary.stopped_reason == "prose_stall"
     assert summary.tokens_total == 178
 
 
@@ -346,10 +347,11 @@ def test_prose_stall_with_no_verdict_is_nudged_not_fatal(tmp_path):
     assert "verdict" in _msg_text(retry).lower()
 
 
-def test_prose_nudges_are_bounded_then_conclusion_honored(tmp_path):
-    """The guard's cap is its own escape hatch: after ``_MAX_PROSE_NUDGES`` corrections a model
-    that still answers in prose is ending the session deliberately — honored as ``agent_done``,
-    never an infinite nudge loop."""
+def test_prose_nudges_are_bounded_then_stall_ends_labeled(tmp_path):
+    """The guard's cap is its own escape hatch: after ``_MAX_PROSE_NUDGES`` corrections a prose
+    turn still ends the session — never an infinite nudge loop — but a zero-verdict ending is
+    labeled ``prose_stall``, not ``agent_done``: past the cap a stuck narrator (#100) and a
+    deliberate empty conclusion are indistinguishable, so the summary carries the countable name."""
     from noctis.research.agent import _MAX_PROSE_NUDGES
 
     toolbox = _make_toolbox(tmp_path)
@@ -360,7 +362,7 @@ def test_prose_nudges_are_bounded_then_conclusion_honored(tmp_path):
         toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=25
     )
 
-    assert summary.stopped_reason == "agent_done"
+    assert summary.stopped_reason == "prose_stall"
     assert summary.iterations == _MAX_PROSE_NUDGES + 1
     assert len(client.calls) == _MAX_PROSE_NUDGES + 1
     assert summary.promotions == 0 and summary.rejections == 0
@@ -763,7 +765,7 @@ def test_usage_rollup_zero_cache_on_fresh_session(tmp_path, caplog):
         summary = run_agent_research(
             toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=5
         )
-    assert summary.stopped_reason == "agent_done"
+    assert summary.stopped_reason == "prose_stall"
     rollups = [r.getMessage() for r in caplog.records if "agent research usage:" in r.getMessage()]
     assert len(rollups) == 1
     assert "cache_read=0" in rollups[0]
@@ -1367,7 +1369,7 @@ def test_tool_event_structured_keys_survive_a_colliding_brief():
 def _ending_client(reason: str):
     """A minimal client that drives the loop to the requested stop reason in as few rounds as
     possible, so the session-end honesty check runs on each distinct exit path."""
-    if reason == "agent_done":
+    if reason == "prose_stall":
         return FakeLLM(prose_ending("No verdict this session."), capabilities=NO_CAPS)
     if reason == "max_iterations":
         # A model that never resolves a native tool call — bounded by the iteration budget.
@@ -1379,9 +1381,9 @@ def _ending_client(reason: str):
     raise AssertionError(f"unknown stop reason {reason!r}")
 
 
-@pytest.mark.parametrize("reason", ["agent_done", "max_iterations", "api_error"])
+@pytest.mark.parametrize("reason", ["prose_stall", "max_iterations", "api_error"])
 def test_undecided_strategies_warn_and_surface_on_every_stop_reason(tmp_path, caplog, reason):
-    """However the loop ends — agent done, iteration budget, or an API error — a non-empty
+    """However the loop ends — a prose stall, the iteration budget, or an API error — a non-empty
     toolbox undecided set is surfaced on the summary (sorted) and named in one WARNING."""
     toolbox = _make_toolbox(tmp_path)
     toolbox.undecided.update({"gamma", "alpha", "beta"})
@@ -1420,7 +1422,7 @@ def test_no_undecided_leaves_field_empty_and_logs_no_warning(tmp_path, caplog):
             toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=3
         )
 
-    assert summary.stopped_reason == "agent_done"
+    assert summary.stopped_reason == "prose_stall"
     assert summary.undecided == []
     assert not [r for r in caplog.records if "undecided" in r.getMessage()]
 
@@ -1443,5 +1445,5 @@ def test_undecided_populated_organically_through_the_write_gate(tmp_path):
         toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=5
     )
 
-    assert summary.stopped_reason == "agent_done"
+    assert summary.stopped_reason == "prose_stall"
     assert summary.undecided == ["probe"]

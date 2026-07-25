@@ -1,8 +1,9 @@
 """Misfire classification — the model stumbles the loop corrects and retries.
 
 A *misfire* is an attempted move that never became an executable tool call, as opposed to
-a deliberate plain-text conclusion (``agent_done``) or a genuine transport failure
-(``api_error``). Small local backends produce four faces of the same stumble:
+a plain-text conclusion (``agent_done`` after a verdict, ``prose_stall`` without one) or a
+genuine transport failure (``api_error``). Small local backends produce four faces of the
+same stumble:
 
 * **text-form markup** — the "tool call" is written as literal Hermes/Qwen-style
   ``<tool_call>``/``<function=`` markup in the thinking or text channel, where no template
@@ -108,8 +109,9 @@ PREMATURE_CONCLUSION = Misfire(
 
 def classify_turn(turn: Turn) -> Misfire | None:
     """Classify a turn that produced zero usable native tool calls: a :class:`Misfire` to
-    correct and retry, or ``None`` — the turn carries plain text and is the agent's
-    deliberate final conclusion (``agent_done``)."""
+    correct and retry, or ``None`` — the turn carries plain text and can end the session
+    (``agent_done`` after a verdict; ``prose_stall`` without one, once the nudge cap is
+    spent)."""
     if turn.stop_reason == "length":
         return _TRUNCATED
     blob = f"{turn.reasoning}\n{turn.text}"

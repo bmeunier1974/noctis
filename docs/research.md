@@ -290,6 +290,16 @@ verdicts/session at 45% fewer tokens/verdict, and subsequent leak fixes (#89, #9
 tokens/verdict a further ~4× on the same fixture. Loop selection lives in one place
 (`bootstrap.resolve_research_loop`); an explicit `conversation`/`episodic` always wins over `auto`.
 
+The conversation loop carries a **zero-verdict liveness guard**: a prose-only reply while nothing
+has been decided is a protocol stall (the FORMULATE step invites exactly that turn shape), so the
+loop keeps the prose as context and nudges the model onward, at most twice per session. Past the
+cap a prose turn still ends the session — never an infinite nudge loop — but a zero-verdict ending
+is reported as `stopped_reason: prose_stall`, not `agent_done`: with the corrections spent there is
+no way to tell a deliberate empty conclusion from a model stuck narrating (#100 watched a hosted
+model do exactly this for three straight sessions), so the summary carries the honest, countable
+name. The episodic driver needs no such guard — its episode contract forces a structured emission,
+so it cannot stall in prose by construction.
+
 ## The legacy fallback
 
 No configured client (missing key or missing `[llm]` extra) → the legacy proposer/Optuna loop

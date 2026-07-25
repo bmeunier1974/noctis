@@ -45,6 +45,12 @@ that cannot honestly supply it — never a fabricated number).**
 * **undecided** — ``len(summary.undecided)`` summed: strategies authored but never carried to a
   verdict (archived after the TTL), surfaced by both loops.
 
+* **prose stalls** — sessions that ended ``stopped_reason == "prose_stall"``: the conversation
+  loop's zero-verdict prose ending past the liveness guard's nudge cap (#100). The episodic driver
+  is structurally immune (its episode contract forces an emission), so its cell is an honest 0;
+  a non-zero conversation count explains a ``n/a`` tokens/verdict as a stalled model rather than a
+  thin fixture.
+
 **The flip criterion** (:func:`assess_flip`, made legible by :func:`render_comparison`): episodic
 meets it when it holds **verdicts/session** (episodic ≥ conversation) **and** spends *materially*
 fewer **tokens/verdict** — at least :data:`MATERIAL_TOKEN_REDUCTION` fewer. When a tokens/verdict is
@@ -58,7 +64,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from noctis.engine.research import ResearchSummary
+from noctis.engine.research import PROSE_STALL, ResearchSummary
 
 # The two loop labels, matching ``noctis.bootstrap.resolve_research_loop``.
 CONVERSATION = "conversation"
@@ -89,6 +95,7 @@ class LoopMetrics:
     validator_first_attempt_pct: float | None
     promotion_gate_reach_pct: float | None
     undecided: int
+    prose_stalls: int
 
 
 def compute_loop_metrics(loop: str, sessions: Sequence[SessionPair]) -> LoopMetrics:
@@ -122,6 +129,7 @@ def compute_loop_metrics(loop: str, sessions: Sequence[SessionPair]) -> LoopMetr
         ),
         promotion_gate_reach_pct=100.0 * verdicts / candidates if candidates else None,
         undecided=undecided,
+        prose_stalls=sum(1 for s in summaries if s.stopped_reason == PROSE_STALL),
     )
 
 
@@ -184,10 +192,27 @@ def assess_flip(conversation: LoopMetrics, episodic: LoopMetrics) -> FlipAssessm
             f"flipping auto to episodic on this fixture (#76)."
         )
     elif tokens_lower is None:
-        summary = (
-            "INCONCLUSIVE — a tokens/verdict is n/a (a loop reached zero verdicts), so spend "
-            "cannot be compared. Re-run with a fixture/mandate that yields verdicts on both loops."
-        )
+        if (
+            conversation.sessions > 0
+            and conversation.prose_stalls == conversation.sessions
+            and episodic.verdicts > 0
+        ):
+            # Every conversation session prose-stalled while episodic reached verdicts: the
+            # table stays incomputable, but the stall itself is the finding (#100) — say so
+            # instead of advising a re-run that will stall the same way.
+            summary = (
+                "INCONCLUSIVE — every conversation session ended in a prose stall "
+                f"({conversation.prose_stalls}/{conversation.sessions}, #100), so tokens/verdict "
+                "cannot be compared. The stall is itself evidence: episodic is the only loop "
+                "reaching verdicts on this model — prefer research.agent.loop: episodic here "
+                "regardless of window size."
+            )
+        else:
+            summary = (
+                "INCONCLUSIVE — a tokens/verdict is n/a (a loop reached zero verdicts), so "
+                "spend cannot be compared. Re-run with a fixture/mandate that yields verdicts "
+                "on both loops."
+            )
     else:
         reasons = []
         if not verdicts_ok:
@@ -247,6 +272,7 @@ def render_comparison(conversation: LoopMetrics, episodic: LoopMetrics) -> str:
             episodic.promotion_gate_reach_pct,
         ),
         ("Undecided (total)", conversation.undecided, episodic.undecided),
+        ("Prose stalls (sessions)", conversation.prose_stalls, episodic.prose_stalls),
     ]
 
     lines = [
