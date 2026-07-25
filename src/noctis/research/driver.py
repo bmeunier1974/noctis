@@ -1243,6 +1243,8 @@ def run_episodic_research(
         result: EpisodeResult[Any],
         checks: list[dict[str, Any]] | None = None,
     ) -> None:
+        # The per-misfire details and the last misfire/error note ride the episode line (#102),
+        # so a misfires_exhausted / api_error episode is diagnosable from the ledger alone.
         ledger.record_episode(
             stage=stage,
             model=result.model,
@@ -1250,6 +1252,8 @@ def run_episodic_research(
             tokens=result.tokens,
             misfires=result.misfires,
             checks=checks,
+            misfire_details=[dict(d) for d in result.misfire_details],
+            note=result.note or None,
         )
 
     while True:
