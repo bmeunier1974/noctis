@@ -47,12 +47,13 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Generic, TypeVar
 
 from noctis.observability.events import Event, usage_line
 from noctis.research.llm import LLMClient, Turn
 from noctis.research.misfire import (
+    Misfire,
     classify_completion_error,
     classify_emit_failure,
     classify_turn,
@@ -97,12 +98,19 @@ class EmitContract(Generic[T]):
     ONE typed validation both transports meet at — it turns the emitted payload dict into the
     typed record ``T`` and raises on anything the schema does not admit. A caller defines one
     contract per episode kind (a match verdict, a decide verdict, …) and reuses it across calls.
+
+    ``retry_hint`` is optional corrective teaching appended to an *emit-failure* retry only (#91):
+    the classifier's message says what failed, the hint shows a shape that passes — typically one
+    minimal valid example of the field weak backends demonstrably cannot infer from the message
+    alone. The turn-level stumbles (markup/truncation/thinking-only) never carry it — their
+    problem is the transport, not the shape.
     """
 
     name: str
     description: str
     schema: dict[str, Any]
     parse: Callable[[dict[str, Any]], T]
+    retry_hint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -175,6 +183,16 @@ def _payload_from_turn(turn: Turn, tool_name: str) -> dict[str, Any] | None:
         if call.name == tool_name:
             return call.arguments if isinstance(call.arguments, dict) else None
     return _extract_json_object(turn.text)
+
+
+def _with_hint(stumble: Misfire, hint: str | None) -> Misfire:
+    """An emit-failure corrective with the contract's optional ``retry_hint`` appended (#91).
+
+    The classifier note (and therefore the ledger's misfire detail) is untouched — the hint only
+    extends the corrective user turn the model sees on the re-prompt."""
+    if not hint:
+        return stumble
+    return replace(stumble, retry=f"{stumble.retry}\n\n{hint}")
 
 
 def _excerpt(text: str) -> str:
@@ -292,7 +310,7 @@ class EpisodeRunner:
                 try:
                     value = contract.parse(payload)
                 except Exception as exc:  # noqa: BLE001 — a schema-invalid payload is a misfire
-                    stumble = classify_emit_failure(_reason(exc))
+                    stumble = _with_hint(classify_emit_failure(_reason(exc)), contract.retry_hint)
                     # The rejected payload IS the evidence — persist it, not just its verdict.
                     raw = json.dumps(payload, sort_keys=True, default=str)
                 else:
@@ -307,8 +325,8 @@ class EpisodeRunner:
             else:
                 # No emit on either transport: the truncation/markup/thinking-only stumbles land
                 # here, and a prose reply carrying no JSON object is the episode-only "no emit".
-                stumble = classify_turn(turn) or classify_emit_failure(
-                    "no JSON object in the reply"
+                stumble = classify_turn(turn) or _with_hint(
+                    classify_emit_failure("no JSON object in the reply"), contract.retry_hint
                 )
                 # A thinking-only turn has no text — its reasoning is the only trace it left.
                 raw = turn.text if turn.text.strip() else turn.reasoning

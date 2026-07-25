@@ -121,6 +121,7 @@ driver acts on it; stage transitions, verdicts, and a session-end rollup are led
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Callable, Sequence
@@ -600,11 +601,42 @@ _DECIDE_SCHEMA: dict[str, Any] = {
     "required": ["verdict", "reason", "class_exhausted", "class_tag", "holdout_symbols"],
 }
 
+# The emit-failure hint's example spec (#91). Session ledgers show weak drivers misfire on the
+# 'behavior' shape specifically — an object fusing the tag and its leg index — and the compiler's
+# message alone does not teach the shape ("a 'behavior' tag is required" drew three different
+# wrong guesses in one episode). Kept as a real dict so the suite compiles it in a test — the
+# shipped example can never drift from the compiler.
+_SCENARIO_SPEC_EXAMPLE: dict[str, Any] = {
+    "scenarios": [
+        {
+            "name": "breakout_entry",
+            "legs": [
+                {"kind": "flat", "bars": 40},
+                {"kind": "trend", "bars": 20, "pct": 0.06},
+            ],
+            "behavior": "enter_long_during_leg",
+            "leg": 1,
+        },
+        {
+            "name": "quiet_tape_stays_flat",
+            "legs": [{"kind": "chop", "bars": 60, "amplitude": 0.01}],
+            "behavior": "never_trade",
+        },
+    ]
+}
+
+_FORMULATE_RETRY_HINT = (
+    "For reference, a minimal valid 'scenario_spec': 'behavior' is ONE enum string and 'leg' is "
+    "a SIBLING integer index into 'legs' (omit it for never_trade) —\n"
+    + json.dumps(_SCENARIO_SPEC_EXAMPLE, sort_keys=True)
+)
+
 FORMULATE_CONTRACT: EmitContract[FormulateOutput] = EmitContract(
     name="emit_formulation",
     description="Emit ONE falsifiable strategy thesis for this session as a structured object.",
     schema=_FORMULATE_SCHEMA,
     parse=parse_formulate,
+    retry_hint=_FORMULATE_RETRY_HINT,
 )
 
 DECIDE_CONTRACT: EmitContract[DecideOutput] = EmitContract(
