@@ -29,23 +29,23 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "typer>=0.27.0",
     "numpy>=2.4.6",
-    "pandas>=2.2.3",
+    "pandas>=3.0.5",
     "pyarrow>=25.0.0",
 ]
 
 [project.optional-dependencies]
 engine = ["nautilus_trader>=1.221.0"]
-research = ["vectorbt>=1.0", "optuna>=4.9.0", "quantstats-lumi>=1.1.5"]
+research = ["vectorbt>=1.1.0", "optuna>=4.9.0", "quantstats-lumi>=1.1.5"]
 data = [
-    "databento>=0.81.0",
-    "yfinance>=1.5.1",
+    "databento>=0.82.0",
+    "yfinance>=1.5.2",
     "exchange-calendars>=4.13.2",
     "transitions>=0.9.3",
     "apscheduler>=3.11.3",
 ]
 # fastapi/orjson: not ours — litellm's gpt-5.x Responses-API bridge (stream + tools +
 # reasoning_effort) imports both at runtime without declaring them ("No module named …" otherwise).
-llm = ["anthropic>=0.117.0", "litellm>=1.92.0", "fastapi>=0.115", "orjson>=3.10"]
+llm = ["anthropic>=0.120.0", "litellm>=1.93.0", "fastapi>=0.140.0", "orjson>=3.11.9"]
 
 # Dev tooling lives in a PEP 735 dependency-group (not an optional extra) so a bare
 # `uv sync` installs the test-suite-ready environment by default. The runtime seams
@@ -54,10 +54,10 @@ llm = ["anthropic>=0.117.0", "litellm>=1.92.0", "fastapi>=0.115", "orjson>=3.10"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
-    "hypothesis>=6.156.7",
-    "ruff>=0.15.22",
+    "hypothesis>=6.161.5",
+    "ruff>=0.16.0",
     "mypy>=2.3.0",
-    "pre-commit>=4.6.0",
+    "pre-commit>=4.6.1",
 ]
 
 [project.scripts]
