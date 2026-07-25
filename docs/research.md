@@ -262,14 +262,50 @@ A mandate **carries its own risk dial**: its front-matter `config:` block may se
 when passed, wins over the overlay. A mandate steers *what to look for*; it never loosens a
 gate, the exhaustion rule, or the honesty contract.
 
-To satisfy a profile the configured universe lacks, the agent **discovers symbols**:
-`web_search` → `preview_bars` → `ensure_data` (budget-gated) → `screen_symbols` to confirm
+To satisfy a profile the configured universe lacks, the agent **discovers symbols**. On the
+conversation loop that is the agent's own tool sequence: `web_search` → `preview_bars` →
+`ensure_data` (budget-gated) → `screen_symbols` to confirm
 the fetched names actually express the requested character. Every fetched symbol joins the
 **effective universe** permanently (config seed ∪ lake-tracked ready symbols — the lake is the
 store), so discovered names are researched, holdout-checked, and traded like any other. At
 verdict time the agent may nominate `holdout_symbols` it deliberately kept out of all tuning;
 the toolbox refuses any name found in the strategy's experiment journal. See
 `mandate/README.md` to author your own or pick a shipped profile.
+
+A mandate's front-matter `symbols:` are honored the same way on **both** loops. The episodic
+driver opens each session with a deterministic **PREFLIGHT** stage (#111, no model call): every
+declared symbol the lake cannot research yet is fetched in one `ensure_data` call over the
+`data.history_days` window ending at the session date (its end sits at the vendor's T+1
+boundary, like `run`'s auto-backfill), so the first screen, fit set, symbol-holdout reservation,
+and fallback panel already see the operator's names. The spend rides the same cost preflight
+against `data.budget_usd` — steering can never bypass the data budget — and a refusal or fetch
+error is ledgered on the stage's own `preflight` line (per-symbol status, rows, cost, plus the
+session's total data spend) while the session continues on the lake it already has. A session
+with no mandate, or one whose declared names are all lake-ready, makes zero `ensure_data` calls
+and behaves exactly as before. No new knobs: `data.history_days` and `data.budget_usd` keep
+their meanings, now honored by both loops.
+
+The episodic driver also **discovers** — where it used to fall back in silence. When a thesis's
+structural screen finds no lake match, MATCH no longer just researches the default panel: the driver
+spends one small **DISCOVER** episode (#112) asking which real tickers express the character the lake
+lacks (`{"symbols": [1–6 tickers], "rationale": "…"}`, the smallest of the three emit contracts, in a
+briefing built from the mandate, the thesis, the band profile that failed to match, the lake
+inventory, and the spend context). Everything after that answer is deterministic code: a pure
+validator (upper-case, ticker shape, dedupe, drop names the lake already holds) filters the proposal
+**before a dollar is spent**, the survivors are fetched in one budget-gated `ensure_data` call over
+the same `history_days` window, and **exactly one re-screen** decides which of them are tuned and
+which are reserved as the symbol holdout — so a discovered name can only enter research through the
+screen's own fit/reserved split, and rules 2–4 are untouched. Failures degrade honestly, each with
+its own ledgered reason: one corrective re-ask on a misfired or all-invalid proposal then
+`discover_failed`, a `discover_refused` / `discover_fetch_failed` fall-through when the data budget
+or the vendor says no (a refusal is not the episode's fault, so it spends no re-ask), and
+`no_lake_match_after_discover` when the names landed but the re-screen still matched nothing. The
+attempt is one line in the session ledger — tickers proposed / kept / fetched, the window, the
+per-symbol status and cost — so the CLOSE rollup tells a session that *discovered* from one that
+*fell back*. Discover episodes count against the session's `max_episodes` through the same
+completions counter, and one is never started when that budget is already spent. There is no
+`web_search` in v1 (the model's own knowledge of the universe carries the proposal) and no new knob;
+a session whose screens match behaves exactly as before.
 
 ## Two agent loops, one contract
 

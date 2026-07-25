@@ -452,6 +452,26 @@ def effective_memory_distill_every(settings) -> int:
     return 0
 
 
+def build_fallback_panel_source(settings, lake) -> Callable[[], list[str]]:
+    """The episodic MATCH *fallback* fit panel, as a zero-arg source resolved at each MATCH (#110).
+
+    The panel itself is unchanged — the ready :func:`~noctis.engine.runtime.trading_roster` names
+    capped at ``research.fit_set_size``, exactly what this root used to precompute once and hand
+    over as a frozen list. What changes is *when* it is computed: the driver calls this on the MATCH
+    that needs it, so a symbol that joins the lake mid-session (a mandate preflight fetch, a later
+    DISCOVER episode) is in the next MATCH's panel instead of being frozen out at assembly time,
+    and a session whose screens all match never pays the readiness I/O. Deterministic screening
+    still owns the per-thesis fit set; this is only the no-lake-match floor.
+    """
+    from noctis.engine.runtime import trading_roster
+
+    def resolve() -> list[str]:
+        ready = [s for s in trading_roster(settings, lake) if lake.check_symbol_ready(s)]
+        return ready[: settings.research.fit_set_size]
+
+    return resolve
+
+
 @dataclass
 class ResearchSession:
     """One assembled agent research session: client + budgets + toolbox, ready to run.
@@ -515,7 +535,6 @@ class ResearchSession:
         episode runner (which holds the client) and the ledger are assembled here and injected;
         the driver itself never sees the client. Returns the same summary shape as the
         conversation loop, so the runtime and the CLI are untouched."""
-        from noctis.engine.runtime import trading_roster
         from noctis.research.driver import make_episodes, run_episodic_research
         from noctis.research.episode import EpisodeRunner
         from noctis.research.ledger import SessionLedger
@@ -533,27 +552,36 @@ class ResearchSession:
         )
         ledger = SessionLedger(settings.state_dir)
         context_window = agent_cfg.context_window or _EPISODIC_CONTEXT_WINDOW
-        formulate, decide = make_episodes(
+        # The three judgment episodes: formulate, decide, and the no-lake-match discover (#112).
+        formulate, decide, discover = make_episodes(
             runner=runner,
             toolbox=self.toolbox,
             ledger=ledger,
             mandate=self.mandate,
             context_window=context_window,
         )
-        lake = self.toolbox.lake
-        ready = [s for s in trading_roster(settings, lake) if lake.check_symbol_ready(s)]
-        fit_symbols = ready[: settings.research.fit_set_size]
         return run_episodic_research(
             toolbox=self.toolbox,
             ledger=ledger,
             formulate=formulate,
             decide=decide,
-            fit_symbols=fit_symbols,
+            # The DISCOVER episode a ``no_lake_match`` MATCH spends before accepting the fallback
+            # panel (#112). It rides the same runner as the other two, so its completions count
+            # against the one ``max_episodes`` budget below.
+            discover=discover,
+            fallback_panel_source=build_fallback_panel_source(settings, self.toolbox.lake),
             budget_minutes=settings.research_time_budget_minutes,
             max_episodes=max_iterations or self.budgets.max_iterations,
             completions=lambda: runner.completions,
             stop_event=stop_event,
             mandate_source=self.mandate.source if self.mandate else None,
+            # The two inputs of the session-start mandate-symbol preflight (#111) — and the same
+            # ``history_days`` window a DISCOVER fetch covers (#112). The driver reads no settings,
+            # so they arrive as values: the resolved mandate's declared symbols (already upper-cased
+            # and deduped at parse) and the existing ``data.history_days`` lookback — no mandate ⇒
+            # an empty sequence ⇒ a strict no-op preflight.
+            mandate_symbols=self.mandate.symbols if self.mandate else (),
+            history_days=settings.data.history_days,
             models={"driver": self.model, "coder": agent_cfg.coder_model},
             sweep_trials=self.toolbox.default_sweep_trials,
             on_event=self.on_event,

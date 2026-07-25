@@ -1,6 +1,6 @@
 """The episodic research driver (epic #62 / story #68) — the deterministic session machine that
-owns the FORMULATE → MATCH → AUTHOR → OPTIMIZE → DECIDE protocol and calls the model only at the
-two judgment episodes.
+owns the FORMULATE → MATCH (→ DISCOVER) → AUTHOR → OPTIMIZE → DECIDE protocol and calls the model
+only at its judgment episodes.
 
 Two harnesses, one contract:
 
@@ -8,7 +8,7 @@ Two harnesses, one contract:
   zero LLM — locking the stage order, the ledger persistence, the budget stops (max_episodes,
   wall-clock, stop_event), and each per-stage failed-episode policy (formulate → end, author →
   skip, decide → re-ask once, an exhausted revise cap → the final binary ask (#99), then
-  undecided).
+  undecided; discover → one re-ask, then an honestly-named fallback (#112)).
 * **End to end**, a real :class:`~noctis.research.episode.EpisodeRunner` fed scripted ``Turn``s by
   a fake client drives a real :class:`~noctis.research.tools.ResearchToolbox` (with a fake coder)
   through a whole session that authors, optimizes, and reaches a GATED verdict with a complete
@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,8 +32,10 @@ from noctis.research.driver import (
     _SCENARIO_SPEC_EXAMPLE,
     DECIDE_CONTRACT,
     DECIDE_FINAL_CONTRACT,
+    DISCOVER_CONTRACT,
     FORMULATE_CONTRACT,
     DecideOutput,
+    DiscoverOutput,
     FormulateOutput,
     _parse_scenario_spec,
     _slug,
@@ -39,6 +43,7 @@ from noctis.research.driver import (
     make_episodes,
     parse_formulate,
     run_episodic_research,
+    valid_tickers,
 )
 from noctis.research.episode import (
     API_ERROR,
@@ -117,6 +122,22 @@ def decide_fail() -> EpisodeResult[DecideOutput]:
     return EpisodeResult(API_ERROR, None, "fake/model", tokens=2, misfires=0, note="backend down")
 
 
+def discover_ok(symbols=("QQQ",), rationale="liquid index ETFs express it") -> EpisodeResult:
+    return EpisodeResult(
+        OK,
+        DiscoverOutput(symbols=tuple(symbols), rationale=rationale),
+        "fake/model",
+        tokens=6,
+        misfires=0,
+    )
+
+
+def discover_fail() -> EpisodeResult[DiscoverOutput]:
+    return EpisodeResult(
+        MISFIRES_EXHAUSTED, None, "fake/model", tokens=3, misfires=3, note="no JSON object"
+    )
+
+
 # ── driver-derived strategy names are gate-valid by construction (story #92) ─────────────────
 # The driver derives each strategy's name from the FORMULATE class tag; the write gate enforces
 # ``library.NAME_RE`` (one shared rule). ``_slug`` must be TOTAL: for any tag it yields a name the
@@ -193,13 +214,17 @@ def test_slug_leaves_already_valid_tags_byte_identical(tag, expected):
 
 # ── fake episodes (a completions counter mirrors the episode runner's budget tally) ─────────
 class Episodes:
-    def __init__(self, formulate_script, decide_script):
+    def __init__(self, formulate_script, decide_script, discover_script=()):
         self._f = list(formulate_script)
         self._d = list(decide_script)
+        # The DISCOVER script (#112) — empty for every session whose screens match, so a test that
+        # never reaches a no-lake-match needs no discover episode at all.
+        self._x = list(discover_script)
         self.completions = 0
         self.formulate_calls = 0
         self.formulate_correctives: list[str | None] = []
         self.decide_calls: list[tuple[str, str | None, bool]] = []
+        self.discover_calls: list[dict] = []
 
     def formulate(self, *, corrective=None):
         self.completions += 1
@@ -211,6 +236,19 @@ class Episodes:
         self.completions += 1
         self.decide_calls.append((strategy, corrective, final))
         return self._d.pop(0)
+
+    def discover(self, fo, *, profile, window=None, corrective=None):
+        self.completions += 1
+        self.discover_calls.append(
+            {
+                "character": fo.symbol_character,
+                "thesis": fo.thesis,
+                "profile": dict(profile),
+                "window": dict(window or {}),
+                "corrective": corrective,
+            }
+        )
+        return self._x.pop(0)
 
 
 # ── recipe-return builders: what a backtest/sweep hands the OPTIMIZE recipe (story #70) ──────
@@ -375,12 +413,14 @@ class FakeToolbox:
 
 
 def _drive(episodes, toolbox, *, max_episodes, ledger, **over):
+    # The MATCH fallback panel is a zero-arg source (#110); the default wraps the same fixed panel
+    # the frozen list held, so every behavior locked below stays byte-identical.
     kwargs = dict(
         toolbox=toolbox,
         ledger=ledger,
         formulate=episodes.formulate,
         decide=episodes.decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=max_episodes,
         completions=lambda: episodes.completions,
@@ -1228,6 +1268,402 @@ def test_match_fallback_is_ledgered_when_the_screen_is_empty(tmp_path):
     assert match.detail["fallback"]  # a non-empty reason string records why it fell back
 
 
+# ── 2c. the fallback panel is a lazily resolved source, not a frozen list (story #110) ───────
+def test_fallback_panel_resolves_at_each_match(tmp_path):
+    # The fallback panel is a zero-arg SOURCE resolved at each MATCH, not a list frozen at
+    # composition time: a symbol that becomes lake-ready mid-session (what a mandate preflight or
+    # a DISCOVER fetch will do) lands in a LATER MATCH's fallback panel instead of being frozen
+    # out. The screen already recomputed its pool per call; the fallback now does too.
+    ready = ["AAA", "BBB"]
+    episodes = Episodes(
+        [formulate_ok(), formulate_ok()], [decide_ok("reject"), decide_ok("reject")]
+    )
+
+    class LakeGrowsMidSession(FakeToolbox):
+        """DDD joins the lake between the two cycles (a mid-session ingest)."""
+
+        def tool_reject_strategy(self, **kwargs):
+            ready.append("DDD")
+            return super().tool_reject_strategy(**kwargs)
+
+    box = LakeGrowsMidSession()  # the default empty screen ⇒ every MATCH falls back
+    ledger = SessionLedger(tmp_path, "lz1")
+    _drive(
+        episodes,
+        box,
+        max_episodes=4,
+        ledger=ledger,
+        fallback_panel_source=lambda: list(ready),
+    )
+
+    fits = [s.detail["fit"] for s in ledger.stages() if s.stage == "match"]
+    assert fits == [["AAA", "BBB"], ["AAA", "BBB", "DDD"]]  # the second MATCH sees the newcomer
+    # ...and the tuning calls of each cycle followed the panel that MATCH resolved.
+    assert box.backtests[0]["symbols"] == ["AAA", "BBB"]
+    assert box.backtests[-1]["symbols"] == ["AAA", "BBB", "DDD"]
+
+
+def test_stale_precomputed_fit_panel_call_site_fails_loudly(tmp_path):
+    # The rename is the point (story #110): the old frozen-list parameter is GONE, so a call site
+    # that still hands over a precomputed panel raises instead of silently freezing a stale list
+    # into every MATCH of the session.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    with pytest.raises(TypeError):
+        run_episodic_research(
+            toolbox=FakeToolbox(),
+            ledger=SessionLedger(tmp_path, "lz2"),
+            formulate=episodes.formulate,
+            decide=episodes.decide,
+            fit_symbols=["AAA", "BBB", "CCC"],
+            budget_minutes=60.0,
+            max_episodes=2,
+            completions=lambda: episodes.completions,
+        )
+
+
+# ── 2d. the mandate-symbol data preflight at session start (story #111) ──────────────────────
+# The preflight is deterministic driver code (zero LLM): mandate-declared symbols that are not
+# lake-ready are fetched at session start through the SAME budget-gated ``ensure_data`` method the
+# conversation loop uses. The fakes below add the two surfaces it drives — a lake readiness check
+# and ``tool_ensure_data`` — to the shared FakeToolbox, and model the production consequence of a
+# landed fetch: the symbol becomes lake-ready, so the roster-wide screen and the fallback panel see
+# it. A toolbox WITHOUT those surfaces (the plain FakeToolbox above) must degrade to a no-op.
+
+# The session clock the window arithmetic is anchored to: 12:00 UTC = 07:00 ET the same day.
+_SESSION_NOW = datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
+# ...and the same session date reached from the overnight research window: 02:00 UTC on the 11th is
+# 22:00 ET on the 10th, so the UTC calendar has already rolled but the vendor's day has not.
+_SESSION_NOW_ET_ROLLOVER = datetime(2026, 3, 11, 2, 0, tzinfo=UTC)
+# The window both clocks must produce for a 30-day lookback: 30 days ending at the last full
+# vendor day (the T+1 boundary of the session date — the same arithmetic the run entrypoint's
+# auto-backfill uses over ``data.history_days``).
+_WINDOW = {"start": "2026-02-08", "end": "2026-03-09"}
+
+# What one symbol's ``ensure_data`` outcome looks like: a landed fetch, and a budget refusal in the
+# shape the data seam's own cost preflight returns.
+_INGESTED = {
+    "status": "ingested",
+    "fetch_calls": 1,
+    "rows_added": 500,
+    "cost_usd": 0.25,
+    "detail": "",
+}
+_REFUSED = {
+    "status": "refused",
+    "fetch_calls": 0,
+    "rows_added": 0,
+    "cost_usd": 0.0,
+    "detail": "estimated $9.00 would exceed the remaining budget",
+}
+
+
+class _ReadyLake:
+    """A lake fake exposing only ``check_symbol_ready`` — the readiness surface the preflight
+    feature-detects. Readiness is a mutable set: a landed fetch adds to it, exactly what the
+    coverage registry does in production."""
+
+    def __init__(self, ready=()):
+        self.ready = {s.upper() for s in ready}
+
+    def check_symbol_ready(self, symbol, dataset=None, schema=None):
+        return symbol.upper() in self.ready
+
+
+class MandateToolbox(FakeToolbox):
+    """FakeToolbox + the data surface the mandate preflight drives.
+
+    ``tool_ensure_data`` records every call and, by default, ingests each requested name into the
+    lake's ready set (what a successful fetch does in production). ``ensure_result`` scripts
+    another outcome (a budget refusal, the tool's own error result); ``ensure_raises`` makes the
+    call blow up the way a dead vendor key does.
+    """
+
+    def __init__(self, *, ready=(), ensure_result=None, ensure_raises=False, **kw):
+        super().__init__(**kw)
+        self.lake = _ReadyLake(ready)
+        self.ensure_calls: list[dict] = []
+        self._ensure_result = ensure_result
+        self._ensure_raises = ensure_raises
+
+    def tool_ensure_data(self, symbols, start, end):
+        self.ensure_calls.append({"symbols": list(symbols), "start": start, "end": end})
+        if self._ensure_raises:
+            raise RuntimeError("databento key rejected")
+        if self._ensure_result is not None:
+            return dict(self._ensure_result)
+        for sym in symbols:
+            self.lake.ready.add(str(sym).upper())
+        return {"results": {s: dict(_INGESTED) for s in symbols}}
+
+
+class ScreensTheReadyLake(MandateToolbox):
+    """A screen that ranks the lake-READY names, as the real roster-wide screen does — so whatever
+    the preflight fetched is visible to MATCH's fit/holdout split."""
+
+    def tool_screen_symbols(self, trend="any", volatility="any", liquidity="any", symbols=None):
+        self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
+        ready = sorted(self.lake.ready)
+        return {"suggested_fit": ready[:2], "reserved_holdout": ready[2:3]}
+
+
+def _drive_preflight(tmp_path, session, box, *, mandate_symbols, history_days=30, **over):
+    """Drive one full cycle (a reject verdict) with the mandate preflight wired; returns the
+    ledger so the preflight's own stage line can be read back."""
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    ledger = SessionLedger(tmp_path, session)
+    summary = _drive(
+        episodes,
+        box,
+        max_episodes=2,
+        ledger=ledger,
+        mandate_symbols=mandate_symbols,
+        history_days=history_days,
+        now=lambda: _SESSION_NOW,
+        **over,
+    )
+    return ledger, summary
+
+
+def _preflight_line(ledger):
+    return next(s for s in ledger.stages() if s.stage == "preflight")
+
+
+def test_preflight_fetches_only_the_unready_mandate_symbols_over_the_history_window(tmp_path):
+    # AAA is already lake-ready, so only the two unready declared names are fetched — in ONE
+    # ensure_data call over the history_days window (never one paid call per symbol).
+    box = MandateToolbox(ready=["AAA"])
+    _drive_preflight(tmp_path, "pf1", box, mandate_symbols=["AAA", "QQQ", "IWM"])
+
+    assert box.ensure_calls == [{"symbols": ["QQQ", "IWM"], **_WINDOW}]
+
+
+@pytest.mark.parametrize("session_now", [_SESSION_NOW, _SESSION_NOW_ET_ROLLOVER])
+def test_preflight_window_is_history_days_ending_at_the_session_date(tmp_path, session_now):
+    # The window is anchored to the session date and never crosses the vendor's T+1 boundary: an
+    # overnight session whose UTC date already rolled still asks for the last full vendor day.
+    box = MandateToolbox()
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    _drive(
+        episodes,
+        box,
+        max_episodes=2,
+        ledger=SessionLedger(tmp_path, f"pf2-{session_now:%d%H}"),
+        mandate_symbols=["QQQ"],
+        history_days=30,
+        now=lambda: session_now,
+    )
+
+    assert box.ensure_calls == [{"symbols": ["QQQ"], **_WINDOW}]
+
+
+def test_preflight_ledgers_the_per_symbol_outcome_and_emits_the_tool_line(tmp_path):
+    # The per-symbol outcome (status, rows, cost) lands under the dedicated preflight stage — so the
+    # CLOSE rollup can report data spend without parsing MATCH — beside the same observable
+    # ensure_data tool line the conversation loop emits, opened by a preflight stage boundary.
+    events: list = []
+    box = MandateToolbox(ready=["AAA"])
+    ledger, _ = _drive_preflight(
+        tmp_path, "pf3", box, mandate_symbols=["QQQ"], on_event=events.append
+    )
+
+    assert [s.stage for s in ledger.stages()] == [
+        "preflight",
+        "formulate",
+        "match",
+        "author",
+        "optimize",
+        "decide",
+    ]
+    pre = _preflight_line(ledger)
+    assert pre.detail["symbols"] == ["QQQ"]
+    assert pre.detail["window"] == {**_WINDOW, "history_days": 30}
+    assert pre.detail["results"]["QQQ"] == {
+        "status": "ingested",
+        "rows_added": 500,
+        "cost_usd": 0.25,
+        "detail": "",
+    }
+    assert pre.detail["fetched"] == ["QQQ"] and pre.detail["refused"] == []
+    assert pre.detail["cost_usd"] == 0.25  # the one comparable data-spend number
+
+    first = [(e.kind, e.meta.get("stage") or e.meta.get("tool")) for e in events][:2]
+    assert first == [("stage", "preflight"), ("tool", "ensure_data")]
+
+    # The new stage line perturbs nothing the rollup counts (it names no strategy).
+    rollup = ledger.rollup()
+    assert (rollup.theses, rollup.authored, rollup.validation_failures) == (1, 1, 0)
+
+
+def test_fetched_symbols_join_the_screen_fit_set_and_the_holdout_reservation(tmp_path):
+    # A fetched name joins the effective universe, so the roster-wide screen ranks it: it reaches
+    # the fit set AUTHOR/OPTIMIZE tune on and the code-owned symbol-holdout reservation.
+    box = ScreensTheReadyLake(ready=["AAA"], verdict_results=[{"ok": True, "promoted": True}])
+    episodes = Episodes([formulate_ok()], [decide_ok("approve")])
+    _drive(
+        episodes,
+        box,
+        max_episodes=2,
+        ledger=SessionLedger(tmp_path, "pf4"),
+        mandate_symbols=["IWM", "QQQ"],
+        history_days=30,
+        now=lambda: _SESSION_NOW,
+    )
+
+    # Ready after the preflight: AAA (seed) + IWM + QQQ ⇒ fit = AAA,IWM; reserved holdout = QQQ.
+    assert box.writes[0]["brief"]["symbols"] == ["AAA", "IWM"]
+    assert box.backtests[0]["symbols"] == ["AAA", "IWM"]
+    ev = box.evaluations[0]
+    assert ev["symbols"] == ["AAA", "IWM"]
+    assert ev["holdout_symbols"] == ["QQQ"]  # never tuned, submitted as the symbol holdout
+
+
+def test_fetched_symbols_join_the_lazily_resolved_fallback_panel(tmp_path):
+    # The #110 source resolves at MATCH over lake readiness, so a preflight fetch is in the panel a
+    # no-lake-match MATCH falls back to — the whole point of unfreezing it.
+    box = MandateToolbox(ready=["AAA"])  # the default empty screen ⇒ this MATCH falls back
+    ledger, _ = _drive_preflight(
+        tmp_path,
+        "pf5",
+        box,
+        mandate_symbols=["QQQ"],
+        fallback_panel_source=lambda: sorted(box.lake.ready),
+    )
+
+    match = next(s for s in ledger.stages() if s.stage == "match")
+    assert match.detail["fit"] == ["AAA", "QQQ"]
+    assert box.backtests[0]["symbols"] == ["AAA", "QQQ"]
+
+
+def test_budget_refusal_is_ledgered_and_the_session_continues(tmp_path):
+    # A refusal from the seam's cost preflight is data the driver ledgers and works around: the
+    # session runs its normal course on the lake it already has.
+    box = MandateToolbox(ensure_result={"results": {"QQQ": dict(_REFUSED)}})
+    ledger, summary = _drive_preflight(tmp_path, "pf6", box, mandate_symbols=["QQQ"])
+
+    pre = _preflight_line(ledger)
+    assert pre.detail["refused"] == ["QQQ"]
+    assert pre.detail["fetched"] == []
+    assert pre.detail["cost_usd"] == 0.0
+    assert "budget" in pre.detail["results"]["QQQ"]["detail"]
+    assert summary.rejections == 1  # the session still reached a verdict
+    assert [s.stage for s in ledger.stages()][1:] == [
+        "formulate",
+        "match",
+        "author",
+        "optimize",
+        "decide",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("over", "reason"),
+    [
+        ({"ensure_raises": True}, "databento key rejected"),
+        ({"ensure_result": {"error": "vendor unavailable"}}, "vendor unavailable"),
+    ],
+)
+def test_fetch_failure_is_ledgered_and_never_crashes_the_session(tmp_path, over, reason):
+    # A raising fetch and the tool's own error result degrade the same honest way: the reason is
+    # ledgered on the preflight line and the session continues with today's behavior.
+    box = MandateToolbox(**over)
+    ledger, summary = _drive_preflight(
+        tmp_path, f"pf7-{len(over)}{reason[:3]}", box, mandate_symbols=["QQQ"]
+    )
+
+    pre = _preflight_line(ledger)
+    assert reason in pre.detail["error"]
+    assert pre.detail["fetched"] == []
+    assert summary.rejections == 1
+
+
+def test_no_mandate_symbols_makes_no_ensure_data_call_and_an_unchanged_session(tmp_path):
+    # Byte-identical guard: the data surface EXISTS but nothing declares a symbol ⇒ zero ensure_data
+    # calls, no preflight stage line, the same stage flow as a session before the preflight existed.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = MandateToolbox(ready=["AAA"])
+    ledger = SessionLedger(tmp_path, "pf8")
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger, history_days=30)
+
+    assert box.ensure_calls == []
+    assert [s.stage for s in ledger.stages()] == [
+        "formulate",
+        "match",
+        "author",
+        "optimize",
+        "decide",
+    ]
+    assert summary.rejections == 1
+
+
+def test_all_declared_symbols_already_lake_ready_makes_no_ensure_data_call(tmp_path):
+    # The other byte-identical case: every declared name is already lake-ready (matched
+    # case-insensitively, as the mandate's own upper-casing implies) ⇒ nothing to fetch, no line.
+    box = MandateToolbox(ready=["QQQ", "IWM"])
+    ledger, summary = _drive_preflight(tmp_path, "pf9", box, mandate_symbols=["qqq", "IWM"])
+
+    assert box.ensure_calls == []
+    assert [s.stage for s in ledger.stages()][0] == "formulate"
+    assert summary.rejections == 1
+
+
+@pytest.mark.parametrize("box_factory", [FakeToolbox, lambda: _no_readiness_toolbox()])
+def test_a_lake_without_a_readiness_surface_degrades_to_a_no_op_preflight(tmp_path, box_factory):
+    # A toolbox with no lake at all, or a lake seam without a readiness surface, cannot tell what is
+    # unready — so the preflight spends nothing, ledgers nothing, and the session is unchanged.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = box_factory()
+    ledger = SessionLedger(tmp_path, f"pf10-{type(box).__name__}")
+    summary = _drive(
+        episodes,
+        box,
+        max_episodes=2,
+        ledger=ledger,
+        mandate_symbols=["QQQ"],
+        history_days=30,
+    )
+
+    assert not [s for s in ledger.stages() if s.stage == "preflight"]
+    assert [s.stage for s in ledger.stages()][0] == "formulate"
+    assert summary.rejections == 1
+
+
+def _no_readiness_toolbox():
+    box = FakeToolbox()
+    box.lake = object()  # a lake seam with no readiness/coverage surface at all
+    return box
+
+
+def test_preflight_fetches_through_the_real_toolbox_gated_path(tmp_path):
+    # Integration, zero LLM: driven against the REAL ResearchToolbox, the preflight's fetch reaches
+    # the lake seam's ``ensure_coverage`` — where the cost preflight against data.budget_usd lives —
+    # for the unready name only, over the window's calendar days.
+    from noctis.data.types import ns_to_date
+
+    toolbox = _make_toolbox(tmp_path)  # AAA..DDD are lake-ready; ZZZ is not
+    episodes = Episodes([], [])
+    ledger = SessionLedger(tmp_path, "pfr1")
+
+    # max_episodes=0 stops the loop at its first boundary, so this exercises the session-start
+    # preflight alone — no authoring, no episode.
+    _drive(
+        episodes,
+        toolbox,
+        max_episodes=0,
+        ledger=ledger,
+        mandate_symbols=["AAA", "ZZZ"],
+        history_days=30,
+        now=lambda: _SESSION_NOW,
+    )
+
+    assert len(toolbox.lake.ensure_calls) == 1
+    _dataset, _schema, symbols, start_ns, end_ns = toolbox.lake.ensure_calls[0]
+    assert symbols == ("ZZZ",)
+    assert ns_to_date(start_ns).isoformat() == _WINDOW["start"]
+    assert ns_to_date(end_ns).isoformat() == _WINDOW["end"]
+    # ...and the seam's own per-symbol status is what the ledger line carries.
+    assert _preflight_line(ledger).detail["results"]["ZZZ"]["status"] == "noop"
+
+
 # ── 2e. observability: stage boundaries + deterministic tool lines (story #73) ──────────────
 def test_stage_events_are_emitted_in_protocol_order(tmp_path):
     # The driver emits a `stage` boundary Event beside each ledger stage write, in protocol order,
@@ -1307,6 +1743,557 @@ def test_narration_is_silent_without_a_sink(tmp_path):
     box = FakeToolbox()
     summary = _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "nv5"))
     assert summary.rejections == 1  # the session still ran end to end
+
+
+# ── 2f. the DISCOVER episode replaces the no-lake-match silent fallback (story #112) ─────────
+# When the structural screen finds NO lake match, the driver spends one small judgment episode on
+# candidate tickers instead of silently researching the default panel. Everything after the episode
+# is deterministic: a pure ticker validator filters the proposal BEFORE any spend, the survivors are
+# fetched through the same budget-gated ``ensure_data`` path the mandate preflight uses, and exactly
+# ONE re-screen owns the fit/holdout split — so a discovered name enters research only through the
+# screen's own split (the code-owned symbol-holdout reservation stays a structural guarantee).
+# Every failure mode degrades to today's fallback panel with its own ledgered reason.
+
+
+# ── the deterministic pre-fetch ticker validator (a pure function, tested in isolation) ───────
+@pytest.mark.parametrize(
+    ("proposed", "expected"),
+    [
+        (["qqq", "iwm"], ["QQQ", "IWM"]),  # uppercased, proposal order preserved
+        ([" QQQ ", "qqq", "QQQ"], ["QQQ"]),  # deduped after normalization
+        (["BRK.B", "RDS-A", "F"], ["BRK.B", "RDS-A", "F"]),  # real share-class / one-letter shapes
+        # Hallucinated prose, empty strings, numbers, and over-long "tickers" are dropped outright.
+        (["a liquid ETF", "", "   ", "123", "TOOLONGTICKER", "$$$", "spy"], ["SPY"]),
+        # The emit contract admits at most 6 names; the validator enforces that bound in code.
+        (["a", "b", "c", "d", "e", "f", "g", "h"], ["A", "B", "C", "D", "E", "F"]),
+        ([], []),
+    ],
+)
+def test_valid_tickers_uppercases_dedupes_and_drops_malformed_names(proposed, expected):
+    assert valid_tickers(proposed) == expected
+
+
+def test_valid_tickers_drops_names_the_lake_already_researches():
+    # An already-lake-ready name is not a discovery: the screen ranked it and it did not match, so
+    # fetching it again would spend data budget for nothing.
+    ready = {"AAA", "QQQ"}
+    assert valid_tickers(["aaa", "qqq", "iwm"], lake_ready=lambda s: s in ready) == ["IWM"]
+    assert valid_tickers(["AAA"], lake_ready=lambda s: s in ready) == []
+
+
+# ── the emit contract: {"symbols", "rationale"}, missing/empty fields are schema misfires ─────
+def test_discover_contract_emits_symbols_and_a_rationale():
+    schema = DISCOVER_CONTRACT.schema
+    assert sorted(schema["required"]) == ["rationale", "symbols"]
+    assert schema["properties"]["symbols"]["type"] == "array"
+    assert schema["properties"]["symbols"]["maxItems"] == 6
+    out = DISCOVER_CONTRACT.parse({"symbols": ["QQQ", "IWM"], "rationale": "liquid proxies"})
+    assert out == DiscoverOutput(symbols=("QQQ", "IWM"), rationale="liquid proxies")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"rationale": "no tickers at all"},  # missing symbols
+        {"symbols": [], "rationale": "an empty list"},  # empty symbols
+        {"symbols": ["", "  "], "rationale": "blank tickers"},  # nothing usable in symbols
+        {"symbols": "QQQ", "rationale": "not a list"},  # wrong shape
+        {"symbols": ["QQQ"]},  # missing rationale
+        {"symbols": ["QQQ"], "rationale": "   "},  # empty rationale
+    ],
+)
+def test_discover_missing_or_empty_fields_raise_as_schema_misfires(payload):
+    # The parse — the ONE validation both episode transports meet at — raises, so the episode
+    # runner re-prompts it as a schema misfire exactly like any other invalid field.
+    with pytest.raises(ValueError):
+        DISCOVER_CONTRACT.parse(payload)
+
+
+# ── the discovery cycle, driven with fake episodes + a fake toolbox (zero LLM) ─────────────────
+class DiscoverToolbox(MandateToolbox):
+    """MandateToolbox whose screen matches only names that were FETCHED this session.
+
+    The seeded lake expresses nothing the thesis asks for (so MATCH finds no lake match, exactly the
+    condition DISCOVER exists for) and the post-fetch re-screen ranks the newcomers into its own
+    fit / reserved-holdout split — the production shape of a discovery cycle."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._seeded = set(self.lake.ready)
+
+    def tool_screen_symbols(self, trend="any", volatility="any", liquidity="any", symbols=None):
+        self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
+        fetched = sorted(self.lake.ready - self._seeded)
+        return {"suggested_fit": fetched[:2], "reserved_holdout": fetched[2:3]}
+
+
+def _drive_discover(tmp_path, session, box, *, discover_script, decide="reject", **over):
+    """Drive ONE full cycle whose MATCH finds no lake match, with a DISCOVER episode wired.
+
+    ``max_episodes`` defaults to exactly the completions this cycle spends (formulate + the scripted
+    discover attempts + decide), the suite's idiom for keeping a session to one cycle; a test whose
+    discover never runs passes its own. Returns the episode script, the ledger, and the summary."""
+    episodes = Episodes([formulate_ok()], [decide_ok(decide)], discover_script)
+    ledger = SessionLedger(tmp_path, session)
+    kwargs = {
+        "discover": episodes.discover,
+        "history_days": 30,
+        "now": lambda: _SESSION_NOW,
+        "max_episodes": 2 + len(discover_script),
+    }
+    kwargs.update(over)
+    summary = _drive(episodes, box, ledger=ledger, **kwargs)
+    return episodes, ledger, summary
+
+
+def _stage_line(ledger, stage):
+    return next(s for s in ledger.stages() if s.stage == stage)
+
+
+def test_no_lake_match_spends_a_discover_episode_on_the_failed_profile(tmp_path):
+    # The episode is asked about THIS thesis and the exact band profile the screen could not match,
+    # over the same session-anchored fetch window the mandate preflight uses.
+    box = DiscoverToolbox(ready=["AAA"])
+    episodes, ledger, _ = _drive_discover(
+        tmp_path, "dc1", box, discover_script=[discover_ok(("QQQ", "IWM", "SPY"))]
+    )
+
+    assert len(episodes.discover_calls) == 1  # one episode, no loop
+    call = episodes.discover_calls[0]
+    assert call["profile"] == {"trend": "high", "volatility": "any", "liquidity": "high"}
+    assert call["character"] == "liquid trending names"
+    assert call["window"] == {**_WINDOW, "history_days": 30}
+    assert call["corrective"] is None
+    assert [s.stage for s in ledger.stages()] == [
+        "formulate",
+        "match",
+        "discover",
+        "author",
+        "optimize",
+        "decide",
+    ]
+
+
+def test_discovered_names_are_fetched_then_re_screened_once_into_fit_and_holdout(tmp_path):
+    # The survivors are fetched through the SAME budget-gated ensure_data path the preflight uses,
+    # and exactly ONE re-screen follows — the screen, not the model, owns the fit/holdout split.
+    box = DiscoverToolbox(ready=["AAA"], verdict_results=[{"ok": True, "promoted": True}])
+    episodes, ledger, summary = _drive_discover(
+        tmp_path,
+        "dc2",
+        box,
+        discover_script=[discover_ok(("QQQ", "IWM", "SPY"))],
+        decide="approve",
+    )
+
+    assert box.ensure_calls == [{"symbols": ["QQQ", "IWM", "SPY"], **_WINDOW}]
+    assert len(box.screens) == 2  # the MATCH screen + exactly one re-screen, same profile
+    assert box.screens[0] == box.screens[1]
+
+    fit = ["IWM", "QQQ"]  # the re-screen's own split of the fetched names
+    reserved = ["SPY"]
+    match = _stage_line(ledger, "match")
+    assert match.detail["fit"] == fit and match.detail["reserved_holdout"] == reserved
+    assert match.detail["fallback"] is None  # a real screen matched — the fallback field is honest
+    assert box.writes[0]["brief"]["symbols"] == fit
+    for call in box.backtests + box.sweeps:
+        assert "SPY" not in call["symbols"]  # the reserved name never enters tuning
+    ev = box.evaluations[0]
+    assert ev["symbols"] == fit and ev["holdout_symbols"] == reserved
+    assert summary.promotions == 1
+
+
+def test_hallucinated_duplicate_and_lake_ready_proposals_never_reach_a_fetch(tmp_path):
+    # The deterministic validator runs BEFORE any spend: prose, duplicates, and names the lake
+    # already researches are dropped, and only the survivors are fetched.
+    box = DiscoverToolbox(ready=["AAA"])
+    proposed = ("qqq", "AAA", "a liquid ETF", "QQQ", "iwm")
+    episodes, ledger, _ = _drive_discover(
+        tmp_path, "dc3", box, discover_script=[discover_ok(proposed)]
+    )
+
+    assert box.ensure_calls == [{"symbols": ["QQQ", "IWM"], **_WINDOW}]
+    assert len(episodes.discover_calls) == 1  # a usable survivor ⇒ no re-ask
+
+
+def test_discover_ledger_line_carries_the_tickers_proposed_kept_and_fetched(tmp_path):
+    # The CLOSE rollup reads "discovered" vs "fell back" off this one line.
+    box = DiscoverToolbox(ready=["AAA"])
+    proposed = ("qqq", "AAA", "a liquid ETF", "iwm")
+    _, ledger, _ = _drive_discover(tmp_path, "dc4", box, discover_script=[discover_ok(proposed)])
+
+    line = _stage_line(ledger, "discover")
+    assert line.strategy == "intraday_momentum_1"
+    assert line.detail["proposed"] == list(proposed)  # what the model actually said
+    assert line.detail["kept"] == ["QQQ", "IWM"]  # what survived the validator
+    assert line.detail["fetched"] == ["QQQ", "IWM"]  # what the gated fetch landed
+    assert line.detail["window"] == {**_WINDOW, "history_days": 30}
+    assert line.detail["cost_usd"] == 0.5  # two ingests at $0.25 — the data spend of discovery
+    assert line.detail["fallback"] is None  # ...and that discovery actually supplied the panel
+    # The episode's tokens ride the stage's own rollup bucket, and the trail shows the stage.
+    assert ledger.rollup().tokens_by_stage["discover"] == 6
+    assert ledger.candidate_trails()[0].stages == (
+        "match",
+        "discover",
+        "author",
+        "optimize",
+        "decide",
+    )
+
+
+def test_misfired_discover_reasks_once_then_falls_back_with_discover_failed(tmp_path):
+    # The #71 corrective-re-ask pattern: one re-ask naming what went wrong, then the honest
+    # fallback — never a loop, and never a fetch on a proposal that never arrived.
+    box = DiscoverToolbox(ready=["AAA"])
+    episodes, ledger, summary = _drive_discover(
+        tmp_path, "dc5", box, discover_script=[discover_fail(), discover_fail()]
+    )
+
+    assert len(episodes.discover_calls) == 2  # one attempt-pair per thesis, no third ask
+    assert episodes.discover_calls[0]["corrective"] is None
+    assert "no JSON object" in episodes.discover_calls[1]["corrective"]
+    assert box.ensure_calls == []
+    assert _stage_line(ledger, "match").detail["fallback"] == "discover_failed"
+    assert _stage_line(ledger, "match").detail["fit"] == ["AAA", "BBB", "CCC"]  # today's panel
+    line = _stage_line(ledger, "discover")
+    assert line.detail == {
+        "proposed": [],
+        "kept": [],
+        "fetched": [],
+        "attempts": 2,
+        "fallback": "discover_failed",
+    }
+    assert [e.stage for e in ledger.episodes()] == [
+        "formulate",
+        "discover",
+        "discover",
+        "decide",
+    ]
+    assert summary.rejections == 1  # the session still reached a verdict on the fallback panel
+
+
+def test_all_invalid_tickers_earn_the_one_reask_then_recover(tmp_path):
+    # A proposal the validator empties is a failed attempt, not a fetch: the corrective names the
+    # rejected tickers and a usable second proposal proceeds normally.
+    box = DiscoverToolbox(ready=["AAA"])
+    episodes, ledger, _ = _drive_discover(
+        tmp_path,
+        "dc6",
+        box,
+        discover_script=[discover_ok(("a liquid ETF", "AAA")), discover_ok(("QQQ",))],
+    )
+
+    assert len(episodes.discover_calls) == 2
+    corrective = episodes.discover_calls[1]["corrective"]
+    assert "a liquid ETF" in corrective and "AAA" in corrective
+    assert box.ensure_calls == [{"symbols": ["QQQ"], **_WINDOW}]
+    assert _stage_line(ledger, "match").detail["fallback"] is None
+    line = _stage_line(ledger, "discover")
+    assert line.detail["proposed"] == ["a liquid ETF", "AAA", "QQQ"]  # both attempts, in order
+    assert line.detail["kept"] == ["QQQ"]
+    # The check that fired rides the episode line, exactly like a FORMULATE sanity check (#71).
+    checks = [e.checks for e in ledger.episodes() if e.stage == "discover"]
+    assert checks == [[{"check": "discover_tickers", "result": "reask"}], []]
+
+
+def test_a_second_all_invalid_proposal_falls_back_with_discover_failed(tmp_path):
+    box = DiscoverToolbox(ready=["AAA"])
+    episodes, ledger, _ = _drive_discover(
+        tmp_path,
+        "dc7",
+        box,
+        discover_script=[discover_ok(("nonsense one",)), discover_ok(("nonsense two",))],
+    )
+
+    assert len(episodes.discover_calls) == 2 and box.ensure_calls == []
+    assert _stage_line(ledger, "match").detail["fallback"] == "discover_failed"
+    checks = [e.checks for e in ledger.episodes() if e.stage == "discover"]
+    assert checks == [
+        [{"check": "discover_tickers", "result": "reask"}],
+        [{"check": "discover_tickers", "result": "exhausted"}],
+    ]
+
+
+def test_budget_refusal_is_a_ledgered_fall_through_not_an_episode_failure(tmp_path):
+    # The cost preflight refusing the fetch is not the episode's fault: no re-ask is spent, the
+    # refusal is ledgered, and MATCH falls through to today's panel under its own reason.
+    box = DiscoverToolbox(ready=["AAA"], ensure_result={"results": {"QQQ": dict(_REFUSED)}})
+    episodes, ledger, summary = _drive_discover(
+        tmp_path, "dc8", box, discover_script=[discover_ok(("QQQ",))]
+    )
+
+    assert len(episodes.discover_calls) == 1  # a refusal earns no corrective re-ask
+    assert len(box.screens) == 1  # nothing landed ⇒ no re-screen on an unchanged lake
+    assert _stage_line(ledger, "match").detail["fallback"] == "discover_refused"
+    line = _stage_line(ledger, "discover")
+    assert line.detail["kept"] == ["QQQ"] and line.detail["fetched"] == []
+    assert line.detail["refused"] == ["QQQ"]
+    assert "budget" in line.detail["results"]["QQQ"]["detail"]
+    assert summary.rejections == 1
+
+
+@pytest.mark.parametrize(
+    ("over", "reason"),
+    [
+        ({"ensure_raises": True}, "databento key rejected"),
+        ({"ensure_result": {"error": "vendor unavailable"}}, "vendor unavailable"),
+    ],
+)
+def test_a_failed_discover_fetch_falls_through_without_a_second_episode(tmp_path, over, reason):
+    box = DiscoverToolbox(ready=["AAA"], **over)
+    episodes, ledger, summary = _drive_discover(
+        tmp_path, f"dc9-{reason[:3]}", box, discover_script=[discover_ok(("QQQ",))]
+    )
+
+    assert len(episodes.discover_calls) == 1
+    assert _stage_line(ledger, "match").detail["fallback"] == "discover_fetch_failed"
+    line = _stage_line(ledger, "discover")
+    assert reason in line.detail["error"] and line.detail["fetched"] == []
+    assert summary.rejections == 1
+
+
+def test_a_fetch_whose_re_screen_still_matches_nothing_falls_back_with_its_own_reason(tmp_path):
+    # The honest end of a discovery that worked mechanically but not structurally: the names landed,
+    # the re-screen ran once, and still nothing expresses the profile.
+    box = MandateToolbox(ready=["AAA"])  # its screen matches nothing, before or after a fetch
+    episodes, ledger, summary = _drive_discover(
+        tmp_path, "dc10", box, discover_script=[discover_ok(("QQQ",))]
+    )
+
+    assert len(episodes.discover_calls) == 1
+    assert box.ensure_calls == [{"symbols": ["QQQ"], **_WINDOW}]
+    assert len(box.screens) == 2  # exactly one re-screen
+    match = _stage_line(ledger, "match")
+    assert match.detail["fallback"] == "no_lake_match_after_discover"
+    assert match.detail["fit"] == ["AAA", "BBB", "CCC"]  # today's fallback panel
+    line = _stage_line(ledger, "discover")
+    assert line.detail["fetched"] == ["QQQ"] and line.detail["fallback"] == (
+        "no_lake_match_after_discover"
+    )
+    assert summary.rejections == 1
+
+
+def test_a_discover_episode_counts_against_the_session_episode_budget(tmp_path):
+    # The discover episode spends the same completions counter formulate/decide spend, so a session
+    # whose budget it exhausts stops at the next stage boundary — it can never extend the session.
+    box = DiscoverToolbox(ready=["AAA"])
+    episodes, ledger, summary = _drive_discover(
+        tmp_path, "dc11", box, discover_script=[discover_ok(("QQQ",))], max_episodes=2
+    )
+
+    assert len(episodes.discover_calls) == 1  # formulate (1) + discover (2) = the whole budget
+    assert episodes.decide_calls == []  # DECIDE never started
+    assert summary.stopped_reason == "max_episodes"
+    assert summary.undecided == ["intraday_momentum_1"]  # authored, honestly left undecided
+
+
+def test_a_session_at_its_episode_bound_never_spends_a_discover_episode(tmp_path):
+    # The bound is checked BEFORE the episode: with the budget already spent by FORMULATE, MATCH
+    # falls back exactly as it did before discovery existed — no episode, no fetch, no stage line.
+    box = DiscoverToolbox(ready=["AAA"])
+    episodes, ledger, summary = _drive_discover(
+        tmp_path, "dc12", box, discover_script=[discover_ok(("QQQ",))], max_episodes=1
+    )
+
+    assert episodes.discover_calls == [] and box.ensure_calls == []
+    assert not [s for s in ledger.stages() if s.stage == "discover"]
+    assert _stage_line(ledger, "match").detail["fallback"] == "no_lake_match"
+    assert summary.stopped_reason == "max_episodes"
+
+
+def test_a_screen_error_never_spends_a_discover_episode(tmp_path):
+    # A broken screen is not a missing symbol: the fallback reason stays the screen's own error and
+    # no discovery is attempted.
+    class ScreenErrors(DiscoverToolbox):
+        def tool_screen_symbols(self, **kwargs):
+            raise RuntimeError("screener exploded")
+
+    box = ScreenErrors(ready=["AAA"])
+    episodes, ledger, _ = _drive_discover(
+        tmp_path, "dc13", box, discover_script=[discover_ok(("QQQ",))], max_episodes=2
+    )
+
+    assert episodes.discover_calls == [] and box.ensure_calls == []
+    assert "screen_error" in _stage_line(ledger, "match").detail["fallback"]
+
+
+def test_a_matching_screen_never_spends_a_discover_episode(tmp_path):
+    # The byte-identical guard: a session whose screen matches behaves exactly as before — no
+    # discover episode, no fetch, no discover line.
+    box = MandateToolbox(
+        ready=["AAA"], screen_result={"suggested_fit": ["A", "B"], "reserved_holdout": ["C"]}
+    )
+    episodes, ledger, summary = _drive_discover(
+        tmp_path, "dc14", box, discover_script=[discover_ok(("QQQ",))], max_episodes=2
+    )
+
+    assert episodes.discover_calls == [] and box.ensure_calls == []
+    assert [s.stage for s in ledger.stages()] == [
+        "formulate",
+        "match",
+        "author",
+        "optimize",
+        "decide",
+    ]
+    assert summary.rejections == 1
+
+
+def test_no_discover_episode_wired_keeps_the_pre_existing_silent_fallback(tmp_path):
+    # A caller that wires no discover episode (the pre-#112 contract) gets exactly the old
+    # behavior: the no_lake_match fallback, no data calls, no discover line.
+    box = DiscoverToolbox(ready=["AAA"])
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    ledger = SessionLedger(tmp_path, "dc15")
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger, history_days=30)
+
+    assert box.ensure_calls == []
+    assert _stage_line(ledger, "match").detail["fallback"] == "no_lake_match"
+    assert not [s for s in ledger.stages() if s.stage == "discover"]
+    assert summary.rejections == 1
+
+
+def test_without_a_history_window_no_discover_episode_is_spent(tmp_path):
+    # Nothing can be fetched over a zero-day window, so spending a judgment episode on candidate
+    # tickers would be waste: MATCH falls back exactly as before.
+    box = DiscoverToolbox(ready=["AAA"])
+    episodes, ledger, _ = _drive_discover(
+        tmp_path,
+        "dc16",
+        box,
+        discover_script=[discover_ok(("QQQ",))],
+        history_days=0,
+        max_episodes=2,
+    )
+
+    assert episodes.discover_calls == [] and box.ensure_calls == []
+    assert _stage_line(ledger, "match").detail["fallback"] == "no_lake_match"
+
+
+def test_the_discover_stage_narrates_its_boundary_and_its_data_call(tmp_path):
+    # The -v feed reads as one continuous arc: the DISCOVER boundary opens after MATCH's screen and
+    # its deterministic actions (the fetch, the re-screen) print as the same tool lines.
+    events: list = []
+    box = DiscoverToolbox(ready=["AAA"])
+    _drive_discover(
+        tmp_path,
+        "dc17",
+        box,
+        discover_script=[discover_ok(("QQQ", "IWM", "SPY"))],
+        on_event=events.append,
+    )
+
+    stages = [(e.meta["stage"], e.meta.get("strategy")) for e in events if e.kind == "stage"]
+    assert stages[:3] == [
+        ("formulate", None),
+        ("match", "intraday_momentum_1"),
+        ("discover", "intraday_momentum_1"),
+    ]
+    tools = [e.meta["tool"] for e in events if e.kind == "tool"]
+    assert tools[:3] == ["screen_symbols", "ensure_data", "screen_symbols"]
+
+
+def test_discover_fetches_and_re_screens_through_the_real_toolbox_gated_path(tmp_path):
+    # Integration, zero LLM: driven against the REAL ResearchToolbox and the REAL structural
+    # screen. The seeded fixture lake expresses nothing for "volatile illiquid mean-reverting small
+    # caps", the discovered name's history is fetched through the lake seam's own
+    # ``ensure_coverage`` (where the cost preflight against data.budget_usd lives), and the REAL
+    # re-screen — the only way a name enters research — ranks the newcomer into the fit set.
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    box.lake = _IngestingLake(box.lake.bars, {"ZZZ": _choppy_bars()})
+    box.screener.lake = box.lake
+    fo = formulate_ok(symbol_character="volatile illiquid mean-reverting small caps")
+    episodes = Episodes([fo], [decide_ok("reject")], [discover_ok(("zzz", "not a ticker"))])
+    ledger = SessionLedger(box.state_dir, "dcr1")
+
+    _drive(
+        episodes,
+        box,
+        max_episodes=3,  # formulate + discover + decide: exactly one cycle
+        ledger=ledger,
+        discover=episodes.discover,
+        history_days=30,
+        now=lambda: _SESSION_NOW,
+        sweep_trials=3,
+    )
+
+    from noctis.data.types import ns_to_date
+
+    assert len(box.lake.ensure_calls) == 1
+    _dataset, _schema, symbols, start_ns, end_ns = box.lake.ensure_calls[0]
+    assert symbols == ("ZZZ",)  # only the validator's survivor reached the vendor path
+    assert ns_to_date(start_ns).isoformat() == _WINDOW["start"]
+    assert ns_to_date(end_ns).isoformat() == _WINDOW["end"]
+    assert box.lake.check_symbol_ready("ZZZ")  # the fetch joined it to the effective universe
+
+    match = _stage_line(ledger, "match")
+    assert match.detail["fit"] == ["ZZZ"]  # the REAL re-screen matched only the discovered name
+    assert match.detail["fallback"] is None
+    assert _stage_line(ledger, "discover").detail["fetched"] == ["ZZZ"]
+
+
+def _choppy_bars(n: int = 320, seed: int = 9, volume: int = 100):
+    """A thin, choppy, volatile series — the character the fixture lake lacks, so the real screen
+    matches it (and only it) for a low-trend / high-volatility / low-liquidity profile."""
+    import numpy as np
+    import pandas as pd
+
+    from tests.test_research_tools import _NS_PER_MINUTE
+
+    rng = np.random.default_rng(seed)
+    close = 100.0 + rng.normal(0.0, 3.0, n) + 8.0 * np.sin(np.linspace(0, 30, n))
+    return pd.DataFrame(
+        {
+            "ts_event": [i * _NS_PER_MINUTE for i in range(n)],
+            "open": close,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": [volume] * n,
+        }
+    )
+
+
+class _IngestingLake:
+    """The fixture lake plus a vendor that really lands bars: ``ensure_coverage`` adds the requested
+    series (as a DataBento fetch does), and the coverage surface reports it, so the fetched name
+    joins the trading roster the screen pools from — the production consequence of a fetch."""
+
+    def __init__(self, bars, addable):
+        from tests.test_research_tools import FakeLake
+
+        self._inner = FakeLake(dict(bars))
+        self._addable = dict(addable)
+        self.ensure_calls = self._inner.ensure_calls
+        self.coverage = SimpleNamespace(
+            all=lambda: [
+                SimpleNamespace(symbol=s, status="idle", row_count=len(b))
+                for s, b in self._inner.bars.items()
+            ]
+        )
+
+    @property
+    def bars(self):
+        return self._inner.bars
+
+    def check_symbol_ready(self, symbol, dataset=None, schema=None):
+        return self._inner.check_symbol_ready(symbol, dataset, schema)
+
+    def get_bars(self, dataset, schema, symbols, start, end):
+        return self._inner.get_bars(dataset, schema, symbols, start, end)
+
+    def ensure_coverage(self, dataset, schema, symbols, start, end, dry_run=False):
+        from noctis.data.ingest import IngestResult
+
+        self.ensure_calls.append((dataset, schema, tuple(symbols), start, end))
+        out = {}
+        for sym in symbols:
+            landed = self._addable.pop(sym, None)
+            if landed is None:
+                out[sym] = IngestResult(sym, "noop", detail="nothing to add")
+                continue
+            self._inner.bars[sym] = landed
+            out[sym] = IngestResult(sym, "ingested", fetch_calls=1, rows_added=len(landed))
+        return out
 
 
 # ── 3. budgets: every episode ledgered before acting; three stop conditions ─────────────────
@@ -1526,6 +2513,60 @@ _REJECT_PAYLOAD = {
 }
 
 
+def test_production_discover_episode_emits_through_the_real_runner_and_briefing(tmp_path):
+    # The production wiring (#112), end to end with a real EpisodeRunner and the real briefing
+    # builder: the composition root's discover callable forces the emit tool, the briefing carries
+    # the profile that failed to match, and the typed proposal comes back parsed.
+    box = _make_toolbox(tmp_path)
+    ledger = SessionLedger(box.state_dir, session_id="ep-discover")
+    client = FakeEpisodeClient(
+        [_emit(DISCOVER_CONTRACT.name, {"symbols": ["QQQ", "IWM"], "rationale": "liquid proxies"})]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    _formulate, _decide, discover = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    result = discover(
+        formulate_ok().value,
+        profile={"trend": "low", "volatility": "high", "liquidity": "low"},
+        window={"start": "2026-02-08", "end": "2026-03-09", "history_days": 30},
+    )
+
+    assert result.outcome == OK
+    assert result.value == DiscoverOutput(symbols=("QQQ", "IWM"), rationale="liquid proxies")
+    briefing = client.calls[0][0]["content"]
+    assert '"volatility": "high"' in briefing  # the unmatched profile
+    assert "2026-03-09" in briefing  # the window a fetch would cover
+    assert "AAA" in briefing  # the lake inventory it must not re-propose
+
+
+def test_production_discover_episode_reprompts_a_missing_field_then_lands(tmp_path):
+    # A missing/empty emit field takes the existing schema-misfire path: the runner re-prompts with
+    # the classifier's corrective (plus the contract's hint) and the second attempt lands — no new
+    # machinery, one shared re-prompt contract for every episode kind.
+    box = _make_toolbox(tmp_path)
+    ledger = SessionLedger(box.state_dir, session_id="ep-discover-misfire")
+    client = FakeEpisodeClient(
+        [
+            _emit(DISCOVER_CONTRACT.name, {"symbols": [], "rationale": "nothing came to mind"}),
+            _emit(DISCOVER_CONTRACT.name, {"symbols": ["SPY"], "rationale": "the broad proxy"}),
+        ]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    _formulate, _decide, discover = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    result = discover(formulate_ok().value, profile=character_to_profile("liquid trending names"))
+
+    assert result.outcome == OK and result.misfires == 1
+    assert result.value.symbols == ("SPY",)
+    corrective = client.calls[1][-1]["content"]
+    assert "symbols" in corrective and '"rationale"' in corrective  # what to fix + a valid shape
+    assert runner.completions == 2  # both attempts count against the session's episode budget
+
+
 def test_decide_final_contract_is_binary_on_both_transports():
     # The final-ask contract (#99) drops `revise` from the emit vocabulary itself (the schema
     # enum), and its parse refuses a revise arriving via the JSON-in-text fallback — both
@@ -1561,7 +2602,7 @@ def test_end_to_end_revise_lock_resolves_through_the_final_binary_ask(tmp_path):
         ]
     )
     runner = EpisodeRunner(client=client, retries=2)
-    formulate, decide = make_episodes(
+    formulate, decide, _discover = make_episodes(
         runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
     )
 
@@ -1570,7 +2611,7 @@ def test_end_to_end_revise_lock_resolves_through_the_final_binary_ask(tmp_path):
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=4,
         completions=lambda: runner.completions,
@@ -1595,7 +2636,7 @@ def test_end_to_end_episodic_session_produces_a_gated_verdict_and_a_complete_led
         [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
     )
     runner = EpisodeRunner(client=client, retries=2)
-    formulate, decide = make_episodes(
+    formulate, decide, _discover = make_episodes(
         runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
     )
 
@@ -1604,7 +2645,7 @@ def test_end_to_end_episodic_session_produces_a_gated_verdict_and_a_complete_led
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,
@@ -1646,7 +2687,7 @@ def test_end_to_end_digit_leading_class_tag_reaches_the_gate_with_a_valid_name(t
         [_emit(_FORMULATE_TOOL, payload), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
     )
     runner = EpisodeRunner(client=client, retries=2)
-    formulate, decide = make_episodes(
+    formulate, decide, _discover = make_episodes(
         runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
     )
 
@@ -1655,7 +2696,7 @@ def test_end_to_end_digit_leading_class_tag_reaches_the_gate_with_a_valid_name(t
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,
@@ -1693,7 +2734,7 @@ def test_end_to_end_escalation_authors_via_the_paid_fallback_and_ledgers_it(tmp_
         [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
     )
     runner = EpisodeRunner(client=client, retries=2)
-    formulate, decide = make_episodes(
+    formulate, decide, _discover = make_episodes(
         runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
     )
 
@@ -1702,7 +2743,7 @@ def test_end_to_end_escalation_authors_via_the_paid_fallback_and_ledgers_it(tmp_
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,
@@ -1739,7 +2780,7 @@ def test_end_to_end_below_floor_verdict_is_refused_by_the_real_gate(tmp_path):
         ]
     )
     runner = EpisodeRunner(client=client, retries=2)
-    formulate, decide = make_episodes(
+    formulate, decide, _discover = make_episodes(
         runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
     )
 
@@ -1748,7 +2789,7 @@ def test_end_to_end_below_floor_verdict_is_refused_by_the_real_gate(tmp_path):
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=3,
         completions=lambda: runner.completions,
@@ -1776,7 +2817,7 @@ def test_end_to_end_authors_against_the_fixed_oracle_and_stamps_the_installed_fi
         [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
     )
     runner = EpisodeRunner(client=client, retries=2)
-    formulate, decide = make_episodes(
+    formulate, decide, _discover = make_episodes(
         runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
     )
 
@@ -1785,7 +2826,7 @@ def test_end_to_end_authors_against_the_fixed_oracle_and_stamps_the_installed_fi
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,
@@ -1812,7 +2853,7 @@ def test_end_to_end_warmup_too_large_ends_in_a_refined_brief(tmp_path):
     ledger = SessionLedger(box.state_dir, session_id="ep-refine-e2e")
     client = FakeEpisodeClient([_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD)])
     runner = EpisodeRunner(client=client, retries=2)
-    formulate, decide = make_episodes(
+    formulate, decide, _discover = make_episodes(
         runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
     )
 
@@ -1821,7 +2862,7 @@ def test_end_to_end_warmup_too_large_ends_in_a_refined_brief(tmp_path):
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=1,
         completions=lambda: runner.completions,
@@ -1853,7 +2894,7 @@ def test_verbose_episodic_session_narrates_the_full_arc(tmp_path):
         [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
     )
     runner = EpisodeRunner(client=client, retries=2, on_event=events.append)
-    formulate, decide = make_episodes(
+    formulate, decide, _discover = make_episodes(
         runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
     )
 
@@ -1862,7 +2903,7 @@ def test_verbose_episodic_session_narrates_the_full_arc(tmp_path):
         ledger=ledger,
         formulate=formulate,
         decide=decide,
-        fit_symbols=["AAA", "BBB", "CCC"],
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
         budget_minutes=60.0,
         max_episodes=2,
         completions=lambda: runner.completions,

@@ -859,6 +859,176 @@ def test_conversation_loop_kwargs_unchanged_under_auto(tmp_path, monkeypatch):
     assert seen["max_iterations"] == 5
 
 
+# ── the episodic MATCH fallback panel: a lazy source built here (story #110) ──────────────────
+class _PanelLake:
+    """A lake fake for the fallback-panel source: readiness is a mutable set (so a mid-session
+    ingest can be simulated) and the coverage registry reports one discovered symbol, which the
+    trading roster appends after the config seed."""
+
+    def __init__(self, ready, discovered=()):
+        self.ready = set(ready)
+        self.coverage = SimpleNamespace(
+            all=lambda: [
+                SimpleNamespace(symbol=s, status="idle", row_count=100) for s in discovered
+            ]
+        )
+
+    def check_symbol_ready(self, symbol) -> bool:
+        return symbol in self.ready
+
+
+def _episodic_session(tmp_path, monkeypatch, lake, *, mandate=None, history_days=None):
+    monkeypatch.setattr(
+        research_mod,
+        "build_llm_client",
+        lambda settings: SimpleNamespace(model="fake/model", capabilities=Capabilities()),
+    )
+    data = [] if history_days is None else ["data:", f"  history_days: {history_days}"]
+    settings = load_settings(
+        config_path=_config(
+            tmp_path,
+            [
+                f"state_dir: {tmp_path}/state/",
+                f"strategies_dir: {tmp_path}/strategies/",
+                "universe: [AAA, BBB, CCC]",
+                *data,
+                "research:",
+                "  fit_set_size: 2",
+                "  agent:",
+                "    loop: episodic",
+            ],
+            "panel.yaml",
+        )
+    )
+    return build_research_session(
+        settings=settings,
+        lake=lake,
+        registry=object(),
+        families=FamilyRegistry(),
+        memory=object(),
+        mandate=mandate,
+    )
+
+
+def test_composition_root_builds_the_fallback_panel_source_over_roster_and_readiness(
+    tmp_path, monkeypatch
+):
+    """The composition root hands the episodic session a zero-arg SOURCE, not a precomputed list —
+    and it resolves to exactly the panel the precomputed list held: the ready trading-roster names
+    (config seed, then lake discoveries) capped at ``research.fit_set_size``."""
+    from noctis.research import driver as driver_mod
+
+    lake = _PanelLake(ready={"CCC", "ZZZ"}, discovered=["ZZZ"])
+    session = _episodic_session(tmp_path, monkeypatch, lake)
+    seen: dict = {}
+    monkeypatch.setattr(
+        driver_mod, "run_episodic_research", lambda **k: seen.update(k) or ResearchSummary()
+    )
+
+    session.run(max_iterations=1)
+
+    source = seen["fallback_panel_source"]
+    # AAA/BBB are seeded but not ready; CCC is; ZZZ joined via the coverage registry — capped at 2.
+    assert source() == ["CCC", "ZZZ"]
+
+    # A symbol that becomes lake-ready mid-session is visible to the NEXT call — the whole point of
+    # the source: the panel is no longer frozen at assembly time.
+    lake.ready.add("AAA")
+    assert source() == ["AAA", "CCC"]
+
+
+def test_composition_root_passes_no_precomputed_fit_panel(tmp_path, monkeypatch):
+    """The frozen-list parameter is gone from the session entry, so the composition root must not
+    hand one over — a stale panel can never be smuggled past the rename."""
+    from noctis.research import driver as driver_mod
+
+    session = _episodic_session(tmp_path, monkeypatch, _PanelLake(ready={"AAA"}))
+    seen: dict = {}
+    monkeypatch.setattr(
+        driver_mod, "run_episodic_research", lambda **k: seen.update(k) or ResearchSummary()
+    )
+
+    session.run(max_iterations=1)
+
+    assert "fit_symbols" not in seen
+    assert callable(seen["fallback_panel_source"])
+
+
+# ── the mandate-symbol data preflight is threaded from here (story #111) ──────────────────────
+def _episodic_kwargs(tmp_path, monkeypatch, *, mandate=None, history_days=None) -> dict:
+    """Run one episodic session with the driver entry stubbed; returns the kwargs it was handed."""
+    from noctis.research import driver as driver_mod
+
+    session = _episodic_session(
+        tmp_path,
+        monkeypatch,
+        _PanelLake(ready={"AAA"}),
+        mandate=mandate,
+        history_days=history_days,
+    )
+    seen: dict = {}
+    monkeypatch.setattr(
+        driver_mod, "run_episodic_research", lambda **k: seen.update(k) or ResearchSummary()
+    )
+    session.run(max_iterations=1)
+    return seen
+
+
+def _mandate(symbols):
+    """A resolved mandate declaring ``symbols`` — the only field the preflight threading reads."""
+    from noctis.research.mandate import Mandate
+
+    return Mandate(
+        text="hunt liquid momentum",
+        source="cli",
+        summary="momentum",
+        references=[],
+        config_overrides={},
+        symbols=list(symbols),
+    )
+
+
+def test_composition_root_threads_the_mandate_symbols_and_history_window(tmp_path, monkeypatch):
+    """The driver imports no settings, so the two preflight inputs arrive as parameters: the
+    resolved mandate's declared symbols and ``data.history_days`` (an existing knob, unchanged)."""
+    seen = _episodic_kwargs(
+        tmp_path, monkeypatch, mandate=_mandate(["QQQ", "IWM"]), history_days=90
+    )
+
+    assert list(seen["mandate_symbols"]) == ["QQQ", "IWM"]
+    assert seen["history_days"] == 90
+
+
+def test_composition_root_declares_no_preflight_symbols_without_a_mandate(tmp_path, monkeypatch):
+    """No mandate ⇒ no declared symbols, so the preflight is a no-op and the session unchanged."""
+    seen = _episodic_kwargs(tmp_path, monkeypatch, history_days=90)
+
+    assert list(seen["mandate_symbols"]) == []
+    assert seen["history_days"] == 90
+
+
+def test_composition_root_threads_the_default_history_window(tmp_path, monkeypatch):
+    """An operator who never touched ``data.history_days`` still gets its shipped default."""
+    from noctis.config.settings import DataConfig
+
+    seen = _episodic_kwargs(tmp_path, monkeypatch, mandate=_mandate(["QQQ"]))
+
+    assert seen["history_days"] == DataConfig().history_days
+
+
+# ── the DISCOVER episode is assembled here too (story #112) ───────────────────────────────────
+def test_composition_root_wires_the_discover_episode(tmp_path, monkeypatch):
+    """Every episodic session gets the third judgment episode wired, so a no-lake-match MATCH can
+    spend one on candidate tickers instead of silently falling back to the default panel. It rides
+    the same runner (one completions counter, one episode budget) as formulate/decide."""
+    seen = _episodic_kwargs(tmp_path, monkeypatch, mandate=_mandate(["QQQ"]), history_days=90)
+
+    assert callable(seen["discover"])
+    assert callable(seen["formulate"]) and callable(seen["decide"])
+    # The discover fetch covers the same window the mandate preflight fetches over.
+    assert seen["history_days"] == 90
+
+
 # ── memory_distill_every defaults ON in episodic mode; conversation stays bit-identical ──────
 def test_effective_memory_distill_every_defaults_on_only_for_episodic(tmp_path):
     # Episodic + operator left it at 0 ⇒ defaults on (a modest cadence).

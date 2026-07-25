@@ -1,10 +1,11 @@
 """Shared state/digest builders — the facts both research loops render, in one place.
 
 The conversation loop (:mod:`noctis.research.prompt`) and the episodic research driver that
-lands later (epic #62) both have to show the model the same four state facts before it acts:
+lands later (epic #62) both have to show the model the same state facts before it acts:
 the MARKET REALITY economics digest, the strategy library index (rejected entries collapsed
-to stubs), the champion board rows, and the advisory memory block (findings + known dead
-ends). Rendering them in one shared module means the two loops present the *same facts by
+to stubs), the champion board rows, the advisory memory block (findings + known dead
+ends), and the lake inventory a symbol-discovery step must not re-propose. Rendering them in one
+shared module means the two loops present the *same facts by
 construction* — the frozen conversation baseline cannot silently drift from the episodic path.
 
 Each builder takes explicit collaborators (toolbox / registry / memory / library paths) and
@@ -59,6 +60,43 @@ def library_index(strategies_dir: Any) -> list[dict]:
         else {"name": entry["name"], "status": entry["status"]}
         for entry in library.list_strategies(strategies_dir)
     ]
+
+
+# How many tracked tickers the lake inventory names before it stops (alphabetical). Bounded by
+# construction so a deep lake cannot quietly inflate a small-context briefing; the inventory is
+# advisory in either case — the pre-fetch validator, not this list, decides what may be fetched.
+_INVENTORY_CAP = 60
+
+
+def lake_inventory(toolbox: Any, *, limit: int = _INVENTORY_CAP) -> list[str]:
+    """The tickers this lake can already research — the names a discovery step must NOT re-propose
+    (story #112).
+
+    The candidates are the configured universe plus every coverage-tracked symbol (the same
+    ``list_symbols`` surface both loops read), filtered by the lake's OWN ``check_symbol_ready`` —
+    the identical predicate the pre-fetch ticker validator drops names with, so what the model is
+    told the lake holds and what the validator refuses to fetch cannot drift. Sorted and capped at
+    ``limit``, so the block is deterministic and bounded. A lake that cannot list its coverage (a
+    bare in-memory fake) yields an empty inventory rather than killing the briefing — the honest
+    degradation is "I cannot tell you what I hold", never a fabricated list.
+    """
+    try:
+        listed = toolbox.tool_list_symbols()
+    except Exception as exc:  # noqa: BLE001 — a lake hiccup must not kill a briefing
+        logger.warning("lake inventory unavailable (%s); showing none", exc)
+        return []
+    if not isinstance(listed, dict):
+        return []
+    tracked = [row.get("symbol") for row in (listed.get("tracked") or []) if isinstance(row, dict)]
+    names = {
+        str(s).strip().upper()
+        for s in [*(listed.get("universe") or []), *tracked]
+        if s and str(s).strip()
+    }
+    ready = getattr(getattr(toolbox, "lake", None), "check_symbol_ready", None)
+    if callable(ready):
+        names = {n for n in names if ready(n)}
+    return sorted(names)[:limit]
 
 
 def champion_digest(registry: Any) -> list[dict]:

@@ -3,15 +3,27 @@ protocol and invokes the model only at narrow judgment points (epic #62, story #
 
 Where the conversation loop (:func:`noctis.research.agent.run_agent_research`) hands the whole
 protocol to one long tool-use transcript, this driver *owns* the protocol in Python and drives
-FORMULATE → MATCH → AUTHOR → OPTIMIZE → DECIDE per strategy, calling the model only for the two
-judgment episodes (formulate, decide) and executing everything else through the same gated
-:class:`~noctis.research.tools.ResearchToolbox` methods the conversation loop uses. It imports no
-LLM client or provider SDK: the :class:`~noctis.research.episode.EpisodeRunner` that holds the
-client is injected *behind* the formulate/decide callables, so the whole stage machine is testable
-end to end with plain fakes and zero LLM involvement.
+FORMULATE → MATCH (→ DISCOVER) → AUTHOR → OPTIMIZE → DECIDE per strategy, calling the model only for
+the judgment episodes (formulate, decide, and the no-lake-match discover) and executing everything
+else through the same gated :class:`~noctis.research.tools.ResearchToolbox` methods the conversation
+loop uses. It imports no LLM client or provider SDK: the
+:class:`~noctis.research.episode.EpisodeRunner` that holds the client is injected *behind* those
+callables, so the whole stage machine is testable end to end with plain fakes and zero LLM
+involvement.
 
 **The stages (minimal where follow-ups deepen them).**
 
+* **PREFLIGHT** — *once per session, before the first thesis*: the operator's mandate-declared
+  symbols that the lake cannot research yet are fetched through the gated, budget-aware
+  ``toolbox.tool_ensure_data`` over the ``data.history_days`` window ending at the session date
+  (:func:`_preflight_stage`, #111) — deterministic code, zero LLM, ONE call for all of them. Fetched
+  names join the effective universe through the lake's coverage registry, so the first screen, fit
+  set, symbol-holdout reservation, and (via the #110 source) fallback panel already see them. The
+  spend rides the data seam's own cost preflight against ``data.budget_usd``: a refusal, a
+  per-symbol vendor error, or a fetch that raises is ledgered under the stage's own
+  :data:`PREFLIGHT` label and the session continues on the lake it already has. Nothing declared,
+  everything already lake-ready, or a lake with no readiness surface ⇒ a strict no-op: no call, no
+  tool line, no stage line.
 * **FORMULATE** — one episode proposes a falsifiable thesis (a :class:`FormulateOutput`). Its
   thesis is recorded to the session ledger (so the next formulate's briefing tail already knows
   what this session tried) before any authoring.
@@ -22,9 +34,30 @@ end to end with plain fakes and zero LLM involvement.
   AUTHOR/OPTIMIZE tune on; its ``reserved_holdout`` is held out *by code* — those names never
   enter a write/backtest/sweep and are submitted at DECIDE time as the symbol-holdout nominees.
   What was a soft prompt rule in the conversation loop ("keep reserved_holdout out of tuning") is
-  now a structural guarantee. An empty screen (no lake match) falls back to the composition-root
-  panel exactly as the pre-#69 passthrough did, ledgered as a fallback; the discover-episode that
-  would replace that fallback is out of this epic's scope for now.
+  now a structural guarantee. An empty screen (no lake match) falls back to a panel the
+  composition-root ``fallback_panel_source`` resolves — the ready trading-roster names capped at
+  ``research.fit_set_size`` — ledgered as a fallback. That panel is resolved **lazily, at each
+  MATCH that needs it** (#110), never frozen at session assembly: a symbol that joins the lake
+  mid-session is in the next MATCH's fallback panel, and a session whose screens all match pays no
+  readiness I/O for it.
+* **DISCOVER** — *only on a ``no_lake_match`` MATCH*: one small judgment episode replaces that
+  silent fallback (#112). The model is asked which real tickers express the character the lake
+  lacks (a :class:`DiscoverOutput`: 1-6 symbols + a rationale); everything after the answer is
+  deterministic. :func:`valid_tickers` — pure, total, uppercase/ticker-shape/dedupe/cap, dropping
+  every name the lake already researches — filters the proposal *before any spend*, the survivors
+  are fetched in ONE gated ``ensure_data`` call over the same ``history_days`` window the preflight
+  uses, and **exactly one re-screen** (the same roster-wide screen MATCH makes) owns the resulting
+  fit/reserved split. So a discovered name enters research only through the screen's own split —
+  the code-owned symbol-holdout reservation stays a structural guarantee, and nothing here touches
+  a promotion gate or the no-lookahead rule. Every ending is honest and ledgered under the stage's
+  own :data:`DISCOVER` label with the tickers proposed / kept / fetched: a re-screen that matches
+  supplies the panel (``fallback`` back to ``None``), while a spent attempt-pair
+  (``discover_failed``), a refused or failed fetch (``discover_refused`` /
+  ``discover_fetch_failed``), and a fetch the re-screen still cannot match
+  (``no_lake_match_after_discover``) each fall back to today's panel under their own reason. No
+  ``web_search`` in v1. The episode spends the same ``completions`` counter formulate/decide spend,
+  and is not even started when the session is out of budget — discovery can never extend a session
+  past ``max_episodes``.
 * **AUTHOR** — the formulate output is mapped onto a :class:`~noctis.research.author.StrategyBrief`
   and committed through ``toolbox.tool_write_strategy(brief=…)``; the coder author engine,
   fresh-subprocess validation, and thesis journaling all live behind that one gated method. (Brief
@@ -52,10 +85,10 @@ end to end with plain fakes and zero LLM involvement.
   empty and the toolbox's own out-of-fit fallback picks the symbol holdout, exactly as before.
 
 **Driver-side sanity checks on episode outputs (story #71).** A small model can emit
-schema-valid nonsense that would burn an authoring call or a verdict attempt; three cheap,
-advisory-corrective checks catch it first. They are a *first line*, not a new gate — the promotion
-gates still arbitrate quality; a failing check only earns one corrective re-ask (a message naming
-exactly what was wrong) before the stage's own failed-episode policy applies:
+schema-valid nonsense that would burn an authoring call, a paid fetch, or a verdict attempt; four
+cheap, advisory-corrective checks catch it first. They are a *first line*, not a new gate — the
+promotion gates still arbitrate quality; a failing check only earns one corrective re-ask (a message
+naming exactly what was wrong) before the stage's own failed-episode policy applies:
 
 * **FORMULATE — cost arithmetic must cite the digest.** At least one number in the formulate
   output's ``cost_arithmetic`` must appear in the MARKET ECONOMICS digest the episode was shown
@@ -65,6 +98,10 @@ exactly what was wrong) before the stage's own failed-episode policy applies:
   exhausted-class registry (:func:`_check_class_tag`, mirroring the write-gate guard). FORMULATE
   carries no ``new_lever`` escape, so an exhausted tag simply fails — the honest move is a
   genuinely different class.
+* **DISCOVER — the proposed tickers must survive the validator.** A proposal
+  :func:`valid_tickers` empties (prose instead of symbols, duplicates, names the lake already
+  holds) fires ``discover_tickers`` and earns the one corrective re-ask naming exactly which names
+  were rejected — *before* any data budget is spent. A second empty proposal is a failed discover.
 * **DECIDE — ``revise`` is capped.** A ``revise`` verdict earns the one corrective re-ask (naming
   the cap); a second ``revise`` for the same strategy exhausts it and forces the **final binary
   ask** (#99): one more episode whose emit contract offers only ``approve``/``reject`` — the
@@ -83,6 +120,13 @@ so which check fired and how its re-ask resolved is visible to reports.
   busy-loop against the episode budget rather than do useful work. A FORMULATE sanity check that
   fails, then fails again on its single re-ask, ends the session the same way — the model was shown
   what was wrong and did not fix it.
+* **DISCOVER failure falls back, never ends anything** (#112): the stage exists to *improve* on an
+  honest fallback that already works, so every failure degrades to it with a distinct ledgered
+  reason and the cycle continues on the fallback panel. A misfired episode or an all-invalid
+  proposal earns the one corrective re-ask, then ``discover_failed``; a fetch the data-budget
+  preflight refuses or that errors is *not* an episode failure at all (no re-ask is spent — the
+  model did its job) but a ledgered fall-through; and a fetch whose single re-screen still matches
+  nothing ends in ``no_lake_match_after_discover``. One attempt-pair per thesis, never a loop.
 * **AUTHOR failure skips the strategy**: a write-gate rejection is a code bug in one draft, not a
   verdict on the thesis, so the driver drops it and formulates the next idea. (The refused draft
   was never added to the undecided set, so nothing lingers.)
@@ -102,7 +146,8 @@ so which check fired and how its re-ask resolved is visible to reports.
 
 **Budgets.** ``max_episodes`` (mapped from ``max_iterations``) is enforced off the injected
 ``completions`` counter — the episode runner's own per-completion tally, retries included — checked
-at every stage boundary; ``budget_minutes`` wall-clock is checked at the same boundaries; a
+at every stage boundary and before a DISCOVER episode is started, so *every* judgment episode is
+budgeted off one counter; ``budget_minutes`` wall-clock is checked at the same points; a
 ``stop_event`` (market open / time limit) is honored between stages. No work is interrupted
 mid-stage, so the journal, registry, and ledger are always left consistent. One further check sits
 at the FORMULATE boundary only (#94): the **author-call budget preflight**. A new FORMULATE leads to
@@ -124,15 +169,17 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from noctis.data.types import ns_to_date, t1_boundary_ns
 from noctis.engine.research import ResearchSummary, StopEvent
 from noctis.observability.events import Event, stage_event, tool_event
 from noctis.research import digests
-from noctis.research.briefings import decide_briefing, formulate_briefing
+from noctis.research.briefings import decide_briefing, discover_briefing, formulate_briefing
 from noctis.research.episode import EmitContract, EpisodeResult
 from noctis.strategies import library
 from noctis.strategies.scenario_spec import (
@@ -155,8 +202,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger("noctis.research.driver")
 
 # Stage labels — the ``stage`` string ledgered at each transition and read back by reports.
+# PREFLIGHT is the once-per-session, strategy-less data stage (#111): it carries its OWN label so a
+# CLOSE rollup reads the session's data spend off one line instead of parsing MATCH detail.
+PREFLIGHT = "preflight"
 FORMULATE = "formulate"
 MATCH = "match"
+# DISCOVER (#112) is the no-lake-match episode that replaces MATCH's silent fallback. Its own label
+# keeps the discovery attempt — tickers proposed / kept / fetched, and its data spend — one line a
+# CLOSE rollup reads directly, instead of a second meaning stuffed into MATCH's detail.
+DISCOVER = "discover"
 AUTHOR = "author"
 OPTIMIZE = "optimize"
 DECIDE = "decide"
@@ -299,6 +353,51 @@ def character_to_profile(symbol_character: str) -> dict[str, str]:
     return {dim: _band_for(text, low, high) for dim, (low, high) in _CHARACTER_LEXICON.items()}
 
 
+# ── the deterministic pre-fetch ticker validator (story #112) ────────────────────────────────
+# The DISCOVER episode proposes *names*; this is the only thing that decides which of them may
+# reach a paid fetch. It is deliberately a pure, total function — no lake I/O of its own beyond the
+# injected readiness predicate — so a hallucinated, malformed, duplicated, or already-held name can
+# never spend data budget, and the rule is testable in isolation.
+#
+# The contract's ceiling on one proposal: the emit schema advertises 1-6 names and the validator
+# enforces the same bound in code, so a backend ignoring ``maxItems`` still cannot widen a fetch.
+_MAX_DISCOVER_TICKERS = 6
+
+# A plausible US-listed ticker, after upper-casing: 1-5 letters plus an optional share-class suffix
+# (BRK.B, RDS-A). Deliberately narrow — prose ("a liquid ETF"), numbers, and over-long strings are
+# the shapes a small model actually hallucinates, and each one is a wasted vendor call.
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}(?:[.\-][A-Z]{1,2})?$")
+
+
+def valid_tickers(
+    proposed: Sequence[str], *, lake_ready: Callable[[str], bool] | None = None
+) -> list[str]:
+    """The survivors of one DISCOVER proposal: upper-cased, ticker-shaped, deduped, capped at
+    :data:`_MAX_DISCOVER_TICKERS`, and with every name this lake can already research dropped.
+
+    Pure and total: for any input (prose, empties, duplicates, junk) it returns a list — never
+    raises — and the same proposal always yields the same names in proposal order. An empty result
+    means the proposal was unusable, which the driver treats as a failed discover attempt (one
+    corrective re-ask, then the honest fallback) rather than fetching anything.
+
+    ``lake_ready`` is the readiness predicate the caller injects (the lake's own
+    ``check_symbol_ready`` in production, ``None`` when readiness cannot be asked): a name the lake
+    already holds is not a discovery — the screen already ranked it and it did not match — so
+    re-fetching it would spend data budget for nothing.
+    """
+    out: list[str] = []
+    for raw in proposed:
+        ticker = str(raw or "").strip().upper()
+        if not _TICKER_RE.match(ticker) or ticker in out:
+            continue
+        if lake_ready is not None and lake_ready(ticker):
+            continue
+        out.append(ticker)
+        if len(out) == _MAX_DISCOVER_TICKERS:
+            break
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Parsed episode outputs (typed, frozen) + their emit contracts
 # ─────────────────────────────────────────────────────────────────────────────
@@ -328,6 +427,19 @@ class FormulateOutput:
     param_space_sketch: str
     parent_thesis: str | None = None
     pivot_rationale: str | None = None
+
+
+@dataclass(frozen=True)
+class DiscoverOutput:
+    """The typed record a DISCOVER episode emits (#112): the candidate tickers the model believes
+    express the band profile the lake could not match, and why.
+
+    The tickers are a *proposal*, never a fit set: :func:`valid_tickers` filters them
+    deterministically before a dollar of data budget is spent, and the post-fetch re-screen — not
+    this record — decides which survivors are researched and which are held out."""
+
+    symbols: tuple[str, ...]
+    rationale: str
 
 
 @dataclass(frozen=True)
@@ -468,6 +580,26 @@ def parse_formulate(payload: dict[str, Any]) -> FormulateOutput:
     )
 
 
+def parse_discover(payload: dict[str, Any]) -> DiscoverOutput:
+    """The single typed parse both episode transports meet at for DISCOVER (#112).
+
+    A missing/empty ``symbols`` list, a ``symbols`` value that is not a list, or a missing/empty
+    ``rationale`` raises, so the episode runner re-prompts it as a schema misfire exactly like any
+    other invalid field. Nothing is filtered here: shape, duplicates, and already-lake-ready names
+    are the deterministic pre-fetch validator's job (:func:`valid_tickers`), which runs on the
+    parsed proposal — the parse only refuses a payload the contract does not admit."""
+    raw = _require(payload, "symbols")
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"symbols must be a list of 1-{_MAX_DISCOVER_TICKERS} ticker strings, not "
+            f"{type(raw).__name__}"
+        )
+    symbols = tuple(str(s).strip() for s in raw if str(s).strip())
+    if not symbols:
+        raise ValueError("symbols must name at least one candidate ticker")
+    return DiscoverOutput(symbols=symbols, rationale=str(_require(payload, "rationale")))
+
+
 def parse_decide(payload: dict[str, Any]) -> DecideOutput:
     """The single typed parse both episode transports meet at for DECIDE."""
     verdict = str(_require(payload, "verdict")).strip().lower()
@@ -601,6 +733,30 @@ _DECIDE_SCHEMA: dict[str, Any] = {
     "required": ["verdict", "reason", "class_exhausted", "class_tag", "holdout_symbols"],
 }
 
+# The DISCOVER emit contract (#112) — deliberately the smallest schema of the three: a handful of
+# candidate tickers plus one line of reasoning, so a small-context local model can answer inside its
+# window. The 1-6 bound is advertised here AND enforced in code (:func:`valid_tickers`).
+_DISCOVER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "symbols": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": _MAX_DISCOVER_TICKERS,
+            "description": (
+                f"1-{_MAX_DISCOVER_TICKERS} REAL, currently-listed US tickers (or liquid ETFs) "
+                "whose character expresses the requested profile. Symbols only, no prose."
+            ),
+        },
+        "rationale": {
+            "type": "string",
+            "description": "One line: why these names express the requested character.",
+        },
+    },
+    "required": ["symbols", "rationale"],
+}
+
 # The emit-failure hint's example spec (#91). Session ledgers show weak drivers misfire on the
 # 'behavior' shape specifically — an object fusing the tag and its leg index — and the compiler's
 # message alone does not teach the shape ("a 'behavior' tag is required" drew three different
@@ -676,6 +832,21 @@ DECIDE_FINAL_CONTRACT: EmitContract[DecideOutput] = EmitContract(
     parse=parse_decide_final,
 )
 
+DISCOVER_CONTRACT: EmitContract[DiscoverOutput] = EmitContract(
+    name="emit_candidate_symbols",
+    description=(
+        "Emit the candidate tickers whose character expresses the requested profile the data "
+        "lake could not match."
+    ),
+    schema=_DISCOVER_SCHEMA,
+    parse=parse_discover,
+    retry_hint=(
+        'For reference, a valid emission: {"symbols": ["QQQ", "IWM"], "rationale": "liquid '
+        'index ETFs with the requested trend/volatility character"} — symbols is a non-empty '
+        "list of plain ticker strings and rationale is one non-empty line."
+    ),
+)
+
 # Episode system prompts — one line of role framing; the briefing (rebuilt fresh from disk by the
 # builders below) carries every fact and the task. Kept tiny so a small-context backend has room.
 _FORMULATE_SYSTEM = (
@@ -685,6 +856,12 @@ _FORMULATE_SYSTEM = (
 _DECIDE_SYSTEM = (
     "You are a quantitative strategy researcher. Read the strategy's gate-facing evidence and "
     "emit exactly one verdict through the provided tool. The journaled evidence is the arbiter."
+)
+_DISCOVER_SYSTEM = (
+    "You are a quantitative strategy researcher who knows the US equity universe. The data lake "
+    "holds no symbol matching this thesis's character; name the real tickers that do, through the "
+    "provided tool. Real, currently-listed names only — a name that does not exist is a wasted "
+    "fetch."
 )
 
 
@@ -762,6 +939,7 @@ def _formulate_checks(fo: FormulateOutput, digest_text: str, exhausted: Any) -> 
 # ─────────────────────────────────────────────────────────────────────────────
 FormulateEpisode = Callable[..., EpisodeResult[FormulateOutput]]
 DecideEpisode = Callable[..., EpisodeResult[DecideOutput]]
+DiscoverEpisode = Callable[..., EpisodeResult[DiscoverOutput]]
 
 
 def make_episodes(
@@ -771,12 +949,13 @@ def make_episodes(
     ledger: SessionLedger,
     mandate: Mandate | None,
     context_window: int,
-) -> tuple[FormulateEpisode, DecideEpisode]:
-    """Bind the formulate/decide episode callables the driver takes to the real
-    :class:`~noctis.research.episode.EpisodeRunner`, the two emit contracts, and the briefing
-    builders. Each call rebuilds its prompt fresh from disk (the ledger tail + shared digests), so
-    there is no accumulated transcript to overflow a small window. The runner (which holds the LLM
-    client) is injected here, never in the driver — the driver only ever sees these callables."""
+) -> tuple[FormulateEpisode, DecideEpisode, DiscoverEpisode]:
+    """Bind the three episode callables the driver takes — formulate, decide, and discover (#112) —
+    to the real :class:`~noctis.research.episode.EpisodeRunner`, their emit contracts, and the
+    briefing builders. Each call rebuilds its prompt fresh from disk (the ledger tail + shared
+    digests), so there is no accumulated transcript to overflow a small window. The runner (which
+    holds the LLM client) is injected here, never in the driver — the driver only ever sees these
+    callables."""
 
     def formulate(*, corrective: str | None = None) -> EpisodeResult[FormulateOutput]:
         briefing = formulate_briefing(
@@ -799,7 +978,31 @@ def make_episodes(
         contract = DECIDE_FINAL_CONTRACT if final else DECIDE_CONTRACT
         return runner.run(contract=contract, system=_DECIDE_SYSTEM, briefing=briefing)
 
-    return formulate, decide
+    def discover(
+        fo: FormulateOutput,
+        *,
+        profile: Mapping[str, str],
+        window: Mapping[str, Any] | None = None,
+        corrective: str | None = None,
+    ) -> EpisodeResult[DiscoverOutput]:
+        # The one episode that asks about symbols rather than strategies (#112). The briefing pairs
+        # the thesis and the band profile that found no lake match with the lake's own inventory and
+        # the spend context, so the answer is a candidate list this driver can honestly act on.
+        briefing = discover_briefing(
+            toolbox,
+            ledger,
+            thesis=fo.thesis,
+            symbol_character=fo.symbol_character,
+            profile=profile,
+            window=window,
+            mandate=mandate,
+            context_window=context_window,
+        )
+        if corrective:
+            briefing = f"{briefing}\n\n{_DISCOVER_CORRECTIVE_HEADER}\n{corrective}"
+        return runner.run(contract=DISCOVER_CONTRACT, system=_DISCOVER_SYSTEM, briefing=briefing)
+
+    return formulate, decide, discover
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -866,6 +1069,11 @@ def _no_emit(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
     return None
 
 
+def _no_stage(stage: str) -> None:
+    """The no-sink stage-boundary no-op, so a stage function can be driven without narration."""
+    return None
+
+
 def _tool_emitter(on_event: Callable[[Event | str], None] | None, toolbox: Any) -> ToolEmitter:
     """Build the driver's tool-line emitter, or the no-op when no sink is wired. Each line uses the
     toolbox's own ``result_brief`` (the gate-facing slice) so the numbers a promotion/rejection
@@ -880,6 +1088,163 @@ def _tool_emitter(on_event: Callable[[Event | str], None] | None, toolbox: Any) 
     return emit_tool
 
 
+# ── PREFLIGHT: the mandate-declared symbol data preflight (story #111) ───────────────────────
+# Deterministic session-start code, zero LLM: whatever the operator's mandate declared that the lake
+# cannot research yet is fetched ONCE, through the same budget-gated ``ensure_data`` method the
+# conversation loop uses, over the ``data.history_days`` window ending at the session date. Fetched
+# names join the effective universe through the lake's coverage registry, so the very first screen,
+# fit set, holdout reservation, and (via the #110 source) fallback panel already see them. Nothing
+# here loosens a gate: the spend rides the seam's cost preflight against ``data.budget_usd``, and a
+# refusal or error is data the driver ledgers and works around.
+_INGESTED = "ingested"  # the seam's status for a fetch that added coverage
+_REFUSED = "refused"  # ...and for one the cost preflight refused
+
+
+def _fetch_window(session_at: datetime, history_days: int) -> dict[str, Any]:
+    """The inclusive ``{start, end, history_days}`` window every driver-side fetch covers: a
+    ``history_days`` lookback ending at the session date's last vendor-available day.
+
+    One window for both fetching stages — the session-start mandate preflight (#111) and a DISCOVER
+    fetch (#112) — so a discovered symbol arrives with exactly the history a declared one does.
+
+    The end is the **T+1 boundary** the run entrypoint's auto-backfill anchors on (UTC midnight of
+    the session's US-market date): vendor availability for US equities ends there and an end past it
+    is rejected outright, so the inclusive end date is the day before that boundary. That also makes
+    the window right for overnight research, when the UTC calendar has already rolled but the
+    vendor's trading day has not (22:00 ET = 02:00 UTC tomorrow).
+    """
+    boundary = ns_to_date(t1_boundary_ns(session_at))
+    start = boundary - timedelta(days=history_days)
+    end = boundary - timedelta(days=1)
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "history_days": int(history_days),
+    }
+
+
+def _unready_symbols(toolbox: Any, symbols: Sequence[str]) -> list[str]:
+    """The declared symbols this lake cannot research yet — normalized, deduped, declared order.
+
+    Readiness is asked of the lake's own ``check_symbol_ready``, the same surface the screener and
+    the fallback panel use. A lake seam without it (a test fake, a bare in-memory lake) cannot say
+    what is missing, so the honest answer is to fetch nothing: an empty list, a no-op preflight.
+    """
+    declared = list(dict.fromkeys(s.strip().upper() for s in symbols if s and s.strip()))
+    if not declared:
+        return []
+    ready = getattr(getattr(toolbox, "lake", None), "check_symbol_ready", None)
+    if not callable(ready):
+        logger.debug("lake exposes no readiness check — skipping the mandate-symbol preflight")
+        return []
+    return [s for s in declared if not ready(s)]
+
+
+def _fetch_outcome(payload: Any) -> dict[str, Any]:
+    """One symbol's ledgered fetch outcome: status, rows added, cost, and the seam's own detail (a
+    budget refusal's reason, a vendor error's message). A deliberately small, stable view of the
+    ``ensure_data`` result, so a fetch ledger line stays legible whatever the tool adds."""
+    row = payload if isinstance(payload, Mapping) else {}
+    return {
+        "status": str(row.get("status") or "unknown"),
+        "rows_added": int(row.get("rows_added") or 0),
+        "cost_usd": float(row.get("cost_usd") or 0.0),
+        "detail": str(row.get("detail") or ""),
+    }
+
+
+def _ensure_data(
+    toolbox: ResearchToolbox,
+    symbols: Sequence[str],
+    window: Mapping[str, Any],
+    *,
+    emit_tool: ToolEmitter = _no_emit,
+) -> dict[str, Any]:
+    """Make ONE gated ``ensure_data`` call for ``symbols`` over ``window``, narrate it, and return
+    the ledger view of what happened: ``{window, results, fetched, refused, cost_usd[, error]}``.
+
+    The single definition both fetching stages use — the session-start mandate preflight (#111) and
+    a DISCOVER fetch (#112) — so their ledger lines carry the same shape and a CLOSE rollup reads
+    data spend one way. Never raises: a refusal, a per-symbol vendor error, or a fetch that blows up
+    is data in the returned view (research is never crashed by a data problem)."""
+    args: dict[str, Any] = {
+        "symbols": list(symbols),
+        "start": window["start"],
+        "end": window["end"],
+    }
+    result = _invoke(toolbox.tool_ensure_data, **args)
+    emit_tool("ensure_data", args, result)
+
+    payload = result.get("results")
+    outcomes = {
+        str(sym): _fetch_outcome(row)
+        for sym, row in (payload.items() if isinstance(payload, Mapping) else ())
+    }
+    view: dict[str, Any] = {
+        "window": dict(window),
+        "results": outcomes,
+        "fetched": [s for s, o in outcomes.items() if o["status"] == _INGESTED],
+        "refused": [s for s, o in outcomes.items() if o["status"] == _REFUSED],
+        "cost_usd": round(sum(o["cost_usd"] for o in outcomes.values()), 4),
+    }
+    if "error" in result:
+        view["error"] = str(result["error"])
+    return view
+
+
+def _preflight_stage(
+    toolbox: ResearchToolbox,
+    ledger: SessionLedger,
+    *,
+    mandate_symbols: Sequence[str],
+    history_days: int,
+    session_at: datetime,
+    emit_stage: Callable[[str], None] = _no_stage,
+    emit_tool: ToolEmitter = _no_emit,
+) -> None:
+    """Fetch the mandate-declared symbols the lake lacks, once, at session start.
+
+    A strict no-op when there is nothing to do — no mandate symbols, every declared name already
+    lake-ready, or a lake with no readiness surface: no ``ensure_data`` call, no tool line, no stage
+    line, so a session that asks for nothing is byte-identical to one before this stage existed.
+    Otherwise ONE gated ``ensure_data`` call covers every unready name over
+    :func:`_fetch_window`, the same observable ``ensure_data`` tool line the conversation loop
+    emits is emitted, and the per-symbol outcome (status, rows, cost, refusals) plus the total
+    spend is ledgered under :data:`PREFLIGHT`. A budget refusal, a per-symbol vendor error, or a
+    fetch that raises outright is recorded and the session continues on the lake it already has —
+    research is never crashed by a data problem.
+    """
+    unready = _unready_symbols(toolbox, mandate_symbols)
+    if not unready:
+        return
+    if history_days <= 0:
+        logger.warning(
+            "the mandate declares %d symbol(s) the lake lacks (%s) but the history window is "
+            "%s days — fetching nothing; set data.history_days to fetch them",
+            len(unready),
+            ", ".join(unready),
+            history_days,
+        )
+        return
+
+    emit_stage(PREFLIGHT)  # the boundary opens the stage before its one observable action
+    window = _fetch_window(session_at, history_days)
+    detail: dict[str, Any] = {
+        "symbols": unready,
+        **_ensure_data(toolbox, unready, window, emit_tool=emit_tool),
+    }
+    ledger.record_stage(PREFLIGHT, detail=detail)
+    logger.info(
+        "mandate preflight over %s..%s: %d/%d symbol(s) fetched for $%s%s",
+        window["start"],
+        window["end"],
+        len(detail["fetched"]),
+        len(unready),
+        detail["cost_usd"],
+        f" — {detail['error']}" if "error" in detail else "",
+    )
+
+
 def _entry_exit_brief(fo: FormulateOutput) -> str:
     """Compose the brief's precise-rules field from the formulate output (skeleton mapping; the
     author engine turns it into code). The prose ``symbol_character`` still frames the rules; MATCH
@@ -891,12 +1256,32 @@ def _entry_exit_brief(fo: FormulateOutput) -> str:
     )
 
 
+# The MATCH fallback panel is a zero-arg SOURCE, not a frozen list (story #110): the composition
+# root builds it over the trading roster + the lake readiness check + ``research.fit_set_size``, and
+# MATCH resolves it at the moment it actually needs it. So a symbol that joins the lake mid-session
+# is visible to a later MATCH instead of being frozen out at assembly time, and a session whose
+# screens all match pays no readiness I/O at all.
+FallbackPanelSource = Callable[[], Sequence[str]]
+
+
+# The MATCH fallback vocabulary. ``None`` still means "a real screen matched" — the field's meaning
+# is unchanged; #112 only grows the reasons a fallback can carry, so a report can tell "no match
+# existed" from "discovery tried and failed" from "discovery fetched and it still did not express
+# the profile".
+_NO_LAKE_MATCH = "no_lake_match"  # the screen matched nothing and no discover episode ran
+_DISCOVER_FAILED = "discover_failed"  # the discover attempt-pair produced nothing usable
+_DISCOVER_REFUSED = "discover_refused"  # the gated fetch was refused (the data-budget preflight)
+_DISCOVER_FETCH_FAILED = "discover_fetch_failed"  # ...or errored / added no coverage
+_NO_MATCH_AFTER_DISCOVER = "no_lake_match_after_discover"  # fetched, re-screened, still nothing
+
+
 @dataclass(frozen=True)
 class MatchResult:
     """The deterministic MATCH outcome for one thesis: the ``fit`` set AUTHOR/OPTIMIZE tune on, the
     ``reserved`` symbol-holdout names held out by code (never tuned; DECIDE's holdout nominees), the
-    screened band ``profile``, and a ``fallback`` reason (``None`` on a real screen, a short string
-    when the screen found no lake match and the composition-root panel was used instead)."""
+    screened band ``profile``, and a ``fallback`` reason (``None`` on a real screen — including the
+    re-screen after a successful DISCOVER — and one of the vocabulary above when the freshly
+    resolved fallback panel was used instead)."""
 
     fit: list[str]
     reserved: list[str]
@@ -912,36 +1297,244 @@ class MatchResult:
         }
 
 
+def _screen_for(
+    toolbox: ResearchToolbox, profile: Mapping[str, str], *, emit_tool: ToolEmitter = _no_emit
+) -> tuple[list[str], list[str], str | None]:
+    """Run the gated structural screen for one band profile and return
+    ``(suggested_fit, reserved_holdout, error)``.
+
+    The ONE screen call the driver makes — MATCH's first look at the lake and the single re-screen a
+    DISCOVER fetch earns are literally the same request, so the fit/holdout split can never be
+    computed two different ways. The screen is roster-wide by design: a freshly fetched name is in
+    the pool because the lake tracks it, never because the driver hand-picked it."""
+    args = {
+        "trend": profile["trend"],
+        "volatility": profile["volatility"],
+        "liquidity": profile["liquidity"],
+    }
+    screen = _invoke(toolbox.tool_screen_symbols, **args)
+    emit_tool("screen_symbols", args, screen)
+    if "error" in screen:
+        return [], [], str(screen["error"])
+    return (
+        [str(s) for s in (screen.get("suggested_fit") or [])],
+        [str(s) for s in (screen.get("reserved_holdout") or [])],
+        None,
+    )
+
+
 def _match_stage(
     toolbox: ResearchToolbox,
     fo: FormulateOutput,
     *,
-    fallback_panel: Sequence[str],
+    fallback_panel_source: FallbackPanelSource,
     emit_tool: ToolEmitter = _no_emit,
 ) -> MatchResult:
     """Deterministic MATCH: screen the lake for the thesis's symbol character and reserve the
     symbol holdout — all in driver code, zero LLM. The band profile comes from
     :func:`character_to_profile`; the gated, budget-aware ``tool_screen_symbols`` (the same method
     the conversation loop used) ranks the lake and splits ``suggested_fit`` / ``reserved_holdout``
-    by the configured sizes. A screen error or an empty match falls back to ``fallback_panel``
-    (the composition-root fit set) with no reservation, so the toolbox's own out-of-fit holdout
-    fallback still supplies a symbol holdout at verdict time (rule 4 stays honored)."""
+    by the configured sizes. A screen error or an empty match falls back to the panel
+    ``fallback_panel_source`` resolves — called *here*, at this MATCH, so the panel reflects the
+    lake as it stands now (#110) — with no reservation, so the toolbox's own out-of-fit holdout
+    fallback still supplies a symbol holdout at verdict time (rule 4 stays honored). An empty match
+    is where DISCOVER (:func:`_discover_stage`) slots in: this stage still returns the honest
+    ``no_lake_match`` fallback, and the caller may then spend one judgment episode trying to replace
+    it."""
     profile = character_to_profile(fo.symbol_character)
-    screen_args = {
-        "trend": profile["trend"],
-        "volatility": profile["volatility"],
-        "liquidity": profile["liquidity"],
-    }
-    screen = _invoke(toolbox.tool_screen_symbols, **screen_args)
-    emit_tool("screen_symbols", screen_args, screen)
-    if "error" in screen:
-        return MatchResult(
-            list(fallback_panel), [], profile, fallback=f"screen_error: {screen['error']}"
-        )
-    fit = [str(s) for s in (screen.get("suggested_fit") or [])]
-    reserved = [str(s) for s in (screen.get("reserved_holdout") or [])]
+    fit, reserved, error = _screen_for(toolbox, profile, emit_tool=emit_tool)
+    if error is not None:
+        return _fell_back(f"screen_error: {error}", profile, fallback_panel_source)
     if not fit:
-        return MatchResult(list(fallback_panel), [], profile, fallback="no_lake_match")
+        return _fell_back(_NO_LAKE_MATCH, profile, fallback_panel_source)
+    return MatchResult(fit, reserved, profile)
+
+
+def _fell_back(
+    reason: str, profile: dict[str, str], fallback_panel_source: FallbackPanelSource
+) -> MatchResult:
+    """The no-match outcome: today's fallback panel, no code reservation, and the reason why.
+
+    The panel is resolved HERE, at the moment it is needed (#110), so it reflects the lake as it
+    stands now — including anything this session's preflight or a DISCOVER fetch just landed."""
+    return MatchResult(list(fallback_panel_source()), [], profile, fallback=reason)
+
+
+# ── DISCOVER: the no-lake-match judgment episode (story #112) ─────────────────────────────────
+# One small episode replaces the silent fallback: when the screen matches nothing, the model is
+# asked which real tickers express the character the lake lacks, and everything after that answer is
+# deterministic — the pure validator (:func:`valid_tickers`) filters the proposal before a dollar is
+# spent, the survivors are fetched through the SAME budget-gated ``ensure_data`` path the mandate
+# preflight uses, and exactly ONE re-screen decides which of them are researched and which are held
+# out. Nothing here loosens a gate: discovered names enter research only through the screen's own
+# fit/reserved split, and the spend rides the data seam's own cost preflight against the configured
+# ``data.budget_usd``.
+#
+# One corrective re-ask per thesis (the #71 pattern), then the honest fallback — never a loop.
+_DISCOVER_ATTEMPTS = 2
+
+# The check id a failing proposal rides on its episode line, beside the FORMULATE/DECIDE checks.
+_TICKER_CHECK = "discover_tickers"
+
+_DISCOVER_CORRECTIVE_HEADER = "PREVIOUS SYMBOL PROPOSAL DID NOT LAND — correct and re-propose:"
+
+
+def _ticker_corrective(proposed: Sequence[str]) -> str:
+    """The corrective for a proposal the validator emptied — it names exactly what was rejected, so
+    the one re-ask is spent on a fixable mistake rather than a repeat."""
+    listed = ", ".join(str(s).strip() for s in proposed if str(s).strip()) or "(nothing usable)"
+    return (
+        f"none of the symbols you proposed ({listed}) can be fetched: each must be a REAL, "
+        f"currently-listed US ticker — 1-5 letters, optionally a share-class suffix (QQQ, IWM, "
+        f"BRK.B) — that the data lake does NOT already hold (the LAKE INVENTORY above lists what "
+        f"it holds). Propose up to {_MAX_DISCOVER_TICKERS} different real tickers."
+    )
+
+
+def _episode_corrective(result: EpisodeResult[Any]) -> str:
+    """The corrective for a discover episode that produced no usable proposal at all."""
+    return (
+        f"the previous discover episode produced no usable proposal "
+        f"({result.note or result.outcome}). Emit up to {_MAX_DISCOVER_TICKERS} real, "
+        f"currently-listed US tickers in 'symbols' plus a one-line 'rationale'."
+    )
+
+
+def _discover_stage(
+    toolbox: ResearchToolbox,
+    discover: DiscoverEpisode,
+    fo: FormulateOutput,
+    match: MatchResult,
+    *,
+    fallback_panel_source: FallbackPanelSource,
+    history_days: int,
+    session_at: datetime,
+    record_episode: Callable[..., None],
+    budget_stop: Callable[[], str | None],
+    emit_stage: Callable[[str], None] = _no_stage,
+    emit_tool: ToolEmitter = _no_emit,
+) -> tuple[MatchResult, dict[str, Any] | None]:
+    """Try to replace a ``no_lake_match`` fallback with symbols the lake does not have yet.
+
+    Returns ``(match, detail)``: the MATCH outcome the rest of the cycle uses — the re-screen's own
+    fit/reserved split when discovery worked, else today's fallback panel under its own reason — and
+    the DISCOVER stage detail to ledger (``None`` when no episode was spent, so a session that could
+    not discover is byte-identical to one before this stage existed).
+
+    It refuses to spend an episode when there is nothing it could do with an answer: no fetch window
+    (``history_days <= 0``) or a session already out of budget — the episode-bound check is the same
+    ``completions``-based gate FORMULATE/DECIDE pass, so a discover can never push a session past
+    ``max_episodes``.
+
+    The failure policy mirrors #71 exactly: a misfired episode or a proposal the validator empties
+    earns ONE corrective re-ask naming what was wrong; a second failure falls back with
+    :data:`_DISCOVER_FAILED`. A fetch the cost preflight refuses (or one that errors) is *not* an
+    episode failure — it is a ledgered fall-through under its own reason, with no re-ask spent — and
+    a fetch that lands names the re-screen still cannot match falls back with
+    :data:`_NO_MATCH_AFTER_DISCOVER`.
+    """
+    if history_days <= 0:
+        logger.warning(
+            "no lake match for %r and the history window is %s days — falling back instead of "
+            "discovering; set data.history_days to let the driver fetch candidates",
+            fo.symbol_character,
+            history_days,
+        )
+        return match, None
+    stop = budget_stop()
+    if stop:
+        logger.info("no lake match, but the session is out of budget (%s) — falling back", stop)
+        return match, None
+
+    emit_stage(DISCOVER)
+    profile = match.profile
+    # ONE window for the whole stage: the briefing tells the model exactly what a fetch would cover,
+    # and the fetch below covers exactly that.
+    window = _fetch_window(session_at, history_days)
+    ready = getattr(getattr(toolbox, "lake", None), "check_symbol_ready", None)
+    detail: dict[str, Any] = {"proposed": [], "kept": [], "fetched": []}
+
+    def ledgered(result: MatchResult) -> tuple[MatchResult, dict[str, Any]]:
+        detail["fallback"] = result.fallback
+        return result, detail
+
+    corrective: str | None = None
+    for attempt in range(_DISCOVER_ATTEMPTS):
+        last = attempt == _DISCOVER_ATTEMPTS - 1
+        detail["attempts"] = attempt + 1
+        result = discover(fo, profile=profile, window=window, corrective=corrective)
+        if not result.ok or result.value is None:
+            record_episode(DISCOVER, result)
+            if last:
+                logger.info("discover produced no proposal after the re-ask — falling back")
+                return ledgered(_fell_back(_DISCOVER_FAILED, profile, fallback_panel_source))
+            corrective = _episode_corrective(result)
+            continue
+
+        proposed = list(result.value.symbols)
+        detail["proposed"] = detail["proposed"] + proposed
+        kept = valid_tickers(proposed, lake_ready=ready if callable(ready) else None)
+        if not kept:
+            # Schema-valid nonsense — the same first-line discipline as the FORMULATE checks (#71).
+            record_episode(
+                DISCOVER,
+                result,
+                [{"check": _TICKER_CHECK, "result": _EXHAUSTED if last else _REASK}],
+            )
+            if last:
+                logger.info("discover proposed no usable ticker after the re-ask — falling back")
+                return ledgered(_fell_back(_DISCOVER_FAILED, profile, fallback_panel_source))
+            logger.info("discover proposed no usable ticker (%s) — re-asking once", proposed)
+            corrective = _ticker_corrective(proposed)
+            continue
+
+        record_episode(DISCOVER, result)
+        detail["kept"] = kept
+        return ledgered(
+            _fetch_and_rescreen(
+                toolbox,
+                kept,
+                profile,
+                detail,
+                fallback_panel_source=fallback_panel_source,
+                window=window,
+                emit_tool=emit_tool,
+            )
+        )
+    raise AssertionError("unreachable: every attempt returns")  # pragma: no cover
+
+
+def _fetch_and_rescreen(
+    toolbox: ResearchToolbox,
+    kept: Sequence[str],
+    profile: dict[str, str],
+    detail: dict[str, Any],
+    *,
+    fallback_panel_source: FallbackPanelSource,
+    window: Mapping[str, Any],
+    emit_tool: ToolEmitter = _no_emit,
+) -> MatchResult:
+    """Fetch the validated candidates through the gated ``ensure_data`` path and re-screen ONCE.
+
+    ``window`` is the same session-date-anchored ``history_days`` lookback the mandate preflight
+    fetches over (:func:`_fetch_window`), so a discovered symbol arrives with exactly the history a
+    declared one does; the per-symbol outcome — status, rows, cost, a refusal's reason — is recorded
+    into ``detail`` for the DISCOVER ledger line. A fetch that lands nothing skips the re-screen (an
+    unchanged lake cannot answer differently) and falls through under its own reason; otherwise the
+    single re-screen owns the fit/holdout split."""
+    detail.update(_ensure_data(toolbox, kept, window, emit_tool=emit_tool))
+    if not detail["fetched"]:
+        reason = _DISCOVER_REFUSED if detail["refused"] else _DISCOVER_FETCH_FAILED
+        logger.info("discover fetched no coverage for %s (%s) — falling back", list(kept), reason)
+        return _fell_back(reason, profile, fallback_panel_source)
+
+    fit, reserved, error = _screen_for(toolbox, profile, emit_tool=emit_tool)
+    if error is not None or not fit:
+        logger.info(
+            "discover fetched %s but the re-screen still matched nothing", detail["fetched"]
+        )
+        return _fell_back(_NO_MATCH_AFTER_DISCOVER, profile, fallback_panel_source)
+    logger.info("discover fetched %s and the re-screen matched %s", detail["fetched"], fit)
     return MatchResult(fit, reserved, profile)
 
 
@@ -1203,13 +1796,16 @@ def run_episodic_research(
     ledger: SessionLedger,
     formulate: FormulateEpisode,
     decide: DecideEpisode,
-    fit_symbols: Sequence[str],
+    fallback_panel_source: FallbackPanelSource,
+    discover: DiscoverEpisode | None = None,
     budget_minutes: float,
     max_episodes: int,
     completions: Callable[[], int],
     stop_event: StopEvent | None = None,
     now: Callable[[], datetime] = _utcnow,
     mandate_source: str | None = None,
+    mandate_symbols: Sequence[str] = (),
+    history_days: int = 0,
     models: dict[str, Any] | None = None,
     sweep_trials: int | None = None,
     market_digest: Callable[[], str] | None = None,
@@ -1217,20 +1813,37 @@ def run_episodic_research(
 ) -> ResearchSummary:
     """Run one episodic research session; returns the same summary shape as the conversation loop.
 
-    ``formulate`` / ``decide`` are the two model-judgment episodes (injected — the LLM client is
-    behind them, never handed here); every other stage runs through the gated ``toolbox`` methods.
+    ``formulate`` / ``decide`` (and the optional ``discover``) are the model-judgment episodes —
+    injected, so the LLM client is never handed here; every other stage runs through the gated
+    ``toolbox`` methods.
     ``completions`` returns the episode runner's per-completion count (retries included) that
     ``max_episodes`` budgets against; ``budget_minutes`` and ``stop_event`` bound wall-clock and
-    interruption. ``fit_symbols`` is now the MATCH *fallback* panel — deterministic screening
-    (:func:`_match_stage`) chooses the per-thesis fit set and reserves the symbol holdout, and only
-    an empty screen falls back to ``fit_symbols``. ``market_digest`` supplies the MARKET ECONOMICS
+    interruption. ``fallback_panel_source`` is the MATCH *fallback* panel as a zero-arg source
+    (#110): deterministic screening (:func:`_match_stage`) chooses the per-thesis fit set and
+    reserves the symbol holdout, and only a screen that matched nothing calls the source — freshly,
+    at that MATCH, so a symbol that joined the lake mid-session is in the panel rather than frozen
+    out. The composition root builds it over the trading roster, the lake readiness check, and
+    ``research.fit_set_size``. ``market_digest`` supplies the MARKET ECONOMICS
     digest text the FORMULATE cost-arithmetic sanity check overlaps against — the same source the
     formulate briefing embeds; it defaults to the toolbox's own digest. See the module docstring
     for the stage protocol, the per-stage failed-episode policies, and the sanity checks.
 
+    ``discover`` is the third judgment episode (#112): the one a ``no_lake_match`` MATCH spends on
+    candidate tickers before accepting the fallback panel. It is optional — a caller that wires none
+    keeps exactly the pre-#112 behavior (the silent ``no_lake_match`` fallback), and so does a
+    session with no fetch window (``history_days <= 0``) or one already out of episode budget.
+
+    ``mandate_symbols`` and ``history_days`` are the session-start PREFLIGHT's two inputs (#111) —
+    the operator's declared symbols and the lookback window to fetch the unready ones over —
+    and ``history_days`` is the window a DISCOVER fetch covers too. The driver reads no settings, so
+    both arrive as values from the composition root (the resolved mandate's ``symbols`` and
+    ``data.history_days``); their defaults are the no-op, so a caller that passes neither behaves
+    exactly as before those stages existed.
+
     ``on_event`` (story #73) makes one observable episodic session read *better* than the
     conversation loop's inferred narration: a ``stage`` boundary Event opens each of
-    FORMULATE/MATCH/AUTHOR/OPTIMIZE/DECIDE, the driver's deterministic toolbox actions emit the
+    PREFLIGHT/FORMULATE/MATCH/DISCOVER/AUTHOR/OPTIMIZE/DECIDE (PREFLIGHT and DISCOVER only when they
+    have work), the driver's deterministic toolbox actions emit the
     same ``tool`` lines the loop does, and the injected episodes (via the episode runner's own
     ``on_event``) tee the think/say/usage the model returned — so the whole arc interleaves on one
     sink. ``None`` (a bare run) ⇒ no emission, byte-identical to before.
@@ -1260,6 +1873,20 @@ def run_episodic_research(
         mandate=mandate_source,
         budgets={"max_episodes": max_episodes, "budget_minutes": budget_minutes},
         models=dict(models or {}),
+    )
+
+    # ── PREFLIGHT (mandate-declared symbol history, #111 — deterministic, zero LLM) ────────
+    # Before the first thesis, so the very first screen, fit set, holdout reservation, and fallback
+    # panel already see whatever the operator's mandate asked for. A no-op — not one gated call —
+    # when nothing is declared or the lake already holds it all.
+    _preflight_stage(
+        toolbox,
+        ledger,
+        mandate_symbols=mandate_symbols,
+        history_days=history_days,
+        session_at=start,
+        emit_stage=emit_stage,
+        emit_tool=emit_tool,
     )
 
     def _budget_stop() -> str | None:
@@ -1326,8 +1953,34 @@ def run_episodic_research(
         # The boundary Event opens the stage before its screen runs; the ledger line lands after,
         # once the screen's profile/fit/reservation detail exists to carry.
         emit_stage(MATCH, name)
-        match = _match_stage(toolbox, fo, fallback_panel=fit_symbols, emit_tool=emit_tool)
+        match = _match_stage(
+            toolbox, fo, fallback_panel_source=fallback_panel_source, emit_tool=emit_tool
+        )
+
+        # ── DISCOVER (the no-lake-match episode, #112) ────────────────────────
+        # An empty screen — and ONLY an empty screen (a screen error is a broken screener, not a
+        # missing symbol) — earns one judgment episode on candidate tickers before the fallback
+        # panel is accepted. Whatever it returns, the MATCH line ledgered below carries the
+        # EFFECTIVE outcome (the re-screen's split, or the fallback under its own reason), and the
+        # DISCOVER line records how it got there.
+        discover_detail: dict[str, Any] | None = None
+        if discover is not None and match.fallback == _NO_LAKE_MATCH:
+            match, discover_detail = _discover_stage(
+                toolbox,
+                discover,
+                fo,
+                match,
+                fallback_panel_source=fallback_panel_source,
+                history_days=history_days,
+                session_at=start,
+                record_episode=_record_episode,
+                budget_stop=_budget_stop,
+                emit_stage=partial(emit_stage, strategy=name),
+                emit_tool=emit_tool,
+            )
         ledger.record_stage(MATCH, strategy=name, detail=match.ledger_detail())
+        if discover_detail is not None:
+            ledger.record_stage(DISCOVER, strategy=name, detail=discover_detail)
         symbols = match.fit  # AUTHOR/OPTIMIZE tune on the fit set ONLY
         reserved_holdout = match.reserved  # held out by code — never tuned, DECIDE's holdout
 
