@@ -30,6 +30,15 @@ logger = logging.getLogger("noctis.research.llm")
 # The Anthropic server-side web-search tool type (an Anthropic-only lever; capability-gated).
 WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
 
+# Anthropic runs *server-side* tools (web_search — and, on the Claude 5 family, a code-execution
+# suite the API can enable without us declaring it, #101) inside a completion. LiteLLM folds each
+# ``server_tool_use`` block into the OpenAI ``tool_calls`` list under this id prefix and parks the
+# paired ``*_tool_result`` blocks on the message's ``provider_specific_fields`` — under exactly
+# these keys, which its request direction reads back off a replayed assistant message to
+# reconstruct the ``server_tool_use`` + result pairs the API requires.
+_SERVER_TOOL_ID_PREFIX = "srvtoolu_"
+_SERVER_TOOL_RESULT_KEYS = ("web_search_results", "tool_results")
+
 # Transport bounds — the loop's time budget is only checked between rounds, so a completion
 # that never returns wedges the whole research phase. LiteLLM's own default request timeout is
 # 6000s (100 minutes of silence per call), which in loop infrastructure reads as a hang; every
@@ -123,25 +132,60 @@ def to_openai_tools(tools: list[dict]) -> list[dict]:
     return out
 
 
+def _server_tool_results(msg) -> dict[str, list]:
+    """The server-tool result blocks LiteLLM parked on the response message's
+    ``provider_specific_fields``, keyed exactly as its request direction reads them back off a
+    replayed assistant message. Empty when there are none (any non-Anthropic provider)."""
+    fields = getattr(msg, "provider_specific_fields", None) or {}
+    out: dict[str, list] = {}
+    for key in _SERVER_TOOL_RESULT_KEYS:
+        results = fields.get(key) if isinstance(fields, dict) else None
+        if isinstance(results, list) and results:
+            out[key] = [r for r in results if isinstance(r, dict)]
+    return out
+
+
 def _turn_from_openai(resp) -> Turn:
-    """Normalize a LiteLLM/OpenAI ``ModelResponse`` to a neutral :class:`Turn`."""
+    """Normalize a LiteLLM/OpenAI ``ModelResponse`` to a neutral :class:`Turn`.
+
+    Server-executed tool calls (Anthropic ``server_tool_use`` blocks, folded into ``tool_calls``
+    under the ``srvtoolu_`` id prefix) are never dispatchable — the server already ran them — so
+    they stay out of ``Turn.tool_calls``. On the replayed assistant message they must round-trip
+    *with* their captured result blocks (#101): the result lists ride along on
+    ``provider_specific_fields`` so LiteLLM's request direction can re-pair them, and a server
+    call whose result was never captured is dropped outright — replaying it unpaired poisons
+    every later request (the API rejects a lone server tool_use)."""
     choice = resp.choices[0]
     msg = choice.message
     text = getattr(msg, "content", None) or ""
     raw_calls = getattr(msg, "tool_calls", None) or []
+    server_results = _server_tool_results(msg)
+    resulted_ids = {r.get("tool_use_id") for results in server_results.values() for r in results}
     tool_calls: list[ToolCall] = []
     assistant_calls: list[dict] = []
+    server_replayed = False
     for call in raw_calls:
         raw_args = call.function.arguments
         args = json.loads(raw_args) if isinstance(raw_args, str) and raw_args else (raw_args or {})
+        entry = {
+            "id": call.id,
+            "type": "function",
+            "function": {"name": call.function.name, "arguments": json.dumps(args)},
+        }
+        if isinstance(call.id, str) and call.id.startswith(_SERVER_TOOL_ID_PREFIX):
+            if call.id in resulted_ids:
+                assistant_calls.append(entry)
+                server_replayed = True
+            else:
+                logger.info(
+                    "dropping server-tool call %s (%s) from the replayed assistant turn: "
+                    "no captured result block to pair it with",
+                    call.id,
+                    call.function.name,
+                )
+            continue
         tool_calls.append(ToolCall(id=call.id, name=call.function.name, arguments=args))
-        assistant_calls.append(
-            {
-                "id": call.id,
-                "type": "function",
-                "function": {"name": call.function.name, "arguments": json.dumps(args)},
-            }
-        )
+        assistant_calls.append(entry)
     finish = str(getattr(choice, "finish_reason", None) or "end_turn")
     # "length" passes through unmasked: a truncated completion is a stumble the loop must be
     # able to see (masking it as end_turn silently ended sessions on small-window backends).
@@ -151,6 +195,8 @@ def _turn_from_openai(resp) -> Turn:
         assistant_message["content"] = text
     if assistant_calls:
         assistant_message["tool_calls"] = assistant_calls
+    if server_replayed:
+        assistant_message["provider_specific_fields"] = server_results
     return Turn(
         text=text,
         tool_calls=tool_calls,

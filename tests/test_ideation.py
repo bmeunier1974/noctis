@@ -223,6 +223,34 @@ def test_propose_specs_resumes_a_paused_server_tool_turn():
     assert client.last_kwargs["messages"][1] == {"role": "assistant", "content": "searching…"}
 
 
+def test_paused_turn_emptied_by_server_call_drop_re_requests():
+    """A paused turn whose only content was an unpaired server-tool call arrives empty after
+    normalization (the call is dropped, #101) — the loop re-requests rather than appending an
+    empty assistant turn the API would reject."""
+
+    class EmptyPausingClient(FakeClient):
+        def complete(self, **kwargs):
+            turn = super().complete(**kwargs)
+            if self.calls == 1:
+                return Turn(
+                    text="",
+                    tool_calls=[],
+                    stop_reason="pause_turn",
+                    usage={},
+                    assistant_message={"role": "assistant"},
+                )
+            return turn
+
+    client = EmptyPausingClient(
+        [_valid_spec("minted_after_empty_pause")], capabilities=Capabilities(server_web_search=True)
+    )
+    specs = propose_specs(context=IdeationContext(), n=1, client=client, web_search=True)
+    assert [s.id for s in specs] == ["minted_after_empty_pause"]
+    assert client.calls == 2
+    # The re-request carries the original prompt only — no empty assistant turn was appended.
+    assert [m["role"] for m in client.last_kwargs["messages"]] == ["user"]
+
+
 # ── 2. Ideator.run mints: registers family, grows proposer, records a finding, persists ──
 def test_ideator_mints_registers_and_feeds_back(tmp_path, families):
     client = FakeClient([_valid_spec("minted_sma")])

@@ -519,8 +519,13 @@ def run_agent_research(
         emit(Event("usage", _usage_line(turn.usage), meta=dict(turn.usage or {}), level=2))
 
         if turn.stop_reason == "pause_turn":
-            # Server-tool loop (web search) paused mid-turn; resume it verbatim.
-            messages = messages + [turn.assistant_message]
+            # Server-tool loop (web search) paused mid-turn; resume it verbatim. A paused turn
+            # whose only content was a server-tool call without a captured result arrives empty
+            # (the unpaired call is dropped in normalization, #101) — nothing to resume, so
+            # re-request instead of appending an empty assistant turn; the round above already
+            # burned an iteration, so max_iterations bounds a backend that pauses forever.
+            if turn.assistant_message.get("content") or turn.assistant_message.get("tool_calls"):
+                messages = messages + [turn.assistant_message]
             continue
 
         tool_calls = [tc for tc in turn.tool_calls if tc.name in tool_names]
