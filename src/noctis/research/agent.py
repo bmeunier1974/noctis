@@ -25,7 +25,7 @@ from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from noctis.engine.research import ResearchSummary, StopEvent
+from noctis.engine.research import PROSE_STALL, ResearchSummary, StopEvent
 from noctis.observability.events import Event, render_plain, tool_event, usage_line
 from noctis.research.llm import WEB_SEARCH_TOOL_TYPE, cached_system, effective_web_search
 from noctis.research.misfire import (
@@ -46,9 +46,11 @@ _RESULT_CHAR_CAP = 20_000  # hard cap per tool result so one dump can't flood th
 
 # The zero-verdict liveness guard: a clean prose turn while nothing has been decided is a
 # protocol stall (a thesis statement awaiting a go-ahead), not a conclusion — nudge the model
-# onward at most this many times per session. Small on purpose: past the cap a prose turn is
-# honored as the deliberate ``agent_done`` conclusion it always was, so a model that truly
-# has nothing left can still end the session.
+# onward at most this many times per session. Small on purpose: past the cap a prose turn
+# still ends the session, so a model that truly has nothing left is never nudged forever —
+# but a zero-verdict ending is labeled ``prose_stall``, not ``agent_done``: with the cap
+# spent there is no way to tell a deliberate empty conclusion from a model stuck narrating
+# (#100 saw exactly this), so the summary carries the honest, countable name.
 _MAX_PROSE_NUDGES = 2
 
 # Context-budget levers (plan P5) — all inert unless research.agent.context_window is set.
@@ -549,8 +551,12 @@ def run_agent_research(
                     {"role": "user", "content": PREMATURE_CONCLUSION.retry},
                 ]
                 continue
-            summary.stopped_reason = "agent_done"
-            # The agent's deliberate final conclusion — level-1 so it shows at -v like today; the
+            # Reaching here with zero verdicts means the nudge cap is spent (earlier prose
+            # turns were nudged above) — a stall, labeled as such so the watch (#100) can
+            # count it; with a verdict on the board the prose is the deliberate conclusion.
+            concluded = toolbox.promotions + toolbox.rejections > 0
+            summary.stopped_reason = "agent_done" if concluded else PROSE_STALL
+            # The agent's final prose — level-1 so it shows at -v like today; the
             # renderer wraps to width, so no more 500-char truncation special-case.
             emit(Event("say", turn.text.strip(), level=1))
             break

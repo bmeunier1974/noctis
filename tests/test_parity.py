@@ -10,7 +10,7 @@ the flip-criterion assessment.
 
 from __future__ import annotations
 
-from noctis.engine.research import ResearchSummary
+from noctis.engine.research import PROSE_STALL, ResearchSummary
 from noctis.research.ledger import SessionLedger
 from noctis.research.parity import (
     CONVERSATION,
@@ -32,6 +32,7 @@ def _summary(
     candidates: tuple[str, ...] = (),
     undecided: tuple[str, ...] = (),
     ledger_path: str | None = None,
+    stopped_reason: str = "",
 ) -> ResearchSummary:
     return ResearchSummary(
         promotions=promotions,
@@ -40,6 +41,7 @@ def _summary(
         candidates=list(candidates),
         undecided=list(undecided),
         ledger_path=ledger_path,
+        stopped_reason=stopped_reason,
     )
 
 
@@ -150,6 +152,21 @@ def test_undecided_total_sums_the_undecided_lists():
     assert m.undecided == 3
 
 
+# ── prose stalls (#100) ──────────────────────────────────────────────────────────────────────
+def test_prose_stalls_counts_only_stalled_sessions():
+    """Sessions ended ``prose_stall`` (the conversation loop's zero-verdict prose ending past the
+    nudge cap) are counted per loop; every other stop reason — including a deliberate post-verdict
+    ``agent_done`` — is not."""
+    sessions = [
+        (_summary(tokens_total=500, stopped_reason=PROSE_STALL), None),
+        (_summary(promotions=1, tokens_total=800, stopped_reason="agent_done"), None),
+        (_summary(tokens_total=300, stopped_reason="time_budget"), None),
+        (_summary(tokens_total=400, stopped_reason=PROSE_STALL), None),
+    ]
+    m = compute_loop_metrics(CONVERSATION, sessions)
+    assert m.prose_stalls == 2
+
+
 # ── rollup_for: load the episodic rollup from the summary's ledger path ────────────────────────
 def test_rollup_for_reads_episodic_ledger_and_is_none_for_conversation(tmp_path):
     led = _episodic_ledger(tmp_path, "load-me")
@@ -196,6 +213,8 @@ def test_render_comparison_is_side_by_side_with_na_paths(tmp_path):
     assert "Tokens / verdict" in text
     # The conversation loop cannot supply the validator pass-rate ⇒ n/a in its column.
     assert "n/a" in text
+    # The stall count (#100) is a row, so a stalled model is visible on the same page.
+    assert "Prose stalls (sessions)" in text
     # The flip criterion is stated in the output.
     assert "flip" in text.lower()
 
@@ -246,6 +265,50 @@ def test_flip_criterion_is_inconclusive_when_a_tokens_per_verdict_is_na():
     )
     assert a.tokens_materially_lower is None
     assert a.meets_flip_criterion is False
+
+
+def test_inconclusive_names_the_stall_when_every_conversation_session_stalled():
+    """The #100 signature — every conversation session prose-stalls while episodic keeps reaching
+    verdicts — still cannot compute the table, but the verdict line says WHY and what the honest
+    move is (prefer episodic on this model), instead of advising a re-run that will stall again."""
+    conv_sessions = [
+        (_summary(tokens_total=55_000, stopped_reason=PROSE_STALL), None),
+        (_summary(tokens_total=34_000, stopped_reason=PROSE_STALL), None),
+    ]
+    epi = _summary(promotions=1, rejections=1, tokens_total=9_000, stopped_reason="max_episodes")
+    a = assess_flip(
+        compute_loop_metrics(CONVERSATION, conv_sessions),
+        compute_loop_metrics(EPISODIC, [(epi, None)]),
+    )
+    assert a.meets_flip_criterion is False
+    assert a.tokens_materially_lower is None
+    assert "prose stall" in a.summary and "#100" in a.summary
+    assert "episodic" in a.summary
+
+
+def test_inconclusive_stays_generic_when_the_stall_is_not_universal():
+    """One stalled session among working ones — or an episodic side with no verdicts either — is
+    not the #100 signature: the generic re-run advice stands."""
+    partial = [
+        (_summary(tokens_total=1_000, stopped_reason=PROSE_STALL), None),
+        (_summary(tokens_total=2_000, stopped_reason="time_budget"), None),
+    ]
+    epi = _summary(promotions=1, tokens_total=900)
+    a = assess_flip(
+        compute_loop_metrics(CONVERSATION, partial),
+        compute_loop_metrics(EPISODIC, [(epi, None)]),
+    )
+    assert "Re-run" in a.summary
+
+    # All-stalled conversation side, but zero episodic verdicts: "episodic is the only loop
+    # reaching verdicts" would be false, so the generic message stands there too.
+    stalled = [(_summary(tokens_total=1_000, stopped_reason=PROSE_STALL), None)]
+    no_verdicts = _summary(promotions=0, rejections=0, tokens_total=500)
+    b = assess_flip(
+        compute_loop_metrics(CONVERSATION, stalled),
+        compute_loop_metrics(EPISODIC, [(no_verdicts, None)]),
+    )
+    assert "Re-run" in b.summary
 
 
 def test_material_token_reduction_threshold_is_a_stated_fraction():

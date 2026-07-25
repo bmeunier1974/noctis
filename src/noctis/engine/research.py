@@ -40,6 +40,14 @@ class _NeverStop:
         return False
 
 
+# ``ResearchSummary.stopped_reason`` when a conversation session ended in prose with zero verdicts
+# after the liveness guard's nudge cap was spent (#100): the session still ends (the cap is the
+# guard's escape hatch), but the ending is labeled a *stall*, never a conclusion, so a stalled
+# model is countable from the summary alone — the CLI line, the runtime log, and the parity
+# harness (which counts these per loop) all read it from here.
+PROSE_STALL = "prose_stall"
+
+
 @dataclass
 class ResearchSummary:
     iterations: int = 0
