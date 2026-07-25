@@ -475,3 +475,92 @@ def test_runner_without_on_event_stays_silent():
     client = FakeClient([emit_turn({"action": "hold", "confidence": 0.5})])
     runner = EpisodeRunner(client=client, retries=2)
     assert runner.run(contract=CONTRACT, system="SYS", briefing="B").ok
+
+
+# ── 10. Every misfire leaves persisted evidence — note + capped raw excerpt (#102) ────────
+# The sonnet-5 exhaustion that motivated this: the ledger said only `misfires: 3`, so there was
+# no way to tell a schema-invalid emit from a transport-mangled call from a retry-classified API
+# error. Each rejected attempt now rides the result as a bounded {"note", "raw"} detail.
+def test_exhausted_schema_invalid_emits_carry_the_payload_and_the_reason():
+    bad = emit_turn({"action": "explode", "confidence": 0.1})
+    result, _ = _run([bad, bad, bad], retries=2)
+
+    assert result.outcome == MISFIRES_EXHAUSTED
+    assert len(result.misfire_details) == 3  # one detail per misfire, in attempt order
+    detail = result.misfire_details[0]
+    assert "not one of promote/reject/hold" in detail["note"]  # the validation reason
+    assert '"explode"' in detail["raw"]  # the rejected payload itself, not just its verdict
+
+
+def test_prose_without_json_captures_the_reply_text():
+    junk = text_turn("I think we should promote it, quite confidently.")
+    good = emit_turn({"action": "promote", "confidence": 0.9})
+    result, _ = _run([junk, good])
+
+    assert result.ok
+    (detail,) = result.misfire_details  # a recovered episode keeps its evidence too
+    assert "no JSON object in the reply" in detail["note"]
+    assert detail["raw"] == "I think we should promote it, quite confidently."
+
+
+def test_thinking_only_misfire_captures_the_reasoning():
+    silent = text_turn("", reasoning="planning silently about momentum")
+    good = emit_turn({"action": "hold", "confidence": 0.5})
+    result, _ = _run([silent, good])
+
+    (detail,) = result.misfire_details
+    assert detail["raw"] == "planning silently about momentum"  # the only trace the turn left
+
+
+def test_completion_error_misfire_captures_the_exception_text():
+    err = ValueError("Invalid tool call arguments: unexpected end of JSON input")
+    good = emit_turn({"action": "promote", "confidence": 0.6})
+    result, _ = _run([err, good])
+
+    (detail,) = result.misfire_details
+    assert "unexpected end of JSON input" in detail["raw"]
+
+
+def test_api_error_keeps_prior_misfire_details_and_the_outage_note():
+    markup = text_turn("<tool_call>x</tool_call>")
+    result, _ = _run([markup, ConnectionError("backend unreachable")])
+
+    assert result.outcome == API_ERROR
+    assert result.note == "backend unreachable"  # the outage reason, distinct from the misfire
+    (detail,) = result.misfire_details  # the retried misfire before the outage survives
+    assert "<tool_call>x</tool_call>" in detail["raw"]
+
+
+def test_clean_episode_carries_no_misfire_details():
+    result, _ = _run([emit_turn({"action": "hold", "confidence": 0.5})])
+    assert result.misfire_details == ()
+
+
+def test_misfire_raw_is_capped_with_a_truncation_marker():
+    huge = "prose without any json object in it, " * 1000  # far past the persistence cap
+    result, _ = _run([text_turn(huge), emit_turn({"action": "hold", "confidence": 0.5})])
+
+    (detail,) = result.misfire_details
+    assert len(detail["raw"]) < 4100  # bounded however large the reply was
+    assert "chars]" in detail["raw"]  # truncation is explicit, never silent
+
+
+def test_misfire_details_persist_to_the_session_ledger(tmp_path):
+    bad = emit_turn({"action": "explode", "confidence": 0.1})
+    result, _ = _run([bad, bad, bad], retries=2)
+
+    ledger = SessionLedger(tmp_path, "s102")
+    ledger.record_episode(
+        stage="formulate",
+        model=result.model,
+        outcome=result.outcome,
+        tokens=result.tokens,
+        misfires=result.misfires,
+        misfire_details=list(result.misfire_details),
+        note=result.note,
+    )
+
+    episode = ledger.episodes()[0]
+    assert len(episode.misfire_details) == 3
+    assert '"explode"' in episode.misfire_details[0]["raw"]
+    assert episode.note == result.note

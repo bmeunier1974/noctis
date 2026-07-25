@@ -744,6 +744,35 @@ def test_formulate_failure_ends_the_session(tmp_path):
     assert ledger.session_end() is not None  # the rollup still lands
 
 
+def test_failed_episode_misfire_details_land_on_the_ledger_line(tmp_path):
+    # The #102 diagnostic gap: a misfires_exhausted episode used to survive only as a count, so
+    # the sonnet-5 parity failure was undiagnosable after the fact. The driver now threads the
+    # runner's per-misfire evidence (note + capped raw) and the last-misfire note into the
+    # episode line, so the session ledger alone answers "what did each rejected attempt emit?".
+    details = (
+        {"note": "structured emit invalid (missing thesis)", "raw": '{"style": "momentum"}'},
+        {"note": "no JSON object in the reply", "raw": "I would buy strength."},
+    )
+    failed = EpisodeResult(
+        MISFIRES_EXHAUSTED,
+        None,
+        "anthropic/claude-sonnet-5",
+        tokens=17678,
+        misfires=2,
+        note="no JSON object in the reply",
+        misfire_details=details,
+    )
+    episodes = Episodes([failed], [])
+    ledger = SessionLedger(tmp_path, "s102")
+
+    summary = _drive(episodes, FakeToolbox(), max_episodes=10, ledger=ledger)
+
+    assert summary.stopped_reason == "formulate_failed"
+    (episode,) = ledger.episodes()
+    assert episode.misfire_details == [dict(d) for d in details]
+    assert episode.note == "no JSON object in the reply"
+
+
 def test_author_failure_skips_the_strategy(tmp_path):
     episodes = Episodes([formulate_ok()], [])
     box = FakeToolbox(write_result={"error": "validation failed: bad scenario window"})

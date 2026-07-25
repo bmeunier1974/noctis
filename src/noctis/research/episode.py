@@ -27,11 +27,19 @@ mid-run; each episode is a pure function of the prompt the caller hands in.
   included, even one that raised — increments :attr:`EpisodeRunner.completions`, so the driver
   enforces ``max_episodes`` off one counter that already counted each completion exactly once (it
   never has to add retry counts on top).
+* **Every misfire leaves evidence.** Each rejected attempt is captured as a bounded
+  ``{"note", "raw"}`` detail — the classifier note (which carries the validation reason) plus a
+  capped excerpt of what actually came back: the schema-invalid payload, the reply text, or the
+  exception. The details ride :attr:`EpisodeResult.misfire_details` into the ledger's episode
+  line, so an exhausted episode is diagnosable after the fact (was the emit schema-invalid, the
+  forced call mangled in transport, or the API erroring?) instead of surviving only as a count
+  (#102) — the episode twin of the coder path's ``__tmp/failed/`` store (#18).
 
 The result is an :class:`EpisodeResult`: the typed value on success, plus the model, token total,
-misfire count, and outcome a caller writes to the session ledger's ``episode`` line
-(:class:`~noctis.research.ledger.Episode`) before acting on it. The runner never writes the ledger
-itself — persistence is the driver's; "suitable for ledger persistence" means the fields are here.
+misfire count, per-misfire details, and outcome a caller writes to the session ledger's
+``episode`` line (:class:`~noctis.research.ledger.Episode`) before acting on it. The runner never
+writes the ledger itself — persistence is the driver's; "suitable for ledger persistence" means
+the fields are here.
 """
 
 from __future__ import annotations
@@ -70,6 +78,11 @@ _USAGE_FIELDS = (
 # The body of the first fenced code block in a reply (```json … ``` or a bare ``` … ```).
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 
+# Per-misfire cap on the persisted raw excerpt (chars). Misfire details are diagnosis, not
+# history: retries bound the entry count and this bounds each entry, so an episode line can
+# never grow past a few capped excerpts however large the rejected replies were.
+_MISFIRE_RAW_CAP = 4000
+
 # Episode outcomes — the string a caller writes to the ledger's ``episode`` line.
 OK = "ok"
 MISFIRES_EXHAUSTED = "misfires_exhausted"
@@ -100,7 +113,10 @@ class EpisodeResult(Generic[T]):
     :data:`OK` / :data:`MISFIRES_EXHAUSTED` / :data:`API_ERROR`. ``model``, ``tokens`` (summed
     across the episode's completions, retries included), and ``misfires`` are exactly the fields
     :meth:`~noctis.research.ledger.SessionLedger.record_episode` needs; ``note`` carries the last
-    misfire/error text for observability (never required by the ledger).
+    misfire/error text for observability (never required by the ledger). ``misfire_details`` is
+    one bounded ``{"note", "raw"}`` per misfire in attempt order — the classifier note beside a
+    capped excerpt of the rejected payload/reply/exception — so a caller can persist what each
+    retry actually saw (#102); empty when the episode never misfired.
     """
 
     outcome: str
@@ -109,6 +125,7 @@ class EpisodeResult(Generic[T]):
     tokens: int
     misfires: int
     note: str = ""
+    misfire_details: tuple[dict[str, str], ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -158,6 +175,15 @@ def _payload_from_turn(turn: Turn, tool_name: str) -> dict[str, Any] | None:
         if call.name == tool_name:
             return call.arguments if isinstance(call.arguments, dict) else None
     return _extract_json_object(turn.text)
+
+
+def _excerpt(text: str) -> str:
+    """A bounded excerpt of a rejected reply/payload for the misfire detail — head-capped with an
+    explicit truncation marker, so persistence stays small however large the reply was."""
+    text = (text or "").strip()
+    if len(text) <= _MISFIRE_RAW_CAP:
+        return text
+    return f"{text[:_MISFIRE_RAW_CAP]}… [+{len(text) - _MISFIRE_RAW_CAP} chars]"
 
 
 class EpisodeRunner:
@@ -214,6 +240,10 @@ class EpisodeRunner:
         tokens = 0
         misfires = 0
         note = ""
+        # One bounded {"note", "raw"} per misfire, in attempt order — what each rejected attempt
+        # actually saw, persisted with the episode line so an exhausted episode is diagnosable
+        # after the fact instead of surviving only as a count (#102).
+        details: list[dict[str, str]] = []
         value: T | None = None
 
         tools = [
@@ -247,9 +277,11 @@ class EpisodeRunner:
                         tokens=tokens,
                         misfires=misfires,
                         note=_reason(exc),
+                        misfire_details=tuple(details),
                     )
                 misfires += 1
                 note = stumble.note
+                details.append({"note": stumble.note, "raw": _excerpt(str(exc))})
                 messages = messages + [{"role": "user", "content": stumble.retry}]
                 continue
 
@@ -261,6 +293,8 @@ class EpisodeRunner:
                     value = contract.parse(payload)
                 except Exception as exc:  # noqa: BLE001 — a schema-invalid payload is a misfire
                     stumble = classify_emit_failure(_reason(exc))
+                    # The rejected payload IS the evidence — persist it, not just its verdict.
+                    raw = json.dumps(payload, sort_keys=True, default=str)
                 else:
                     return EpisodeResult(
                         outcome=OK,
@@ -268,6 +302,7 @@ class EpisodeRunner:
                         model=resolved_model,
                         tokens=tokens,
                         misfires=misfires,
+                        misfire_details=tuple(details),
                     )
             else:
                 # No emit on either transport: the truncation/markup/thinking-only stumbles land
@@ -275,9 +310,12 @@ class EpisodeRunner:
                 stumble = classify_turn(turn) or classify_emit_failure(
                     "no JSON object in the reply"
                 )
+                # A thinking-only turn has no text — its reasoning is the only trace it left.
+                raw = turn.text if turn.text.strip() else turn.reasoning
 
             misfires += 1
             note = stumble.note
+            details.append({"note": stumble.note, "raw": _excerpt(raw)})
             messages = messages + [{"role": "user", "content": stumble.retry}]
 
         return EpisodeResult(
@@ -287,6 +325,7 @@ class EpisodeRunner:
             tokens=tokens,
             misfires=misfires,
             note=note,
+            misfire_details=tuple(details),
         )
 
     def _emit_turn(self, turn: Turn) -> None:

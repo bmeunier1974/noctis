@@ -4,7 +4,8 @@
 opening (``session_start`` — mandate, budgets, models), one motivating idea per formulate
 (``thesis``, with the same ``parent_thesis`` / ``pivot_rationale`` lineage the experiment
 journal records), each stage transition (``stage``), one line per model judgment
-(``episode`` — stage, model, tokens, misfires, outcome, escalated), each spent verdict
+(``episode`` — stage, model, tokens, misfires, outcome, escalated, plus per-misfire
+diagnostics when any fired, #102), each spent verdict
 (``verdict``, carrying the class-level lesson), and the closing rollup (``session_end``).
 
 The cross-strategy story that today lives in a conversation transcript lives *here* instead,
@@ -125,8 +126,12 @@ class Episode:
 
     ``checks`` is the optional list of driver-side sanity-check outcomes (story #71) — each a
     ``{"check": <id>, "result": <reask|exhausted>}`` naming a check that fired on this episode's
-    output and whether it earned the one corrective re-ask or exhausted it. It stays an empty list
-    for the episodes that fired none, so a reader never branches on presence."""
+    output and whether it earned the one corrective re-ask or exhausted it. ``misfire_details``
+    is the optional list of per-misfire diagnostics (#102) — each a ``{"note", "raw"}`` pairing
+    the classifier note (validation reason included) with a capped excerpt of the rejected
+    payload/reply/exception, in attempt order — and ``note`` the episode's last misfire/error
+    text. All three stay empty for the episodes that carried none, so a reader never branches
+    on presence."""
 
     at: str
     stage: str
@@ -136,6 +141,8 @@ class Episode:
     outcome: str
     escalated: bool
     checks: list[dict[str, Any]] = field(default_factory=list)
+    misfire_details: list[dict[str, Any]] = field(default_factory=list)
+    note: str | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Episode:
@@ -148,6 +155,10 @@ class Episode:
             outcome=str(record.get("outcome", "")),
             escalated=bool(record.get("escalated")),
             checks=[dict(c) for c in (record.get("checks") or []) if isinstance(c, dict)],
+            misfire_details=[
+                dict(d) for d in (record.get("misfire_details") or []) if isinstance(d, dict)
+            ],
+            note=_opt_str(record.get("note")),
         )
 
 
@@ -524,11 +535,18 @@ class SessionLedger:
         misfires: int = 0,
         escalated: bool = False,
         checks: list[dict[str, Any]] | None = None,
+        misfire_details: list[dict[str, Any]] | None = None,
+        note: str | None = None,
     ) -> None:
         """One episode line. ``checks`` is the optional driver-side sanity-check payload (story
         #71) — a list of ``{"check", "result"}`` entries for the checks that fired on this
-        episode's output; an absent/empty list is omitted from the record rather than written as an
-        empty field, so a tolerant read distinguishes "no check fired" from a stored empty one."""
+        episode's output. ``misfire_details`` is the optional per-misfire diagnostic payload
+        (#102) — the runner's ``{"note", "raw"}`` entries pairing each rejected attempt's
+        classifier note with a capped excerpt of what came back, so an exhausted episode is
+        diagnosable from the ledger — and ``note`` the episode's last misfire/error text (the
+        API-error reason when no misfire detail exists). Every absent/empty optional is omitted
+        from the record rather than written as an empty field, so a tolerant read distinguishes
+        "nothing carried" from a stored empty one."""
         record: dict[str, Any] = {
             "event": "episode",
             "at": _now_iso(),
@@ -541,6 +559,10 @@ class SessionLedger:
         }
         if checks:
             record["checks"] = [dict(c) for c in checks]
+        if misfire_details:
+            record["misfire_details"] = [dict(d) for d in misfire_details]
+        if note:
+            record["note"] = note
         self._append(record)
 
     def record_verdict(

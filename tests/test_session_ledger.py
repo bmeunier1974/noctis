@@ -203,6 +203,32 @@ def test_episode_checks_round_trip_and_default_empty(ledger):
     assert "checks" not in [r for r in ledger.records() if r["stage"] == "decide"][0]
 
 
+def test_episode_misfire_details_and_note_round_trip_and_default_empty(ledger):
+    # Per-misfire diagnostics (#102) ride the episode line as a tolerant extension, like checks:
+    # each rejected attempt's classifier note beside a capped excerpt of what came back, plus the
+    # episode's last misfire/error note.
+    detail = {
+        "note": "structured emit invalid (missing thesis)",
+        "raw": '{"style": "momentum"}',
+    }
+    ledger.record_episode(
+        stage="formulate",
+        model="anthropic/claude-sonnet-5",
+        outcome="misfires_exhausted",
+        misfires=3,
+        misfire_details=[detail],
+        note="structured emit invalid (missing thesis)",
+    )
+    ledger.record_episode(stage="decide", model="local", outcome="ok")  # clean ⇒ absent
+    failed, clean = ledger.episodes()
+    assert failed.misfire_details == [detail]
+    assert failed.note == "structured emit invalid (missing thesis)"
+    assert clean.misfire_details == [] and clean.note is None
+    # Absent diagnostics are omitted from the record, never stored as empty fields.
+    clean_record = [r for r in ledger.records() if r["stage"] == "decide"][0]
+    assert "misfire_details" not in clean_record and "note" not in clean_record
+
+
 def test_verdict_round_trips_with_class_lesson(ledger):
     ledger.record_verdict(
         "overnight_drift",
