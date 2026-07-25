@@ -18,6 +18,7 @@ Two harnesses, one contract:
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -26,11 +27,13 @@ import pytest
 from noctis.research import Capabilities
 from noctis.research.driver import (
     _CHEAP_MAX_BARS,
+    _SCENARIO_SPEC_EXAMPLE,
     DECIDE_CONTRACT,
     DECIDE_FINAL_CONTRACT,
     FORMULATE_CONTRACT,
     DecideOutput,
     FormulateOutput,
+    _parse_scenario_spec,
     _slug,
     character_to_profile,
     make_episodes,
@@ -2081,3 +2084,31 @@ def test_missing_field_and_uncompilable_spec_take_the_same_misfire_path():
         runner = EpisodeRunner(client=client, retries=2)
         result = runner.run(contract=FORMULATE_CONTRACT, system="SYS", briefing="B")
         assert result.ok and result.misfires == 1
+
+
+def test_formulate_compile_misfire_corrective_ends_with_a_valid_example():
+    # #91: the corrective teaches the shape, not just the failure — the compiler's precise
+    # message still leads, and the contract's minimal valid scenario_spec example is appended.
+    bad = _formulate_payload(scenario_spec=_uncompilable_spec_payload())
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, bad), _emit(_FORMULATE_TOOL, _formulate_payload())]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    result = runner.run(contract=FORMULATE_CONTRACT, system="SYS", briefing="B")
+
+    assert result.ok
+    corrective = client.calls[1][1]["content"]
+    assert "no-trade" in corrective
+    assert FORMULATE_CONTRACT.retry_hint is not None
+    assert corrective.endswith(FORMULATE_CONTRACT.retry_hint)
+
+
+def test_formulate_retry_hint_example_compiles_through_the_real_parse():
+    # The hint's example is a real dict compiled through the SAME parse the emit meets, so the
+    # shipped teaching can never drift from the compiler.
+    suite, compiled = _parse_scenario_spec({"scenario_spec": _SCENARIO_SPEC_EXAMPLE})
+    assert len(compiled) == len(suite.scenarios) == 2
+    behaviors = {s.behavior for s in suite.scenarios}
+    assert Behavior.ENTER_LONG in behaviors and Behavior.NEVER_TRADE in behaviors
+    # and the hint the model sees carries exactly that example, verbatim
+    assert json.dumps(_SCENARIO_SPEC_EXAMPLE, sort_keys=True) in FORMULATE_CONTRACT.retry_hint

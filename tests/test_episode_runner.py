@@ -9,7 +9,7 @@ the whole harness.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from noctis.config.settings import AgentResearchConfig
 from noctis.research import Capabilities
@@ -217,6 +217,21 @@ def test_completion_error_misfire_is_classified_and_retried():
     assert len(client.calls) == 2
 
 
+def test_ollama_xml_markup_rejection_is_a_misfire_not_an_api_error():
+    # ollama parses the model's function-call markup itself and raises on malformed tags — the
+    # XML face of the same rejected-call stumble (#91), retried rather than ending the session.
+    err = RuntimeError(
+        'litellm.APIConnectionError: Ollama_chatException - {"error":"XML syntax error on line '
+        '26: element <function> closed by </parameter>"}'
+    )
+    good = emit_turn({"action": "promote", "confidence": 0.6})
+    result, client = _run([err, good])
+
+    assert result.ok
+    assert result.misfires == 1
+    assert len(client.calls) == 2
+
+
 # ── 3. Retries exhausted → typed failure, not an exception cascade ────────────────────────
 def test_retries_exhausted_yields_a_typed_failure():
     markup = text_turn("<tool_call>garbage</tool_call>")
@@ -302,6 +317,61 @@ def test_malformed_json_in_text_is_a_misfire_not_a_crash():
     assert result.ok
     assert result.misfires == 1
     assert len(client.calls) == 2
+
+
+# ── Emit-failure correctives carry the contract's optional retry_hint (#91) ───────────────
+HINT = 'For reference, a minimal valid emit: {"action": "hold", "confidence": 0.5}'
+HINTED: EmitContract[Decision] = replace(CONTRACT, retry_hint=HINT)
+
+
+def _run_hinted(script) -> tuple[EpisodeResult[Decision], FakeClient]:
+    client = FakeClient(script)
+    result = EpisodeRunner(client=client, retries=2).run(
+        contract=HINTED, system="SYS", briefing="BRIEF"
+    )
+    return result, client
+
+
+def test_schema_misfire_corrective_appends_the_contract_hint():
+    bad = emit_turn({"action": "explode", "confidence": 0.1})
+    good = emit_turn({"action": "hold", "confidence": 0.5})
+    result, client = _run_hinted([bad, good])
+
+    assert result.ok
+    retry = client.calls[1]["messages"][1]["content"]
+    assert "not one of promote/reject/hold" in retry  # the classifier's reason still leads
+    assert retry.endswith(HINT)  # the example is appended, never substituted
+    # the ledger-facing note and detail stay the classifier's own — the hint is prompt-only
+    assert HINT not in result.misfire_details[0]["note"]
+
+
+def test_prose_without_json_corrective_appends_the_contract_hint():
+    junk = text_turn("I would promote it, quite confidently.")
+    good = emit_turn({"action": "promote", "confidence": 0.9})
+    result, client = _run_hinted([junk, good])
+
+    assert result.ok
+    assert client.calls[1]["messages"][1]["content"].endswith(HINT)
+
+
+def test_turn_stumbles_never_carry_the_hint():
+    # Markup/truncation stumbles are transport problems, not shape problems — no example.
+    markup = text_turn("<tool_call>{...}</tool_call>")
+    good = emit_turn({"action": "hold", "confidence": 0.5})
+    result, client = _run_hinted([markup, good])
+
+    assert result.ok
+    assert HINT not in client.calls[1]["messages"][1]["content"]
+
+
+def test_hintless_contract_corrective_is_unchanged():
+    bad = emit_turn({"action": "explode", "confidence": 0.1})
+    good = emit_turn({"action": "hold", "confidence": 0.5})
+    result, client = _run([bad, good])
+
+    assert result.ok
+    # the generic corrective's own closing words end the message — nothing appended
+    assert client.calls[1]["messages"][1]["content"].endswith("nothing else.")
 
 
 # ── 5. Completion counting is exposed for budget enforcement, counted in one place ────────

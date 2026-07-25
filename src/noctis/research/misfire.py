@@ -43,7 +43,13 @@ class Misfire:
 
 _TOOL_MARKUP_TOKENS = ("<tool_call>", "<function=")
 # Only this exception class is retried — a genuinely unreachable backend is not a misfire.
-_MALFORMED_CALL_MARKERS = ("invalid tool call arguments", "unexpected end of json")
+# "xml syntax error": ollama parses a model's function-call markup itself and raises when the
+# tags are malformed — the XML face of the same rejected-truncated-call stumble (#91).
+_MALFORMED_CALL_MARKERS = (
+    "invalid tool call arguments",
+    "unexpected end of json",
+    "xml syntax error",
+)
 
 _TEXT_MARKUP = Misfire(
     note=(
