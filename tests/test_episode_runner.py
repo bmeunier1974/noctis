@@ -217,6 +217,21 @@ def test_completion_error_misfire_is_classified_and_retried():
     assert len(client.calls) == 2
 
 
+def test_ollama_xml_markup_rejection_is_a_misfire_not_an_api_error():
+    # ollama parses the model's function-call markup itself and raises on malformed tags — the
+    # XML face of the same rejected-call stumble (#91), retried rather than ending the session.
+    err = RuntimeError(
+        'litellm.APIConnectionError: Ollama_chatException - {"error":"XML syntax error on line '
+        '26: element <function> closed by </parameter>"}'
+    )
+    good = emit_turn({"action": "promote", "confidence": 0.6})
+    result, client = _run([err, good])
+
+    assert result.ok
+    assert result.misfires == 1
+    assert len(client.calls) == 2
+
+
 # ── 3. Retries exhausted → typed failure, not an exception cascade ────────────────────────
 def test_retries_exhausted_yields_a_typed_failure():
     markup = text_turn("<tool_call>garbage</tool_call>")

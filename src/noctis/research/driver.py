@@ -627,7 +627,8 @@ _SCENARIO_SPEC_EXAMPLE: dict[str, Any] = {
 
 _FORMULATE_RETRY_HINT = (
     "For reference, a minimal valid 'scenario_spec': 'behavior' is ONE enum string and 'leg' is "
-    "a SIBLING integer index into 'legs' (omit it for never_trade) —\n"
+    "a SIBLING integer index into 'legs' (omit it for never_trade), and every scenario's leg "
+    "'bars' must sum to at least 60 — LENGTHEN legs to fix a too-short tape —\n"
     + json.dumps(_SCENARIO_SPEC_EXAMPLE, sort_keys=True)
 )
 
