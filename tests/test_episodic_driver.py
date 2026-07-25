@@ -7,7 +7,8 @@ Two harnesses, one contract:
 * **Deterministic** tests drive the stage machine with plain fake episodes and a fake toolbox —
   zero LLM — locking the stage order, the ledger persistence, the budget stops (max_episodes,
   wall-clock, stop_event), and each per-stage failed-episode policy (formulate → end, author →
-  skip, decide → re-ask once then undecided).
+  skip, decide → re-ask once, an exhausted revise cap → the final binary ask (#99), then
+  undecided).
 * **End to end**, a real :class:`~noctis.research.episode.EpisodeRunner` fed scripted ``Turn``s by
   a fake client drives a real :class:`~noctis.research.tools.ResearchToolbox` (with a fake coder)
   through a whole session that authors, optimizes, and reaches a GATED verdict with a complete
@@ -26,6 +27,7 @@ from noctis.research import Capabilities
 from noctis.research.driver import (
     _CHEAP_MAX_BARS,
     DECIDE_CONTRACT,
+    DECIDE_FINAL_CONTRACT,
     FORMULATE_CONTRACT,
     DecideOutput,
     FormulateOutput,
@@ -194,7 +196,7 @@ class Episodes:
         self.completions = 0
         self.formulate_calls = 0
         self.formulate_correctives: list[str | None] = []
-        self.decide_calls: list[tuple[str, str | None]] = []
+        self.decide_calls: list[tuple[str, str | None, bool]] = []
 
     def formulate(self, *, corrective=None):
         self.completions += 1
@@ -202,9 +204,9 @@ class Episodes:
         self.formulate_correctives.append(corrective)
         return self._f.pop(0)
 
-    def decide(self, strategy, *, corrective=None):
+    def decide(self, strategy, *, corrective=None, final=False):
         self.completions += 1
-        self.decide_calls.append((strategy, corrective))
+        self.decide_calls.append((strategy, corrective, final))
         return self._d.pop(0)
 
 
@@ -859,27 +861,119 @@ def test_decide_episode_failure_reasks_then_undecided(tmp_path):
     assert [e.outcome for e in ledger.episodes() if e.stage == "decide"] == [API_ERROR, API_ERROR]
 
 
-def test_revise_cap_reasks_once_then_leaves_undecided(tmp_path):
-    # A `revise` is capped: the first one earns the single corrective re-ask (naming the cap); a
-    # second `revise` for the same strategy applies the DECIDE failure policy (left undecided).
+def test_revise_lock_forces_the_final_binary_ask_then_leaves_undecided(tmp_path):
+    # A `revise` is capped: the first earns the single corrective re-ask (naming the cap); a
+    # second exhausts it and forces ONE final binary ask (#99) — run under the binary contract
+    # (final=True), the corrective naming the spent cap. A model that still refuses to pick
+    # leaves the strategy undecided exactly as before.
     episodes = Episodes(
         [formulate_ok()],
-        [decide_ok("revise", new_lever="add a short leg"), decide_ok("revise", new_lever="again")],
+        [
+            decide_ok("revise", new_lever="add a short leg"),
+            decide_ok("revise", new_lever="again"),
+            decide_ok("revise", new_lever="still"),
+        ],
     )
     box = FakeToolbox()
     ledger = SessionLedger(tmp_path, "s9")
-    summary = _drive(episodes, box, max_episodes=3, ledger=ledger)
+    summary = _drive(episodes, box, max_episodes=4, ledger=ledger)
 
     assert box.rejects == [] and box.evaluations == []  # revise is never a terminal verdict
-    assert len(episodes.decide_calls) == 2  # initial + exactly one capped re-ask
+    assert len(episodes.decide_calls) == 3  # initial + the capped re-ask + the final binary ask
     assert episodes.decide_calls[0][1] is None  # first ask has no corrective
     assert episodes.decide_calls[1][1] is not None and "revise" in episodes.decide_calls[1][1]
+    assert [c[2] for c in episodes.decide_calls] == [False, False, True]  # binary contract last
+    assert "no longer" in episodes.decide_calls[2][1]  # the corrective names the spent cap
     assert summary.undecided == ["intraday_momentum_1"]
     dchecks = [e.checks for e in ledger.episodes() if e.stage == "decide"]
     assert dchecks == [
         [{"check": "revise_cap", "result": "reask"}],
         [{"check": "revise_cap", "result": "exhausted"}],
+        [{"check": "revise_cap", "result": "final"}],
     ]
+
+
+def test_final_binary_ask_lands_an_honest_reject(tmp_path):
+    # The #99 scenario: the model revise-locks on gate-failing evidence, and the final binary ask
+    # converts the completed tune-to-verdict cycle into an honest reject through the same gated
+    # method — no gate moved, nothing fabricated, nothing left undecided.
+    episodes = Episodes(
+        [formulate_ok()],
+        [
+            decide_ok("revise", new_lever="x"),
+            decide_ok("revise", new_lever="y"),
+            decide_ok("reject"),
+        ],
+    )
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "s9c")
+    summary = _drive(episodes, box, max_episodes=4, ledger=ledger)
+
+    assert len(box.rejects) == 1 and summary.rejections == 1
+    assert summary.undecided == []  # the completed cycle produced a verdict, not nothing
+    verdicts = ledger.verdicts()
+    assert len(verdicts) == 1 and verdicts[0].verdict == "reject"
+    dchecks = [e.checks for e in ledger.episodes() if e.stage == "decide"]
+    assert dchecks == [
+        [{"check": "revise_cap", "result": "reask"}],
+        [{"check": "revise_cap", "result": "exhausted"}],
+        [{"check": "revise_cap", "result": "final"}],
+    ]
+
+
+def test_final_binary_ask_approve_still_routes_through_the_champion_gate(tmp_path):
+    # A final-ask approve is submitted exactly like any other: through evaluate_vs_champion with
+    # the journal's best params and the MATCH-reserved holdout (never the model's nomination).
+    episodes = Episodes(
+        [formulate_ok()],
+        [decide_ok("revise"), decide_ok("revise"), decide_ok("approve", holdout_symbols=("DDD",))],
+    )
+    box = FakeToolbox(
+        screen_result={"suggested_fit": ["A", "B"], "reserved_holdout": ["D"]},
+        verdict_results=[{"ok": True, "promoted": True}],
+    )
+    ledger = SessionLedger(tmp_path, "s9d")
+    summary = _drive(episodes, box, max_episodes=4, ledger=ledger)
+
+    assert len(box.evaluations) == 1
+    ev = box.evaluations[0]
+    assert ev["symbols"] == ["A", "B"] and ev["holdout_symbols"] == ["D"]
+    assert summary.promotions == 1 and summary.undecided == []
+
+
+def test_final_binary_ask_failure_leaves_undecided(tmp_path):
+    # A failed final episode fabricates nothing: the strategy is left undecided as before, and
+    # the failed line still carries the final-ask marker so the ledger tells the story.
+    episodes = Episodes(
+        [formulate_ok()],
+        [decide_ok("revise"), decide_ok("revise"), decide_fail()],
+    )
+    box = FakeToolbox()
+    ledger = SessionLedger(tmp_path, "s9e")
+    summary = _drive(episodes, box, max_episodes=4, ledger=ledger)
+
+    assert box.rejects == [] and box.evaluations == []
+    assert summary.undecided == ["intraday_momentum_1"]
+    decide_eps = [e for e in ledger.episodes() if e.stage == "decide"]
+    assert decide_eps[-1].outcome == API_ERROR
+    assert decide_eps[-1].checks == [{"check": "revise_cap", "result": "final"}]
+
+
+def test_final_binary_ask_gate_refusal_leaves_undecided_with_no_further_ask(tmp_path):
+    # The final verdict still goes through the gate, and a refusal earns NO further re-ask — the
+    # final ask is one submission, then undecided.
+    episodes = Episodes(
+        [formulate_ok()],
+        [decide_ok("revise"), decide_ok("revise"), decide_ok("reject")],
+    )
+    box = FakeToolbox(verdict_results=[{"error": _EXHAUSTION_REFUSAL}])
+    ledger = SessionLedger(tmp_path, "s9f")
+    summary = _drive(episodes, box, max_episodes=4, ledger=ledger)
+
+    assert len(box.rejects) == 1  # submitted once, refused, never re-asked
+    assert len(episodes.decide_calls) == 3
+    assert summary.rejections == 0 and summary.undecided == ["intraday_momentum_1"]
+    assert ledger.verdicts() == []  # nothing recorded as a spent verdict
 
 
 def test_revise_cap_reask_can_recover_to_a_terminal_verdict(tmp_path):
@@ -1398,6 +1492,68 @@ _REJECT_PAYLOAD = {
     "class_tag": "intraday momentum",
     "holdout_symbols": [],
 }
+
+
+def test_decide_final_contract_is_binary_on_both_transports():
+    # The final-ask contract (#99) drops `revise` from the emit vocabulary itself (the schema
+    # enum), and its parse refuses a revise arriving via the JSON-in-text fallback — both
+    # transports meet the same binary rule. The standard contract keeps all three verdicts.
+    assert DECIDE_CONTRACT.schema["properties"]["verdict"]["enum"] == [
+        "approve",
+        "reject",
+        "revise",
+    ]
+    assert DECIDE_FINAL_CONTRACT.schema["properties"]["verdict"]["enum"] == ["approve", "reject"]
+    assert DECIDE_FINAL_CONTRACT.name == DECIDE_CONTRACT.name  # one emit tool, two vocabularies
+    assert DECIDE_FINAL_CONTRACT.parse(dict(_REJECT_PAYLOAD)).verdict == "reject"
+    assert DECIDE_FINAL_CONTRACT.parse(dict(_REJECT_PAYLOAD, verdict="approve")).verdict == (
+        "approve"
+    )
+    with pytest.raises(ValueError, match="approve or reject"):
+        DECIDE_FINAL_CONTRACT.parse(dict(_REJECT_PAYLOAD, verdict="revise"))
+
+
+def test_end_to_end_revise_lock_resolves_through_the_final_binary_ask(tmp_path):
+    # The #99 parity-session dead end, end to end: the judgment model revise-locks (two revises
+    # through the standard contract), the driver's final ask runs under the binary contract, and
+    # its reject clears the REAL gate — the completed cycle ends in a verdict, not INCONCLUSIVE.
+    revise = dict(_REJECT_PAYLOAD, verdict="revise")
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    ledger = SessionLedger(box.state_dir, session_id="ep-final-ask")
+    client = FakeEpisodeClient(
+        [
+            _emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD),
+            _emit(_DECIDE_TOOL, revise),
+            _emit(_DECIDE_TOOL, revise),
+            _emit(_DECIDE_TOOL, _REJECT_PAYLOAD),
+        ]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fit_symbols=["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=4,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+
+    assert summary.rejections == 1 and summary.undecided == []
+    verdicts = ledger.verdicts()
+    assert len(verdicts) == 1 and verdicts[0].verdict == "reject"
+    dchecks = [e.checks for e in ledger.episodes() if e.stage == "decide"]
+    assert dchecks == [
+        [{"check": "revise_cap", "result": "reask"}],
+        [{"check": "revise_cap", "result": "exhausted"}],
+        [{"check": "revise_cap", "result": "final"}],
+    ]
 
 
 def test_end_to_end_episodic_session_produces_a_gated_verdict_and_a_complete_ledger(tmp_path):

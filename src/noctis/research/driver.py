@@ -66,7 +66,11 @@ exactly what was wrong) before the stage's own failed-episode policy applies:
   carries no ``new_lever`` escape, so an exhausted tag simply fails — the honest move is a
   genuinely different class.
 * **DECIDE — ``revise`` is capped.** A ``revise`` verdict earns the one corrective re-ask (naming
-  the cap); a second ``revise`` for the same strategy exhausts it and leaves the strategy undecided.
+  the cap); a second ``revise`` for the same strategy exhausts it and forces the **final binary
+  ask** (#99): one more episode whose emit contract offers only ``approve``/``reject`` — the
+  vocabulary itself drops ``revise`` — with a corrective naming the spent cap. A verdict it lands
+  is submitted through the same gated method as any other; only if the final ask also fails to
+  land one is the strategy left undecided.
 
 Each check's outcome rides the ledger's ``episode`` line (a ``checks`` payload of
 ``{check, result}`` — ``reask`` when it earned the correction, ``exhausted`` when it fired again),
@@ -86,10 +90,15 @@ so which check fired and how its re-ask resolved is visible to reports.
   refused verdict, *or* a capped ``revise`` triggers exactly one re-ask, with the failure note /
   refusal / cap folded in as corrective context. The two-attempt cap is shared across all three
   causes — one corrective re-ask total, never more — so a mix (e.g. a ``revise`` then a gate
-  refusal) still spends only the one re-ask. If the re-ask still fails, is still refused, or
-  ``revise``s again, the strategy is left undecided (the toolbox already holds it there from AUTHOR
-  time, so the session-end rollup and the summary surface it, and the TTL sweep archives it later —
-  never a silent loss).
+  refusal) still spends only the one re-ask. If the re-ask still fails or is still refused, the
+  strategy is left undecided (the toolbox already holds it there from AUTHOR time, so the
+  session-end rollup and the summary surface it, and the TTL sweep archives it later — never a
+  silent loss). One exception (#99): a re-ask that ``revise``s again — an exhausted revise cap —
+  earns the **final binary ask** described above rather than going straight to undecided, so a
+  revise-locked judgment model cannot convert a completed tune-to-verdict cycle into nothing. The
+  final ask changes no gate and fabricates nothing: its verdict still goes through the gated
+  method (one submission, no further re-ask on a refusal), and a final ask that fails, is refused,
+  or still refuses to pick leaves the strategy undecided exactly as before.
 
 **Budgets.** ``max_episodes`` (mapped from ``max_iterations``) is enforced off the injected
 ``completions`` counter — the episode runner's own per-completion tally, retries included — checked
@@ -161,7 +170,8 @@ _AUTHOR_BUDGET_EXHAUSTED = "author_budget_exhausted"
 
 # One re-ask on a failed/refused DECIDE, then undecided (see the module docstring). The same
 # two-attempt cap absorbs a `revise` verdict: the first revise earns the corrective re-ask, a
-# second revise for the same strategy exhausts it (undecided).
+# second revise for the same strategy exhausts it — which then forces the final binary ask (#99)
+# rather than going straight to undecided.
 _DECIDE_ATTEMPTS = 2
 
 # One re-ask on a failed FORMULATE sanity check, then end the session (the FORMULATE policy).
@@ -183,7 +193,10 @@ _FORMULATE_CORRECTIVE_HEADER = (
 _COST_CHECK = "cost_arithmetic"  # cost_arithmetic cites no number from the digest shown
 _CLASS_CHECK = "class_tag_exhausted"  # the proposed class is already a declared dead end
 _REVISE_CHECK = "revise_cap"  # a `revise` verdict — capped at one re-ask per strategy
-_REASK, _EXHAUSTED = "reask", "exhausted"  # earned the re-ask vs fired again and exhausted it
+# How a fired check resolved on its episode line: `reask` earned the one correction, `exhausted`
+# fired again after it, and `final` marks the forced binary ask that follows an exhausted revise
+# cap (#99) — the episode whose contract offers approve/reject only.
+_REASK, _EXHAUSTED, _FINAL = "reask", "exhausted", "final"
 
 # A maximal integer/decimal run — the cheap numeric-token extractor the cost check overlaps on.
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
@@ -192,6 +205,17 @@ _REVISE_CORRECTIVE = (
     "a 'revise' verdict is capped — this session does not spend another tuning round on your "
     "say-so. Decide on the current evidence: approve (challenge the board), reject (a class-level "
     "dead end), or revise once more only if the class genuinely continues."
+)
+
+# The final binary ask (#99): the revise cap is spent, the emit contract itself no longer offers
+# `revise`, and this corrective says so. It points at the honest exit without fabricating — the
+# journaled evidence stays the arbiter, and the gated method still disposes of the verdict.
+_FINAL_CORRECTIVE = (
+    "your revise budget for this strategy is spent — 'revise' is no longer an accepted verdict. "
+    "This is the final ask: weigh the gate-facing evidence above and emit exactly one of approve "
+    "(challenge the champion board) or reject (declare the honest dead end). The journaled "
+    "evidence is the arbiter; if it does not support a promotion case, reject is the honest "
+    "verdict."
 )
 
 # ── the deterministic MATCH lexicon ─────────────────────────────────────────────────────────
@@ -590,6 +614,35 @@ DECIDE_CONTRACT: EmitContract[DecideOutput] = EmitContract(
     parse=parse_decide,
 )
 
+# The final-ask variant of the decide schema (#99): once the revise cap is spent, the emit
+# vocabulary itself drops `revise` — the binary choice is enforced structurally, not by prompt.
+_DECIDE_FINAL_SCHEMA: dict[str, Any] = {
+    **_DECIDE_SCHEMA,
+    "properties": {
+        **_DECIDE_SCHEMA["properties"],
+        "verdict": {"type": "string", "enum": [_APPROVE, _REJECT]},
+    },
+}
+
+
+def parse_decide_final(payload: dict[str, Any]) -> DecideOutput:
+    """The typed parse for the final binary ask (#99): :func:`parse_decide` with ``revise``
+    refused. A backend that answers in prose (the JSON-in-text fallback) is held to the same
+    binary vocabulary as the schema — a ``revise`` raises here and re-prompts as a schema misfire
+    naming the choice, exactly like any other invalid field."""
+    out = parse_decide(payload)
+    if out.verdict == _REVISE:
+        raise ValueError("the revise budget is spent — the verdict must be approve or reject")
+    return out
+
+
+DECIDE_FINAL_CONTRACT: EmitContract[DecideOutput] = EmitContract(
+    name="emit_verdict",
+    description="Emit the FINAL verdict for this strategy: approve or reject only.",
+    schema=_DECIDE_FINAL_SCHEMA,
+    parse=parse_decide_final,
+)
+
 # Episode system prompts — one line of role framing; the briefing (rebuilt fresh from disk by the
 # builders below) carries every fact and the task. Kept tiny so a small-context backend has room.
 _FORMULATE_SYSTEM = (
@@ -700,13 +753,18 @@ def make_episodes(
             briefing = f"{briefing}\n\n{_FORMULATE_CORRECTIVE_HEADER}\n{corrective}"
         return runner.run(contract=FORMULATE_CONTRACT, system=_FORMULATE_SYSTEM, briefing=briefing)
 
-    def decide(strategy: str, *, corrective: str | None = None) -> EpisodeResult[DecideOutput]:
+    def decide(
+        strategy: str, *, corrective: str | None = None, final: bool = False
+    ) -> EpisodeResult[DecideOutput]:
+        # `final` (#99) swaps in the binary contract for the ask that follows an exhausted revise
+        # cap; the briefing is rebuilt fresh either way, so the evidence is restated in full.
         briefing = decide_briefing(
             toolbox, ledger, strategy, mandate=mandate, context_window=context_window
         )
         if corrective:
             briefing = f"{briefing}\n\n{_CORRECTIVE_HEADER}\n{corrective}"
-        return runner.run(contract=DECIDE_CONTRACT, system=_DECIDE_SYSTEM, briefing=briefing)
+        contract = DECIDE_FINAL_CONTRACT if final else DECIDE_CONTRACT
+        return runner.run(contract=contract, system=_DECIDE_SYSTEM, briefing=briefing)
 
     return formulate, decide
 
@@ -1387,8 +1445,10 @@ def _decide_stage(
     and on a failed episode, a refused verdict, or a (capped) ``revise`` re-ask exactly once before
     leaving the strategy undecided. The two-attempt cap is shared across all three causes — one
     corrective re-ask total, whatever fired it — so a ``revise`` earns the one re-ask (naming the
-    cap) and a second ``revise`` for the same strategy exhausts it (undecided). ``reserved_holdout``
-    is the MATCH-reserved symbol holdout the driver submits at verdict time — a code reservation the
+    cap) and a second ``revise`` for the same strategy exhausts it. An exhausted revise cap then
+    forces the final binary ask (#99, :func:`_final_decide_ask`) — promote or reject, revise no
+    longer offered — before the strategy can be left undecided. ``reserved_holdout`` is the
+    MATCH-reserved symbol holdout the driver submits at verdict time — a code reservation the
     model proposal never overwrites."""
     corrective: str | None = None
     for attempt in range(_DECIDE_ATTEMPTS):
@@ -1402,13 +1462,24 @@ def _decide_stage(
             continue
         verdict = result.value
         if verdict.verdict == _REVISE:
-            # `revise` is capped: the first earns the one corrective re-ask, a second exhausts it.
+            # `revise` is capped: the first earns the one corrective re-ask, a second exhausts it
+            # and forces the final binary ask (#99) instead of dead-ending in undecided.
             last = attempt == _DECIDE_ATTEMPTS - 1
             record_episode(
                 DECIDE, result, [{"check": _REVISE_CHECK, "result": _EXHAUSTED if last else _REASK}]
             )
             if last:
-                logger.info("decide %s: revise cap reached — left undecided", name)
+                logger.info("decide %s: revise cap exhausted — forcing the final binary ask", name)
+                _final_decide_ask(
+                    toolbox,
+                    ledger,
+                    decide,
+                    name,
+                    symbols,
+                    reserved_holdout,
+                    record_episode,
+                    emit_tool=emit_tool,
+                )
                 return
             corrective = _REVISE_CORRECTIVE
             continue
@@ -1424,6 +1495,48 @@ def _decide_stage(
         corrective = str(outcome["error"])
     # Re-ask exhausted: leave the strategy undecided (the toolbox still holds it there).
     logger.info("decide %s left undecided after the re-ask", name)
+
+
+def _final_decide_ask(
+    toolbox: ResearchToolbox,
+    ledger: SessionLedger,
+    decide: DecideEpisode,
+    name: str,
+    symbols: Sequence[str],
+    reserved_holdout: Sequence[str],
+    record_episode: Callable[..., None],
+    *,
+    emit_tool: ToolEmitter = _no_emit,
+) -> None:
+    """The forced binary ask after the revise cap is spent (#99): one more decide episode under
+    the binary contract (``final=True`` — the emit vocabulary drops ``revise``), with a corrective
+    naming the spent cap. A verdict it lands is submitted through the same gated toolbox method as
+    any other — no gate moves, nothing is fabricated; the ask only removes the dead end where the
+    model's offered exits excluded the one it kept choosing. A failed episode, a still-revising
+    output (a transport that ignored the binary contract), or a gate refusal leaves the strategy
+    undecided exactly as before — the one submission earns no further re-ask. The episode line
+    carries ``{"check": "revise_cap", "result": "final"}`` so a ledger reader tells the forced
+    ask apart from an ordinary decide episode."""
+    marker = [{"check": _REVISE_CHECK, "result": _FINAL}]
+    result = decide(name, corrective=_FINAL_CORRECTIVE, final=True)
+    if not result.ok or result.value is None:
+        record_episode(DECIDE, result, marker)
+        logger.info("decide %s: the final ask produced no verdict — left undecided", name)
+        return
+    verdict = result.value
+    record_episode(DECIDE, result, marker)
+    if verdict.verdict == _REVISE:
+        logger.info("decide %s: still revising on the final ask — left undecided", name)
+        return
+    outcome = _submit_verdict(
+        toolbox, name, symbols, reserved_holdout, verdict, emit_tool=emit_tool
+    )
+    if "error" not in outcome:
+        _record_verdict(ledger, name, verdict, outcome)
+        return
+    logger.info(
+        "decide %s: final verdict refused by the gate (%s) — left undecided", name, outcome["error"]
+    )
 
 
 def _submit_verdict(
