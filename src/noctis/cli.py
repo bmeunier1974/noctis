@@ -1,9 +1,10 @@
 """Command-line interface (Typer).
 
 Commands: ``setup`` (the guided first-run wizard), ``init``/``migrate`` (scaffold /
-legacy-layout move), ``run``, ``status``, ``report``, ``backtest``, ``champions``,
-``account`` (the continuous paper account), ``research`` (one observable agent research
-session), ``strategies`` (the authored library index), and the ``data`` sub-app.
+legacy-layout move), ``run``, ``status``, ``mandate`` (the steering preflight), ``report``,
+``backtest``, ``champions``, ``account`` (the continuous paper account), ``research`` (one
+observable agent research session), ``strategies`` (the authored library index), and the
+``data`` sub-app.
 """
 
 from __future__ import annotations
@@ -12,10 +13,14 @@ import logging
 import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, NoReturn
 
 import typer
 
 from noctis.config import SafetyGateError, load_settings, resolve_execution_mode
+
+if TYPE_CHECKING:  # the composition root imports at call time (fast `--help`), types don't
+    from noctis.bootstrap import OverrideChange, SessionInputs
 
 
 def _logging_level(verbose: int) -> int:
@@ -49,6 +54,12 @@ def _resolve_mode_or_exit(config: str | None):
     return settings, mode
 
 
+def _exit_red(exc: Exception, prefix: str = "") -> NoReturn:
+    """Red text on stderr + exit 1 — the one mapping every typed startup error takes."""
+    typer.secho(f"{prefix}{exc}", fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=1) from exc
+
+
 def _resolve_session_or_exit(config: str | None, **kwargs):
     """Resolve the session inputs (the composition root's precedence chain), mapping each
     typed startup error to red text + a non-zero exit. Errors are loud at startup by design:
@@ -60,14 +71,37 @@ def _resolve_session_or_exit(config: str | None, **kwargs):
     try:
         return resolve_session(config, **kwargs)
     except UsageError as exc:  # --directive × --mandate, or an unknown --metric
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
+        _exit_red(exc)
     except MandateError as exc:
-        typer.secho(f"MANDATE: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
+        _exit_red(exc, prefix="MANDATE: ")
     except SafetyGateError as exc:
-        typer.secho(f"SAFETY GATE: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
+        _exit_red(exc, prefix="SAFETY GATE: ")
+
+
+def _resolve_status_session(config: str | None) -> tuple[SessionInputs, str | None]:
+    """Resolve the whole session for ``status``, degrading an unusable mandate to a report.
+
+    ``status`` is the command an operator runs *because* something is wrong, so a mandate the
+    overlay refuses must not take the rest of the diagnosis down with it: the refusal is
+    returned as text for the mandate line, the remaining values fall back to the pre-overlay
+    settings, and the command still exits 0 — the same warn-don't-exit contract this one
+    already keeps beside an un-migrated legacy layout. ``run``/``research`` still refuse
+    outright, which is where a fatal configuration error belongs.
+
+    The safety gate is deliberately **not** degraded (a mode that will not resolve is not a
+    configuration ``status`` can narrate), and it resolves before the mandate, so the fallback
+    reload below is only ever reached with the gate already open.
+    """
+    from noctis.bootstrap import SessionInputs, resolve_session
+    from noctis.research import MandateError
+
+    try:
+        return resolve_session(config, require_gate=True), None
+    except MandateError as exc:
+        settings, mode = _resolve_mode_or_exit(config)
+        return SessionInputs(settings=settings, mode=mode, mandate=None, overrides=[]), str(exc)
+    except SafetyGateError as exc:
+        _exit_red(exc, prefix="SAFETY GATE: ")
 
 
 def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
@@ -99,12 +133,87 @@ def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
 
 
 def _echo_mandate(mandate, override_lines: list[str]) -> None:
-    """Print the resolved mandate provenance + any applied config overrides at session start."""
+    """Print the resolved mandate provenance + **every** applied config override at session start.
+
+    The overlay carries the whole run configuration now — which model thinks, what it may spend,
+    how much history it fetches, what "good" is scored as — so the assembled configuration has to
+    land in the log an operator already reads, not just the mandate's name. One header names the
+    mandate that moved them (the provenance a multi-mandate install needs), then one ``k=v`` line
+    per override, in the sorted order ``apply_patch`` read back off the validated settings — so
+    the echo shows the value the run will actually use, not the value the file asked for.
+
+    Nothing to say stays silent: no mandate, or a mandate whose overlay applied nothing, prints
+    exactly what it printed before this existed.
+    """
     if mandate is not None:
         typer.echo(f"Mandate: {mandate.source}")
+    if not override_lines:
+        return
+    source = mandate.source if mandate is not None else "?"
+    typer.echo(f"  mandate {source} overrides:")
     for line in override_lines:
-        source = mandate.source if mandate is not None else "?"
-        typer.echo(f"  mandate {source} overrides {line}")
+        typer.echo(f"    {line}")
+
+
+def _echo_status_mandate(mandate, override_lines: list[str], error: str | None) -> None:
+    """The provenance footer of ``noctis status``: what steered this configuration, and how.
+
+    Three states, one shape. Resolved: the mandate's source, then every applied ``k=v``
+    override (or ``none``) — the same echo lines the kickoff prints, so the two surfaces can
+    never disagree about what applied. No mandate: said explicitly, because "unconstrained" is
+    a configuration too. Unusable: the overlay's own refusal, verbatim and in red, plus the
+    warning that every value above it is pre-overlay — the diagnosis an operator opened
+    ``status`` for, rather than the traceback ``run`` would have handed them.
+    """
+    if error is not None:
+        typer.secho(
+            "mandate:           UNUSABLE — the values above are pre-overlay; `run` would "
+            "refuse to start:",
+            fg=typer.colors.RED,
+        )
+        for line in error.splitlines():
+            typer.echo(f"  {line}")
+    elif mandate is None:
+        typer.echo("mandate:           none (unconstrained)")
+    else:
+        typer.echo(f"mandate:           {mandate.source}")
+    if not override_lines:
+        typer.echo("overrides:         none")
+        return
+    typer.echo("overrides:")
+    for line in override_lines:
+        typer.echo(f"  {line}")
+
+
+def _echo_mandate_preflight(mandate, changes: list[OverrideChange]) -> None:
+    """The whole body of ``noctis mandate``: what this selector resolved to, and what it moves.
+
+    Same label gutter as ``status`` (and the same ``overrides:`` block, ``none`` included), so
+    the two read as one tool: an operator who has seen one has read the other. The diff is the
+    part ``status`` cannot show — every bound path with the value config resolved for it *and*
+    the value the run would use — because a preflight's question is "what would this change?",
+    not "what is set?".
+    """
+    if mandate is None:  # an empty MANDATE.md — the one selector that resolves to no steering
+        typer.echo("mandate:           none — this selector resolves to no steering at all")
+        typer.echo("overrides:         none (a run under it would be unconstrained)")
+        return
+    typer.echo(f"mandate:           {mandate.source}")
+    typer.echo(f"summary:           {mandate.summary or 'none'}")
+    typer.echo(f"symbols:           {', '.join(mandate.symbols) if mandate.symbols else 'none'}")
+    if not mandate.references:
+        typer.echo("references:        none")
+    else:
+        typer.echo("references:")
+        for ref in mandate.references:
+            typer.echo(f"  {ref.path} ({len(ref.text.encode('utf-8'))} bytes)")
+    if not changes:
+        typer.echo("overrides:         none (this mandate binds no settings)")
+        return
+    typer.echo("overrides:")
+    width = max(len(change.path) for change in changes)
+    for change in changes:
+        typer.echo(f"  {change.path:<{width}}  {change.before} → {change.after}")
 
 
 def _echo_research_engine(settings) -> None:
@@ -283,12 +392,21 @@ def run(
 def status(
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
 ) -> None:
-    """Show the resolved execution mode, market state, and a configuration summary."""
+    """Show the resolved execution mode, market state, and a configuration summary.
+
+    Reports the configuration the session actually assembled: ``status`` runs the composition
+    root's whole precedence chain (gate → mandate → overlay), not the mode alone, so every line
+    below shows the **post-overlay** value a run would use rather than what ``config.yaml`` said
+    before the mandate touched it. The mandate, its applied overrides, and the resolved research
+    model are stated alongside, so the steering and its effect are readable together.
+    """
     from noctis.champions import build_registry
     from noctis.engine import MarketClock, initial_phase_for, resolve_trading_driver
     from noctis.engine.report_assembly import gather_account_forward
+    from noctis.research import resolved_research_model
 
-    settings, mode = _resolve_mode_or_exit(config)
+    inputs, mandate_error = _resolve_status_session(config)
+    settings, mode = inputs.settings, inputs.mode
     # status stays usable beside a legacy layout — it's the diagnostic you'd run first.
     _guard_legacy_or_exit(settings, warn_only=True)
     clock = MarketClock(settings.session.calendar, settings.session.timezone)
@@ -329,11 +447,44 @@ def status(
     typer.echo(f"account:           {account_line}")
     typer.echo(f"universe:          {', '.join(settings.universe)}")
     typer.echo(f"research_budget:   {settings.research_time_budget_minutes} min")
+    # The same resolution the run's own "Research engine" line announces (research.model, else
+    # the agent fallback) — read here without the client probe, so the quickest diagnostic in
+    # the CLI never pays for (or depends on) the optional LLM stack.
+    typer.echo(f"research model:    {resolved_research_model(settings)}")
     typer.echo(f"data provider:     {settings.data.provider} (budget ${settings.data.budget_usd})")
     typer.echo(
         f"trading driver:    {resolve_trading_driver(settings)} "
         f"(execution={settings.trading.execution})"
     )
+    _echo_status_mandate(inputs.mandate, inputs.overrides, mandate_error)
+
+
+@app.command()
+def mandate(
+    name: str = typer.Argument(
+        ...,
+        help="Mandate selector — the same vocabulary --mandate takes: a profile name, "
+        "MANDATE, or auto.",
+    ),
+    config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
+) -> None:
+    """Preflight one mandate: what it resolves to, and every setting it would change.
+
+    The dry run before committing a machine to a multi-day loop — the mandate's source,
+    summary, declared symbols and references, then the effective settings diff: every path
+    the overlay binds, from the value config resolved for it to the value the run would use.
+    Starts nothing: no research session, no LLM client, no orders.
+
+    Exits non-zero on any refusal, wrong-direction clamp, invalid value, or unresolvable
+    selector — listing every problem at once, exactly as startup would — so a cron job or a
+    shell script can gate on it.
+    """
+    # Straight through the composition root, so a preflight can never drift from what a run
+    # assembles: one precedence chain, two renderings. ``require_gate`` stays off for the same
+    # reason ``research`` leaves it off — a preflight places no orders — which also keeps a
+    # mandate diagnosable on a box whose ``mode`` will not resolve.
+    inputs = _resolve_session_or_exit(config, mandate=name)
+    _echo_mandate_preflight(inputs.mandate, inputs.changes)
 
 
 @app.command()
@@ -623,14 +774,14 @@ def research(
         build_research_session,
     )
     from noctis.champions import build_registry
-    from noctis.research import client_status, provider_of
+    from noctis.research import client_status, provider_of, resolved_research_model
 
     logging.basicConfig(
         level=_logging_level(verbose), format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
 
     # The composition root owns the ordering (§5): load_settings → resolve_mandate →
-    # apply_overrides → explicit CLI flags, so --metric still wins over a mandate overlay.
+    # overlay_mandate → explicit CLI flags, so --metric still wins over a mandate overlay.
     inputs = _resolve_session_or_exit(config, directive=directive, mandate=mandate, metric=metric)
     settings, active_mandate = inputs.settings, inputs.mandate
     _guard_legacy_or_exit(settings)
@@ -663,7 +814,7 @@ def research(
     if session is None:
         if recorder is not None:  # defensive: no orphaned run tree if a session went missing
             recorder.close()
-        resolved_model = settings.research.model or settings.research.agent.model
+        resolved_model = resolved_research_model(settings)
         provider = provider_of(resolved_model)
         key_env = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider)
         need_key = f" and {key_env}" if key_env else ""

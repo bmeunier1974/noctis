@@ -6,9 +6,11 @@ ordering enforced by comments, :class:`~noctis.champions.promotion.PromotionRule
 hand-built from settings in two places, and the CLI and the runtime each wired their own
 copy of the agent research session (client + budgets + toolbox + loop kwargs).
 
-Everything here is plain assembly, no policy: the safety gate, the overlay allowlist, and
-the budget tables all stay with their owners (``config.gate``, ``research.mandate``,
-``research.cost``). This module only fixes the *order* in one place and hands back built
+Everything here is plain assembly, no policy: the safety gate, the settings-overlay
+classifier, and the budget tables all stay with their owners (``config.gate``,
+``config.overlay``, ``research.cost``). This module only fixes the *order* in one place,
+wraps every overlay it performs in the gate-unmoved assertion (:func:`overlay_mandate`),
+and hands back built
 collaborators. Errors are typed, never printed — the CLI maps them to red text + exit
 codes; a library caller sees ordinary exceptions.
 
@@ -20,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -47,6 +49,22 @@ class UsageError(ValueError):
 
 
 @dataclass(frozen=True)
+class OverrideChange:
+    """One setting a mandate's overlay moved, from what to what.
+
+    ``before`` is the value **config** resolved for the path (``config.yaml`` + ``.env`` + the
+    environment) and ``after`` is the value the session will actually use — the same value the
+    ``"k=v"`` echo line carries. Read off the live settings object either side of the one
+    guarded overlay seam (:func:`~noctis.config.overlay.patch_snapshot`), never re-derived, so
+    a preflight can render the change without owning a second copy of the precedence chain.
+    """
+
+    path: str
+    before: Any
+    after: Any
+
+
+@dataclass(frozen=True)
 class SessionInputs:
     """The resolved inputs of one session: settings after every override, plus provenance."""
 
@@ -57,6 +75,10 @@ class SessionInputs:
     mandate: Mandate | None
     # "k=v" echo lines for each mandate override actually applied (the CLI prints them).
     overrides: list[str]
+    # The same overrides with their pre-overlay value alongside, path-sorted — what `noctis
+    # mandate` renders as the effective settings diff. Same paths as ``overrides`` by
+    # construction (both come from the one applied patch); empty when nothing was overlaid.
+    changes: list[OverrideChange] = field(default_factory=list)
 
 
 def resolve_session(
@@ -68,17 +90,21 @@ def resolve_session(
     time_limit_hours: float | None = None,
     require_gate: bool = False,
 ) -> SessionInputs:
-    """Resolve one session's settings by the one precedence order (docs/operator-mandate §5).
+    """Resolve one session's settings by the one precedence order (docs/configuration.md).
 
     ``load_settings`` → safety gate (when ``require_gate``) → ``resolve_mandate`` →
-    ``apply_overrides`` → explicit CLI flags last, so a one-off ``--metric`` still wins over
-    a mandate's overlay. Raises :class:`UsageError` on bad flags (both mandate selectors,
-    an unknown metric), :class:`~noctis.research.MandateError` on an unresolvable selector,
-    and :class:`~noctis.config.SafetyGateError` when the gate refuses — all before any
-    long-running work starts.
+    :func:`overlay_mandate` → explicit CLI flags last, so a one-off ``--metric`` still wins
+    over a mandate's overlay. The gate resolves *before* the overlay because nothing
+    downstream may run against an un-gated mode; the gate-unmoved assertion then proves the
+    overlay never reached it anyway. Raises :class:`UsageError` on bad flags (both mandate
+    selectors, an unknown metric), :class:`~noctis.research.MandateError` on an unresolvable
+    selector, :class:`~noctis.config.SafetyGateError` when the gate refuses, and
+    :class:`~noctis.config.OverlayError` if an overlay moved a refused setting — all before
+    any long-running work starts.
     """
     from noctis.backtest.scorecard import Metric
-    from noctis.research import apply_overrides, resolve_mandate
+    from noctis.config.overlay import patch_snapshot
+    from noctis.research import resolve_mandate
 
     if directive is not None and mandate is not None:
         raise UsageError("Pass either --directive or --mandate, not both.")
@@ -91,12 +117,94 @@ def resolve_session(
     settings = load_settings(config_path=config_path)
     mode = resolve_execution_mode(settings) if require_gate else None
     active = resolve_mandate(settings, cli_directive=directive, cli_mandate=mandate)
-    overrides = apply_overrides(settings, active)
+    # The overlay is applied once, and both readings of it are taken around that one call: the
+    # applier's ``"k=v"`` echo lines, and the same paths' values snapshotted either side. The
+    # pre-values have to be captured *here* — after config resolved and before the patch lands
+    # — because nothing downstream can recover them; ``noctis mandate`` renders the pair as the
+    # effective settings diff without owning a second copy of the precedence chain.
+    patch = active.config_overrides if active is not None else {}
+    before = patch_snapshot(settings, patch)
+    overrides = overlay_mandate(settings, active)
+    changes = [
+        OverrideChange(path=path, before=before[path], after=after)
+        for path, after in sorted(patch_snapshot(settings, patch).items())
+    ]
+    warn_if_auto_overlay_is_inert(settings, active)
     if metric is not None:
         settings.promotion.metric = metric
     if time_limit_hours is not None:
         settings.time_limit_hours = time_limit_hours
-    return SessionInputs(settings=settings, mode=mode, mandate=active, overrides=overrides)
+    return SessionInputs(
+        settings=settings, mode=mode, mandate=active, overrides=overrides, changes=changes
+    )
+
+
+def overlay_mandate(settings: Settings, mandate: Mandate | None) -> list[str]:
+    """Apply one mandate's config overlay, with the gate-unmoved assertion around it.
+
+    **Every** overlay this composition root performs goes through here, so no call site can
+    forget the assertion: snapshot the refused settings subtree, apply the patch, assert the
+    subtree is byte-identical afterwards. Returns the ``"k=v"`` echo lines ``apply_overrides``
+    produced; ``None`` (no mandate) is the same no-op it always was.
+
+    This is belt and braces on top of the deny-by-default classifier, in the spirit of the two
+    live-money gates: the classifier decides what a mandate *may* bind, and this proves — after
+    the fact, against the live settings object — that nothing else moved. The snapshot is
+    derived from :data:`~noctis.config.overlay.REFUSED` itself, so classifying one more path as
+    refused extends the assertion with no edit here and the two can never drift.
+
+    It **raises** (:class:`~noctis.config.OverlayError`), never warns: refused settings that
+    moved mean the allowlist has a bug, not that the operator mis-typed something, and a run
+    that continued would be researching in an arena nobody configured. The message names the
+    moved paths and deliberately not their values — the refused subtree carries the API keys.
+    """
+    from noctis.config.overlay import assert_gates_unmoved, gate_snapshot
+    from noctis.research import apply_overrides
+
+    before = gate_snapshot(settings)
+    overrides = apply_overrides(settings, mandate)
+    assert_gates_unmoved(before, gate_snapshot(settings))
+    return overrides
+
+
+def warn_if_auto_overlay_is_inert(settings: Settings, mandate: Mandate | None) -> None:
+    """Warn — once per session — when ``research.mandate: auto`` makes a profile's overlay inert.
+
+    Under ``auto`` the agent chooses its profile *inside* the session, long after settings are
+    assembled, so no profile's ``config:`` block can ever reach the overlay. That used to cost one
+    knob; now that the overlay carries the whole run configuration (the model, the loop, the spend
+    ceilings, the data window) it costs the run's entire steering — and the loss is otherwise
+    completely silent: nothing fails, the session simply isn't steered. So scan the catalog at
+    startup and name the profiles whose keys will go nowhere, plus the remedy (pin the mandate).
+
+    **Informational, never fatal.** ``auto`` is a valid, shipped configuration and picking a
+    profile mid-session against the champion board is the point of it, so this warns and continues
+    — the same loud-degradation contract as the LLM-client and reference-loading warnings — rather
+    than refusing to start. Pre-selecting the profile before assembly would be a redesign of the
+    ``auto`` contract, not a warning.
+
+    "Once per session" is structural, not a flag: this is called from :func:`resolve_session`,
+    which every session-assembling entrypoint calls exactly once, before any phase loop starts.
+    Which keys count as inert (``promotion.metric`` is deliberately excluded) is the mandate
+    module's decision, beside the ``auto`` contract that justifies it.
+    """
+    from noctis.research import inert_auto_overrides
+
+    if mandate is None or mandate.source != "auto":
+        return
+    inert = inert_auto_overrides(settings.mandate_dir)
+    if not inert:
+        return
+    named = "; ".join(f"{name} ({', '.join(keys)})" for name, keys in sorted(inert.items()))
+    logger.warning(
+        "research.mandate: auto — %d profile(s) declare config: keys that will NOT apply this "
+        "session: %s. Under auto the agent picks its profile mid-session, long after settings "
+        "are assembled, so a profile's config: block never reaches the overlay. Pin the mandate "
+        "to make it apply: research.mandate: <profile> in config.yaml, or --mandate <profile> "
+        "for one session.",
+        len(inert),
+        named,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -492,8 +600,12 @@ class ResearchSession:
 
     @property
     def model(self) -> str:
-        """The resolved provider/model string this session will drive."""
-        return self.settings.research.model or self.settings.research.agent.model
+        """The resolved provider/model string this session will drive — the one resolution the
+        research seam owns, so the session, the client probe, and the CLI's status line all name
+        the same model (post-overlay, when a mandate moved it)."""
+        from noctis.research import resolved_research_model
+
+        return resolved_research_model(self.settings)
 
     def run(self, *, max_iterations: int | None = None, stop_event=None) -> ResearchSummary:
         """Run the session behind the ``research.agent.loop`` selector. ``max_iterations`` falls

@@ -87,20 +87,24 @@ all fail here instead of burning backtest budget.
 ```python
 from noctis.strategies import scenarios as sc
 
+
 @classmethod
 def scenarios(cls) -> list[sc.Scenario]:
-    warm = cls.params_cls().lookback   # derive windows from the CURRENT defaults
+    warm = cls.params_cls().lookback  # derive windows from the CURRENT defaults
     return [
         sc.Scenario(
             "capitulation_then_recovery",
             segments=[sc.flat(warm + 5), sc.selloff(10, 0.06), sc.recovery(40, 0.11)],
-            expect=[sc.flat_until(warm), sc.long_within(warm + 5, warm + 16),
-                    sc.flat_by(2 * warm + 20)],
+            expect=[
+                sc.flat_until(warm),
+                sc.long_within(warm + 5, warm + 16),
+                sc.flat_by(2 * warm + 20),
+            ],
         ),
         sc.Scenario(
             "steady_grind_stays_flat",
             segments=[sc.flat(warm + 5), sc.recovery(60, 0.15)],
-            expect=[sc.always_flat()],       # the mandatory no-trade tape
+            expect=[sc.always_flat()],  # the mandatory no-trade tape
         ),
     ]
 ```
@@ -194,7 +198,8 @@ two-liner:
 ```python
 m = session.minutes_to_close(bar.ts_event)
 if m is not None and m <= 15:
-    ctx.set_target(0); return
+    ctx.set_target(0)
+    return
 ```
 
 Limitations (documented, not solved): **no holiday calendar** (a holiday session just has
@@ -209,12 +214,13 @@ feed every base bar in `on_bar`, and act on the completed higher-timeframe bar i
 
 ```python
 def on_start(self, ctx):
-    self.htf = ind.HtfBars("1h")          # must be a MULTIPLE of this strategy's timeframe
+    self.htf = ind.HtfBars("1h")  # must be a MULTIPLE of this strategy's timeframe
     self.htf_ema = ind.EmaState(self.params.trend_period)
     self.trend = float("nan")
 
+
 def on_bar(self, ctx, bar):
-    done = self.htf.add(bar)              # completed 1h bar or None
+    done = self.htf.add(bar)  # completed 1h bar or None
     if done is not None:
         self.trend = self.htf_ema.update(done.close)
     # ... use self.trend as a gate on your base-timeframe entries ...
@@ -247,6 +253,7 @@ beside `Bar`:
 
 ```python
 from noctis.strategies.base import Bar, Context, ExitRules, ParamSpec, TraderStrategy
+
 
 def on_bar(self, ctx: Context, bar: Bar) -> None:
     # ... decide target as usual ...

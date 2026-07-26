@@ -1,8 +1,79 @@
 ---
 summary: Risk-adjusted swing trading on liquid US large/mid-caps (scored on sortino)
+# Optional: tickers this brief wants LOOKED AT. A search prior — they join the session's
+# research focus set (the prompt's market digest, the holdout candidate pool, the episodic
+# driver's session-start fetch), never the trading roster and never a gate. The roster is
+# the other ticker surface, `config: universe:` far below; the two are different things.
+# symbols:
+#   - SMR
+#   - CCJ
 config:
   promotion:
-    metric: sortino
+    metric: sortino # sharpe | sortino | total_return — how every candidate is scored
+  # # ── The rest of the surface, commented out ────────────────────────────────────────
+  # # A mandate configures the whole RUN — which model thinks, what it may spend, how big
+  # # its prompt gets, which names it starts from, what "good" is scored as. Every line
+  # # below is one YAML line behind a "# ": bind it by removing exactly that prefix. The
+  # # values are illustrative, not defaults; leave out the knobs this personality has no
+  # # opinion about — an unset key simply keeps config.yaml's.
+  # #
+  # # A key that appears nowhere in this block is REFUSED, and a refusal is fatal at
+  # # startup with the reason printed: the arena stays config.yaml's (safety mode, fill
+  # # costs, promotion thresholds, the fit-set/symbol-holdout geometry, the output paths,
+  # # the secrets). Two keys are CLAMPED to the disciplined direction only, marked below.
+  # # Full reference: docs/configuration.md; the tables live in noctis/config/overlay.py.
+  # research:
+  #   # ── model seam: which brain runs the session, and where it is reached ──
+  #   model: ollama_chat/noctis-qwen3:14b # LiteLLM provider/model for the driver
+  #   base_url: http://localhost:11434/v1 # OpenAI-compatible endpoint (vLLM, Ollama, a proxy)
+  #   # ── search shape: what the session is pointed at ──
+  #   focus_size: 10 # cap on symbols enumerated into each prompt (a prompt-size lever)
+  #   tuning_dispersion_penalty: 0.25 # λ × cross-symbol dispersion, in TUNING only
+  #   draft_ttl_hours: 48 # sweep undecided __tmp/ drafts older than this into archive/
+  #   memory_distill_every: 3 # distill MEMORY.md every N completed sessions (0 = off)
+  #   # ── spend ceilings: how much one session may burn ──
+  #   cost_profile: balanced # full | balanced | economy
+  #   # ── CLAMPED, raise only: demand MORE evidence per verdict, never less ──
+  #   min_trials: 20 # distinct journaled param sets before a verdict tool answers
+  #   agent:
+  #     model: anthropic/claude-sonnet-5 # driver fallback when research.model is unset
+  #     loop: episodic # conversation | episodic | auto (auto flips at context_window ≤ 32768)
+  #     thinking: "off" # the driver's reasoning dial — a watch-session switch
+  #     coder_model: anthropic/claude-sonnet-5 # the dedicated authoring model
+  #     coder_thinking: "on" # the coder's own reasoning dial
+  #     coder_fallback_model: anthropic/claude-opus-4-8 # paid escalation for a spent coder
+  #     coder_fallback_thinking: "off" # the escalated coder's reasoning dial
+  #     max_escalations: 1 # escalations allowed per session (0 = never)
+  #     max_iterations: 12 # tool-use rounds (conversation) / episodes (episodic)
+  #     max_backtests: 30 # backtest calls + individual sweep trials
+  #     sweep_trials: 24 # default Optuna trials for one run_sweep call
+  #     max_author_calls: 9 # coder completions per session — the authoring bill
+  #     max_tokens: 4096 # the driver's per-completion output ceiling
+  #     coder_max_tokens: 16000 # the coder's output ceiling — the file's budget
+  #     context_window: 32768 # whole-request budget (a small-context compat lever)
+  #     episode_retries: 2 # corrective retries per episode when the model misfires
+  #     web_search: true # server-side grounding during FORMULATE/MATCH
+  #     max_web_searches: 3 # and its per-session cap
+  #     sweep_workers: 4 # parallel workers (results are identical whatever the count)
+  #     worker_bar_budget: 3000000 # the memory guard that scales those workers down
+  # data:
+  #   history_days: 720 # lookback for the backfill of not-yet-ready symbols
+  #   auto_backfill: true # whether that backfill runs at all
+  #   # ── CLAMPED, lower only: spend LESS of the vendor budget, never more ──
+  #   budget_usd: 40.0 # the cap the data cost preflight bounds every fetch against
+  # observability:
+  #   heartbeat_polls: 30 # -vv live-trading heartbeat cadence, in polls
+  # qa:
+  #   keep_last_runs: 5 # --debug QA run folders kept by prune-on-start
+  # # ── the seed trading roster the research panel is drawn from — what is TRADED, not
+  # # what is looked at (that is the symbols: list at the top). Upper-cased and
+  # # de-duped the same way, and it must name at least
+  # # research.fit_set_size + research.symbol_holdout_size symbols (8 as shipped) —
+  # # fewer is fatal, because the symbol-holdout gate would go inert instead of being
+  # # cleared, and neither of those two sizes is a knob a mandate may move.
+  # universe: [AAPL, XOM, UNH, JPM, NVDA, WMT, CAT, GOOGL, SPY, IWM]
+  # research_time_budget_minutes: 60 # wall-clock cap on one research session
+  # time_limit_hours: 8 # wall-clock cap on the whole run
 ---
 
 I want a believable, risk-adjusted record on liquid US large- and mid-cap names — deep

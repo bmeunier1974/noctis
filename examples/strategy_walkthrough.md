@@ -33,6 +33,7 @@ class Params:
     fast: int = 10
     slow: int = 30
 
+
 params_cls = Params
 ```
 
@@ -46,7 +47,7 @@ def on_bar(self, ctx: Context, bar: Bar) -> None:
     self._closes.append(bar.close)
     fast = ind.sma(self._closes, self.params.fast)
     slow = ind.sma(self._closes, self.params.slow)
-    if fast is None or slow is None:      # still warming up
+    if fast is None or slow is None:  # still warming up
         ctx.set_target(0)
         return
     ctx.set_target(1 if fast > slow else 0)
@@ -77,7 +78,11 @@ def scenarios(cls) -> list[sc.Scenario]:
         sc.Scenario(
             "trend_ride_then_rollover",
             segments=[sc.flat(warm + 5), sc.trend(40, 0.12), sc.selloff(40, 0.20)],
-            expect=[sc.flat_until(warm), sc.long_within(warm + 5, warm + 45), sc.flat_by(warm + 80)],
+            expect=[
+                sc.flat_until(warm),
+                sc.long_within(warm + 5, warm + 45),
+                sc.flat_by(warm + 80),
+            ],
         ),
         sc.Scenario(
             "steady_decline_never_longs",

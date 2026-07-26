@@ -4,6 +4,17 @@ Layered sources, highest priority first: constructor args, process environment, 
 then ``config.yaml``. So operational knobs come from ``config.yaml`` while secrets and
 overrides come from the environment (environment always wins over the YAML file).
 
+One layer sits *above* every source built here, and is applied by the composition root to the
+object this module hands back: the active mandate's ``config:`` overlay
+(:mod:`noctis.config.overlay`). The effective chain is therefore::
+
+    CLI flags > mandate overlay > environment > .env > config.yaml > built-in defaults
+
+For the run-shaping subset a mandate may bind, that **inverts** the environment-beats-YAML rule
+above. It is deliberate: a mandate is a per-run *selection* an operator makes on purpose, not
+ambient environment, and pinning one is meant to configure the run. Secrets and the
+``ALLOW_LIVE`` gate are refused by the overlay, so the environment stays their only source.
+
 Point at an alternate YAML file with the ``NOCTIS_CONFIG`` environment variable.
 """
 
@@ -61,8 +72,9 @@ class BacktestConfig(BaseModel):
     would die on real fills, so the knob may only make the world *harsher* (or per-venue
     realistic), never cheaper than the baseline. A value below ``_COST_FLOOR_BPS`` is a hard
     startup error (like ``mode: live`` without ``ALLOW_LIVE``), never a silent clamp. This
-    section is deliberately **not** in the mandate ``config:`` overlay allowlist — a research
-    personality steers what to look for, never how forgiving the arena is.
+    whole section is deliberately **refused by the mandate overlay**
+    (:mod:`noctis.config.overlay`) — a research personality steers what to look for, never how
+    forgiving the arena is.
     """
 
     fee_bps: float = _COST_FLOOR_BPS
@@ -307,9 +319,13 @@ class ResearchConfig(BaseModel):
     # promotion gate or the min_trials exhaustion floor (AGENTS.md rules 2/4).
     cost_profile: Literal["full", "balanced", "economy"] = "balanced"
     # The active mandate under mandate_dir: a profile name, "MANDATE" (mandate/MANDATE.md),
-    # "auto" (agent picks a profile per session), or null (unconstrained). Its config: block may
-    # override promotion.metric ONLY — see docs/operator-mandate.md. Replaces the old directive
-    # string; CLI --mandate/--directive override it for one session.
+    # "auto" (agent picks a profile per session), or null (unconstrained). Its config: block
+    # overlays every path noctis.config.overlay classifies as run-shaping (and may move the two
+    # clamped ones in the disciplined direction only); a refused, unknown, or invalid key is
+    # fatal at startup — see docs/configuration.md. This selector is itself refused there: an
+    # overlay may not choose which overlay is read. Under "auto" the agent picks its profile
+    # mid-session, long after assembly, so that profile's config: block never applies at all
+    # (startup warns). CLI --mandate/--directive override the selector for one session.
     mandate: str | None = None
     # Exhaustion gate: verdict tools (evaluate_vs_champion / reject_strategy) refuse until
     # the strategy's journal shows this many distinct param sets or one completed sweep.
@@ -375,7 +391,18 @@ class QAConfig(BaseModel):
 
 
 class PromotionConfig(BaseModel):
-    """Scoring metric + challenger→champion promotion thresholds (all in the metric's units)."""
+    """Scoring metric + challenger→champion promotion thresholds (all in the metric's units).
+
+    **Refused by the mandate overlay, and why.** Every field below except ``metric`` is
+    classified REFUSED in :mod:`noctis.config.overlay`: these thresholds *are* the promotion
+    gates, and a mandate that could move them would be a permission slip rather than a search
+    prior. They are refused outright rather than clamped "tighten-only" like the exhaustion
+    floor, because across a metric change the direction is not even well defined — read in
+    ``metric``'s units, a ``max_gap`` of 0.5 is not a stricter 1.0, it is a different scale.
+    That is the same incomparability that makes a champion scored under a different metric
+    *stale* (displaceable) instead of beatable. ``metric`` itself is allowed: it is the
+    operator's risk appetite, and it reinterprets the thresholds' units without loosening one.
+    """
 
     # The objective every research stage scores on — your risk appetite. ``sharpe`` penalizes
     # all volatility (risk-averse); ``sortino`` penalizes only downside; ``total_return``

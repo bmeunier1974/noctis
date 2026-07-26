@@ -102,8 +102,13 @@ fixed sequence of **quality gates**, and only then is it measured against the bo
    election metric, champions with different fit sets still compare on a **scale-free footing**.
 
 The election metric itself (`promotion.metric` — `sharpe`, `sortino`, or `total_return`) is the
-*one* knob an operator mandate may bind; it reinterprets every threshold above but can never
-loosen a gate.
+*one* `promotion.*` key an operator mandate may bind; it reinterprets every threshold above but
+can never loosen a gate. The thresholds themselves are **refused** by the mandate overlay —
+deliberately refused rather than clamped "tighten-only", because in the metric's own units a
+`max_gap` of `0.5` is not tighter than a Sharpe-units `1.0` once the same mandate also moves
+`metric`. That is the same incomparability rule 7 above is built on. A refused key is fatal at
+startup, with the reason printed
+([configuration.md](configuration.md#the-mandate-overlay)).
 
 > **On defaults and honesty.** Several thresholds ship at `0.0`, and two gates (activity,
 > consistency) ship off. That is deliberate, not a loophole: the holdout gates at `0.0` still

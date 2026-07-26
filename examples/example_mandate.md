@@ -11,9 +11,13 @@ config:
   `research.mandate: MANDATE` in config.yaml. See mandate/README.md for the full authoring
   guide, the shipped profiles, and precedence rules.
 
-  The front-matter `config:` block may bind EXACTLY ONE knob — promotion.metric
-  (sharpe | sortino | total_return). It steers the risk dial; it never loosens a gate,
-  the exhaustion rule, or the honesty contract.
+  The front-matter `config:` block binds the RUN-SHAPING settings this personality needs —
+  the model seam, the spend ceilings, the search shape (promotion.metric among them), the
+  data window, the seed universe. It never touches the ARENA: the safety mode, the fill
+  costs, the promotion thresholds, the holdout geometry, the paths and the secrets are
+  refused by name, and a refused key stops the run at startup with the reason printed.
+  The whole surface ships commented out in mandate/MANDATE.md.example; the reference is
+  docs/configuration.md ("The mandate overlay"). This example binds only the risk dial.
 -->
 
 I want a conservative, long-only trend-following system on large, liquid US names — broad index

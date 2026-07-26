@@ -54,10 +54,11 @@ with every existing strategy file:
 
 ```python
 @dataclass(frozen=True)
-class ExitRules:                      # noctis/strategies/base.py, beside Bar
-    stop_pct: float | None = None     # exit if adverse move ≥ this fraction of entry
+class ExitRules:  # noctis/strategies/base.py, beside Bar
+    stop_pct: float | None = None  # exit if adverse move ≥ this fraction of entry
     take_profit_pct: float | None = None
-    trail_pct: float | None = None    # exit if drawdown from best-since-entry ≥ this
+    trail_pct: float | None = None  # exit if drawdown from best-since-entry ≥ this
+
 
 def set_target(self, target: int, exits: ExitRules | None = None) -> None: ...
 ```
@@ -173,18 +174,20 @@ two drivers" shape as `TargetContext` and `StreamingAggregator`):
 
 ```python
 @dataclass(frozen=True)
-class ExitState:        # per open position
-    direction: int      # +1 / −1
+class ExitState:  # per open position
+    direction: int  # +1 / −1
     entry_price: float
-    best: float         # best favorable extreme since entry (prior-bar ratchet)
+    best: float  # best favorable extreme since entry (prior-bar ratchet)
+
 
 @dataclass(frozen=True)
 class ExitTrigger:
-    price: float        # the fill price per the conservative policy
-    reason: str         # "stop" | "take_profit" | "trail"
+    price: float  # the fill price per the conservative policy
+    reason: str  # "stop" | "take_profit" | "trail"
+
 
 def evaluate(rules: ExitRules, state: ExitState, bar: Bar) -> ExitTrigger | None: ...
-def ratchet(state: ExitState, bar: Bar) -> ExitState: ...   # called AFTER evaluate
+def ratchet(state: ExitState, bar: Bar) -> ExitState: ...  # called AFTER evaluate
 ```
 
 `evaluate` implements Phase 0b exactly: gap-through at open, stop-beats-TP on same-bar

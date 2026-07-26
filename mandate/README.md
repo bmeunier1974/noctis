@@ -8,10 +8,11 @@ a run. See `docs/research.md` ("Mandates + a growing universe") for the full des
 ```
 mandate/
 ├─ README.md              # this file                                    (committed)
-├─ MANDATE.md.example     # balanced Sortino swing brief; copy over MANDATE.md to use (committed)
+├─ MANDATE.md.example     # balanced Sortino swing brief + the whole overlay surface,
+│                         # commented out; copy over MANDATE.md to use            (committed)
 ├─ MANDATE.md             # YOUR own input — edit the prose to steer research    (LOCAL, gitignored)
 ├─ tune-first.md          # conduct mandate: tune/decide the existing library     (committed)
-├─ profiles/              # five shipped personalities; pick one or copy one to start
+├─ profiles/              # five shipped personalities, metric-only by design (see `auto` below)
 │  ├─ aggressive.md       → promotion.metric: total_return               (committed)
 │  ├─ conservative.md     → promotion.metric: sharpe                     (committed)
 │  ├─ long-term.md        → promotion.metric: sharpe                     (committed)
@@ -56,10 +57,12 @@ Structure of a mandate file (this is also the shape of every profile):
 ```markdown
 ---
 summary: One line describing this mandate (shown in the auto menu and kickoff echo).
-config:
+config:                       # run-shaping settings this personality binds (see below)
   promotion:
-    metric: total_return      # the ONLY key a mandate may override
-symbols:                      # optional: tickers this mandate wants researched
+    metric: total_return      # the risk dial every candidate is scored on
+  research:
+    model: ollama_chat/noctis-qwen3:14b   # …and anything else on the allowed list
+symbols:                      # optional: tickers this mandate wants LOOKED AT
   - SMR                       # they join the session's research focus set (the prompt's
   - CCJ                       # market digest + holdout candidate pool) — a search prior,
 references:                   # never a gate change; the focus cap is research.focus_size
@@ -67,6 +70,11 @@ references:                   # never a gate change; the focus cap is research.f
 ---
 Your prose goes here.
 ```
+
+`symbols:` and `config: universe:` are **two different things**, deliberately: `symbols:` says
+what to *look at* (a search prior that joins the research focus set), `universe:` says what is
+*traded* and what the research panel is drawn from. Both normalize identically (upper-case,
+de-duped, first-mention order); only the roster must be long enough to fill the panel.
 
 The front-matter must be the very first bytes of the file (a `---` … `---` fence). Any
 HTML comments or prose go *below* it. The shipped `MANDATE.md` keeps its how-to header as an
@@ -91,15 +99,34 @@ level rather than in `profiles/` on purpose, so the `auto` menu stays a catalog 
 personalities. Its metric overlay mirrors `MANDATE.md` (sortino) so champion comparisons
 stay like-for-like; keep the two in lockstep if you change one.
 
-## The metric-only overlay rule
+## The overlay rule: the run is yours, the arena is not
 
-A mandate carries its risk dial with it: the `config:` block may set **`promotion.metric`
-and nothing else** (`sharpe` | `sortino` | `total_return`). Every other key — gate
-thresholds, `mode`, `risk.*`, budgets, `state_dir`, session budgets — is refused with a
-warning and ignored. This is deliberate: a mandate *steers* what the agent looks for and how
-risk is scored; it never loosens a gate, the exhaustion rule, or the honesty contract. Those
-still bind. Widening the allowlist is an owner-gated change to a constant in
-`noctis/research/mandate.py`, not something a mandate author can reach.
+A mandate configures the whole **run** it steers — which model thinks, what one session may
+spend, how big its prompt gets, which names it starts from, and `promotion.metric`, the risk
+dial. It never touches the **arena**: the safety mode, the fill costs, the promotion
+thresholds, the fit-set/symbol-holdout geometry, the output paths, the secrets stay
+`config.yaml`'s alone.
+
+- **Allowed (35 knobs, six groups):** the model seam, the spend ceilings, the search shape
+  (`promotion.metric`, `focus_size`, the tuning penalty, the draft TTL, the distill cadence),
+  data acquisition (`history_days`, `auto_backfill`), housekeeping, and the seed `universe`.
+- **Clamped (2), one direction only:** `research.min_trials` may only be **raised** (a mandate
+  may demand more evidence per verdict, never less) and `data.budget_usd` may only be
+  **lowered** (spend less of your vendor money, never more). Equal to the configured value is
+  fine; the wrong direction is fatal, and the message names the number it tried to cross.
+  Nothing is silently clipped.
+- **Refused (49): fatal at startup, with the reason printed.** A refused, unknown, or invalid
+  key stops the run before it starts and lists *every* problem in one error. It is never a
+  warning you find three days into a run.
+
+Two more rules worth knowing: a mandate-set `universe` must name at least
+`research.fit_set_size + research.symbol_holdout_size` symbols (8 as shipped) — too few and the
+symbol-holdout gate would go inert instead of being cleared, so the run stops. And the whole
+allowed/clamped surface ships **commented out** in `MANDATE.md.example`: uncomment what your
+personality needs. The authoritative tables, with a justification per group, live in
+`src/noctis/config/overlay.py`; the operator-facing reference is
+[docs/configuration.md](../docs/configuration.md#the-mandate-overlay). Widening the surface is
+an owner-gated edit to that module, not something a mandate author can reach.
 
 ## Adding references (keep them small — links over embeds)
 
@@ -123,22 +150,38 @@ ships two inert examples that no shipped mandate wires in: `example-watchlist.md
 kept here as documentation after the balanced Sortino brief became the scaffolded
 `MANDATE.md.example`.
 
-## The `auto` caveat (why a profile's overlay can look inert)
+## The `auto` caveat (why a profile's overlay is inert)
 
 Under `research.mandate: auto`, the *agent* picks a profile partway through the session —
 after the config overlay has already been applied and the toolbox built. So an auto-selected
-profile's `config:` overlay does **not** take effect: **auto sessions always score on the
-base `config.yaml` metric.** This keeps every auto session comparable on one yardstick. If
-you want a specific profile's metric overlay, **pin that profile** (`research.mandate:
-aggressive`) instead of using `auto`.
+profile's `config:` block does **not** take effect, whatever it declares: **auto sessions
+always run on the base `config.yaml` configuration**, and score on its metric. That keeps every
+auto session comparable on one yardstick. Startup logs one warning naming any profile whose
+keys would be lost; `promotion.metric` is suppressed from it, because metric-neutrality *is*
+the `auto` contract and a warning that fires on every stock install is the noise that gets the
+interesting warning ignored.
+
+That is why the **five shipped profiles stay metric-only**: a profile `auto` may pick must
+never declare a knob that would be silently inert on the default config — and a second key in
+a shipped profile would make every default install warn. Your own profiles are free to bind the
+whole allowed surface; just **pin them** (`research.mandate: my-profile`, or `--mandate
+my-profile` for one session) so the overlay actually applies.
 
 ## Precedence
 
 From lowest to highest priority:
 
-1. Base `config.yaml` / defaults.
-2. `research.mandate` (config) — the persistent selector.
-3. `--mandate <name>` or `--directive "<text>"` on the CLI — a one-session override.
-   (`--directive` and `--mandate` together is a usage error.)
-4. `--metric <m>` on `noctis research` — an explicit one-off flag applied **after** the
-   overlay, so it always wins over a mandate's `promotion.metric`.
+1. Built-in defaults, then `config.yaml`, then `.env`, then the environment — the ordinary
+   settings chain ([docs/configuration.md](../docs/configuration.md)).
+2. The **mandate overlay**, applied on top of all of it. For the overlaid subset this inverts
+   the usual "environment beats the YAML file" rule, deliberately: a mandate is a per-run
+   selection, not ambient environment. Secrets and `ALLOW_LIVE` are refused, so the environment
+   stays their only source.
+3. `--mandate <name>` or `--directive "<text>"` on the CLI selects *which* mandate overlays,
+   for one session. (`--directive` and `--mandate` together is a usage error.)
+4. `--metric <m>` (on `noctis research`) and `--time-limit-hours` (on `noctis run`) — explicit
+   one-off flags applied **after** the overlay, so they always win over a mandate.
+
+`noctis status` prints the resolved end of that chain: the active mandate and every `k=v`
+override it applied, with all the values above them post-overlay. `run` and `research` echo the
+same lines at kickoff.

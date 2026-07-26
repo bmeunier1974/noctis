@@ -500,12 +500,24 @@ class ClientStatus:
     reason: str | None  # populated iff ``not ok``
 
 
+def resolved_research_model(settings) -> str:
+    """The ``provider/model`` string this session's research driver runs on: ``research.model``
+    when set, else the ``research.agent.model`` fallback.
+
+    Pure settings arithmetic — it builds nothing and imports no LLM stack — so a diagnostic can
+    state the model without paying for (or depending on) the provider probe :func:`client_status`
+    performs. That probe resolves through this function, so the model a command announces and the
+    model a client would be built for can never drift; a mandate overlay that moved either knob is
+    reflected by both, because both read the post-overlay settings."""
+    research = settings.research
+    return getattr(research, "model", None) or research.agent.model
+
+
 def client_status(settings) -> ClientStatus:
     """Would :func:`build_llm_client` succeed for the configured research model, and if not, why —
     computed without side effects (no client built, no network) so a CLI can announce the research
     engine before the loop starts."""
-    research = settings.research
-    model = getattr(research, "model", None) or research.agent.model
+    model = resolved_research_model(settings)
     provider = provider_of(model)
     reason = _client_blocked(provider, settings)
     return ClientStatus(ok=reason is None, model=model, provider=provider, reason=reason)

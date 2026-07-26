@@ -2,9 +2,12 @@
 
 Pure, client-free coverage of noctis.research.mandate: selector precedence, name lookup,
 the empty-MANDATE rule, front-matter parsing (incl. the malformed-fence degrade), reference
-inclusion/caps/confinement, summary extraction, and the metric-only config overlay allowlist
-(with the assignment-validation subtlety it exists to guard). Plus the CLI mutual-exclusion
-of --directive/--mandate and the "empty input == today" parity.
+inclusion/caps/confinement, summary extraction, and the config-overlay *adapter* — the thin
+seam onto noctis.config.overlay that keeps apply_overrides' signature and exception type and
+makes a refused/unknown/invalid key fatal at startup, naming the mandate that carried it.
+(The classifier and the applier themselves are covered in tests/test_settings_overlay.py.)
+Plus the CLI mutual-exclusion of --directive/--mandate, the exit-1-on-a-bad-overlay path,
+and the "empty input == today" parity.
 """
 
 from __future__ import annotations
@@ -302,93 +305,303 @@ def test_html_comments_stripped_from_agent_text(tmp_path):
     assert mandate.summary == "Real summary."
 
 
-# ── the config overlay allowlist (§3.4) ──────────────────────────────────────────────────
-def test_overlay_applies_metric_only(tmp_path):
+# ── the config overlay adapter (§3.4) ────────────────────────────────────────────────────
+# apply_overrides keeps its signature and its exception type; the classification and the
+# validation live in noctis.config.overlay (tests/test_settings_overlay.py). What is asserted
+# here is the adapter's own contract: the mandate source is named, and a refused, unknown, or
+# invalid key is FATAL at startup rather than a buried warning.
+def _mandate_with(overrides: dict, source: str = "profile:test") -> Mandate:
+    return Mandate(text="x", source=source, summary="x", references=[], config_overrides=overrides)
+
+
+def test_overlay_applies_the_scoring_metric(tmp_path):
     settings = _settings(tmp_path, tmp_path / "mandate")
     assert settings.promotion.metric == "sharpe"  # base default
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={"promotion.metric": "total_return"},
-    )
-    lines = apply_overrides(settings, mandate)
+    lines = apply_overrides(settings, _mandate_with({"promotion.metric": "total_return"}))
     assert settings.promotion.metric == "total_return"
     assert lines == ["promotion.metric=total_return"]
 
 
-def test_overlay_refuses_everything_but_metric(tmp_path):
+def test_a_mandate_binds_the_run_shaping_settings_from_nested_front_matter(tmp_path):
+    """A mandate configures the whole run (#117) — which model thinks, what it may spend, how
+    big the prompt gets — straight out of the nested ``config:`` block, flattened here and
+    applied by the overlay."""
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "profiles" / "local.md",
+        "---\n"
+        "summary: A local-model personality.\n"
+        "config:\n"
+        "  research:\n"
+        "    model: ollama/qwen3-coder-30b\n"
+        "    base_url: http://localhost:11434/v1\n"
+        "    cost_profile: economy\n"
+        "    focus_size: 8\n"
+        "    agent:\n"
+        "      loop: episodic\n"
+        "      context_window: 32768\n"
+        "      max_tokens: 4096\n"
+        "  data:\n"
+        "    history_days: 180\n"
+        "---\n"
+        "Hunt mean reversion on a small local model.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="local")
+    mandate = resolve_mandate(settings)
+    assert mandate is not None
+
+    lines = apply_overrides(settings, mandate)
+
+    assert settings.research.model == "ollama/qwen3-coder-30b"
+    assert settings.research.base_url == "http://localhost:11434/v1"
+    assert settings.research.cost_profile == "economy"
+    assert settings.research.focus_size == 8
+    assert settings.research.agent.loop == "episodic"
+    assert settings.research.agent.context_window == 32768
+    assert settings.research.agent.max_tokens == 4096
+    assert settings.data.history_days == 180
+    assert lines == sorted(lines)  # the echo is stable, one line per applied knob
+    assert "research.model=ollama/qwen3-coder-30b" in lines
+    assert len(lines) == 8
+
+
+def test_a_tune_first_mandate_may_demand_more_trials_and_less_spend(tmp_path):
+    """The tier-B direction clamps through real front matter (#118): a conduct mandate that
+    wants more evidence per verdict and a smaller vendor bill is steering *towards* discipline,
+    so both apply and both are echoed."""
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "tune-first.md",
+        "---\n"
+        "summary: Tune the existing library first.\n"
+        "config:\n"
+        "  research:\n"
+        "    min_trials: 20\n"
+        "  data:\n"
+        "    budget_usd: 40.0\n"
+        "---\n"
+        "Drive one existing strategy to a verdict before authoring anything.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="tune-first")
+    mandate = resolve_mandate(settings)
+
+    lines = apply_overrides(settings, mandate)
+
+    assert settings.research.min_trials == 20
+    assert settings.data.budget_usd == 40.0
+    assert lines == ["data.budget_usd=40.0", "research.min_trials=20"]
+
+
+def test_a_mandate_cannot_loosen_the_exhaustion_floor(tmp_path):
+    """The wrong direction is fatal at startup, naming both the steering file to fix and the
+    config value it tried to cross."""
     settings = _settings(tmp_path, tmp_path / "mandate")
-    base_mode = settings.mode
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={
+
+    with pytest.raises(MandateError) as exc:
+        apply_overrides(settings, _mandate_with({"research.min_trials": 3}))
+
+    message = str(exc.value)
+    assert "profile:test" in message
+    assert "the configured 8" in message
+    assert settings.research.min_trials == 8
+
+
+def test_a_mandate_may_set_the_seed_universe_and_it_is_normalized(tmp_path):
+    """A sector personality names the roster it wants traded (#121), and the tickers are
+    normalized on the way in — upper-cased, stripped, de-duped, first-mention order kept — so
+    the echoed roster is the one the run will actually use."""
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "profiles" / "uranium.md",
+        "---\n"
+        "summary: The uranium complex.\n"
+        "config:\n"
+        '  universe: ["smr", "CCJ", " smr ", "leu", "ura", "nne", "oklo", "bwxt", "vst"]\n'
+        "---\n"
+        "Trade the uranium complex.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="uranium")
+    mandate = resolve_mandate(settings)
+
+    lines = apply_overrides(settings, mandate)
+
+    assert settings.universe == ["SMR", "CCJ", "LEU", "URA", "NNE", "OKLO", "BWXT", "VST"]
+    assert lines == [f"universe={settings.universe}"]
+
+
+def test_a_mandate_universe_that_starves_the_symbol_holdout_is_fatal_at_startup(tmp_path):
+    """The starvation guard lives in the applier, so it fires through this adapter with no
+    help from it: a roster too short to fill the fit set *and* a disjoint symbol holdout would
+    switch the second out-of-sample axis off in silence, so it stops the session — naming both
+    the steering file to fix and the gate that would have gone inert."""
+    settings = _settings(tmp_path, tmp_path / "mandate")
+    before = list(settings.universe)
+
+    with pytest.raises(MandateError) as exc:
+        apply_overrides(settings, _mandate_with({"universe": ["SMR", "CCJ"]}))
+
+    message = str(exc.value)
+    assert "profile:test" in message
+    assert "symbol-holdout gate" in message
+    assert settings.universe == before
+
+
+def test_both_ticker_surfaces_normalize_identically(tmp_path):
+    """``symbols:`` and ``config: universe:`` mean different things, but a ticker is a ticker:
+    an operator never has to spell one of them differently from the other."""
+    typed = '["smr", "CCJ", " smr ", "leu", "ura", "nne", "oklo", "bwxt", "vst"]'
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "profiles" / "both.md",
+        f"---\nsymbols: {typed}\nconfig:\n  universe: {typed}\n---\nUranium.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="both")
+    mandate = resolve_mandate(settings)
+
+    apply_overrides(settings, mandate)
+
+    assert mandate.symbols == settings.universe
+    assert settings.universe == ["SMR", "CCJ", "LEU", "URA", "NNE", "OKLO", "BWXT", "VST"]
+
+
+def test_symbols_steers_the_search_and_config_universe_sets_the_roster(tmp_path):
+    """The two surfaces stay two different things when one mandate sets both: ``symbols:`` is a
+    search prior that joins the session's focus set and never the roster; ``config: universe:``
+    is the seed roster the readiness check and the panel are drawn from."""
+    from noctis.engine.runtime import research_focus, trading_roster
+
+    roster = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH"]
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "profiles" / "sector.md",
+        "---\n"
+        'symbols: ["smr", "ccj"]\n'
+        "config:\n"
+        f"  universe: {roster}\n"
+        "---\n"
+        "Uranium ideas, large-cap roster.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="sector")
+    mandate = resolve_mandate(settings)
+    apply_overrides(settings, mandate)
+    lake = _AlwaysReadyLake()
+
+    assert mandate.symbols == ["SMR", "CCJ"]  # the search prior, normalized the same way
+    assert settings.universe == roster  # the seed roster is exactly what config: set
+    assert trading_roster(settings, lake) == roster  # symbols: never redefines the roster
+    focus = research_focus(settings, lake, mandate)
+    assert focus[: len(roster)] == roster  # fit set + symbol holdout window first
+    assert "SMR" in focus and "CCJ" in focus  # …then the declared symbols join the focus set
+
+
+class _AlwaysReadyLake:
+    """A lake whose every symbol is ready. No ``coverage`` attribute, so the trading roster is
+    exactly the config seed — which is the point here."""
+
+    def check_symbol_ready(self, symbol) -> bool:
+        return True
+
+
+def test_a_mandate_setting_every_allowed_knob_leaves_the_gates_byte_identical(tmp_path):
+    """The maximal legal mandate — every knob the surface allows, at once — cannot move one
+    byte of the refused subtree (the safety mode, the fill costs, the promotion thresholds,
+    the holdout geometry, the paths, the secrets)."""
+    import json
+
+    from noctis.config.overlay import gate_snapshot
+    from tests.test_settings_overlay import SAMPLE_VALUES  # ratcheted total over ALLOWED
+
+    settings = _settings(tmp_path, tmp_path / "mandate")
+    before = json.dumps(gate_snapshot(settings), sort_keys=True, default=str)
+
+    lines = apply_overrides(settings, _mandate_with(dict(SAMPLE_VALUES)))
+
+    assert len(lines) == len(SAMPLE_VALUES)
+    assert json.dumps(gate_snapshot(settings), sort_keys=True, default=str) == before
+
+
+def test_overlay_refuses_the_arena_and_applies_nothing(tmp_path):
+    """One error names the mandate, lists every refused key *and* every wrong-direction clamp,
+    and applies nothing — not even the one legal key beside them."""
+    settings = _settings(tmp_path, tmp_path / "mandate")
+    mandate = _mandate_with(
+        {
             "mode": "live",
             "risk.max_daily_loss_pct": 99.0,
-            "data.budget_usd": 9999.0,
+            "data.budget_usd": 9999.0,  # a clamp violation, reported in the same error
             "promotion.max_gap": 5.0,
             "promotion.min_test_metric": -5.0,
             "promotion.min_holdout_metric": -5.0,
             "promotion.metric": "total_return",  # the sole allowed key
-        },
+        }
     )
-    lines = apply_overrides(settings, mandate)
-    # Every refused key is untouched; only the metric moved.
-    assert settings.mode == base_mode
+    with pytest.raises(MandateError) as exc:
+        apply_overrides(settings, mandate)
+    message = str(exc.value)
+    assert "profile:test" in message  # the refusal names its source
+    for refused in (
+        "mode",
+        "risk.max_daily_loss_pct",
+        "data.budget_usd",
+        "promotion.max_gap",
+        "promotion.min_test_metric",
+        "promotion.min_holdout_metric",
+    ):
+        assert refused in message
+    # Nothing moved, including the legal key that travelled with them.
+    assert settings.mode == "paper"
     assert settings.risk.max_daily_loss_pct == 3.0
     assert settings.data.budget_usd == 125.0
     assert settings.promotion.max_gap == 1.0
     assert settings.promotion.min_test_metric == 0.0
     assert settings.promotion.min_holdout_metric == 0.0
-    assert settings.promotion.metric == "total_return"
-    assert lines == ["promotion.metric=total_return"]
+    assert settings.promotion.metric == "sharpe"
 
 
 def test_overlay_refuses_invalid_metric_value(tmp_path):
+    """A bad value is fatal too, carrying the one unknown-metric diagnosis.
+
+    Raw attribute assignment on these models still does NOT validate (no
+    validate_assignment) — the overlay's section re-validation is what protects the knob.
+    """
     settings = _settings(tmp_path, tmp_path / "mandate")
-    # The subtlety apply_overrides guards: raw assignment does NOT validate (no
-    # validate_assignment on these models), so a hand-check is the only protection.
     settings.promotion.metric = "bogus"
     assert settings.promotion.metric == "bogus"  # proves assignment is unchecked
     settings.promotion.metric = "sharpe"
 
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={"promotion.metric": "not_a_metric"},
-    )
-    lines = apply_overrides(settings, mandate)
+    with pytest.raises(MandateError, match="unknown metric 'not_a_metric'") as exc:
+        apply_overrides(settings, _mandate_with({"promotion.metric": "not_a_metric"}))
+    assert "profile:test" in str(exc.value)
     assert settings.promotion.metric == "sharpe"  # invalid value refused, left unchanged
-    assert lines == []
+
+
+def test_overlay_refuses_an_unknown_key(tmp_path):
+    """A typo'd path never silently un-steers a multi-day run."""
+    settings = _settings(tmp_path, tmp_path / "mandate")
+    with pytest.raises(MandateError, match="promotion.metrik"):
+        apply_overrides(settings, _mandate_with({"promotion.metrik": "sortino"}))
+    assert settings.promotion.metric == "sharpe"
 
 
 def test_overlay_cannot_touch_backtest_costs(tmp_path):
-    """The mandate config: overlay stays promotion.metric-only — it may steer WHAT to look
-    for, never how forgiving the arena is (#23). A backtest cost override is refused and the
-    section is left on its floored default."""
+    """However wide the run-shaping surface gets, the fill costs stay out of it — a mandate
+    steers WHAT to look for, never how forgiving the arena is (#23). A backtest cost override
+    is fatal and the section is left on its floored default."""
     settings = _settings(tmp_path, tmp_path / "mandate")
     assert settings.backtest.fee_bps == 1.0
     assert settings.backtest.slippage_bps == 1.0
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={
+    mandate = _mandate_with(
+        {
             "backtest.fee_bps": 0.1,  # a cost-cheapening attempt via the overlay
             "backtest.slippage_bps": 0.1,
-        },
+        }
     )
-    lines = apply_overrides(settings, mandate)
+    with pytest.raises(MandateError) as exc:
+        apply_overrides(settings, mandate)
+    assert "backtest.fee_bps" in str(exc.value)
+    assert "backtest.slippage_bps" in str(exc.value)
     assert settings.backtest.fee_bps == 1.0  # untouched
     assert settings.backtest.slippage_bps == 1.0
-    assert lines == []  # nothing applied
 
 
 def test_apply_overrides_none_is_noop(tmp_path):
@@ -400,14 +613,7 @@ def test_apply_overrides_none_is_noop(tmp_path):
 def test_metric_flag_beats_overlay_via_apply_order(tmp_path):
     """The CLI applies --metric AFTER the overlay, so a one-off flag still wins."""
     settings = _settings(tmp_path, tmp_path / "mandate")
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={"promotion.metric": "total_return"},
-    )
-    apply_overrides(settings, mandate)
+    apply_overrides(settings, _mandate_with({"promotion.metric": "total_return"}))
     assert settings.promotion.metric == "total_return"
     settings.promotion.metric = "sortino"  # what --metric does, after the overlay
     assert settings.promotion.metric == "sortino"
@@ -507,6 +713,36 @@ def test_directive_and_mandate_together_errors(tmp_path):
     assert "not both" in result.output
 
 
+@pytest.mark.parametrize(
+    ("block", "diagnosis"),
+    [
+        # refused: a promotion threshold is a gate, by design
+        ("promotion:\n    max_gap: 5.0\n    metric: sortino", "promotion gates"),
+        # unknown: a typo'd path
+        ("promotion:\n    metrik: sortino", "promotion.metrik"),
+        # invalid: the value fails the section's own validator
+        ("promotion:\n    metric: alpha", "unknown metric 'alpha'"),
+    ],
+)
+def test_bad_mandate_overlay_exits_one_and_starts_no_loop(tmp_path, block, diagnosis):
+    """Loud at startup: a refused, unknown, or invalid key stops `noctis run` before the
+    loop, with the reason on stderr — never a buried warning under a multi-day run."""
+    mandate_dir = tmp_path / "mandate"
+    _write(mandate_dir / "profiles" / "bad.md", f"---\nconfig:\n  {block}\n---\nGo.\n")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"mode: paper\nmandate_dir: {mandate_dir}\ndata:\n  lake_dir: {tmp_path}/lake\n"
+        f"state_dir: {tmp_path}/state/\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["run", "--mandate", "bad", "-c", str(cfg)])
+    assert result.exit_code == 1
+    assert "MANDATE:" in result.stderr
+    assert diagnosis in result.stderr
+    assert "profile:bad" in result.stderr  # which mandate caused it
+    assert "Noctis starting" not in result.stdout  # no loop was entered
+
+
 # ── the SHIPPED mandate/ folder (Phase 2): reads the real committed files ─────────────────
 # These guard that the checked-in mandate/ folder always resolves and stays allowlist-clean.
 # They deliberately point at the REAL repo mandate/ + config.yaml, not tmp fixtures.
@@ -530,19 +766,20 @@ def _repo_settings(selector):
 
 
 @pytest.mark.parametrize("name", _SHIPPED_PROFILES)
-def test_shipped_profile_resolves_and_overlay_is_allowlist_clean(name):
-    from noctis.research.mandate import _OVERRIDE_ALLOWLIST
+def test_shipped_profile_resolves_and_declares_promotion_metric_only(name):
+    """Every shipped profile declares exactly one key — ``promotion.metric``.
 
+    Tighter than "within the allowlist": a profile the shipped ``auto`` selector may pick
+    must never declare a knob that would be refused (now fatal) or silently inert.
+    """
     settings = _repo_settings(name)
     mandate = resolve_mandate(settings)  # loads without raising
     assert mandate is not None
     assert mandate.source == f"profile:{name}"
-    # No profile puts anything outside the allowlist in its config: block.
-    assert set(mandate.config_overrides) <= set(_OVERRIDE_ALLOWLIST)
-    # apply_overrides only ever echoes a promotion.metric change (or nothing).
+    assert set(mandate.config_overrides) == {"promotion.metric"}
     echoes = apply_overrides(settings, mandate)
-    assert all(line.startswith("promotion.metric=") for line in echoes)
-    assert len(echoes) <= 1
+    assert len(echoes) == 1
+    assert echoes[0].startswith("promotion.metric=")
 
 
 def test_shipped_profile_metrics_are_expected():
@@ -567,6 +804,70 @@ def test_shipped_profiles_catalog_has_all_five_with_summaries():
     catalog = profiles_catalog(settings.mandate_dir)
     assert {c["name"] for c in catalog} == set(_SHIPPED_PROFILES)
     assert all(c["summary"].strip() for c in catalog)
+
+
+def _example_config_surface() -> dict:
+    """Every ``config:`` override ``MANDATE.md.example`` shows — the live block plus the
+    commented-out one, flattened to dotted paths.
+
+    The example's front matter is the operator's discoverability surface for the overlay: the
+    live block binds the metric, and the whole rest of the bindable tier ships beside it behind
+    a ``# `` prefix. The convention that makes that readable *and* checkable is that every
+    commented line *inside* ``config:`` (i.e. indented) is one YAML line with exactly one ``# ``
+    in front of it — prose in the block is therefore itself a YAML comment (``# #`` in the raw
+    file), so removing one ``# `` from every line yields exactly what an operator gets by
+    uncommenting. Column-0 comments are the other front-matter keys' own guidance (``symbols:``)
+    and stay out of it.
+    """
+    import yaml
+
+    from noctis.research.mandate import _FRONT_MATTER_RE, _extract_overrides, _flatten
+
+    raw = (_REPO_MANDATE / "MANDATE.md.example").read_text(encoding="utf-8")
+    match = _FRONT_MATTER_RE.match(raw)
+    assert match is not None, "MANDATE.md.example must open with a --- front-matter fence"
+    uncommented = []
+    for line in match.group(1).splitlines():
+        body = line.lstrip()
+        indent = line[: len(line) - len(body)]
+        if not indent or not body.startswith("#"):
+            continue
+        body = body[1:]
+        uncommented.append(indent + (body[1:] if body.startswith(" ") else body))
+    surface = _extract_overrides(yaml.safe_load(match.group(1)))
+    surface.update(_flatten(yaml.safe_load("\n".join(uncommented)) or {}))
+    return surface
+
+
+def test_shipped_mandate_example_documents_the_whole_bindable_surface():
+    """The example's ``config:`` block is ratcheted both ways against the classifier.
+
+    It is the only place an operator learns the overlay surface without reading
+    ``noctis/config/overlay.py``, so a documented path the classifier refuses (or has never
+    heard of) is a lie, and a widened allowed/clamped tier nobody wrote down is a surface
+    nobody can find.
+    """
+    from noctis.config.overlay import ALLOWED, CLAMPED, classify
+
+    documented = set(_example_config_surface())
+    unbindable = sorted(p for p in documented if classify(p).tier not in {"allowed", "clamped"})
+    assert not unbindable, f"MANDATE.md.example documents unbindable paths: {unbindable}"
+    missing = sorted((set(ALLOWED) | set(CLAMPED)) - documented)
+    assert not missing, f"bindable paths missing from MANDATE.md.example's config: block: {missing}"
+
+
+def test_shipped_mandate_example_block_applies_as_written(tmp_path):
+    """Uncomment the whole block and the run still starts.
+
+    Classification alone would let the example ship an illustrative value the owning section
+    rejects, a clamp pointed the undisciplined way, or a seed universe too short for the
+    research panel. Applying it is the honest check, and it costs one call.
+    """
+    from noctis.config.overlay import ALLOWED, CLAMPED, apply_patch
+
+    settings = load_settings(config_path=tmp_path / "missing.yaml")
+    applied = apply_patch(settings, _example_config_surface())
+    assert len(applied) == len(ALLOWED) + len(CLAMPED)
 
 
 def test_shipped_mandate_md_resolves_to_sortino(tmp_path):

@@ -751,3 +751,427 @@ def test_research_debug_without_session_writes_no_run_tree(tmp_path):
     assert "[llm] extra" in result.output
     qa = tmp_path / "qa"
     assert not qa.exists() or not any(qa.iterdir())
+
+
+# --- the overlay an operator can actually read: kickoff echo + status (story #122) -----
+# The mandate overlay carries the whole run configuration now (model, budgets, data window,
+# metric), so the configuration a run assembled from has to be visible where an operator
+# already looks: the kickoff log of `run`/`research`, and `noctis status`.
+
+# One mandate that moves knobs in three different sections — the everyday widened overlay.
+_WIDE_OVERLAY = (
+    "  promotion:\n"
+    "    metric: sortino\n"
+    "  research:\n"
+    "    model: anthropic/claude-mandate-fake\n"
+    "  data:\n"
+    "    history_days: 45\n"
+)
+_WIDE_ECHOES = (
+    "data.history_days=45",
+    "promotion.metric=sortino",
+    "research.model=anthropic/claude-mandate-fake",
+)
+
+
+def _mandate_config(tmp_path, profile: str, config_block: str = "") -> str:
+    """A paper config whose active mandate is ``profile``; ``config_block`` is its overlay.
+
+    The lake stays empty on purpose: ``run`` echoes its kickoff lines and then exits cleanly
+    on the no-data path, so these tests read the echo without entering the loop.
+    """
+    front = f"config:\n{config_block}" if config_block else ""
+    md = tmp_path / "mandate" / "profiles" / f"{profile}.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(f"---\nsummary: A steering personality.\n{front}---\nSteer this session.\n")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "data:",
+                f"  lake_dir: {tmp_path}/lake",
+                f"state_dir: {tmp_path}/state/",
+                f"mandate_dir: {tmp_path}/mandate",
+                "research:",
+                f"  mandate: {profile}",
+            ]
+        )
+        + "\n"
+    )
+    return str(cfg)
+
+
+def test_run_kickoff_echoes_every_applied_override(tmp_path):
+    """Every knob the mandate moved is in the log an operator already reads, under one header
+    naming the mandate that moved them."""
+    cfg = _mandate_config(tmp_path, "homelab", _WIDE_OVERLAY)
+    result = runner.invoke(app, ["run", "--config", cfg])
+    assert result.exit_code == 0, result.output
+    assert "Mandate: profile:homelab" in result.output
+    assert "mandate profile:homelab overrides:" in result.output
+    for echo in _WIDE_ECHOES:
+        assert echo in result.output
+
+
+def test_research_kickoff_echoes_every_applied_override(tmp_path, monkeypatch):
+    _patch_research_agent(monkeypatch)
+    result = runner.invoke(
+        app, ["research", "--config", _mandate_config(tmp_path, "homelab", _WIDE_OVERLAY)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "mandate profile:homelab overrides:" in result.output
+    for echo in _WIDE_ECHOES:
+        assert echo in result.output
+
+
+def test_kickoff_is_unchanged_without_a_mandate(tmp_path):
+    result = runner.invoke(app, ["run", "--config", _paper_config(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "Mandate:" not in result.output
+    assert "overrides" not in result.output
+
+
+def test_kickoff_is_unchanged_when_the_mandate_applies_nothing(tmp_path):
+    """A prose-only mandate still names itself and adds not one line more."""
+    result = runner.invoke(app, ["run", "--config", _mandate_config(tmp_path, "prose")])
+    assert result.exit_code == 0, result.output
+    assert "Mandate: profile:prose" in result.output
+    assert "overrides" not in result.output
+
+
+def test_a_mandate_set_research_model_is_visible_at_kickoff(tmp_path):
+    """The research-engine line reads post-overlay too: the model a mandate chose is the model
+    the run announces, not the one config.yaml would have used."""
+    cfg = _mandate_config(
+        tmp_path, "homelab", "  research:\n    model: anthropic/claude-mandate-fake\n"
+    )
+    result = runner.invoke(app, ["run", "--config", cfg])
+    assert result.exit_code == 0, result.output
+    assert "Research engine:" in result.output
+    assert "anthropic/claude-mandate-fake" in result.output
+    assert "research.model=anthropic/claude-mandate-fake" in result.output
+
+
+def test_status_reports_post_mandate_values(tmp_path):
+    """status resolves the whole session, so its configuration lines show what the run would
+    actually use — including a direction-clamped knob the mandate tightened."""
+    cfg = _mandate_config(
+        tmp_path,
+        "homelab",
+        "  research_time_budget_minutes: 17\n  data:\n    budget_usd: 3.5\n",
+    )
+    result = runner.invoke(app, ["status", "--config", cfg])
+    assert result.exit_code == 0, result.output
+    assert "research_budget:   17 min" in result.output
+    assert "budget $3.5" in result.output
+
+
+def test_status_prints_the_mandate_the_overrides_and_the_research_model(tmp_path):
+    cfg = _mandate_config(tmp_path, "homelab", _WIDE_OVERLAY)
+    result = runner.invoke(app, ["status", "--config", cfg])
+    assert result.exit_code == 0, result.output
+    assert "mandate:           profile:homelab" in result.output
+    assert "research model:    anthropic/claude-mandate-fake" in result.output
+    for echo in _WIDE_ECHOES:
+        assert echo in result.output
+
+
+def test_status_without_a_mandate_still_reports(tmp_path):
+    """No mandate configured is the default install: status says so and keeps every line."""
+    result = runner.invoke(app, ["status", "--config", _paper_config(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "mandate:           none" in result.output
+    assert "overrides:         none" in result.output
+    assert "research model:    openai/gpt-5.4" in result.output  # the shipped default
+    assert "mode (resolved):   paper" in result.output
+
+
+def test_status_research_model_falls_back_to_the_agent_model(tmp_path):
+    """``research.model: null`` is the documented fallback to ``research.agent.model`` — status
+    reports the model a session would actually drive, not the empty knob."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"mode: paper\ndata:\n  lake_dir: {tmp_path}/lake\nstate_dir: {tmp_path}/state/\n"
+        f"research:\n  model: null\n  agent:\n    model: ollama_chat/local-30b\n"
+    )
+    result = runner.invoke(app, ["status", "--config", str(cfg)])
+    assert result.exit_code == 0, result.output
+    assert "research model:    ollama_chat/local-30b" in result.output
+
+
+def test_status_reports_an_unusable_mandate_instead_of_crashing(tmp_path):
+    """A mandate `run` refuses to start under is exactly what an operator runs `status` to
+    diagnose, so the refusal is reported in place — the remaining lines fall back to the
+    pre-overlay settings and say so — while `run` itself still refuses outright."""
+    cfg = _mandate_config(tmp_path, "sneaky", "  promotion:\n    max_gap: 5.0\n")
+
+    status_result = runner.invoke(app, ["status", "--config", cfg])
+    assert status_result.exit_code == 0, status_result.output
+    assert "promotion.max_gap" in status_result.output  # the refusal, named
+    assert "pre-overlay" in status_result.output  # ...and what that costs the lines below
+    assert "mode (resolved):   paper" in status_result.output  # the diagnosis still prints
+
+    run_result = runner.invoke(app, ["run", "--config", cfg])
+    assert run_result.exit_code != 0
+    assert "MANDATE" in run_result.output
+
+
+def test_status_beside_a_legacy_layout_still_warns_rather_than_exits(tmp_path, monkeypatch):
+    """The full-session switch keeps the diagnostic contract: status warns where run refuses."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "state").mkdir()  # an un-migrated legacy artifact beside the config
+    md = tmp_path / "mandate" / "profiles" / "homelab.md"
+    md.parent.mkdir(parents=True)
+    md.write_text(f"---\nconfig:\n{_WIDE_OVERLAY}---\nSteer this session.\n")
+    cfg = tmp_path / "config.yaml"  # state/lake left at their workspace defaults
+    cfg.write_text(f"mode: paper\nmandate_dir: {tmp_path}/mandate\nresearch:\n  mandate: homelab\n")
+
+    result = runner.invoke(app, ["status", "--config", str(cfg)])
+    assert result.exit_code == 0, result.output
+    assert "legacy" in result.output.lower()
+    assert "mode (resolved):   paper" in result.output
+    assert "mandate:           profile:homelab" in result.output
+
+
+def test_debug_manifest_digests_post_overlay_settings(tmp_path):
+    """Regression: the QA manifest's config digest is taken over the settings the run actually
+    assembled from, so a recorded run's manifest reflects the mandate's overlay — a knob set by
+    a mandate digests exactly like the same knob set in config.yaml."""
+    import json
+
+    cfg = Path(_debug_run_config(tmp_path))
+    profile = tmp_path / "mandate" / "profiles" / "spicy.md"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("---\nconfig:\n  promotion:\n    metric: sortino\n---\nGo.\n")
+    cfg.write_text(cfg.read_text() + f"mandate_dir: {tmp_path}/mandate\n")
+
+    def digest(*args: str) -> str:
+        result = runner.invoke(
+            app, ["run", "--config", str(cfg), "--debug", "--time-limit-hours", "0", *args]
+        )
+        assert result.exit_code == 0, result.output
+        run_id = next(
+            line.split("QA run:")[1].strip()
+            for line in result.output.splitlines()
+            if line.startswith("QA run:")
+        )
+        return json.loads((tmp_path / "qa" / run_id / "run.json").read_text())["config_digest"]
+
+    plain = digest()
+    steered = digest("--mandate", "spicy")
+    assert steered != plain  # the overlay reached the manifest at all...
+
+    cfg.write_text(cfg.read_text() + "promotion:\n  metric: sortino\n")
+    configured = digest()
+    assert configured == steered  # ...and what it digests is the post-overlay value
+
+
+# --- `noctis mandate <name>`: the preflight (story #124) -------------------------------
+# The mandate is the sole run input, so a dry-run before committing a machine to a multi-day
+# loop is what makes the widened surface self-documenting: resolve the mandate, print what it
+# would actually do — provenance, declared symbols, references, and the effective settings
+# diff from what to what — and start nothing at all.
+
+
+def _write_profile(
+    tmp_path, name: str, front_matter: str = "", body: str = "Steer this.\n"
+) -> None:
+    """Write ``mandate/profiles/<name>.md`` with the given front matter."""
+    md = tmp_path / "mandate" / "profiles" / f"{name}.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(f"---\n{front_matter}---\n{body}")
+
+
+def _preflight_config(tmp_path) -> str:
+    """A paper config with a mandate_dir but NO pinned mandate.
+
+    The selector argument does all the work here — the way an operator preflights a
+    personality they have not committed to yet. ``promotion.metric`` is pinned so the diff
+    has a stated pre-value to move away from, and the lake stays empty so a cross-checking
+    ``run`` exits cleanly on the no-data path right after its kickoff echo.
+    """
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "mode: paper",
+                "data:",
+                f"  lake_dir: {tmp_path}/lake",
+                f"state_dir: {tmp_path}/state/",
+                f"mandate_dir: {tmp_path}/mandate",
+                "promotion:",
+                "  metric: sharpe",
+            ]
+        )
+        + "\n"
+    )
+    return str(cfg)
+
+
+def test_mandate_preflight_prints_source_summary_symbols_and_references(tmp_path):
+    """The provenance an operator needs before committing a machine to a mandate: which file
+    it resolved to, what it says it does, the tickers it declares, and what it pulled in."""
+    refs = tmp_path / "mandate" / "references"
+    refs.mkdir(parents=True)
+    (refs / "watchlist.md").write_text("SMR is a small modular reactor play.\n")
+    _write_profile(
+        tmp_path,
+        "homelab",
+        "summary: A small-context homelab personality.\n"
+        "symbols: [smr, CCJ, smr]\n"
+        "references: [references/watchlist]\n",
+    )
+
+    result = runner.invoke(app, ["mandate", "homelab", "-c", _preflight_config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "profile:homelab" in result.output
+    assert "A small-context homelab personality." in result.output
+    assert "SMR, CCJ" in result.output  # normalized and de-duped, as the session sees them
+    assert "references/watchlist.md" in result.output
+
+
+def test_mandate_preflight_prints_the_effective_settings_diff(tmp_path):
+    """Every path the overlay binds, from what config resolved to what the run would use."""
+    _write_profile(tmp_path, "homelab", f"config:\n{_WIDE_OVERLAY}")
+
+    result = runner.invoke(app, ["mandate", "homelab", "-c", _preflight_config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "promotion.metric" in result.output
+    assert "sharpe → sortino" in result.output  # the config.yaml value → the mandate's
+    assert "data.history_days" in result.output
+    assert "365 → 45" in result.output  # the shipped default → the mandate's
+    assert "openai/gpt-5.4 → anthropic/claude-mandate-fake" in result.output
+
+
+def test_mandate_preflight_with_no_config_block_prints_provenance_and_an_empty_diff(tmp_path):
+    """A prose-only mandate is a valid mandate: it still says what it is, and says plainly
+    that it binds nothing."""
+    _write_profile(tmp_path, "prose", "summary: Prose only, no knobs.\n")
+
+    result = runner.invoke(app, ["mandate", "prose", "-c", _preflight_config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "profile:prose" in result.output
+    assert "Prose only, no knobs." in result.output
+    assert "overrides:         none" in result.output
+
+
+def test_mandate_preflight_of_auto_reports_an_empty_overlay(tmp_path):
+    """``auto`` resolves to a selection instruction rather than a profile, so it binds nothing
+    — a preflight that showed a profile's knobs here would be lying about the session."""
+    _write_profile(tmp_path, "homelab", f"config:\n{_WIDE_OVERLAY}")
+
+    result = runner.invoke(app, ["mandate", "auto", "-c", _preflight_config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "mandate:           auto" in result.output
+    assert "overrides:         none" in result.output
+    assert "sortino" not in result.output  # the profile's overlay never reaches this session
+
+
+def test_mandate_preflight_of_an_empty_mandate_says_it_steers_nothing(tmp_path):
+    """The shipped MANDATE.md is all comments, so the selector resolves to no mandate at all —
+    said out loud, and still a clean exit, because unconstrained is a configuration too."""
+    (tmp_path / "mandate").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "mandate" / "MANDATE.md").write_text("<!-- how-to header only -->\n")
+
+    result = runner.invoke(app, ["mandate", "MANDATE", "-c", _preflight_config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "no steering" in result.output
+    assert "unconstrained" in result.output
+
+
+def test_mandate_preflight_exits_nonzero_and_lists_every_problem_at_once(tmp_path):
+    """A refused key, a wrong-direction clamp and an unknown key are all named in one pass,
+    each with the reason for that path — and they are the same problems startup prints, so a
+    cron job can gate on the preflight and get the diagnosis a run would have given it."""
+    _write_profile(
+        tmp_path,
+        "sneaky",
+        "config:\n"
+        "  promotion:\n"
+        "    max_gap: 5.0\n"
+        "  research:\n"
+        "    min_trials: 2\n"
+        "    metrik: sortino\n",
+    )
+    cfg = _preflight_config(tmp_path)
+
+    result = runner.invoke(app, ["mandate", "sneaky", "-c", cfg])
+
+    assert result.exit_code != 0
+    assert "promotion.max_gap" in result.output
+    assert "promotion gates" in result.output  # the reason that path is refused
+    assert "research.min_trials" in result.output
+    assert "may only be raised" in result.output  # the clamp direction
+    assert "research.metrik" in result.output
+    assert "not a setting" in result.output
+
+    startup = runner.invoke(app, ["run", "--config", cfg, "--mandate", "sneaky"])
+    assert startup.exit_code != 0
+    for problem in ("promotion.max_gap", "research.min_trials", "research.metrik"):
+        assert problem in startup.output
+
+
+def test_mandate_preflight_exits_nonzero_on_an_invalid_value(tmp_path):
+    """A value the owning config section rejects fails the preflight too — the whole point is
+    that a gating script never has to start a run to find out."""
+    _write_profile(tmp_path, "typo", "config:\n  promotion:\n    metric: not_a_metric\n")
+
+    result = runner.invoke(app, ["mandate", "typo", "-c", _preflight_config(tmp_path)])
+
+    assert result.exit_code != 0
+    assert "promotion.metric" in result.output
+    assert "not_a_metric" in result.output
+
+
+def test_mandate_preflight_unresolvable_selector_exits_with_the_not_found_diagnosis(tmp_path):
+    """The one not-found message, reused: it names the selector and both paths it looked in."""
+    result = runner.invoke(app, ["mandate", "no-such-profile", "-c", _preflight_config(tmp_path)])
+
+    assert result.exit_code != 0
+    assert "no-such-profile" in result.output
+    assert "not found" in result.output
+    assert "profiles/no-such-profile.md" in result.output
+
+
+def test_mandate_preflight_starts_nothing(tmp_path, monkeypatch):
+    """A preflight is a dry run: no research session, no LLM client (not even the probe, which
+    drags litellm in), and no runtime that could place an order."""
+    started: list[str] = []
+    monkeypatch.setattr(
+        "noctis.bootstrap.build_research_session", lambda **kwargs: started.append("session")
+    )
+    monkeypatch.setattr(
+        "noctis.research.build_llm_client", lambda *a, **kw: started.append("llm_client")
+    )
+    monkeypatch.setattr(
+        "noctis.research.client_status", lambda *a, **kw: started.append("client_status")
+    )
+    monkeypatch.setattr("noctis.engine.build_runtime", lambda *a, **kw: started.append("runtime"))
+    _write_profile(tmp_path, "homelab", f"config:\n{_WIDE_OVERLAY}")
+
+    result = runner.invoke(app, ["mandate", "homelab", "-c", _preflight_config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert started == []
+
+
+def test_mandate_preflight_shows_what_a_run_would_actually_get(tmp_path):
+    """One precedence chain, two renderings: the preflight's post-value is the value the
+    kickoff echo prints for the same mandate — it resolves through the same session path."""
+    _write_profile(tmp_path, "homelab", "config:\n  research_time_budget_minutes: 17\n")
+    cfg = _preflight_config(tmp_path)
+
+    preflight = runner.invoke(app, ["mandate", "homelab", "-c", cfg])
+    assert preflight.exit_code == 0, preflight.output
+    assert "research_time_budget_minutes" in preflight.output
+    assert "60 → 17" in preflight.output  # the shipped default → the mandate's
+
+    kickoff = runner.invoke(app, ["run", "--config", cfg, "--mandate", "homelab"])
+    assert kickoff.exit_code == 0, kickoff.output
+    assert "research_time_budget_minutes=17" in kickoff.output

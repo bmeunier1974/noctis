@@ -33,6 +33,7 @@ from .llm import (
     client_status,
     effective_web_search,
     provider_of,
+    resolved_research_model,
     thinking_for,
 )
 from .mandate import (
@@ -40,6 +41,7 @@ from .mandate import (
     MandateError,
     Reference,
     apply_overrides,
+    inert_auto_overrides,
     profiles_catalog,
     resolve_mandate,
 )
@@ -76,6 +78,7 @@ __all__ = [
     "Turn",
     "ToolCall",
     "provider_of",
+    "resolved_research_model",
     "thinking_for",
     "effective_web_search",
     "CostProfile",
@@ -87,4 +90,5 @@ __all__ = [
     "resolve_mandate",
     "apply_overrides",
     "profiles_catalog",
+    "inert_auto_overrides",
 ]

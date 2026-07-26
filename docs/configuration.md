@@ -7,7 +7,8 @@ why the template stays short — it lists only the knobs operators actually touc
 page is the full reference. Secrets live in `.env` (same pattern: `.env.example` → `.env`).
 Both resolve into typed settings (`src/noctis/config/settings.py`). **Environment
 variables override `config.yaml`**, and `NOCTIS_CONFIG=/path/to/config.yaml` points at an
-alternate file.
+alternate file. The active mandate then overlays the run-shaping subset on top of all of it —
+see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 
 ## The knobs
 
@@ -71,12 +72,112 @@ state-touching command refuses to run beside un-migrated legacy data until it ha
 
 ## The mandate overlay
 
-The active mandate's front-matter `config:` block may overlay **only** `promotion.metric` —
-nothing else. Precedence: `--metric` CLI flag > mandate overlay > `config.yaml`. For one
-session, `--mandate <name>` or `--directive "<text>"` (mutually exclusive) override the
+The active mandate's front-matter `config:` block overlays the **run-shaping** knobs of this
+page — and only those. The split is a statement about who owns what: a mandate configures the
+*run* (which model thinks, what it may spend, how big its prompt gets, which names it starts
+from, what "good" is scored as), while `config.yaml` keeps the *arena* (the safety mode, the
+fill-cost floor, the promotion thresholds, the two-axis holdout geometry, the output paths, the
+secrets). Every leaf setting is classified **exactly once** in `src/noctis/config/overlay.py` —
+the authoritative table, with a justification comment per group — and a completeness ratchet in
+the test suite fails until a newly added knob is classified deliberately, so nothing is allowed
+by accident of omission. Today: **35 allowed, 2 clamped, 49 refused**. The whole surface also
+ships commented-out in `mandate/MANDATE.md.example`, so it is discoverable without reading
+source.
+
+**Allowed (35), in six groups.** None of them is read by the promotion gates
+(`champions/promotion.py`), the split geometry (`backtest/splits.py`), or the safety gate
+(`config/gate.py`) — that is the property that makes them settable at all.
+
+| Group | Knobs |
+|---|---|
+| Model seam | `research.model`, `research.base_url`, `research.agent.model` / `coder_model` / `coder_fallback_model`, the three thinking dials (`thinking`, `coder_thinking`, `coder_fallback_thinking`), `research.agent.loop` |
+| Spend ceilings | `research.cost_profile`, `research.agent.max_iterations` / `max_backtests` / `sweep_trials` / `max_author_calls` / `max_escalations` / `max_tokens` / `coder_max_tokens` / `context_window` / `episode_retries` / `web_search` / `max_web_searches` / `sweep_workers` / `worker_bar_budget`, `research_time_budget_minutes`, `time_limit_hours` |
+| Search shape | `promotion.metric`, `research.focus_size`, `research.tuning_dispersion_penalty`, `research.draft_ttl_hours`, `research.memory_distill_every` |
+| Data acquisition | `data.history_days`, `data.auto_backfill` |
+| Housekeeping | `observability.heartbeat_polls`, `qa.keep_last_runs` |
+| Seed universe | `universe` |
+
+**Clamped (2) — legal only in the direction that adds discipline.**
+
+| Knob | Direction | Why |
+|---|---|---|
+| `research.min_trials` | **raise only** | The exhaustion floor. A tune-first personality demanding 20 journaled param sets per verdict is legitimate steering; demanding fewer is the loosening [safety.md](safety.md) forbids. |
+| `data.budget_usd` | **lower only** | The vendor spend cap. A mandate may spend less of your money; the ceiling `config.yaml` set stays the ceiling. |
+
+The bound is whatever config resolved for that path (equal to it is fine), so the clamp
+constrains the *overlay* and nothing else — you still set the number you want in `config.yaml`.
+A wrong-direction value is **fatal**, and the message names the configured value it tried to
+cross; nothing is silently clipped, because a silent clamp would let a mandate say one thing
+while the run does another. `null` — "no bound": an unlimited budget, no exhaustion floor at all
+— ranks as the least-disciplined end of *either* scale, so an overlay may replace it with a
+number and never the reverse.
+
+**Refused (49) — fatal at startup, with the reason printed.** A refused, unknown, or invalid
+key stops the process before any work starts, listing **every** problem in one error so a bad
+mandate is one fix rather than a fix-one-rerun loop. (Refusals used to be warned about and
+silently skipped, which meant discovering three days into a run that a knob never applied.) The
+refused set is the arena: the live-money double gate (`mode`, `allow_live`), the enforced
+fill-cost floor (`backtest.fee_bps`, `backtest.slippage_bps`), every `promotion.*` except
+`metric`, the holdout geometry (`research.fit_set_size`, `research.symbol_holdout_size`),
+`champion_count`, every state/IO path (`workspace_dir`, `state_dir`, `reports_dir`,
+`memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`), the three API keys,
+self-selection (`research.mandate`, `research.mode`), `risk.*` / `trading.*` /
+`live_feed.poll_interval_s`, `data.provider` / `data.dataset`, `session.calendar` /
+`session.timezone`, and `ideation.*`.
+
+Two of those refusals look like they could have been clamps, and are worth spelling out:
+
+- **The promotion thresholds are refused, not "tighten-only" clamped.** They are read in the
+  units of `promotion.metric`, which the same mandate may change — so a `max_gap: 0.5` is not
+  tighter than a Sharpe-units `1.0`, it is a different number in a different scale. It is the
+  same incomparability that makes a champion scored under a different metric **stale** rather
+  than beatable ([validation.md](validation.md)).
+- **The state paths are the sharpest escape hatch there is.** Redirecting `state_dir` moves the
+  experiment journal the exhaustion gate counts trials from — a fresh directory is a *reset
+  exhaustion gate*, having touched no gate knob at all. Redirecting `strategies_dir` moves the
+  champions tier, and with it champion immutability.
+
+**The seed universe carries a starvation guard.** A mandate-set `universe` is upper-cased and
+de-duped (exactly like a mandate's `symbols:` list), and must then name at least
+`research.fit_set_size + research.symbol_holdout_size` symbols — both refused, so a mandate
+cannot shrink the requirement to fit its roster. Fewer is fatal, and the message names the
+**symbol-holdout gate** that would otherwise go inert rather than be cleared: a gate can be
+defeated by starving it as well as by lowering it. This is an overlay-only check by design — a
+`config.yaml` universe below the panel size is the operator's own arena and is left alone.
+
+### Precedence
+
+```
+CLI flags  >  mandate overlay  >  environment  >  .env  >  config.yaml  >  built-in defaults
+```
+
+The overlay applies to a **fully-constructed** settings object — pydantic has already resolved
+env > `.env` > YAML by the time a mandate is read — so for the overlaid subset this **inverts**
+the "environment always wins over the YAML file" rule stated at the top of this page. That is
+deliberate: a mandate is a per-run *selection* an operator makes on purpose, not ambient
+environment, and the whole point of pinning one is that the run is configured by it. Secrets and
+`ALLOW_LIVE` are unaffected — they are refused, so the environment stays their only source.
+`--metric` and `--time-limit-hours` are applied after the overlay and still win; for one session
+`--mandate <name>` or `--directive "<text>"` (mutually exclusive) override the
 `research.mandate` selector. The whole chain resolves in one place — `resolve_session` in
 `src/noctis/bootstrap.py`, the composition root — so the ordering can never drift between
-commands. Details: [research.md](research.md) and `mandate/README.md`.
+commands, and every overlay it performs is bracketed by a gate-unmoved assertion over the
+refused subtree.
+
+### `research.mandate: auto` makes a profile's `config:` block inert
+
+Under the shipped `auto` selector the *agent* picks its profile partway through the session,
+long after settings were assembled — so no profile's `config:` block ever reaches the overlay.
+Nothing fails; the run simply isn't steered by it. Startup therefore logs one warning naming
+every profile whose keys will not apply, plus the remedy (pin the mandate). `promotion.metric`
+is deliberately **suppressed** from that warning: it is inert *by contract* under `auto` (the
+selection instruction is explicitly metric-neutral, and the shipped `config.yaml` says an auto
+session is scored on the base metric), so warning about it on every stock install would be the
+noise that gets the interesting warning ignored. That is exactly why the five shipped profiles
+stay **metric-only** — a shipped profile that declared a second key would make every default
+install warn, and a test holds them there.
+
+Details: [research.md](research.md) and `mandate/README.md`.
 
 ## Fill costs (the enforced floor)
 
@@ -92,9 +193,10 @@ The baseline is **also the enforced minimum**: a value below `1.0` per side is a
 startup error (like `mode: live` without `ALLOW_LIVE`), never a silent clamp. The cost model
 is the system's main difficulty knob — dialing it below the baseline is the cheapest way to
 manufacture champions that would die on real fills — so the knob may only be raised toward
-per-venue realism, never lowered. For the same reason this section is **not** in the mandate
-`config:` overlay allowlist (which stays `promotion.metric`-only): a research personality
-steers *what* to look for, never how forgiving the arena is.
+per-venue realism, never lowered. For the same reason the whole `backtest:` section is
+**refused by name** in the mandate overlay, however wide that surface grows: a research
+personality steers *what* to look for, never how forgiving the arena is. A mandate that tries
+it does not start, and the error says so.
 
 ## Local backends (noctis-ollama)
 

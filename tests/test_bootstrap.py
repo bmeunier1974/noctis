@@ -1,10 +1,11 @@
 """The composition root — one module resolves a session and builds its collaborators.
 
 ``resolve_session`` is the single home of the precedence chain that used to span four
-files (``load_settings`` → safety gate → ``resolve_mandate`` → ``apply_overrides`` →
+files (``load_settings`` → safety gate → ``resolve_mandate`` → ``overlay_mandate`` →
 explicit CLI flags), and the builders here are the one copy of assembly the CLI and the
 runtime used to duplicate (lake vendor selection, the MEMORY.md store, PromotionRules
-from settings, the agent research session bundle).
+from settings, the agent research session bundle). Every overlay the root performs goes
+through ``overlay_mandate``, which is the one place the gate-unmoved assertion lives.
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ from noctis.bootstrap import (
     resolve_session,
 )
 from noctis.champions.promotion import PromotionRules
-from noctis.config import SafetyGateError, load_settings
+from noctis.config import SafetyGateError, load_settings, overlay
+from noctis.config.overlay import OverlayError, gate_snapshot
 from noctis.engine.research import ResearchSummary
 from noctis.research import Capabilities, MandateError
 from noctis.strategies.families import FamilyRegistry
@@ -89,6 +91,43 @@ def test_metric_precedence_config_then_overlay_then_flag(tmp_path):
     assert flagged.overrides == ["promotion.metric=sortino"]  # the echo still records the overlay
 
 
+def test_a_resolved_session_carries_the_pre_overlay_value_of_every_override(tmp_path):
+    """The overlay's echo lines say what a knob ended up as; the session also carries what it
+    *was*, captured around the same guarded seam, so a preflight can render the change from
+    what to what without re-deriving a second precedence chain of its own (#124)."""
+    mandate_dir = _mandate_dir(
+        tmp_path,
+        "homelab",
+        "---\nconfig:\n  promotion:\n    metric: sortino\n  research_time_budget_minutes: 17\n"
+        "---\nSteer this session.\n",
+    )
+    cfg = _config(
+        tmp_path,
+        [
+            "promotion:",
+            "  metric: sharpe",
+            f"mandate_dir: {mandate_dir}",
+            "research:",
+            "  mandate: homelab",
+        ],
+    )
+
+    resolved = resolve_session(cfg)
+
+    assert [(c.path, c.before, c.after) for c in resolved.changes] == [
+        ("promotion.metric", "sharpe", "sortino"),
+        ("research_time_budget_minutes", 60, 17),
+    ]
+    # The two renderings of one overlay can never name different paths: same source, same order.
+    assert [c.path for c in resolved.changes] == [
+        line.split("=", 1)[0] for line in resolved.overrides
+    ]
+
+
+def test_a_session_without_an_overlay_carries_no_changes(tmp_path):
+    assert resolve_session(_config(tmp_path, ["mode: paper"])).changes == []
+
+
 def test_directive_and_mandate_are_mutually_exclusive(tmp_path):
     with pytest.raises(UsageError, match="either --directive or --mandate"):
         resolve_session(_config(tmp_path, ["mode: paper"]), directive="go", mandate="spicy")
@@ -115,10 +154,424 @@ def test_gate_resolves_only_when_asked(tmp_path, monkeypatch):
     assert resolve_session(_config(tmp_path, ["mode: paper"]), require_gate=True).mode == "paper"
 
 
-def test_time_limit_flag_overrides_config(tmp_path):
+def test_time_limit_flag_overrides_config_and_a_mandate_overlay(tmp_path):
+    """``time_limit_hours`` is run-shaping, so a mandate may overlay it (#117) — and the
+    ``--time-limit-hours`` flag is still applied last, so a one-off run bound still wins."""
     cfg = _config(tmp_path, ["time_limit_hours: 24"])
     assert resolve_session(cfg).settings.time_limit_hours == 24
     assert resolve_session(cfg, time_limit_hours=0.5).settings.time_limit_hours == 0.5
+
+    mandate_dir = _mandate_dir(
+        tmp_path, "brief", "---\nconfig:\n  time_limit_hours: 6\n---\nShort runs.\n"
+    )
+    overlaid_cfg = _config(
+        tmp_path,
+        [
+            "time_limit_hours: 24",
+            f"mandate_dir: {mandate_dir}",
+            "research:",
+            "  mandate: brief",
+        ],
+        "overlaid.yaml",
+    )
+    overlaid = resolve_session(overlaid_cfg)
+    assert overlaid.settings.time_limit_hours == 6  # the mandate beats config.yaml
+    assert overlaid.overrides == ["time_limit_hours=6.0"]
+
+    flagged = resolve_session(overlaid_cfg, time_limit_hours=0.5)
+    assert flagged.settings.time_limit_hours == 0.5  # ...and the flag beats the mandate
+    assert flagged.overrides == ["time_limit_hours=6.0"]  # the echo still records the overlay
+
+
+def test_effective_precedence_is_flag_over_mandate_over_env_over_dotenv_over_yaml(
+    tmp_path, monkeypatch
+):
+    """The whole chain on one knob: CLI flag > mandate overlay > environment > ``.env`` >
+    ``config.yaml`` > defaults.
+
+    The mandate slot is the interesting one — it **inverts** the usual env-over-YAML rule.
+    ``config.yaml`` never beats an environment variable, but the mandate is applied after
+    settings are fully resolved, so an operator's steering file wins over the shell.
+    """
+    from noctis.config.settings import Settings
+
+    mandate_dir = _mandate_dir(
+        tmp_path, "bounded", "---\nconfig:\n  time_limit_hours: 3\n---\nBounded runs.\n"
+    )
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("TIME_LIMIT_HOURS=12\n", encoding="utf-8")
+
+    # 1. defaults — no file, no env, no mandate.
+    assert resolve_session(str(tmp_path / "absent.yaml")).settings.time_limit_hours is None
+
+    # 2. config.yaml beats the default.
+    yaml_only = _config(tmp_path, ["time_limit_hours: 24"], "yaml-only.yaml")
+    assert resolve_session(yaml_only).settings.time_limit_hours == 24
+
+    # 3. .env beats config.yaml.
+    monkeypatch.setitem(Settings.model_config, "env_file", str(dotenv))
+    assert resolve_session(yaml_only).settings.time_limit_hours == 12
+
+    # 4. the environment beats .env.
+    monkeypatch.setenv("TIME_LIMIT_HOURS", "8")
+    assert resolve_session(yaml_only).settings.time_limit_hours == 8
+
+    # 5. the mandate overlay beats the environment — the inversion.
+    steered = _config(
+        tmp_path,
+        ["time_limit_hours: 24", f"mandate_dir: {mandate_dir}", "research:", "  mandate: bounded"],
+        "steered.yaml",
+    )
+    assert resolve_session(steered).settings.time_limit_hours == 3
+
+    # 6. the CLI flag beats everything.
+    assert resolve_session(steered, time_limit_hours=0.25).settings.time_limit_hours == 0.25
+
+
+# ── resolve_session: the gate-unmoved assertion around every overlay (#119) ───────────────
+# Belt and braces on top of the deny-by-default classifier: the resolver snapshots the refused
+# subtree, overlays the mandate, and asserts the subtree is byte-identical afterwards. The
+# snapshot is derived from ``overlay.REFUSED`` itself, so the two tables can never drift — the
+# tests below drive that from both sides (a refused path smuggled into ALLOWED, and a path
+# newly added to REFUSED) through the real composition root.
+def _steered(tmp_path, profile: str, config_block: str, name: str = "guarded.yaml") -> str:
+    """A config whose active mandate carries ``config_block`` as its front-matter overlay."""
+    mandate_dir = _mandate_dir(
+        tmp_path, profile, f"---\nconfig:\n{config_block}---\nSteer this session.\n"
+    )
+    return _config(
+        tmp_path,
+        [f"mandate_dir: {mandate_dir}", "research:", f"  mandate: {profile}"],
+        name,
+    )
+
+
+def test_a_refused_path_smuggled_into_the_allowed_set_makes_resolution_raise(tmp_path, monkeypatch):
+    """A mis-classified path is the bug this assertion exists for: with ``promotion.max_gap``
+    wrongly in ALLOWED the overlay itself would happily loosen the overfit guard, and the
+    resolver still refuses to hand back the session."""
+    monkeypatch.setattr(overlay, "ALLOWED", frozenset(set(overlay.ALLOWED) | {"promotion.max_gap"}))
+    cfg = _steered(tmp_path, "sneaky", "  promotion:\n    max_gap: 5.0\n")
+
+    with pytest.raises(OverlayError) as exc:
+        resolve_session(cfg)
+
+    assert "promotion.max_gap" in str(exc.value)
+
+
+def test_a_path_newly_added_to_the_refusal_table_is_asserted_without_further_edits(
+    tmp_path, monkeypatch
+):
+    """The snapshot is derived from the refusal table, not hand-listed in the composition root:
+    a path that becomes refused is covered by the assertion with no edit anywhere else. Here it
+    is left in ALLOWED as well — exactly the drift a classification bug would leave behind — so
+    the overlay applies it and only the derived assertion can catch it."""
+    monkeypatch.setattr(
+        overlay,
+        "REFUSED",
+        {**overlay.REFUSED, "research.focus_size": "refused for the duration of this test"},
+    )
+    cfg = _steered(tmp_path, "narrow", "  research:\n    focus_size: 3\n")
+
+    with pytest.raises(OverlayError) as exc:
+        resolve_session(cfg)
+
+    assert "research.focus_size" in str(exc.value)
+
+
+def test_the_assertion_raises_and_names_what_moved_without_printing_a_secret(
+    tmp_path, monkeypatch, caplog
+):
+    """It raises rather than warns, and the failure names the moved path — but never its value:
+    the refused subtree carries the API keys, and a diagnostic is no place for a credential."""
+    monkeypatch.setattr(overlay, "ALLOWED", frozenset(set(overlay.ALLOWED) | {"databento_api_key"}))
+    cfg = _steered(tmp_path, "leaky", "  databento_api_key: db-secret-123\n")
+
+    with caplog.at_level(logging.WARNING), pytest.raises(OverlayError) as exc:
+        resolve_session(cfg)
+
+    message = str(exc.value)
+    assert "databento_api_key" in message
+    assert "db-secret-123" not in message
+    assert not caplog.records  # raised, never downgraded to a warning nobody reads
+
+
+def test_a_mandate_seed_universe_reaches_the_resolved_session_normalized(tmp_path):
+    """The seed trading roster is settable from a mandate (#121): it survives the whole
+    precedence chain onto the settings object, normalized, and is echoed like any other knob."""
+    cfg = _steered(
+        tmp_path,
+        "sector",
+        '  universe: ["smr", "ccj", "leu", "ura", "nne", "oklo", "bwxt", "vst"]\n',
+        "sector.yaml",
+    )
+
+    session = resolve_session(cfg)
+
+    assert session.settings.universe == ["SMR", "CCJ", "LEU", "URA", "NNE", "OKLO", "BWXT", "VST"]
+    assert session.overrides == [f"universe={session.settings.universe}"]
+
+
+def test_a_mandate_universe_that_starves_the_symbol_holdout_stops_resolution(tmp_path):
+    """The starvation guard sits in the applier, not in a caller, so the composition root
+    inherits it for free: a roster too short to fill the fit set plus the symbol holdout would
+    silently disable the second out-of-sample axis, and resolution refuses before any
+    long-running work starts. Nothing here knows the guard exists — that is the point."""
+    cfg = _steered(tmp_path, "narrow", '  universe: ["AAA", "BBB"]\n', "starved.yaml")
+
+    with pytest.raises(MandateError) as exc:
+        resolve_session(cfg)
+
+    message = str(exc.value)
+    assert "symbol-holdout gate" in message
+    assert "profile:narrow" in message
+
+
+def test_the_safety_gate_resolves_before_the_overlay(tmp_path, monkeypatch):
+    """Ordering is unchanged: nothing downstream may run against an un-gated mode, so a closed
+    gate is the failure an operator sees even when the mandate would also have failed."""
+    monkeypatch.delenv("ALLOW_LIVE", raising=False)
+    monkeypatch.setattr(overlay, "ALLOWED", frozenset(set(overlay.ALLOWED) | {"promotion.max_gap"}))
+    mandate_dir = _mandate_dir(
+        tmp_path, "sneaky", "---\nconfig:\n  promotion:\n    max_gap: 5.0\n---\nSteer.\n"
+    )
+    cfg = _config(
+        tmp_path,
+        ["mode: live", f"mandate_dir: {mandate_dir}", "research:", "  mandate: sneaky"],
+        "gated.yaml",
+    )
+
+    with pytest.raises(SafetyGateError):
+        resolve_session(cfg, require_gate=True)
+
+
+def test_a_session_without_a_mandate_passes_the_assertion_unchanged(tmp_path):
+    cfg = _config(tmp_path, ["promotion:", "  metric: sharpe"], "plain.yaml")
+
+    resolved = resolve_session(cfg)
+
+    assert resolved.mandate is None and resolved.overrides == []
+    assert gate_snapshot(resolved.settings) == gate_snapshot(load_settings(config_path=cfg))
+
+
+def test_a_metric_only_mandate_passes_the_assertion_and_moves_only_the_metric(tmp_path):
+    """The everyday case: a legal overlay applies, the gates are byte-identical to a session
+    that never overlaid anything, and the CLI flag still lands after the assertion."""
+    cfg = _steered(tmp_path, "spicy", "  promotion:\n    metric: sortino\n", "metric-only.yaml")
+
+    resolved = resolve_session(cfg)
+
+    assert resolved.settings.promotion.metric == "sortino"
+    assert resolved.overrides == ["promotion.metric=sortino"]
+    assert gate_snapshot(resolved.settings) == gate_snapshot(load_settings(config_path=cfg))
+
+    flagged = resolve_session(cfg, metric="total_return")
+    assert flagged.settings.promotion.metric == "total_return"
+    assert gate_snapshot(flagged.settings) == gate_snapshot(load_settings(config_path=cfg))
+
+
+# ── resolve_session: the `auto` inert-overlay warning (#120) ──────────────────────────────
+# ``research.mandate: auto`` is the shipped default, and under it the agent picks its profile
+# *inside* the session — long after settings assembly — so a profile's ``config:`` block can
+# never reach the overlay. Since the overlay grew from one knob to the whole run configuration
+# that loss is the entire session's steering, lost silently. These drive the one startup warning
+# that says so, through the real composition root every session-assembling entrypoint calls.
+_REPO_PROFILES = Path(__file__).resolve().parents[1] / "mandate" / "profiles"
+
+# A custom (operator-authored, gitignored) profile that binds its backend and its spend — the
+# case the warning exists for: every one of these keys is legal when the mandate is pinned.
+_INERT_PROFILE = (
+    "---\n"
+    "summary: A homelab personality that binds its own backend.\n"
+    "config:\n"
+    "  research:\n"
+    "    agent:\n"
+    "      model: ollama_chat/local-30b\n"
+    "  data:\n"
+    "    budget_usd: 5.0\n"
+    "---\n"
+    "Run the session on the local coder.\n"
+)
+
+
+def _profiles(tmp_path, bodies: dict[str, str]) -> Path:
+    """A mandate dir holding one ``profiles/<name>.md`` per entry. Returns the mandate dir."""
+    base = tmp_path / "mandate" / "profiles"
+    base.mkdir(parents=True, exist_ok=True)
+    for name, body in bodies.items():
+        (base / f"{name}.md").write_text(body, encoding="utf-8")
+    return tmp_path / "mandate"
+
+
+def _auto_config(tmp_path, mandate_dir, *, name: str = "auto.yaml", prelude=()) -> str:
+    """A config whose selector is ``research.mandate: auto`` against ``mandate_dir``."""
+    return _config(
+        tmp_path,
+        [*prelude, f"mandate_dir: {mandate_dir}", "research:", "  mandate: auto"],
+        name,
+    )
+
+
+def _warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_auto_warns_once_naming_the_profile_and_its_inert_keys(tmp_path, caplog):
+    mandate_dir = _profiles(tmp_path, {"homelab": _INERT_PROFILE})
+    cfg = _auto_config(tmp_path, mandate_dir)
+
+    with caplog.at_level(logging.WARNING):
+        resolved = resolve_session(cfg)
+
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1  # exactly one, per session
+    assert "homelab" in warnings[0]  # which profile
+    assert "research.agent.model" in warnings[0]  # ...and which keys go nowhere
+    assert "data.budget_usd" in warnings[0]
+    assert resolved.mandate is not None and resolved.mandate.source == "auto"
+
+
+def test_the_auto_warning_names_pinning_a_mandate_as_the_remedy(tmp_path, caplog):
+    """A warning an operator can't act on is noise: this one carries the fix, in both spellings
+    (the config selector and the one-session flag)."""
+    cfg = _auto_config(tmp_path, _profiles(tmp_path, {"homelab": _INERT_PROFILE}))
+
+    with caplog.at_level(logging.WARNING):
+        resolve_session(cfg)
+
+    message = _warnings(caplog)[0]
+    assert "research.mandate" in message
+    assert "--mandate" in message
+
+
+def test_auto_warns_once_for_the_whole_catalog_not_once_per_profile(tmp_path, caplog):
+    """Once per session — a catalog of offenders is one warning naming them all, never one
+    record per profile read."""
+    thrifty = "---\nconfig:\n  research:\n    cost_profile: economy\n---\nSpend little.\n"
+    mandate_dir = _profiles(tmp_path, {"homelab": _INERT_PROFILE, "thrifty": thrifty})
+    cfg = _auto_config(tmp_path, mandate_dir)
+
+    with caplog.at_level(logging.WARNING):
+        resolve_session(cfg)
+
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "homelab" in warnings[0] and "thrifty" in warnings[0]
+    assert "research.cost_profile" in warnings[0]
+
+
+def test_auto_stays_an_empty_overlay_and_never_becomes_fatal(tmp_path, caplog):
+    """The warning is informational: ``auto`` remains a valid, shipped configuration. Even a
+    profile whose block would be *fatal* when pinned (a refused promotion gate) only warns
+    here — and moves nothing."""
+    mandate_dir = _profiles(
+        tmp_path, {"sneaky": "---\nconfig:\n  promotion:\n    max_gap: 5.0\n---\nGo.\n"}
+    )
+    cfg = _auto_config(tmp_path, mandate_dir, prelude=["promotion:", "  metric: sortino"])
+
+    with caplog.at_level(logging.WARNING):
+        resolved = resolve_session(cfg)
+
+    assert resolved.overrides == []  # auto still yields an empty overlay
+    assert resolved.settings.promotion.max_gap == load_settings(config_path=cfg).promotion.max_gap
+    assert "promotion.max_gap" in _warnings(caplog)[0]
+    # ...and the contrast that makes the warning worth reading: pinned, the same file is fatal.
+    with pytest.raises(MandateError):
+        resolve_session(cfg, mandate="sneaky")
+
+
+def test_the_shipped_metric_only_profiles_are_deliberately_silent_under_auto(tmp_path, caplog):
+    """THE CHOICE (#120, criterion 4): ``promotion.metric`` alone is suppressed.
+
+    It is the one key ``auto`` already answers for — the auto instruction tells the model to
+    select on the neutral Sharpe basis "REGARDLESS of the metric each profile tunes on", and the
+    shipped ``config.yaml`` line says the session is "scored on the base promotion.metric" — so a
+    stock install is told nothing it does not already know. Keeping the default install quiet is
+    what keeps the warning worth reading when it does fire. The boundary is exactly one key wide:
+    add any second key to a shipped profile and the same install warns.
+    """
+    base = tmp_path / "mandate" / "profiles"
+    base.mkdir(parents=True)
+    for src in sorted(_REPO_PROFILES.glob("*.md")):
+        (base / src.name).write_bytes(src.read_bytes())
+    cfg = _auto_config(tmp_path, tmp_path / "mandate")
+
+    with caplog.at_level(logging.WARNING):
+        resolved = resolve_session(cfg)
+
+    assert _warnings(caplog) == []  # five metric-only profiles: silence
+    assert resolved.overrides == []
+
+    # One non-metric key in one shipped profile, and the ratchet fires.
+    aggressive = base / "aggressive.md"
+    aggressive.write_text(
+        aggressive.read_text(encoding="utf-8").replace(
+            "config:\n", "config:\n  research:\n    cost_profile: economy\n", 1
+        ),
+        encoding="utf-8",
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        resolve_session(cfg)
+
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "aggressive" in warnings[0] and "research.cost_profile" in warnings[0]
+    assert "promotion.metric" not in warnings[0]  # still suppressed, even alongside a live key
+
+
+def test_a_pinned_mandate_produces_no_inert_overlay_warning(tmp_path, caplog):
+    """Pinned — by flag or by config selector — the overlay actually applies, so there is
+    nothing inert to warn about."""
+    mandate_dir = _profiles(tmp_path, {"homelab": _INERT_PROFILE})
+
+    flagged_cfg = _config(tmp_path, [f"mandate_dir: {mandate_dir}"], "pinned.yaml")
+    with caplog.at_level(logging.WARNING):
+        flagged = resolve_session(flagged_cfg, mandate="homelab")
+    assert _warnings(caplog) == []
+    assert "research.agent.model=ollama_chat/local-30b" in flagged.overrides
+
+    selector_cfg = _config(
+        tmp_path,
+        [f"mandate_dir: {mandate_dir}", "research:", "  mandate: homelab"],
+        "selector.yaml",
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        selected = resolve_session(selector_cfg)
+    assert _warnings(caplog) == []
+    assert "research.agent.model=ollama_chat/local-30b" in selected.overrides
+
+
+def test_an_absent_profiles_dir_under_auto_warns_nothing(tmp_path, caplog):
+    mandate_dir = tmp_path / "mandate"
+    mandate_dir.mkdir()
+    cfg = _auto_config(tmp_path, mandate_dir)
+
+    with caplog.at_level(logging.WARNING):
+        resolved = resolve_session(cfg)
+
+    assert _warnings(caplog) == []
+    assert resolved.mandate is not None and resolved.mandate.source == "auto"
+
+
+def test_an_unreadable_profiles_dir_degrades_to_no_warning(tmp_path, caplog):
+    """A diagnostic never becomes the reason a session fails to start."""
+    mandate_dir = _profiles(tmp_path, {"homelab": _INERT_PROFILE})
+    profiles = mandate_dir / "profiles"
+    os.chmod(profiles, 0o000)
+    if os.access(profiles / "homelab.md", os.R_OK):  # running as root: the chmod proves nothing
+        os.chmod(profiles, 0o755)
+        pytest.skip("cannot make a directory unreadable for this user")
+    try:
+        cfg = _auto_config(tmp_path, mandate_dir)
+        with caplog.at_level(logging.WARNING):
+            resolved = resolve_session(cfg)
+    finally:
+        os.chmod(profiles, 0o755)
+
+    assert _warnings(caplog) == []
+    assert resolved.mandate is not None and resolved.mandate.source == "auto"
 
 
 # ── PromotionRules.from_settings: the one config→rules mapping ────────────────────────────
@@ -382,6 +835,50 @@ def test_research_session_runs_the_same_loop_kwargs_as_the_cli_did(tmp_path, mon
     # An explicit cap wins over the budget.
     session.run(max_iterations=3)
     assert seen["max_iterations"] == 3
+
+
+def test_a_mandate_model_override_reaches_the_built_research_session(tmp_path, monkeypatch):
+    """The model seam is run-shaping (#117): a mandate that declares its own model changes
+    which model the composition root builds the session's client for, and which model the
+    session reports it drives — not just a settings value nobody reads."""
+    mandate_dir = _mandate_dir(
+        tmp_path,
+        "local",
+        "---\nconfig:\n  research:\n    model: ollama/qwen3-coder-30b\n---\nRun local.\n",
+    )
+    cfg = _config(
+        tmp_path,
+        [
+            f"mandate_dir: {mandate_dir}",
+            f"state_dir: {tmp_path}/state/",
+            f"strategies_dir: {tmp_path}/strategies/",
+            "research:",
+            "  model: openai/gpt-5.4",
+            "  mandate: local",
+        ],
+    )
+    resolved = resolve_session(cfg)
+    assert resolved.settings.research.model == "ollama/qwen3-coder-30b"
+    assert "research.model=ollama/qwen3-coder-30b" in resolved.overrides
+
+    seen: dict = {}
+
+    def fake_build_llm_client(settings):
+        seen["model"] = settings.research.model
+        return object()
+
+    monkeypatch.setattr(research_mod, "build_llm_client", fake_build_llm_client)
+    session = build_research_session(
+        settings=resolved.settings,
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+        mandate=resolved.mandate,
+    )
+    assert session is not None
+    assert seen["model"] == "ollama/qwen3-coder-30b"  # the client is built for the mandate's model
+    assert session.model == "ollama/qwen3-coder-30b"  # and the session drives it
 
 
 def test_research_session_derives_rules_and_mandate_provenance(tmp_path, monkeypatch):

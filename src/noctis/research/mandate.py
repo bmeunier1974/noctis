@@ -1,12 +1,14 @@
 """The operator mandate — a human-ownable input surface for the research agent.
 
 One selector resolves to one :class:`Mandate`: the free-form prose the human wants the
-agent to pursue this session, its supporting reference files, and the single config knob a
-personality may consciously bind (``promotion.metric``). This module is pure and
+agent to pursue this session, its supporting reference files, and the run-shaping settings a
+personality may consciously bind (model, budgets, prompt shape, scoring metric — never a
+gate; :mod:`noctis.config.overlay` owns that list). This module is pure and
 unit-testable — no agent, no network — so the loader, the overlay, and the seam are all
 exercised without a client.
 
-Design constraints (see ``docs/operator-mandate.md``):
+Design constraints (the operator-facing reference is ``docs/configuration.md`` — "The mandate
+overlay" — and ``mandate/README.md``):
 
 * **Errors are loud at startup, quiet mid-session.** An unresolvable selector (typo'd
   profile, missing file/dir, unreadable file) raises :class:`MandateError` so an entrypoint
@@ -17,21 +19,26 @@ Design constraints (see ``docs/operator-mandate.md``):
   caps (module constants, deliberately small) keep the operator's supporting material from
   crowding out the agent's own reasoning; a reference that wants to be bigger is a signal it
   should be a link the agent follows with web_search, not an embed.
-* **The overlay may set exactly one knob.** ``_OVERRIDE_ALLOWLIST`` is ``promotion.metric``
-  and nothing else; every gate, safety, budget, and structural knob is refused (with a
-  warning, never a crash). Widening it is a deliberate, owner-gated edit to that constant.
+* **The overlay is deny-by-default, and its refusals are fatal.** Which settings a mandate
+  may bind is not decided here: :mod:`noctis.config.overlay` classifies every leaf path in
+  ``Settings`` exactly once and validates values by re-building the owning config section,
+  so this module only flattens the front-matter, hands the patch over, and re-types the
+  refusal with the mandate's provenance. A refused, unknown, or invalid key raises
+  :class:`MandateError` at startup — an operator never discovers three days into a run that
+  a knob they set silently didn't apply.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-from noctis.backtest.scorecard import Metric
+from noctis.config.overlay import OverlayError, apply_patch
 
 logger = logging.getLogger("noctis.research.mandate")
 
@@ -40,10 +47,6 @@ logger = logging.getLogger("noctis.research.mandate")
 _REFERENCE_FILE_CAP_BYTES = 2048
 _REFERENCE_TOTAL_CAP_BYTES = 6144
 _MANDATE_BODY_WARN_BYTES = 6144
-
-# The single overridable knob (§3.4). Widening this past ``promotion.metric`` is a
-# deliberate, owner-gated change to this constant — never something a mandate author reaches.
-_OVERRIDE_ALLOWLIST = ("promotion.metric",)
 
 # A leading ``---`` / ``---`` YAML front-matter fence, then the prose body.
 _FRONT_MATTER_RE = re.compile(r"^---\s*\n(.*?)\n---[ \t]*\n?(.*)\Z", re.DOTALL)
@@ -76,7 +79,11 @@ class Mandate:
     config_overrides: dict  # flattened {"promotion.metric": ...} from the front-matter config:
     # Front-matter ``symbols:`` — tickers the mandate declares it wants researched. A search
     # prior only (rule 5): they join the session's research *focus set* (prompt digest +
-    # holdout candidate pool), never a gate or the trading roster.
+    # holdout candidate pool) and the episodic driver's session-start fetch, never a gate or
+    # the trading roster. The roster is the *other* ticker surface — ``config: universe:``,
+    # which the overlay applies to ``Settings.universe`` — and the two are deliberately
+    # different things: this one says what to look at, that one says what is traded. Both
+    # normalize tickers identically (upper-case, de-duped, first-mention order).
     symbols: list[str] = field(default_factory=list)
 
 
@@ -222,36 +229,21 @@ def _auto_mandate(mandate_dir: Path) -> Mandate:
 def apply_overrides(settings, mandate) -> list[str]:
     """Apply a mandate's ``config:`` overlay to ``settings`` in place; return "k=v" echoes.
 
-    Only ``promotion.metric`` may be set; every other key is refused with a warning and
-    skipped. The metric value is pre-validated through :meth:`Metric.parse` **here** —
-    these pydantic models do not enable ``validate_assignment``, so the field validator does
-    NOT run on attribute assignment (§3.4). Nothing here crashes: bad input warns and skips.
+    A thin adapter over :func:`noctis.config.overlay.apply_patch`: the flattened front-matter
+    *is* the patch. Which paths may be bound, and whether a value is legal, are the overlay's
+    decisions — this function only re-types the refusal with the mandate's provenance, so an
+    operator reading the error knows which steering file to fix.
+
+    A refused key, an unknown key, or a value the owning config section rejects raises
+    :class:`MandateError` listing **every** problem at once (fatal at startup, per §3.4);
+    nothing is applied when anything is refused. ``None`` (no mandate) is a no-op.
     """
     if mandate is None:
         return []
-    echoes: list[str] = []
-    for dotted, value in mandate.config_overrides.items():
-        if dotted not in _OVERRIDE_ALLOWLIST:
-            logger.warning(
-                "mandate %s tried to override %s=%r — refused: only %s may be set by a mandate; "
-                "skipping.",
-                mandate.source,
-                dotted,
-                value,
-                ", ".join(_OVERRIDE_ALLOWLIST),
-            )
-            continue
-        if dotted == "promotion.metric":
-            try:
-                value = Metric.parse(value).value
-            except ValueError as exc:
-                logger.warning(
-                    "mandate %s set promotion.metric — %s; skipping.", mandate.source, exc
-                )
-                continue
-            settings.promotion.metric = value
-            echoes.append(f"promotion.metric={value}")
-    return echoes
+    try:
+        return apply_patch(settings, mandate.config_overrides)
+    except OverlayError as exc:
+        raise MandateError(f"mandate {mandate.source} — {exc}") from exc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,10 +251,59 @@ def apply_overrides(settings, mandate) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 def profiles_catalog(mandate_dir) -> list[dict]:
     """``[{"name", "summary"}, ...]`` for ``mandate/profiles/*.md`` (empty if the dir is absent)."""
+    return [
+        {"name": name, "summary": _extract_summary(front_matter, body)}
+        for name, front_matter, body in _iter_profiles(mandate_dir)
+    ]
+
+
+# Under ``research.mandate: auto`` the agent chooses its profile *inside* the session, long
+# after settings assembly, so a profile's ``config:`` block never reaches the overlay — it is
+# inert whatever it declares. ``promotion.metric`` is the one key that is inert **by contract**
+# rather than by accident, so it alone is suppressed from the startup warning below:
+#
+# * the ``auto`` instruction already tells the model to select "REGARDLESS of the metric each
+#   profile tunes on", on the neutral Sharpe basis — metric-neutrality *is* the auto contract;
+# * the shipped ``config.yaml`` selector line already says a session under ``auto`` is "scored
+#   on the base promotion.metric", so a stock install has been told, in the file it was
+#   configured from, exactly what this warning would repeat.
+#
+# The five shipped profiles are metric-only, so a default install stays silent — and that is the
+# point: a warning that fires for everyone, every startup, about the one knob the epic
+# deliberately keeps as the safe one, is the noise that gets the *interesting* warning ignored.
+# Everything else a profile may bind (the model, the loop, the spend ceilings, the data window)
+# has no such answer: it simply vanishes, so it warns. The boundary is exactly one key wide, and
+# it doubles as a ratchet on the shipped catalog — a second key in a shipped profile makes every
+# default install warn.
+_AUTO_DOCUMENTED_INERT: frozenset[str] = frozenset({"promotion.metric"})
+
+
+def inert_auto_overrides(mandate_dir) -> dict[str, list[str]]:
+    """``{profile: [dotted key, …]}`` for profiles whose ``config:`` block ``auto`` makes inert.
+
+    Pure and total: keys documented as inert under ``auto``
+    (:data:`_AUTO_DOCUMENTED_INERT`) are dropped, a profile left with nothing is omitted, and an
+    absent or unreadable profiles directory reports nothing at all. This feeds a diagnostic, and
+    a diagnostic never becomes the reason a session fails to start.
+    """
+    found: dict[str, list[str]] = {}
+    for name, front_matter, _body in _iter_profiles(mandate_dir):
+        inert = sorted(set(_extract_overrides(front_matter)) - _AUTO_DOCUMENTED_INERT)
+        if inert:
+            found[name] = inert
+    return found
+
+
+def _iter_profiles(mandate_dir) -> Iterator[tuple[str, dict, str]]:
+    """``(name, front-matter, body)`` per readable ``mandate/profiles/*.md``, name-sorted.
+
+    The one profile-folder reader: the ``auto`` catalog and the inert-overlay scan share it, so
+    they can never disagree about which files are profiles. An absent (or unreadable) profiles
+    directory yields nothing, and a single unreadable file warns and is skipped.
+    """
     base = Path(mandate_dir) / "profiles"
     if not base.is_dir():
-        return []
-    catalog: list[dict] = []
+        return
     for path in sorted(base.glob("*.md")):
         try:
             raw = path.read_text(encoding="utf-8")
@@ -270,8 +311,7 @@ def profiles_catalog(mandate_dir) -> list[dict]:
             logger.warning("profile %s unreadable (%s); skipping catalog entry.", path, exc)
             continue
         front_matter, body = _split_front_matter(raw, path)
-        catalog.append({"name": path.stem, "summary": _extract_summary(front_matter, body)})
-    return catalog
+        yield path.stem, front_matter, body
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -330,7 +370,10 @@ def _extract_symbols(front_matter) -> list[str]:
     """Front-matter ``symbols:`` — a list of ticker strings, normalized upper-case, deduped.
 
     A malformed block (not a list, non-string items) warns and drops, mirroring the
-    reference-loading policy: a valid mandate never becomes fatal over a steering hint.
+    reference-loading policy: a valid mandate never becomes fatal over a steering hint. That
+    tolerance is the one difference from the roster surface (``config: universe:``, normalized
+    in :mod:`noctis.config.overlay`), where a bad ticker list is a fatal config error; the
+    normalization itself is identical on both, and a parity test holds them there.
     """
     if not front_matter:
         return []
