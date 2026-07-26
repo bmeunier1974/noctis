@@ -14,6 +14,8 @@ it), and the sample-value table the apply tests draw from is total over the allo
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import BaseModel, ValidationError
 
@@ -48,10 +50,93 @@ def _leaf_paths(model: type[BaseModel], prefix: str = "") -> set[str]:
 
 SETTINGS_LEAVES = _leaf_paths(Settings)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The tier-A run-shaping surface (#117), written out here group by group so this
+# suite states the contract independently of the module it checks.
+# ─────────────────────────────────────────────────────────────────────────────
+MODEL_SEAM = {
+    "research.model",
+    "research.base_url",
+    "research.agent.model",
+    "research.agent.coder_model",
+    "research.agent.coder_fallback_model",
+    "research.agent.thinking",
+    "research.agent.coder_thinking",
+    "research.agent.coder_fallback_thinking",
+    "research.agent.loop",
+}
+SPEND_CEILINGS = {
+    "research.cost_profile",
+    "research.agent.max_iterations",
+    "research.agent.max_backtests",
+    "research.agent.sweep_trials",
+    "research.agent.max_author_calls",
+    "research.agent.max_escalations",
+    "research.agent.max_tokens",
+    "research.agent.coder_max_tokens",
+    "research.agent.context_window",
+    "research.agent.episode_retries",
+    "research.agent.web_search",
+    "research.agent.max_web_searches",
+    "research.agent.sweep_workers",
+    "research.agent.worker_bar_budget",
+    "research_time_budget_minutes",
+    "time_limit_hours",
+}
+SEARCH_SHAPE = {
+    "promotion.metric",
+    "research.focus_size",
+    "research.tuning_dispersion_penalty",
+    "research.draft_ttl_hours",
+    "research.memory_distill_every",
+}
+DATA_ACQUISITION = {"data.history_days", "data.auto_backfill"}
+HOUSEKEEPING = {"observability.heartbeat_polls", "qa.keep_last_runs"}
+
+RUN_SHAPING = MODEL_SEAM | SPEND_CEILINGS | SEARCH_SHAPE | DATA_ACQUISITION | HOUSEKEEPING
+
 # The per-path sample values the apply tests draw from. Ratcheted below to stay total over
 # ALLOWED, so a widened surface cannot ship untested.
 SAMPLE_VALUES: dict[str, object] = {
+    # Model / provider seam.
+    "research.model": "ollama/qwen3-coder-30b",
+    "research.base_url": "http://localhost:11434/v1",
+    "research.agent.model": "claude-sonnet-5",
+    "research.agent.coder_model": "ollama/qwen2.5-coder",
+    "research.agent.coder_fallback_model": "anthropic/claude-sonnet-5",
+    "research.agent.thinking": "on",
+    "research.agent.coder_thinking": "off",
+    "research.agent.coder_fallback_thinking": "on",
+    "research.agent.loop": "episodic",
+    # Spend + compatibility ceilings.
+    "research.cost_profile": "economy",
+    "research.agent.max_iterations": 12,
+    "research.agent.max_backtests": 30,
+    "research.agent.sweep_trials": 24,
+    "research.agent.max_author_calls": 9,
+    "research.agent.max_escalations": 2,
+    "research.agent.max_tokens": 4096,
+    "research.agent.coder_max_tokens": 6000,
+    "research.agent.context_window": 32768,
+    "research.agent.episode_retries": 3,
+    "research.agent.web_search": True,
+    "research.agent.max_web_searches": 3,
+    "research.agent.sweep_workers": 4,
+    "research.agent.worker_bar_budget": 3000000,
+    "research_time_budget_minutes": 45,
+    "time_limit_hours": 12.0,
+    # Search shape (prompt-facing).
     "promotion.metric": "sortino",
+    "research.focus_size": 8,
+    "research.tuning_dispersion_penalty": 0.25,
+    "research.draft_ttl_hours": 24.0,
+    "research.memory_distill_every": 3,
+    # Data acquisition for the mandate's own symbols.
+    "data.history_days": 180,
+    "data.auto_backfill": True,
+    # Display / housekeeping.
+    "observability.heartbeat_polls": 30,
+    "qa.keep_last_runs": 5,
 }
 
 
@@ -97,10 +182,20 @@ def test_sample_value_table_covers_the_whole_allowed_surface():
     assert not stale, f"sample values for paths that are not allowed: {stale}"
 
 
-def test_allowed_surface_is_still_metric_only():
-    """Stage 1 lands the mechanism with the surface unchanged (epic #115)."""
-    assert set(ALLOWED) == {"promotion.metric"}
-    assert CLAMPED == {}
+def test_allowed_surface_is_the_run_shaping_tier():
+    """A mandate configures the whole run — model, budgets, prompt shape, scoring metric —
+    and nothing else (#117). ``config.yaml`` keeps the arena."""
+    assert set(ALLOWED) == RUN_SHAPING
+    assert CLAMPED == {}  # the direction clamps are their own stage
+
+
+@pytest.mark.parametrize("path", ["universe", "research.min_trials", "data.budget_usd"])
+def test_the_paths_that_need_a_guard_first_are_still_refused(path):
+    """``universe`` carries the symbol-holdout starvation guard, and the two clamped-tier
+    knobs carry a direction — each lands with its guard, not before."""
+    verdict = classify(path)
+    assert verdict.tier == "refused"
+    assert "not yet in the overlay surface" in verdict.reason
 
 
 # ── classify: one verdict per path, and a verdict for a path the model lacks ─────────────
@@ -138,6 +233,23 @@ def test_allowed_path_applies_and_echoes(tmp_path, path):
     assert lines == [f"{path}={SAMPLE_VALUES[path]}"]
     assert _read(settings, path) == SAMPLE_VALUES[path]
     assert_gates_unmoved(before, gate_snapshot(settings))  # no gate moved
+
+
+def test_the_whole_allowed_surface_applies_in_one_patch(tmp_path):
+    """The maximal legal overlay: every run-shaping knob at once, every value landed, and the
+    refused subtree byte-identical afterwards. This is the property the whole tier rests on —
+    a mandate may reconfigure the run and still cannot move the arena."""
+    settings = _settings(tmp_path)
+    before = json.dumps(gate_snapshot(settings), sort_keys=True, default=str)
+
+    lines = apply_patch(settings, dict(SAMPLE_VALUES))
+
+    assert lines == sorted(f"{path}={value}" for path, value in SAMPLE_VALUES.items())
+    for path, value in SAMPLE_VALUES.items():
+        assert _read(settings, path) == value
+    after = json.dumps(gate_snapshot(settings), sort_keys=True, default=str)
+    assert after == before
+    assert_gates_unmoved(gate_snapshot(settings), gate_snapshot(_settings(tmp_path)))
 
 
 def test_empty_patch_is_a_noop(tmp_path):
@@ -235,6 +347,24 @@ def test_one_error_lists_every_problem_with_its_reason(tmp_path):
 
 
 # ── values are validated by exactly the validators config.yaml gets ──────────────────────
+def _assert_bad_value_fails_identically(tmp_path, path, value, yaml_body, diagnosis):
+    """Same bad value, two sources: the YAML file and the overlay must reject it with the
+    same diagnosis, and the overlay must leave no half-applied patch behind."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml_body, encoding="utf-8")
+    with pytest.raises(ValidationError) as from_yaml:
+        load_settings(config_path=cfg)
+    assert diagnosis in str(from_yaml.value)
+
+    settings = _settings(tmp_path)
+    baseline = settings.model_dump_json()
+    with pytest.raises(OverlayError) as from_overlay:
+        apply_patch(settings, {path: value})
+    assert diagnosis in str(from_overlay.value)
+    assert path in str(from_overlay.value)
+    assert settings.model_dump_json() == baseline  # a rejected patch leaves no half-apply
+
+
 @pytest.mark.parametrize(
     ("path", "value", "yaml_body", "diagnosis"),
     [
@@ -243,12 +373,6 @@ def test_one_error_lists_every_problem_with_its_reason(tmp_path):
             "alpha",
             "promotion:\n  metric: alpha\n",
             "unknown metric 'alpha'",
-        ),
-        (
-            "backtest.fee_bps",
-            0.1,
-            "backtest:\n  fee_bps: 0.1\n",
-            "below the enforced minimum",
         ),
         (
             "research.agent.loop",
@@ -263,6 +387,32 @@ def test_one_error_lists_every_problem_with_its_reason(tmp_path):
             "valid integer",
         ),
         (
+            "research.cost_profile",
+            "lavish",
+            "research:\n  cost_profile: lavish\n",
+            "'full', 'balanced' or 'economy'",
+        ),
+    ],
+)
+def test_a_bad_value_fails_identically_from_either_source(
+    tmp_path, path, value, yaml_body, diagnosis
+):
+    """The applier re-validates the owning section, so the metric parser, ``Literal``
+    membership, and type coercion all fire exactly as they do for the YAML file — surfacing
+    as the one overlay exception type. Every path here is genuinely allowed."""
+    _assert_bad_value_fails_identically(tmp_path, path, value, yaml_body, diagnosis)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "yaml_body", "diagnosis"),
+    [
+        (
+            "backtest.fee_bps",
+            0.1,
+            "backtest:\n  fee_bps: 0.1\n",
+            "below the enforced minimum",
+        ),
+        (
             "champion_count",
             "three",
             "champion_count: three\n",
@@ -270,31 +420,15 @@ def test_one_error_lists_every_problem_with_its_reason(tmp_path):
         ),
     ],
 )
-def test_a_bad_value_fails_identically_from_either_source(
+def test_validation_would_hold_for_a_path_a_later_stage_allows(
     tmp_path, monkeypatch, path, value, yaml_body, diagnosis
 ):
-    """The applier re-validates the owning section, so the metric parser, the cost floor,
-    ``Literal`` membership, and type coercion all fire exactly as they do for the YAML file —
-    surfacing as the one overlay exception type.
-
-    Paths outside today's one-knob surface are put in ALLOWED for the duration of the test:
-    the property under test is "whatever the surface holds is validated", and it must hold
-    before stage 2 widens the surface for real.
-    """
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text(yaml_body, encoding="utf-8")
-    with pytest.raises(ValidationError) as from_yaml:
-        load_settings(config_path=cfg)
-    assert diagnosis in str(from_yaml.value)
-
-    settings = _settings(tmp_path)
-    baseline = settings.model_dump_json()
+    """The property under test is "whatever the surface holds is validated", so it is checked
+    against refused paths too — the section rebuild and the top-level ``TypeAdapter`` path —
+    by putting one in ALLOWED for the duration of the test. These two stay refused in
+    production (the cost floor is the arena, the board size is a gate)."""
     monkeypatch.setattr(overlay, "ALLOWED", frozenset(set(ALLOWED) | {path}))
-    with pytest.raises(OverlayError) as from_overlay:
-        apply_patch(settings, {path: value})
-    assert diagnosis in str(from_overlay.value)
-    assert path in str(from_overlay.value)
-    assert settings.model_dump_json() == baseline  # a rejected patch leaves no half-apply
+    _assert_bad_value_fails_identically(tmp_path, path, value, yaml_body, diagnosis)
 
 
 def test_apply_never_rereads_env_dotenv_or_yaml(tmp_path, monkeypatch):

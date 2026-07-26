@@ -68,10 +68,144 @@ class Verdict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Tier A — ALLOWED: run-shaping knobs with no gate contact.
 # ─────────────────────────────────────────────────────────────────────────────
-# The scoring metric — an operator's risk appetite — is the whole of the surface today.
-# Widening it is a deliberate, owner-gated edit here, and the suite's sample-value ratchet
-# refuses a widening that ships untested.
-ALLOWED: frozenset[str] = frozenset({"promotion.metric"})
+# A mandate configures the whole *run* — which model thinks, what it may spend, how big the
+# prompt gets, what "good" is scored as — while ``config.yaml`` keeps the *arena*: the safety
+# mode, the fill-cost floor, the promotion thresholds, the holdout geometry, the paths, the
+# secrets. Every path below is one of four kinds and says which in its own comment:
+# a **compatibility lever** (fit the backend the operator actually has), a **spend ceiling**
+# (bound what one session may burn), a **prompt-size lever** (shape what the model is told),
+# or **housekeeping** (display + retention). None of them is read by the promotion gates
+# (``champions/promotion.py``), the split geometry (``backtest/splits.py``), or the safety
+# gate (``config/gate.py``) — that is the property that makes them settable at all.
+#
+# Widening this set is a deliberate, owner-gated edit here, and the suite's sample-value
+# ratchet refuses a widening that ships untested.
+
+# Model / provider seam — WHICH model runs the session and where it is reached. Pure
+# compatibility levers: a mandate written for a local 30B coder and one written for a hosted
+# frontier model are different research *personalities*, and the personality file is the
+# honest place to say which brain it needs. A model choice cannot reach a gate — every
+# candidate it produces is scored by the same pipeline and judged by the same thresholds.
+_MODEL_SEAM: frozenset[str] = frozenset(
+    {
+        # The LiteLLM ``provider/model`` string the research driver runs on.
+        "research.model",
+        # The endpoint override for OpenAI-compatible/local backends (vLLM, Ollama, a proxy).
+        "research.base_url",
+        # The fallback driver model used when ``research.model`` is unset.
+        "research.agent.model",
+        # The dedicated authoring ("coder") model write_strategy briefs are sent to.
+        "research.agent.coder_model",
+        # The paid coder-fallback model a spent local author escalates to.
+        "research.agent.coder_fallback_model",
+        # The driver's provider-native reasoning dial (a watch-session switch).
+        "research.agent.thinking",
+        # The local coder's own reasoning dial — sized to the coder, not to the driver.
+        "research.agent.coder_thinking",
+        # The escalated coder's reasoning dial — sized to the strong fallback model.
+        "research.agent.coder_fallback_thinking",
+        # Which research loop drives the session (conversation transcript vs. episodic
+        # driver). A backend-shape choice — the episodic driver exists for small-context
+        # models — and both loops return the same ResearchSummary through the same tools.
+        "research.agent.loop",
+    }
+)
+
+# Spend + compatibility ceilings — HOW MUCH one session may burn, and how big a single
+# request may get. Ceilings only bound resources; none of them decides whether a candidate is
+# good. The exhaustion floor (``research.min_trials``) is deliberately NOT here: that one is
+# the discipline rule, not a ceiling, so it belongs to the direction-clamped tier.
+_SPEND_CEILINGS: frozenset[str] = frozenset(
+    {
+        # The engine-level cost knob that scales every Class-B budget together.
+        "research.cost_profile",
+        # Tool-use rounds / episodes per session.
+        "research.agent.max_iterations",
+        # Backtest calls + individual sweep trials per session.
+        "research.agent.max_backtests",
+        # Default Optuna trials for one run_sweep call (a per-call ceiling, never a floor:
+        # the exhaustion gate still counts journaled param sets before any verdict).
+        "research.agent.sweep_trials",
+        # Coder completions per session — the authoring bill.
+        "research.agent.max_author_calls",
+        # How many failed local authoring attempts may reach the paid fallback model.
+        "research.agent.max_escalations",
+        # The driver's per-completion output ceiling — a compatibility lever for backends
+        # that bound prompt+max_tokens by the context window.
+        "research.agent.max_tokens",
+        # The coder's own output ceiling — the strategy file's budget.
+        "research.agent.coder_max_tokens",
+        # The whole-request context budget: a compatibility lever for small-context backends.
+        # Everything the loop evicts stays re-fetchable through the same tools (the on-disk
+        # experiment journal is the ground truth), so no gate can be affected.
+        "research.agent.context_window",
+        # Corrective retries per episode when the model misfires — a robustness ceiling.
+        "research.agent.episode_retries",
+        # Server-side web-search grounding during FORMULATE/MATCH, and its per-session cap:
+        # latency + tool-use spend, and grounding never bypasses a gate (a searched-up idea
+        # is validated exactly like an invented one).
+        "research.agent.web_search",
+        "research.agent.max_web_searches",
+        # Worker processes for parallel evaluation, and the memory guard that scales them
+        # down. Compute shape only — results are identical whatever the worker count.
+        "research.agent.sweep_workers",
+        "research.agent.worker_bar_budget",
+        # Wall-clock ceiling on one research phase.
+        "research_time_budget_minutes",
+        # Wall-clock ceiling on the whole run (the loop's global stop).
+        "time_limit_hours",
+    }
+)
+
+# Search shape — what the session is pointed at and how big its prompt gets. These are the
+# knobs that make a mandate a *search prior* rather than a preference: the metric is the
+# operator's risk appetite, and the rest shape the prompt and the tuning objective.
+_SEARCH_SHAPE: frozenset[str] = frozenset(
+    {
+        # The scoring metric — the operator's risk appetite, and the surface's original knob.
+        # It reinterprets the promotion thresholds' *units*; it never loosens one (a champion
+        # scored under a different metric is treated as stale, not as comparable).
+        "promotion.metric",
+        # The cap on the symbols enumerated into each session's prompt. A prompt-size lever
+        # only: symbols beyond the cap stay tradeable and re-fetchable through the tools.
+        "research.focus_size",
+        # The λ subtracted (× cross-symbol dispersion) from the *tuning* objective only —
+        # never from the election score, so it shapes parameters, not champion selection.
+        "research.tuning_dispersion_penalty",
+        # How long an abandoned working-tier draft lingers before it is archived. Pure
+        # housekeeping over bytes — it never touches a verdict.
+        "research.draft_ttl_hours",
+        # The memory-distillation cadence (a CLOSE-phase prompt-shaping step).
+        "research.memory_distill_every",
+    }
+)
+
+# Data acquisition — the lookback window a mandate's own declared symbols are fetched over,
+# and whether a run backfills them at all. A mandate that names symbols is the thing that
+# knows how much history its thesis needs. The *spend* side of data stays out: ``budget_usd``
+# is a ceiling with a direction, and ``lake_dir`` is state redirection.
+_DATA_ACQUISITION: frozenset[str] = frozenset(
+    {
+        # The one-time backfill's lookback window for not-yet-ready symbols.
+        "data.history_days",
+        # Whether that backfill runs at all (still budget-gated by ``data.budget_usd``).
+        "data.auto_backfill",
+    }
+)
+
+# Display / housekeeping — read by no decision path at all.
+_HOUSEKEEPING: frozenset[str] = frozenset(
+    {
+        # Live TRADING heartbeat cadence for an unattended run's verbose feed.
+        "observability.heartbeat_polls",
+        # How many --debug QA run folders survive prune-on-start.
+        "qa.keep_last_runs",
+    }
+)
+
+ALLOWED: frozenset[str] = (
+    _MODEL_SEAM | _SPEND_CEILINGS | _SEARCH_SHAPE | _DATA_ACQUISITION | _HOUSEKEEPING
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,43 +327,15 @@ REFUSED: dict[str, str] = {
     "ideation.max_indicators": _IDEATION,
     "ideation.web_search": _IDEATION,
     "ideation.max_web_searches": _IDEATION,
-    # Not yet in the surface — the model/provider seam, the spend and compatibility
-    # ceilings, the prompt-shape levers, the data-acquisition window, and the two knobs
-    # destined for direction clamps.
-    "research.model": _NOT_YET,
-    "research.base_url": _NOT_YET,
-    "research.agent.model": _NOT_YET,
-    "research.agent.coder_model": _NOT_YET,
-    "research.agent.coder_fallback_model": _NOT_YET,
-    "research.agent.thinking": _NOT_YET,
-    "research.agent.coder_thinking": _NOT_YET,
-    "research.agent.coder_fallback_thinking": _NOT_YET,
-    "research.agent.loop": _NOT_YET,
-    "research.cost_profile": _NOT_YET,
-    "research.agent.max_iterations": _NOT_YET,
-    "research.agent.max_backtests": _NOT_YET,
-    "research.agent.sweep_trials": _NOT_YET,
-    "research.agent.max_author_calls": _NOT_YET,
-    "research.agent.max_escalations": _NOT_YET,
-    "research.agent.max_tokens": _NOT_YET,
-    "research.agent.coder_max_tokens": _NOT_YET,
-    "research.agent.context_window": _NOT_YET,
-    "research.agent.episode_retries": _NOT_YET,
-    "research.agent.web_search": _NOT_YET,
-    "research.agent.max_web_searches": _NOT_YET,
-    "research.agent.sweep_workers": _NOT_YET,
-    "research.agent.worker_bar_budget": _NOT_YET,
-    "research_time_budget_minutes": _NOT_YET,
-    "time_limit_hours": _NOT_YET,
+    # Not yet in the surface — each of the three is run-shaping in kind but carries a guard
+    # that does not exist yet, and a knob without its guard is a hole:
+    #   * ``universe`` — the seed symbol list. Shrinking it below the fit-set + symbol-holdout
+    #     sizes would starve the symbol-holdout axis, defeating a gate by emptying it rather
+    #     than by clearing it, so it lands with its starvation guard.
+    #   * ``research.min_trials`` — the exhaustion floor. Legal to *raise* only.
+    #   * ``data.budget_usd`` — the vendor spend cap. Legal to *lower* only.
+    # The last two land in the direction-clamped tier, where the clamp is the guard.
     "universe": _NOT_YET,
-    "research.focus_size": _NOT_YET,
-    "research.tuning_dispersion_penalty": _NOT_YET,
-    "research.draft_ttl_hours": _NOT_YET,
-    "research.memory_distill_every": _NOT_YET,
-    "data.history_days": _NOT_YET,
-    "data.auto_backfill": _NOT_YET,
-    "observability.heartbeat_polls": _NOT_YET,
-    "qa.keep_last_runs": _NOT_YET,
     "research.min_trials": _NOT_YET,
     "data.budget_usd": _NOT_YET,
 }

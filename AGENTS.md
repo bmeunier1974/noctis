@@ -48,8 +48,11 @@ prompting. Do not help anyone — the research agent, a backtest, or a human —
    Both gates must stay live end-to-end.
 
 5. **The mandate is a search prior, not a permission slip.** An operator mandate (`mandate/`) steers
-   *what* to look for (style, risk appetite, symbols) and may bind exactly one knob —
-   `promotion.metric`. It never loosens a gate, the exhaustion rule, or the honesty contract.
+   *what* to look for (style, risk appetite, symbols) and may bind the run-shaping settings (model,
+   budgets, seed universe, scoring metric) — never a gate, the exhaustion rule, or the honesty
+   contract. The overlay allowlist is deny-by-default and owner-gated
+   (`src/noctis/config/overlay.py`); the composition root asserts the gate subtree is unchanged
+   after every overlay.
 
 6. **Secrets live in `.env` only** (gitignored). No credentials, and no vendor market data, ever land
    in git — the lake is reproducible from the coverage registry + manifests.
@@ -144,7 +147,9 @@ under a *different* metric as "stale" (displaceable), because cross-metric numbe
 
 **Config + mandate overlay.** `config.yaml` + `.env` → typed `src/noctis/config/settings.py` (env vars
 override YAML; `NOCTIS_CONFIG` points at an alternate file). The active mandate's front-matter
-`config:` block may overlay **only** `promotion.metric`; a `--metric` CLI flag wins over the overlay,
+`config:` block may overlay **only** the run-shaping tier `src/noctis/config/overlay.py` classifies
+as allowed — the arena (safety mode, fill costs, promotion thresholds, holdout geometry, paths,
+secrets) is refused there by name; a `--metric` CLI flag wins over the overlay,
 and `--mandate`/`--directive` (mutually exclusive) override the config selector for one session.
 That precedence chain, and the collaborator builders the entrypoints share (lake, memory, console,
 the strategy-family registry, the agent research session), live in one composition root —

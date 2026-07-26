@@ -115,10 +115,78 @@ def test_gate_resolves_only_when_asked(tmp_path, monkeypatch):
     assert resolve_session(_config(tmp_path, ["mode: paper"]), require_gate=True).mode == "paper"
 
 
-def test_time_limit_flag_overrides_config(tmp_path):
+def test_time_limit_flag_overrides_config_and_a_mandate_overlay(tmp_path):
+    """``time_limit_hours`` is run-shaping, so a mandate may overlay it (#117) — and the
+    ``--time-limit-hours`` flag is still applied last, so a one-off run bound still wins."""
     cfg = _config(tmp_path, ["time_limit_hours: 24"])
     assert resolve_session(cfg).settings.time_limit_hours == 24
     assert resolve_session(cfg, time_limit_hours=0.5).settings.time_limit_hours == 0.5
+
+    mandate_dir = _mandate_dir(
+        tmp_path, "brief", "---\nconfig:\n  time_limit_hours: 6\n---\nShort runs.\n"
+    )
+    overlaid_cfg = _config(
+        tmp_path,
+        [
+            "time_limit_hours: 24",
+            f"mandate_dir: {mandate_dir}",
+            "research:",
+            "  mandate: brief",
+        ],
+        "overlaid.yaml",
+    )
+    overlaid = resolve_session(overlaid_cfg)
+    assert overlaid.settings.time_limit_hours == 6  # the mandate beats config.yaml
+    assert overlaid.overrides == ["time_limit_hours=6.0"]
+
+    flagged = resolve_session(overlaid_cfg, time_limit_hours=0.5)
+    assert flagged.settings.time_limit_hours == 0.5  # ...and the flag beats the mandate
+    assert flagged.overrides == ["time_limit_hours=6.0"]  # the echo still records the overlay
+
+
+def test_effective_precedence_is_flag_over_mandate_over_env_over_dotenv_over_yaml(
+    tmp_path, monkeypatch
+):
+    """The whole chain on one knob: CLI flag > mandate overlay > environment > ``.env`` >
+    ``config.yaml`` > defaults.
+
+    The mandate slot is the interesting one — it **inverts** the usual env-over-YAML rule.
+    ``config.yaml`` never beats an environment variable, but the mandate is applied after
+    settings are fully resolved, so an operator's steering file wins over the shell.
+    """
+    from noctis.config.settings import Settings
+
+    mandate_dir = _mandate_dir(
+        tmp_path, "bounded", "---\nconfig:\n  time_limit_hours: 3\n---\nBounded runs.\n"
+    )
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("TIME_LIMIT_HOURS=12\n", encoding="utf-8")
+
+    # 1. defaults — no file, no env, no mandate.
+    assert resolve_session(str(tmp_path / "absent.yaml")).settings.time_limit_hours is None
+
+    # 2. config.yaml beats the default.
+    yaml_only = _config(tmp_path, ["time_limit_hours: 24"], "yaml-only.yaml")
+    assert resolve_session(yaml_only).settings.time_limit_hours == 24
+
+    # 3. .env beats config.yaml.
+    monkeypatch.setitem(Settings.model_config, "env_file", str(dotenv))
+    assert resolve_session(yaml_only).settings.time_limit_hours == 12
+
+    # 4. the environment beats .env.
+    monkeypatch.setenv("TIME_LIMIT_HOURS", "8")
+    assert resolve_session(yaml_only).settings.time_limit_hours == 8
+
+    # 5. the mandate overlay beats the environment — the inversion.
+    steered = _config(
+        tmp_path,
+        ["time_limit_hours: 24", f"mandate_dir: {mandate_dir}", "research:", "  mandate: bounded"],
+        "steered.yaml",
+    )
+    assert resolve_session(steered).settings.time_limit_hours == 3
+
+    # 6. the CLI flag beats everything.
+    assert resolve_session(steered, time_limit_hours=0.25).settings.time_limit_hours == 0.25
 
 
 # ── PromotionRules.from_settings: the one config→rules mapping ────────────────────────────
@@ -382,6 +450,50 @@ def test_research_session_runs_the_same_loop_kwargs_as_the_cli_did(tmp_path, mon
     # An explicit cap wins over the budget.
     session.run(max_iterations=3)
     assert seen["max_iterations"] == 3
+
+
+def test_a_mandate_model_override_reaches_the_built_research_session(tmp_path, monkeypatch):
+    """The model seam is run-shaping (#117): a mandate that declares its own model changes
+    which model the composition root builds the session's client for, and which model the
+    session reports it drives — not just a settings value nobody reads."""
+    mandate_dir = _mandate_dir(
+        tmp_path,
+        "local",
+        "---\nconfig:\n  research:\n    model: ollama/qwen3-coder-30b\n---\nRun local.\n",
+    )
+    cfg = _config(
+        tmp_path,
+        [
+            f"mandate_dir: {mandate_dir}",
+            f"state_dir: {tmp_path}/state/",
+            f"strategies_dir: {tmp_path}/strategies/",
+            "research:",
+            "  model: openai/gpt-5.4",
+            "  mandate: local",
+        ],
+    )
+    resolved = resolve_session(cfg)
+    assert resolved.settings.research.model == "ollama/qwen3-coder-30b"
+    assert "research.model=ollama/qwen3-coder-30b" in resolved.overrides
+
+    seen: dict = {}
+
+    def fake_build_llm_client(settings):
+        seen["model"] = settings.research.model
+        return object()
+
+    monkeypatch.setattr(research_mod, "build_llm_client", fake_build_llm_client)
+    session = build_research_session(
+        settings=resolved.settings,
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+        mandate=resolved.mandate,
+    )
+    assert session is not None
+    assert seen["model"] == "ollama/qwen3-coder-30b"  # the client is built for the mandate's model
+    assert session.model == "ollama/qwen3-coder-30b"  # and the session drives it
 
 
 def test_research_session_derives_rules_and_mandate_provenance(tmp_path, monkeypatch):

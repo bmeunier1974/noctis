@@ -314,7 +314,7 @@ def _mandate_with(overrides: dict, source: str = "profile:test") -> Mandate:
     return Mandate(text="x", source=source, summary="x", references=[], config_overrides=overrides)
 
 
-def test_overlay_applies_metric_only(tmp_path):
+def test_overlay_applies_the_scoring_metric(tmp_path):
     settings = _settings(tmp_path, tmp_path / "mandate")
     assert settings.promotion.metric == "sharpe"  # base default
     lines = apply_overrides(settings, _mandate_with({"promotion.metric": "total_return"}))
@@ -322,7 +322,68 @@ def test_overlay_applies_metric_only(tmp_path):
     assert lines == ["promotion.metric=total_return"]
 
 
-def test_overlay_refuses_everything_but_metric(tmp_path):
+def test_a_mandate_binds_the_run_shaping_settings_from_nested_front_matter(tmp_path):
+    """A mandate configures the whole run (#117) — which model thinks, what it may spend, how
+    big the prompt gets — straight out of the nested ``config:`` block, flattened here and
+    applied by the overlay."""
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "profiles" / "local.md",
+        "---\n"
+        "summary: A local-model personality.\n"
+        "config:\n"
+        "  research:\n"
+        "    model: ollama/qwen3-coder-30b\n"
+        "    base_url: http://localhost:11434/v1\n"
+        "    cost_profile: economy\n"
+        "    focus_size: 8\n"
+        "    agent:\n"
+        "      loop: episodic\n"
+        "      context_window: 32768\n"
+        "      max_tokens: 4096\n"
+        "  data:\n"
+        "    history_days: 180\n"
+        "---\n"
+        "Hunt mean reversion on a small local model.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="local")
+    mandate = resolve_mandate(settings)
+    assert mandate is not None
+
+    lines = apply_overrides(settings, mandate)
+
+    assert settings.research.model == "ollama/qwen3-coder-30b"
+    assert settings.research.base_url == "http://localhost:11434/v1"
+    assert settings.research.cost_profile == "economy"
+    assert settings.research.focus_size == 8
+    assert settings.research.agent.loop == "episodic"
+    assert settings.research.agent.context_window == 32768
+    assert settings.research.agent.max_tokens == 4096
+    assert settings.data.history_days == 180
+    assert lines == sorted(lines)  # the echo is stable, one line per applied knob
+    assert "research.model=ollama/qwen3-coder-30b" in lines
+    assert len(lines) == 8
+
+
+def test_a_mandate_setting_every_allowed_knob_leaves_the_gates_byte_identical(tmp_path):
+    """The maximal legal mandate — every knob the surface allows, at once — cannot move one
+    byte of the refused subtree (the safety mode, the fill costs, the promotion thresholds,
+    the holdout geometry, the paths, the secrets)."""
+    import json
+
+    from noctis.config.overlay import gate_snapshot
+    from tests.test_settings_overlay import SAMPLE_VALUES  # ratcheted total over ALLOWED
+
+    settings = _settings(tmp_path, tmp_path / "mandate")
+    before = json.dumps(gate_snapshot(settings), sort_keys=True, default=str)
+
+    lines = apply_overrides(settings, _mandate_with(dict(SAMPLE_VALUES)))
+
+    assert len(lines) == len(SAMPLE_VALUES)
+    assert json.dumps(gate_snapshot(settings), sort_keys=True, default=str) == before
+
+
+def test_overlay_refuses_the_arena_and_applies_nothing(tmp_path):
     """One error names the mandate, lists every refused key, and applies nothing — not even
     the one legal key beside them."""
     settings = _settings(tmp_path, tmp_path / "mandate")
@@ -386,9 +447,9 @@ def test_overlay_refuses_an_unknown_key(tmp_path):
 
 
 def test_overlay_cannot_touch_backtest_costs(tmp_path):
-    """The mandate config: overlay stays promotion.metric-only — it may steer WHAT to look
-    for, never how forgiving the arena is (#23). A backtest cost override is fatal and the
-    section is left on its floored default."""
+    """However wide the run-shaping surface gets, the fill costs stay out of it — a mandate
+    steers WHAT to look for, never how forgiving the arena is (#23). A backtest cost override
+    is fatal and the section is left on its floored default."""
     settings = _settings(tmp_path, tmp_path / "mandate")
     assert settings.backtest.fee_bps == 1.0
     assert settings.backtest.slippage_bps == 1.0

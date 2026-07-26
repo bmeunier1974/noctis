@@ -1,8 +1,9 @@
 """The operator mandate — a human-ownable input surface for the research agent.
 
 One selector resolves to one :class:`Mandate`: the free-form prose the human wants the
-agent to pursue this session, its supporting reference files, and the single config knob a
-personality may consciously bind (``promotion.metric``). This module is pure and
+agent to pursue this session, its supporting reference files, and the run-shaping settings a
+personality may consciously bind (model, budgets, prompt shape, scoring metric — never a
+gate; :mod:`noctis.config.overlay` owns that list). This module is pure and
 unit-testable — no agent, no network — so the loader, the overlay, and the seam are all
 exercised without a client.
 
