@@ -3,6 +3,7 @@
 from noctis.config.gate import SafetyGateError, resolve_execution_mode
 from noctis.config.overlay import (
     OverlayError,
+    Verdict,
     apply_patch,
     assert_gates_unmoved,
     classify,
@@ -29,6 +30,7 @@ __all__ = [
     "SafetyGateError",
     "resolve_execution_mode",
     "OverlayError",
+    "Verdict",
     "apply_patch",
     "assert_gates_unmoved",
     "classify",

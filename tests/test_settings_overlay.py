@@ -119,6 +119,16 @@ def test_classify_reports_an_unknown_path():
     assert verdict.reason
 
 
+def test_classify_honors_a_clamped_entry_over_a_refusal(monkeypatch):
+    """CLAMPED is empty today, but it is the tier the direction clamps land in: an entry
+    there must win over the same path's refusal, and carry the legal direction."""
+    monkeypatch.setattr(overlay, "CLAMPED", {"research.min_trials": "raise_only"})
+    verdict = classify("research.min_trials")
+    assert verdict.tier == "clamped"
+    assert verdict.direction == "raise_only"
+    assert "raised" in verdict.reason
+
+
 # ── apply: the allowed surface ───────────────────────────────────────────────────────────
 @pytest.mark.parametrize("path", sorted(ALLOWED))
 def test_allowed_path_applies_and_echoes(tmp_path, path):
