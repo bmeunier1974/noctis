@@ -25,9 +25,12 @@ root would re-read the environment, ``.env``, and the YAML file mid-assembly, an
 ``validate_assignment`` globally would change behavior for every existing in-place
 assignment in the codebase.
 
-**Errors are loud.** A refused key, an unknown key, or a value the owning section rejects
-raises :class:`OverlayError` — one error listing *every* problem in the patch, so fixing a
-bad overlay is one pass rather than a fix-one-rerun loop.
+**Errors are loud.** A refused key, an unknown key, a clamped key moved the wrong way, or a
+value the owning section rejects raises :class:`OverlayError` — one error listing *every*
+problem in the patch, so fixing a bad overlay is one pass rather than a fix-one-rerun loop.
+A clamp is checked against the value **config resolved** for that path (the live ``settings``
+value), and the error names it, so the direction and the number to clear are both in the
+message. Nothing is clipped silently: a mandate says what it means or it does not run.
 """
 
 from __future__ import annotations
@@ -182,8 +185,8 @@ _SEARCH_SHAPE: frozenset[str] = frozenset(
 
 # Data acquisition — the lookback window a mandate's own declared symbols are fetched over,
 # and whether a run backfills them at all. A mandate that names symbols is the thing that
-# knows how much history its thesis needs. The *spend* side of data stays out: ``budget_usd``
-# is a ceiling with a direction, and ``lake_dir`` is state redirection.
+# knows how much history its thesis needs. The *spend* side of data stays out of tier A:
+# ``budget_usd`` is direction-clamped below, and ``lake_dir`` is state redirection.
 _DATA_ACQUISITION: frozenset[str] = frozenset(
     {
         # The one-time backfill's lookback window for not-yet-ready symbols.
@@ -211,8 +214,29 @@ ALLOWED: frozenset[str] = (
 # ─────────────────────────────────────────────────────────────────────────────
 # Tier B — CLAMPED: legal only in the direction that adds discipline.
 # ─────────────────────────────────────────────────────────────────────────────
-# Empty today; the direction clamps land with the widened surface.
-CLAMPED: dict[str, Direction] = {}
+# Two knobs a mandate may move, but only *towards* discipline — the direction IS the guard
+# that makes them settable at all, so a wrong-direction value is fatal rather than clipped
+# (silently clamping a number would let a mandate say one thing while the run does another).
+#
+# The bound is whatever config resolved for the path at overlay time (``config.yaml``, ``.env``
+# and the environment together), so a clamp constrains **the overlay and nothing else**: the
+# config file's own semantics are untouched, and an operator who wants a lower exhaustion floor
+# or a bigger vendor budget still sets it there. A second overlay in the same process therefore
+# ratchets from the first one's result.
+#
+# ``None`` — "no bound": an unlimited budget, no exhaustion floor at all — is the
+# least-disciplined end of *either* scale, so an overlay may replace it with a number and
+# never the reverse.
+CLAMPED: dict[str, Direction] = {
+    # The exhaustion floor: how many distinct param sets must reach the experiment journal
+    # before a verdict tool will answer. A count, not a metric — raising it demands strictly
+    # more evidence per verdict (a tune-first personality asking for 20 is legitimate
+    # steering), and lowering it is exactly the loosening AGENTS.md rule 5 forbids.
+    "research.min_trials": "raise_only",
+    # The vendor spend cap the data preflight bounds every fetch against. A mandate may spend
+    # less of the operator's money; the ceiling config set stays the ceiling.
+    "data.budget_usd": "lower_only",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -327,17 +351,11 @@ REFUSED: dict[str, str] = {
     "ideation.max_indicators": _IDEATION,
     "ideation.web_search": _IDEATION,
     "ideation.max_web_searches": _IDEATION,
-    # Not yet in the surface — each of the three is run-shaping in kind but carries a guard
-    # that does not exist yet, and a knob without its guard is a hole:
-    #   * ``universe`` — the seed symbol list. Shrinking it below the fit-set + symbol-holdout
-    #     sizes would starve the symbol-holdout axis, defeating a gate by emptying it rather
-    #     than by clearing it, so it lands with its starvation guard.
-    #   * ``research.min_trials`` — the exhaustion floor. Legal to *raise* only.
-    #   * ``data.budget_usd`` — the vendor spend cap. Legal to *lower* only.
-    # The last two land in the direction-clamped tier, where the clamp is the guard.
+    # Not yet in the surface — run-shaping in kind, but carrying a guard that does not exist
+    # yet, and a knob without its guard is a hole: shrinking ``universe`` below the fit-set +
+    # symbol-holdout sizes would starve the symbol-holdout axis, defeating a gate by emptying
+    # it rather than by clearing it, so it lands with its starvation guard.
     "universe": _NOT_YET,
-    "research.min_trials": _NOT_YET,
-    "data.budget_usd": _NOT_YET,
 }
 
 _UNKNOWN = "not a setting — check the spelling and the dotted path against config.example.yaml"
@@ -357,7 +375,7 @@ def classify(path: str) -> Verdict:
         return Verdict(
             path=path,
             tier="clamped",
-            reason=f"may only be {adds_discipline} relative to the configured value",
+            reason=f"may only be {adds_discipline} by an overlay",
             direction=direction,
         )
     reason = REFUSED.get(path)
@@ -372,8 +390,10 @@ def classify(path: str) -> Verdict:
 def apply_patch(settings: Settings, patch: Mapping[str, object]) -> list[str]:
     """Apply a flat ``{"dotted.path": value}`` patch to ``settings`` in place.
 
-    Classifies **every** key first and raises one :class:`OverlayError` listing all the
-    violations, so an operator sees every problem at once. Survivors are grouped by their
+    Classifies **every** key first — and direction-checks every :data:`CLAMPED` one against
+    the value ``settings`` currently holds — then raises one :class:`OverlayError` listing all
+    the violations, so an operator sees every problem at once. Survivors (allowed keys and
+    clamped keys moving the legal way, treated identically from here) are grouped by their
     owning top-level section, deep-merged into that section's dump, and re-validated through
     ``model_validate`` (top-level scalars go through a ``TypeAdapter`` over the field's own
     annotation), so values are checked by exactly the validators ``config.yaml`` gets. Any
@@ -385,11 +405,11 @@ def apply_patch(settings: Settings, patch: Mapping[str, object]) -> list[str]:
     violations: list[str] = []
     survivors: dict[str, object] = {}
     for path, value in patch.items():
-        verdict = classify(path)
-        if verdict.tier == "allowed":
+        violation = _violation(settings, classify(path), value)
+        if violation is None:
             survivors[path] = value
         else:
-            violations.append(f"{path}: {verdict.reason}")
+            violations.append(violation)
     if violations:
         raise OverlayError(_refusal_message(violations))
     if not survivors:
@@ -412,6 +432,76 @@ def apply_patch(settings: Settings, patch: Mapping[str, object]) -> list[str]:
     for name, value in rebuilt.items():
         setattr(settings, name, value)
     return sorted(f"{path}={_read_path(settings, path)}" for path in survivors)
+
+
+def _violation(settings: Settings, verdict: Verdict, value: object) -> str | None:
+    """The one error line for a key that may not be applied, or ``None`` when it may."""
+    if verdict.tier == "allowed":
+        return None
+    if verdict.tier == "clamped" and verdict.direction is not None:
+        return _clamp_violation(settings, verdict, verdict.direction, value)
+    return f"{verdict.path}: {verdict.reason}"
+
+
+def _clamp_violation(
+    settings: Settings, verdict: Verdict, direction: Direction, value: object
+) -> str | None:
+    """Direction-check one :data:`CLAMPED` value, naming the config value it tried to cross.
+
+    The comparison is against the live ``settings`` value — what ``config.yaml``, ``.env``,
+    and the environment settled on — so the clamp constrains the overlay and nothing else.
+    A value that cannot be read as a number (on either side) is not a direction question at
+    all: it is left to the section rebuild, where pydantic gives the honest type diagnosis.
+    """
+    proposed = _discipline_rank(value, direction)
+    if proposed is None:
+        return None
+    configured = _read_path(settings, verdict.path)
+    current = _discipline_rank(configured, direction)
+    if current is None or proposed >= current:
+        return None
+    crossed = "below" if direction == "raise_only" else "above"
+    return (
+        f"{verdict.path}: {verdict.reason} — "
+        f"{_show(value)} is {crossed} the configured {_show(configured)}"
+    )
+
+
+def _discipline_rank(value: object, direction: Direction) -> float | None:
+    """Where ``value`` sits on the path's *discipline* scale (higher is stricter), or ``None``
+    when it is not a number the clamp can read.
+
+    ``None`` is "no bound" — an unlimited budget, no exhaustion floor — which is the
+    least-disciplined end of either scale, hence ``-inf`` whichever way the clamp points.
+    """
+    if value is None:
+        return float("-inf")
+    number = _as_number(value)
+    if number is None:
+        return None
+    return number if direction == "raise_only" else -number
+
+
+def _as_number(value: object) -> float | None:
+    """``value`` as the number the owning section would coerce it to, or ``None`` if it isn't.
+
+    As permissive as pydantic's lax mode on purpose: a mandate's YAML front matter can hand
+    over a quoted ``"2"`` that validates into ``2``, so the clamp has to read it as ``2`` too
+    — otherwise the direction check would have a hole one quote character wide.
+    """
+    if isinstance(value, bool | int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _show(value: object) -> str:
+    """A value as it reads in an operator-facing message (``None`` says what it means)."""
+    return "null (no bound)" if value is None else repr(value)
 
 
 def _sections() -> frozenset[str]:

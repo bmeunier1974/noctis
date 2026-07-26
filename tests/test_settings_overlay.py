@@ -139,6 +139,28 @@ SAMPLE_VALUES: dict[str, object] = {
     "qa.keep_last_runs": 5,
 }
 
+# The tier-B direction clamps (#118), stated here as the contract: the legal direction, the
+# value pure defaults resolve for the path, one value that adds discipline and one that
+# removes it. Ratcheted below to stay total over CLAMPED, so a widened clamp tier cannot ship
+# without an apply test.
+CLAMP_SAMPLES: dict[str, dict[str, object]] = {
+    # The exhaustion floor: a count, so demanding more evidence per verdict is legitimate
+    # steering and demanding less is the loosening AGENTS.md rule 5 forbids.
+    "research.min_trials": {
+        "direction": "raise_only",
+        "configured": 8,
+        "adds_discipline": 20,
+        "removes_discipline": 4,
+    },
+    # The vendor spend cap: a mandate may spend less of the operator's money, never more.
+    "data.budget_usd": {
+        "direction": "lower_only",
+        "configured": 125.0,
+        "adds_discipline": 40.0,
+        "removes_discipline": 250.0,
+    },
+}
+
 
 def _settings(tmp_path):
     """Settings from pure defaults (the repo config.yaml is bypassed by a missing path)."""
@@ -182,17 +204,32 @@ def test_sample_value_table_covers_the_whole_allowed_surface():
     assert not stale, f"sample values for paths that are not allowed: {stale}"
 
 
+def test_clamp_sample_table_covers_the_whole_clamped_surface():
+    """Widening CLAMPED without stating its direction and its two sample values fails here."""
+    missing = sorted(set(CLAMPED) - set(CLAMP_SAMPLES))
+    assert not missing, f"clamped paths with no sample values in this suite: {missing}"
+    stale = sorted(set(CLAMP_SAMPLES) - set(CLAMPED))
+    assert not stale, f"sample values for paths that are not clamped: {stale}"
+    for path, sample in CLAMP_SAMPLES.items():
+        assert CLAMPED[path] == sample["direction"]
+
+
 def test_allowed_surface_is_the_run_shaping_tier():
     """A mandate configures the whole run — model, budgets, prompt shape, scoring metric —
     and nothing else (#117). ``config.yaml`` keeps the arena."""
     assert set(ALLOWED) == RUN_SHAPING
-    assert CLAMPED == {}  # the direction clamps are their own stage
 
 
-@pytest.mark.parametrize("path", ["universe", "research.min_trials", "data.budget_usd"])
+def test_clamped_surface_is_the_two_direction_clamped_knobs():
+    """Tier B (#118): the exhaustion floor may only go up, the vendor budget only down."""
+    assert CLAMPED == {"research.min_trials": "raise_only", "data.budget_usd": "lower_only"}
+    assert not set(CLAMPED) & set(REFUSED)  # they left the refused tier in the same change
+
+
+@pytest.mark.parametrize("path", ["universe"])
 def test_the_paths_that_need_a_guard_first_are_still_refused(path):
-    """``universe`` carries the symbol-holdout starvation guard, and the two clamped-tier
-    knobs carry a direction — each lands with its guard, not before."""
+    """``universe`` carries the symbol-holdout starvation guard — it lands with its guard, not
+    before. The two direction-clamped knobs landed with theirs (the clamp) in #118."""
     verdict = classify(path)
     assert verdict.tier == "refused"
     assert "not yet in the overlay surface" in verdict.reason
@@ -214,14 +251,16 @@ def test_classify_reports_an_unknown_path():
     assert verdict.reason
 
 
-def test_classify_honors_a_clamped_entry_over_a_refusal(monkeypatch):
-    """CLAMPED is empty today, but it is the tier the direction clamps land in: an entry
-    there must win over the same path's refusal, and carry the legal direction."""
-    monkeypatch.setattr(overlay, "CLAMPED", {"research.min_trials": "raise_only"})
-    verdict = classify("research.min_trials")
+@pytest.mark.parametrize(
+    ("path", "direction", "wording"),
+    [("research.min_trials", "raise_only", "raised"), ("data.budget_usd", "lower_only", "lowered")],
+)
+def test_classify_carries_the_legal_direction_for_a_clamped_path(path, direction, wording):
+    """A clamped verdict says which way the knob may move, in the operator's words."""
+    verdict = classify(path)
     assert verdict.tier == "clamped"
-    assert verdict.direction == "raise_only"
-    assert "raised" in verdict.reason
+    assert verdict.direction == direction
+    assert wording in verdict.reason
 
 
 # ── apply: the allowed surface ───────────────────────────────────────────────────────────
@@ -263,6 +302,188 @@ def _read(settings, path: str):
     for part in path.split("."):
         node = getattr(node, part)
     return node
+
+
+# ── apply: the tier-B direction clamps (#118) ────────────────────────────────────────────
+@pytest.mark.parametrize("path", sorted(CLAMP_SAMPLES))
+def test_clamped_path_applies_in_the_direction_that_adds_discipline(tmp_path, path):
+    """A clamped knob that passes its direction check is applied exactly like an allowed one:
+    same section re-validation, same echo line, same untouched refused subtree."""
+    settings = _settings(tmp_path)
+    value = CLAMP_SAMPLES[path]["adds_discipline"]
+    before = gate_snapshot(settings)
+
+    lines = apply_patch(settings, {path: value})
+
+    assert lines == [f"{path}={value}"]
+    assert _read(settings, path) == value
+    assert_gates_unmoved(before, gate_snapshot(settings))
+
+
+@pytest.mark.parametrize("path", sorted(CLAMP_SAMPLES))
+def test_clamped_path_is_fatal_in_the_direction_that_removes_discipline(tmp_path, path):
+    settings = _settings(tmp_path)
+    baseline = _settings(tmp_path).model_dump_json()
+    sample = CLAMP_SAMPLES[path]
+
+    with pytest.raises(OverlayError) as exc:
+        apply_patch(settings, {path: sample["removes_discipline"]})
+
+    message = str(exc.value)
+    assert path in message
+    assert str(sample["configured"]) in message  # the config value it tried to cross
+    assert settings.model_dump_json() == baseline
+
+
+@pytest.mark.parametrize("path", sorted(CLAMP_SAMPLES))
+def test_clamped_path_accepts_the_configured_value(tmp_path, path):
+    """The boundary is inclusive: a mandate restating what config resolved is not a violation."""
+    settings = _settings(tmp_path)
+    configured = _read(settings, path)
+    assert configured == CLAMP_SAMPLES[path]["configured"]
+
+    assert apply_patch(settings, {path: configured}) == [f"{path}={configured}"]
+    assert _read(settings, path) == configured
+
+
+def test_raising_the_exhaustion_floor_applies_and_lowering_it_is_fatal(tmp_path):
+    """The exhaustion floor is a count, not a metric: a tune-first personality demanding 20
+    distinct param sets before any verdict is more discipline, and that is the only direction."""
+    settings = _settings(tmp_path)
+    assert settings.research.min_trials == 8
+
+    assert apply_patch(settings, {"research.min_trials": 20}) == ["research.min_trials=20"]
+    assert settings.research.min_trials == 20
+
+    with pytest.raises(OverlayError) as exc:
+        apply_patch(settings, {"research.min_trials": 12})
+    assert "20" in str(exc.value)  # the raised floor is what the second overlay must clear
+    assert settings.research.min_trials == 20
+
+
+def test_lowering_the_data_budget_applies_and_raising_it_is_fatal(tmp_path):
+    """A mandate may spend less of the operator's vendor budget, never more than the ceiling
+    config set."""
+    settings = _settings(tmp_path)
+    assert settings.data.budget_usd == 125.0
+
+    assert apply_patch(settings, {"data.budget_usd": 40.0}) == ["data.budget_usd=40.0"]
+    assert settings.data.budget_usd == 40.0
+
+    with pytest.raises(OverlayError) as exc:
+        apply_patch(settings, {"data.budget_usd": 100.0})
+    assert "40.0" in str(exc.value)  # already-lowered, so 100 is now a raise
+    assert settings.data.budget_usd == 40.0
+
+
+def test_a_wrong_direction_error_names_the_config_value_it_crossed(tmp_path):
+    """The clamp compares against the value *config resolved*, not against the default — and
+    the message names it, so the fix is obvious from the error alone."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("research:\n  min_trials: 17\ndata:\n  budget_usd: 33.5\n", encoding="utf-8")
+    settings = load_settings(config_path=cfg)
+
+    with pytest.raises(OverlayError) as exc:
+        # 9 clears the default floor of 8 and 99.0 sits under the default cap of 125.0 —
+        # both are still wrong-direction against what this config resolved.
+        apply_patch(settings, {"research.min_trials": 9, "data.budget_usd": 99.0})
+
+    message = str(exc.value)
+    assert "17" in message
+    assert "33.5" in message
+    assert settings.research.min_trials == 17
+    assert settings.data.budget_usd == 33.5
+
+
+def test_config_yaml_may_set_either_clamped_knob_freely(tmp_path):
+    """The clamp constrains the overlay and nothing else: ``config.yaml`` semantics are
+    untouched, so an operator can still set a low floor and a large vendor budget there."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("research:\n  min_trials: 2\ndata:\n  budget_usd: 9999.0\n", encoding="utf-8")
+
+    settings = load_settings(config_path=cfg)
+
+    assert settings.research.min_trials == 2
+    assert settings.data.budget_usd == 9999.0
+
+
+def test_a_clamp_violation_and_a_refusal_are_reported_together(tmp_path):
+    """One pass, not a fix-one-rerun loop: clamp violations join the same collect-all-then-
+    raise-once path as refusals, and the legal key travelling with them applies nothing."""
+    settings = _settings(tmp_path)
+    patch = {
+        "research.min_trials": 2,  # a wrong-direction clamp
+        "promotion.max_gap": 5.0,  # a refusal
+        "promotion.metric": "sortino",  # the one legal key
+    }
+
+    with pytest.raises(OverlayError) as exc:
+        apply_patch(settings, patch)
+
+    message = str(exc.value)
+    assert "research.min_trials" in message
+    assert "the configured 8" in message
+    assert REFUSED["promotion.max_gap"] in message
+    assert "2 config overrides refused" in message.splitlines()[0]
+    assert settings.research.min_trials == 8
+    assert settings.promotion.max_gap == 1.0
+    assert settings.promotion.metric == "sharpe"
+
+
+def test_the_clamped_tier_applies_beside_the_whole_allowed_surface(tmp_path):
+    """The maximal legal overlay, tiers A and B at once: every value lands and the refused
+    subtree stays byte-identical."""
+    settings = _settings(tmp_path)
+    before = json.dumps(gate_snapshot(settings), sort_keys=True, default=str)
+    clamped = {path: sample["adds_discipline"] for path, sample in CLAMP_SAMPLES.items()}
+
+    lines = apply_patch(settings, {**SAMPLE_VALUES, **clamped})
+
+    assert len(lines) == len(SAMPLE_VALUES) + len(clamped)
+    for path, value in {**SAMPLE_VALUES, **clamped}.items():
+        assert _read(settings, path) == value
+    assert json.dumps(gate_snapshot(settings), sort_keys=True, default=str) == before
+
+
+def test_a_clamped_knob_may_not_be_unbounded_by_an_overlay(tmp_path):
+    """``null`` means "no bound" — an unlimited vendor budget, no exhaustion floor at all —
+    which is the least-disciplined end of either scale, so an overlay may never move there."""
+    settings = _settings(tmp_path)
+
+    with pytest.raises(OverlayError) as exc:
+        apply_patch(settings, {"data.budget_usd": None, "research.min_trials": None})
+
+    message = str(exc.value)
+    assert "the configured 125.0" in message
+    assert "the configured 8" in message
+    assert settings.data.budget_usd == 125.0
+    assert settings.research.min_trials == 8
+
+
+def test_an_overlay_may_bound_a_budget_config_left_unbounded(tmp_path):
+    """The mirror image: putting a number on an unbounded budget *adds* discipline, so it
+    applies. (Raw attribute assignment is unvalidated — that is how a ``None`` gets in here
+    while ``data.budget_usd`` is still typed ``float``; the clamp is written for the semantic,
+    not for today's annotation.)"""
+    settings = _settings(tmp_path)
+    settings.data.budget_usd = None
+
+    assert apply_patch(settings, {"data.budget_usd": 40.0}) == ["data.budget_usd=40.0"]
+    assert settings.data.budget_usd == 40.0
+
+
+def test_a_quoted_number_cannot_walk_past_the_clamp(tmp_path):
+    """Front matter is YAML, so a value can arrive as a string that pydantic then coerces to a
+    number on the way into the section. The clamp reads it the same way, or it would be a hole
+    a quote character wide."""
+    settings = _settings(tmp_path)
+
+    with pytest.raises(OverlayError, match="research.min_trials"):
+        apply_patch(settings, {"research.min_trials": "2"})
+    assert settings.research.min_trials == 8
+
+    assert apply_patch(settings, {"research.min_trials": "20"}) == ["research.min_trials=20"]
+    assert settings.research.min_trials == 20
 
 
 # ── apply: the refused surface is fatal, and leaves nothing behind ───────────────────────
@@ -392,6 +613,14 @@ def _assert_bad_value_fails_identically(tmp_path, path, value, yaml_body, diagno
             "research:\n  cost_profile: lavish\n",
             "'full', 'balanced' or 'economy'",
         ),
+        (
+            # A clamped path is validated like any other: a value the clamp cannot read as a
+            # number is not a direction question, so pydantic delivers the honest diagnosis.
+            "research.min_trials",
+            "many",
+            "research:\n  min_trials: many\n",
+            "valid integer",
+        ),
     ],
 )
 def test_a_bad_value_fails_identically_from_either_source(
@@ -399,7 +628,8 @@ def test_a_bad_value_fails_identically_from_either_source(
 ):
     """The applier re-validates the owning section, so the metric parser, ``Literal``
     membership, and type coercion all fire exactly as they do for the YAML file — surfacing
-    as the one overlay exception type. Every path here is genuinely allowed."""
+    as the one overlay exception type. Every path here is genuinely settable (allowed, or
+    clamped and moving the legal way)."""
     _assert_bad_value_fails_identically(tmp_path, path, value, yaml_body, diagnosis)
 
 

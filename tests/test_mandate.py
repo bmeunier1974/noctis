@@ -365,6 +365,47 @@ def test_a_mandate_binds_the_run_shaping_settings_from_nested_front_matter(tmp_p
     assert len(lines) == 8
 
 
+def test_a_tune_first_mandate_may_demand_more_trials_and_less_spend(tmp_path):
+    """The tier-B direction clamps through real front matter (#118): a conduct mandate that
+    wants more evidence per verdict and a smaller vendor bill is steering *towards* discipline,
+    so both apply and both are echoed."""
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "tune-first.md",
+        "---\n"
+        "summary: Tune the existing library first.\n"
+        "config:\n"
+        "  research:\n"
+        "    min_trials: 20\n"
+        "  data:\n"
+        "    budget_usd: 40.0\n"
+        "---\n"
+        "Drive one existing strategy to a verdict before authoring anything.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="tune-first")
+    mandate = resolve_mandate(settings)
+
+    lines = apply_overrides(settings, mandate)
+
+    assert settings.research.min_trials == 20
+    assert settings.data.budget_usd == 40.0
+    assert lines == ["data.budget_usd=40.0", "research.min_trials=20"]
+
+
+def test_a_mandate_cannot_loosen_the_exhaustion_floor(tmp_path):
+    """The wrong direction is fatal at startup, naming both the steering file to fix and the
+    config value it tried to cross."""
+    settings = _settings(tmp_path, tmp_path / "mandate")
+
+    with pytest.raises(MandateError) as exc:
+        apply_overrides(settings, _mandate_with({"research.min_trials": 3}))
+
+    message = str(exc.value)
+    assert "profile:test" in message
+    assert "the configured 8" in message
+    assert settings.research.min_trials == 8
+
+
 def test_a_mandate_setting_every_allowed_knob_leaves_the_gates_byte_identical(tmp_path):
     """The maximal legal mandate — every knob the surface allows, at once — cannot move one
     byte of the refused subtree (the safety mode, the fill costs, the promotion thresholds,
@@ -384,14 +425,14 @@ def test_a_mandate_setting_every_allowed_knob_leaves_the_gates_byte_identical(tm
 
 
 def test_overlay_refuses_the_arena_and_applies_nothing(tmp_path):
-    """One error names the mandate, lists every refused key, and applies nothing — not even
-    the one legal key beside them."""
+    """One error names the mandate, lists every refused key *and* every wrong-direction clamp,
+    and applies nothing — not even the one legal key beside them."""
     settings = _settings(tmp_path, tmp_path / "mandate")
     mandate = _mandate_with(
         {
             "mode": "live",
             "risk.max_daily_loss_pct": 99.0,
-            "data.budget_usd": 9999.0,
+            "data.budget_usd": 9999.0,  # a clamp violation, reported in the same error
             "promotion.max_gap": 5.0,
             "promotion.min_test_metric": -5.0,
             "promotion.min_holdout_metric": -5.0,
