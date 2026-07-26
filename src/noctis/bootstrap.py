@@ -6,9 +6,10 @@ ordering enforced by comments, :class:`~noctis.champions.promotion.PromotionRule
 hand-built from settings in two places, and the CLI and the runtime each wired their own
 copy of the agent research session (client + budgets + toolbox + loop kwargs).
 
-Everything here is plain assembly, no policy: the safety gate, the overlay allowlist, and
-the budget tables all stay with their owners (``config.gate``, ``research.mandate``,
-``research.cost``). This module only fixes the *order* in one place and hands back built
+Everything here is plain assembly, no policy: the safety gate, the settings-overlay
+classifier, and the budget tables all stay with their owners (``config.gate``,
+``config.overlay``, ``research.cost``). This module only fixes the *order* in one place
+and hands back built
 collaborators. Errors are typed, never printed — the CLI maps them to red text + exit
 codes; a library caller sees ordinary exceptions.
 

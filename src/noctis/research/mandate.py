@@ -17,9 +17,13 @@ Design constraints (see ``docs/operator-mandate.md``):
   caps (module constants, deliberately small) keep the operator's supporting material from
   crowding out the agent's own reasoning; a reference that wants to be bigger is a signal it
   should be a link the agent follows with web_search, not an embed.
-* **The overlay may set exactly one knob.** ``_OVERRIDE_ALLOWLIST`` is ``promotion.metric``
-  and nothing else; every gate, safety, budget, and structural knob is refused (with a
-  warning, never a crash). Widening it is a deliberate, owner-gated edit to that constant.
+* **The overlay is deny-by-default, and its refusals are fatal.** Which settings a mandate
+  may bind is not decided here: :mod:`noctis.config.overlay` classifies every leaf path in
+  ``Settings`` exactly once and validates values by re-building the owning config section,
+  so this module only flattens the front-matter, hands the patch over, and re-types the
+  refusal with the mandate's provenance. A refused, unknown, or invalid key raises
+  :class:`MandateError` at startup — an operator never discovers three days into a run that
+  a knob they set silently didn't apply.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from pathlib import Path
 
 import yaml
 
-from noctis.backtest.scorecard import Metric
+from noctis.config.overlay import OverlayError, apply_patch
 
 logger = logging.getLogger("noctis.research.mandate")
 
@@ -40,10 +44,6 @@ logger = logging.getLogger("noctis.research.mandate")
 _REFERENCE_FILE_CAP_BYTES = 2048
 _REFERENCE_TOTAL_CAP_BYTES = 6144
 _MANDATE_BODY_WARN_BYTES = 6144
-
-# The single overridable knob (§3.4). Widening this past ``promotion.metric`` is a
-# deliberate, owner-gated change to this constant — never something a mandate author reaches.
-_OVERRIDE_ALLOWLIST = ("promotion.metric",)
 
 # A leading ``---`` / ``---`` YAML front-matter fence, then the prose body.
 _FRONT_MATTER_RE = re.compile(r"^---\s*\n(.*?)\n---[ \t]*\n?(.*)\Z", re.DOTALL)
@@ -222,36 +222,21 @@ def _auto_mandate(mandate_dir: Path) -> Mandate:
 def apply_overrides(settings, mandate) -> list[str]:
     """Apply a mandate's ``config:`` overlay to ``settings`` in place; return "k=v" echoes.
 
-    Only ``promotion.metric`` may be set; every other key is refused with a warning and
-    skipped. The metric value is pre-validated through :meth:`Metric.parse` **here** —
-    these pydantic models do not enable ``validate_assignment``, so the field validator does
-    NOT run on attribute assignment (§3.4). Nothing here crashes: bad input warns and skips.
+    A thin adapter over :func:`noctis.config.overlay.apply_patch`: the flattened front-matter
+    *is* the patch. Which paths may be bound, and whether a value is legal, are the overlay's
+    decisions — this function only re-types the refusal with the mandate's provenance, so an
+    operator reading the error knows which steering file to fix.
+
+    A refused key, an unknown key, or a value the owning config section rejects raises
+    :class:`MandateError` listing **every** problem at once (fatal at startup, per §3.4);
+    nothing is applied when anything is refused. ``None`` (no mandate) is a no-op.
     """
     if mandate is None:
         return []
-    echoes: list[str] = []
-    for dotted, value in mandate.config_overrides.items():
-        if dotted not in _OVERRIDE_ALLOWLIST:
-            logger.warning(
-                "mandate %s tried to override %s=%r — refused: only %s may be set by a mandate; "
-                "skipping.",
-                mandate.source,
-                dotted,
-                value,
-                ", ".join(_OVERRIDE_ALLOWLIST),
-            )
-            continue
-        if dotted == "promotion.metric":
-            try:
-                value = Metric.parse(value).value
-            except ValueError as exc:
-                logger.warning(
-                    "mandate %s set promotion.metric — %s; skipping.", mandate.source, exc
-                )
-                continue
-            settings.promotion.metric = value
-            echoes.append(f"promotion.metric={value}")
-    return echoes
+    try:
+        return apply_patch(settings, mandate.config_overrides)
+    except OverlayError as exc:
+        raise MandateError(f"mandate {mandate.source} — {exc}") from exc
 
 
 # ─────────────────────────────────────────────────────────────────────────────

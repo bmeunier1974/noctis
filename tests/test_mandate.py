@@ -2,9 +2,12 @@
 
 Pure, client-free coverage of noctis.research.mandate: selector precedence, name lookup,
 the empty-MANDATE rule, front-matter parsing (incl. the malformed-fence degrade), reference
-inclusion/caps/confinement, summary extraction, and the metric-only config overlay allowlist
-(with the assignment-validation subtlety it exists to guard). Plus the CLI mutual-exclusion
-of --directive/--mandate and the "empty input == today" parity.
+inclusion/caps/confinement, summary extraction, and the config-overlay *adapter* — the thin
+seam onto noctis.config.overlay that keeps apply_overrides' signature and exception type and
+makes a refused/unknown/invalid key fatal at startup, naming the mandate that carried it.
+(The classifier and the applier themselves are covered in tests/test_settings_overlay.py.)
+Plus the CLI mutual-exclusion of --directive/--mandate, the exit-1-on-a-bad-overlay path,
+and the "empty input == today" parity.
 """
 
 from __future__ import annotations
@@ -302,31 +305,29 @@ def test_html_comments_stripped_from_agent_text(tmp_path):
     assert mandate.summary == "Real summary."
 
 
-# ── the config overlay allowlist (§3.4) ──────────────────────────────────────────────────
+# ── the config overlay adapter (§3.4) ────────────────────────────────────────────────────
+# apply_overrides keeps its signature and its exception type; the classification and the
+# validation live in noctis.config.overlay (tests/test_settings_overlay.py). What is asserted
+# here is the adapter's own contract: the mandate source is named, and a refused, unknown, or
+# invalid key is FATAL at startup rather than a buried warning.
+def _mandate_with(overrides: dict, source: str = "profile:test") -> Mandate:
+    return Mandate(text="x", source=source, summary="x", references=[], config_overrides=overrides)
+
+
 def test_overlay_applies_metric_only(tmp_path):
     settings = _settings(tmp_path, tmp_path / "mandate")
     assert settings.promotion.metric == "sharpe"  # base default
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={"promotion.metric": "total_return"},
-    )
-    lines = apply_overrides(settings, mandate)
+    lines = apply_overrides(settings, _mandate_with({"promotion.metric": "total_return"}))
     assert settings.promotion.metric == "total_return"
     assert lines == ["promotion.metric=total_return"]
 
 
 def test_overlay_refuses_everything_but_metric(tmp_path):
+    """One error names the mandate, lists every refused key, and applies nothing — not even
+    the one legal key beside them."""
     settings = _settings(tmp_path, tmp_path / "mandate")
-    base_mode = settings.mode
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={
+    mandate = _mandate_with(
+        {
             "mode": "live",
             "risk.max_daily_loss_pct": 99.0,
             "data.budget_usd": 9999.0,
@@ -334,61 +335,75 @@ def test_overlay_refuses_everything_but_metric(tmp_path):
             "promotion.min_test_metric": -5.0,
             "promotion.min_holdout_metric": -5.0,
             "promotion.metric": "total_return",  # the sole allowed key
-        },
+        }
     )
-    lines = apply_overrides(settings, mandate)
-    # Every refused key is untouched; only the metric moved.
-    assert settings.mode == base_mode
+    with pytest.raises(MandateError) as exc:
+        apply_overrides(settings, mandate)
+    message = str(exc.value)
+    assert "profile:test" in message  # the refusal names its source
+    for refused in (
+        "mode",
+        "risk.max_daily_loss_pct",
+        "data.budget_usd",
+        "promotion.max_gap",
+        "promotion.min_test_metric",
+        "promotion.min_holdout_metric",
+    ):
+        assert refused in message
+    # Nothing moved, including the legal key that travelled with them.
+    assert settings.mode == "paper"
     assert settings.risk.max_daily_loss_pct == 3.0
     assert settings.data.budget_usd == 125.0
     assert settings.promotion.max_gap == 1.0
     assert settings.promotion.min_test_metric == 0.0
     assert settings.promotion.min_holdout_metric == 0.0
-    assert settings.promotion.metric == "total_return"
-    assert lines == ["promotion.metric=total_return"]
+    assert settings.promotion.metric == "sharpe"
 
 
 def test_overlay_refuses_invalid_metric_value(tmp_path):
+    """A bad value is fatal too, carrying the one unknown-metric diagnosis.
+
+    Raw attribute assignment on these models still does NOT validate (no
+    validate_assignment) — the overlay's section re-validation is what protects the knob.
+    """
     settings = _settings(tmp_path, tmp_path / "mandate")
-    # The subtlety apply_overrides guards: raw assignment does NOT validate (no
-    # validate_assignment on these models), so a hand-check is the only protection.
     settings.promotion.metric = "bogus"
     assert settings.promotion.metric == "bogus"  # proves assignment is unchecked
     settings.promotion.metric = "sharpe"
 
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={"promotion.metric": "not_a_metric"},
-    )
-    lines = apply_overrides(settings, mandate)
+    with pytest.raises(MandateError, match="unknown metric 'not_a_metric'") as exc:
+        apply_overrides(settings, _mandate_with({"promotion.metric": "not_a_metric"}))
+    assert "profile:test" in str(exc.value)
     assert settings.promotion.metric == "sharpe"  # invalid value refused, left unchanged
-    assert lines == []
+
+
+def test_overlay_refuses_an_unknown_key(tmp_path):
+    """A typo'd path never silently un-steers a multi-day run."""
+    settings = _settings(tmp_path, tmp_path / "mandate")
+    with pytest.raises(MandateError, match="promotion.metrik"):
+        apply_overrides(settings, _mandate_with({"promotion.metrik": "sortino"}))
+    assert settings.promotion.metric == "sharpe"
 
 
 def test_overlay_cannot_touch_backtest_costs(tmp_path):
     """The mandate config: overlay stays promotion.metric-only — it may steer WHAT to look
-    for, never how forgiving the arena is (#23). A backtest cost override is refused and the
+    for, never how forgiving the arena is (#23). A backtest cost override is fatal and the
     section is left on its floored default."""
     settings = _settings(tmp_path, tmp_path / "mandate")
     assert settings.backtest.fee_bps == 1.0
     assert settings.backtest.slippage_bps == 1.0
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={
+    mandate = _mandate_with(
+        {
             "backtest.fee_bps": 0.1,  # a cost-cheapening attempt via the overlay
             "backtest.slippage_bps": 0.1,
-        },
+        }
     )
-    lines = apply_overrides(settings, mandate)
+    with pytest.raises(MandateError) as exc:
+        apply_overrides(settings, mandate)
+    assert "backtest.fee_bps" in str(exc.value)
+    assert "backtest.slippage_bps" in str(exc.value)
     assert settings.backtest.fee_bps == 1.0  # untouched
     assert settings.backtest.slippage_bps == 1.0
-    assert lines == []  # nothing applied
 
 
 def test_apply_overrides_none_is_noop(tmp_path):
@@ -400,14 +415,7 @@ def test_apply_overrides_none_is_noop(tmp_path):
 def test_metric_flag_beats_overlay_via_apply_order(tmp_path):
     """The CLI applies --metric AFTER the overlay, so a one-off flag still wins."""
     settings = _settings(tmp_path, tmp_path / "mandate")
-    mandate = Mandate(
-        text="x",
-        source="profile:test",
-        summary="x",
-        references=[],
-        config_overrides={"promotion.metric": "total_return"},
-    )
-    apply_overrides(settings, mandate)
+    apply_overrides(settings, _mandate_with({"promotion.metric": "total_return"}))
     assert settings.promotion.metric == "total_return"
     settings.promotion.metric = "sortino"  # what --metric does, after the overlay
     assert settings.promotion.metric == "sortino"
@@ -507,6 +515,36 @@ def test_directive_and_mandate_together_errors(tmp_path):
     assert "not both" in result.output
 
 
+@pytest.mark.parametrize(
+    ("block", "diagnosis"),
+    [
+        # refused: a promotion threshold is a gate, by design
+        ("promotion:\n    max_gap: 5.0\n    metric: sortino", "promotion gates"),
+        # unknown: a typo'd path
+        ("promotion:\n    metrik: sortino", "promotion.metrik"),
+        # invalid: the value fails the section's own validator
+        ("promotion:\n    metric: alpha", "unknown metric 'alpha'"),
+    ],
+)
+def test_bad_mandate_overlay_exits_one_and_starts_no_loop(tmp_path, block, diagnosis):
+    """Loud at startup: a refused, unknown, or invalid key stops `noctis run` before the
+    loop, with the reason on stderr — never a buried warning under a multi-day run."""
+    mandate_dir = tmp_path / "mandate"
+    _write(mandate_dir / "profiles" / "bad.md", f"---\nconfig:\n  {block}\n---\nGo.\n")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"mode: paper\nmandate_dir: {mandate_dir}\ndata:\n  lake_dir: {tmp_path}/lake\n"
+        f"state_dir: {tmp_path}/state/\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["run", "--mandate", "bad", "-c", str(cfg)])
+    assert result.exit_code == 1
+    assert "MANDATE:" in result.stderr
+    assert diagnosis in result.stderr
+    assert "profile:bad" in result.stderr  # which mandate caused it
+    assert "Noctis starting" not in result.stdout  # no loop was entered
+
+
 # ── the SHIPPED mandate/ folder (Phase 2): reads the real committed files ─────────────────
 # These guard that the checked-in mandate/ folder always resolves and stays allowlist-clean.
 # They deliberately point at the REAL repo mandate/ + config.yaml, not tmp fixtures.
@@ -530,19 +568,20 @@ def _repo_settings(selector):
 
 
 @pytest.mark.parametrize("name", _SHIPPED_PROFILES)
-def test_shipped_profile_resolves_and_overlay_is_allowlist_clean(name):
-    from noctis.research.mandate import _OVERRIDE_ALLOWLIST
+def test_shipped_profile_resolves_and_declares_promotion_metric_only(name):
+    """Every shipped profile declares exactly one key — ``promotion.metric``.
 
+    Tighter than "within the allowlist": a profile the shipped ``auto`` selector may pick
+    must never declare a knob that would be refused (now fatal) or silently inert.
+    """
     settings = _repo_settings(name)
     mandate = resolve_mandate(settings)  # loads without raising
     assert mandate is not None
     assert mandate.source == f"profile:{name}"
-    # No profile puts anything outside the allowlist in its config: block.
-    assert set(mandate.config_overrides) <= set(_OVERRIDE_ALLOWLIST)
-    # apply_overrides only ever echoes a promotion.metric change (or nothing).
+    assert set(mandate.config_overrides) == {"promotion.metric"}
     echoes = apply_overrides(settings, mandate)
-    assert all(line.startswith("promotion.metric=") for line in echoes)
-    assert len(echoes) <= 1
+    assert len(echoes) == 1
+    assert echoes[0].startswith("promotion.metric=")
 
 
 def test_shipped_profile_metrics_are_expected():
