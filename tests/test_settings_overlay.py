@@ -92,8 +92,11 @@ SEARCH_SHAPE = {
 }
 DATA_ACQUISITION = {"data.history_days", "data.auto_backfill"}
 HOUSEKEEPING = {"observability.heartbeat_polls", "qa.keep_last_runs"}
+SEED_UNIVERSE = {"universe"}
 
-RUN_SHAPING = MODEL_SEAM | SPEND_CEILINGS | SEARCH_SHAPE | DATA_ACQUISITION | HOUSEKEEPING
+RUN_SHAPING = (
+    MODEL_SEAM | SPEND_CEILINGS | SEARCH_SHAPE | DATA_ACQUISITION | HOUSEKEEPING | SEED_UNIVERSE
+)
 
 # The per-path sample values the apply tests draw from. Ratcheted below to stay total over
 # ALLOWED, so a widened surface cannot ship untested.
@@ -137,6 +140,10 @@ SAMPLE_VALUES: dict[str, object] = {
     # Display / housekeeping.
     "observability.heartbeat_polls": 30,
     "qa.keep_last_runs": 5,
+    # The seed trading roster — already normalized (upper-case, no repeats) and long enough to
+    # fill the fit set + the symbol holdout under the shipped geometry, so this sample clears
+    # the starvation guard the path ships with.
+    "universe": ["SMR", "CCJ", "LEU", "URA", "NNE", "OKLO", "BWXT", "VST"],
 }
 
 # The tier-B direction clamps (#118), stated here as the contract: the legal direction, the
@@ -226,13 +233,13 @@ def test_clamped_surface_is_the_two_direction_clamped_knobs():
     assert not set(CLAMPED) & set(REFUSED)  # they left the refused tier in the same change
 
 
-@pytest.mark.parametrize("path", ["universe"])
-def test_the_paths_that_need_a_guard_first_are_still_refused(path):
-    """``universe`` carries the symbol-holdout starvation guard — it lands with its guard, not
-    before. The two direction-clamped knobs landed with theirs (the clamp) in #118."""
-    verdict = classify(path)
-    assert verdict.tier == "refused"
-    assert "not yet in the overlay surface" in verdict.reason
+def test_universe_is_allowed_now_that_it_ships_with_its_guard():
+    """``universe`` was held out of tier A until its starvation guard existed (#117), because a
+    knob without its guard is a hole. It lands allowed *with* the guard (#121), so no path is
+    left carrying the "not yet in the overlay surface" placeholder reason."""
+    assert classify("universe").tier == "allowed"
+    placeheld = sorted(path for path, reason in REFUSED.items() if "not yet" in reason)
+    assert not placeheld
 
 
 # ── classify: one verdict per path, and a verdict for a path the model lacks ─────────────
@@ -302,6 +309,141 @@ def _read(settings, path: str):
     for part in path.split("."):
         node = getattr(node, part)
     return node
+
+
+# ── apply: the seed universe — normalization + the starvation guard (#121) ───────────────
+def _panel_size(settings) -> int:
+    """The ready names the two-axis panel needs: the fit set plus the symbol holdout."""
+    return settings.research.fit_set_size + settings.research.symbol_holdout_size
+
+
+def _roster(count: int, first: str = "AAA") -> list[str]:
+    """``count`` distinct, already-normalized tickers, the first one named."""
+    return [first, *(f"SYM{i}" for i in range(count - 1))]
+
+
+def test_an_overlaid_universe_is_upper_cased_and_deduped(tmp_path):
+    """A mandate-set roster is normalized exactly as the mandate's own ``symbols:`` list is:
+    upper-cased, stripped, de-duped, first-mention order preserved."""
+    settings = _settings(tmp_path)
+
+    lines = apply_patch(
+        settings,
+        {"universe": [" smr ", "CCJ", "smr", "leu", "ura", "nne", "oklo", "bwxt", "vst"]},
+    )
+
+    assert settings.universe == ["SMR", "CCJ", "LEU", "URA", "NNE", "OKLO", "BWXT", "VST"]
+    # The echo is read back off the settings object, so an operator sees the normalized roster.
+    assert lines == [f"universe={settings.universe}"]
+
+
+def test_a_universe_exactly_at_the_panel_size_is_accepted(tmp_path):
+    """The boundary is inclusive: a roster that exactly fills the fit set + the symbol holdout
+    keeps both out-of-sample axes live, so it is legitimate steering."""
+    settings = _settings(tmp_path)
+    exact = _roster(_panel_size(settings))
+
+    assert apply_patch(settings, {"universe": exact}) == [f"universe={exact}"]
+    assert settings.universe == exact
+
+
+def test_a_universe_below_the_panel_size_is_fatal_and_names_the_gate_it_would_disable(tmp_path):
+    """A gate can be defeated by starving it as well as by lowering it: too few symbols and no
+    scorecard ever carries a symbol-holdout metric, so the gate goes inert while every refused
+    knob sits untouched. That is fatal, and the message says which gate."""
+    settings = _settings(tmp_path)
+    baseline = _settings(tmp_path).model_dump_json()
+    starved = _roster(_panel_size(settings) - 1)
+
+    with pytest.raises(OverlayError) as exc:
+        apply_patch(settings, {"universe": starved})
+
+    message = str(exc.value)
+    assert "universe" in message
+    assert "symbol-holdout gate" in message  # the operator-meaningful "what breaks"
+    assert settings.model_dump_json() == baseline  # nothing half-applied
+
+
+def test_a_repeated_ticker_cannot_pad_the_universe_past_the_guard(tmp_path):
+    """The guard counts after de-duplication — otherwise the normalization it ships beside
+    would be the hole: ``[AAA] * 8`` is a one-name universe however it is spelled."""
+    settings = _settings(tmp_path)
+    padded = [*_roster(_panel_size(settings) - 1), "aaa"]  # AAA repeated, lower-cased
+    assert len(padded) == _panel_size(settings)
+
+    with pytest.raises(OverlayError, match="symbol-holdout gate"):
+        apply_patch(settings, {"universe": padded})
+    assert settings.universe == _settings(tmp_path).universe
+
+
+def test_the_guard_measures_against_the_geometry_config_resolved(tmp_path):
+    """The threshold is read off the settings being patched — and the fit-set/holdout sizes are
+    refused, so the config-resolved geometry is the only bound there is. A config that runs a
+    smaller panel legitimately accepts a smaller mandate roster."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("research:\n  fit_set_size: 3\n  symbol_holdout_size: 1\n", encoding="utf-8")
+    settings = load_settings(config_path=cfg)
+    four = _roster(4)
+
+    assert apply_patch(settings, {"universe": four}) == [f"universe={four}"]
+    assert settings.universe == four
+
+    # The same four names under the shipped 6+2 geometry starve the holdout.
+    default_settings = _settings(tmp_path)
+    with pytest.raises(OverlayError, match="symbol-holdout gate"):
+        apply_patch(default_settings, {"universe": four})
+
+
+def test_the_holdout_geometry_cannot_be_shrunk_in_the_same_patch_to_clear_the_guard(tmp_path):
+    """The obvious way around the guard is to shrink the panel it measures against — which is
+    exactly what the refused holdout-geometry paths already forbid, so the attempt dies in the
+    classification pass with the geometry refusal, and the roster never lands."""
+    settings = _settings(tmp_path)
+
+    with pytest.raises(OverlayError) as exc:
+        apply_patch(
+            settings,
+            {
+                "universe": ["AAA", "BBB"],
+                "research.fit_set_size": 1,
+                "research.symbol_holdout_size": 1,
+            },
+        )
+
+    message = str(exc.value)
+    assert REFUSED["research.fit_set_size"] in message
+    assert settings.research.fit_set_size == 6
+    assert settings.research.symbol_holdout_size == 2
+    assert settings.universe == _settings(tmp_path).universe
+
+
+def test_a_starvation_violation_is_raised_after_the_classification_pass(tmp_path):
+    """Ordering, stated: the starvation guard is a **post-apply consistency check** — it reads
+    the normalized, already-validated roster — so it cannot join the collect-all-then-raise-once
+    refusal list, which is decided before any value is built. A patch carrying a refusal fails on
+    the refusal and never reaches the guard."""
+    settings = _settings(tmp_path)
+
+    with pytest.raises(OverlayError) as exc:
+        apply_patch(settings, {"universe": ["AAA"], "promotion.max_gap": 5.0})
+
+    message = str(exc.value)
+    assert REFUSED["promotion.max_gap"] in message
+    assert "1 config override refused" in message.splitlines()[0]
+    assert "symbol-holdout gate" not in message
+
+
+def test_config_yaml_may_set_a_universe_below_the_panel_size(tmp_path):
+    """The guard constrains the overlay and nothing else (like the tier-B clamps): an operator
+    running a deliberately tiny universe from ``config.yaml`` — a two-name pilot, say — is
+    making that choice with their own file open, and widening the guard to config is a separate
+    change."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("universe: [AAA, BBB]\n", encoding="utf-8")
+
+    settings = load_settings(config_path=cfg)
+
+    assert settings.universe == ["AAA", "BBB"]
 
 
 # ── apply: the tier-B direction clamps (#118) ────────────────────────────────────────────
@@ -702,7 +844,16 @@ def test_gate_snapshot_survives_an_overlay(tmp_path):
     assert_gates_unmoved(before, gate_snapshot(settings))
 
 
-def test_gate_snapshot_does_not_alias_mutable_values(tmp_path):
+def test_gate_snapshot_does_not_alias_mutable_values(tmp_path, monkeypatch):
+    """A snapshot is deep-copied, so an in-place mutation of a list-valued setting can never
+    make a snapshot agree with itself by aliasing.
+
+    Driven against a path that is refused *for the duration of this test*: since #121 moved
+    ``universe`` into tier A, no production refusal holds a mutable value — but the refusal
+    table is meant to grow, so the property is checked, not assumed."""
+    monkeypatch.setattr(
+        overlay, "REFUSED", {**REFUSED, "universe": "refused for the duration of this test"}
+    )
     settings = _settings(tmp_path)
     before = gate_snapshot(settings)
     settings.universe.append("SMR")  # an in-place mutation of a refused list

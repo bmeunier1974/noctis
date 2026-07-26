@@ -78,7 +78,11 @@ class Mandate:
     config_overrides: dict  # flattened {"promotion.metric": ...} from the front-matter config:
     # Front-matter ``symbols:`` — tickers the mandate declares it wants researched. A search
     # prior only (rule 5): they join the session's research *focus set* (prompt digest +
-    # holdout candidate pool), never a gate or the trading roster.
+    # holdout candidate pool) and the episodic driver's session-start fetch, never a gate or
+    # the trading roster. The roster is the *other* ticker surface — ``config: universe:``,
+    # which the overlay applies to ``Settings.universe`` — and the two are deliberately
+    # different things: this one says what to look at, that one says what is traded. Both
+    # normalize tickers identically (upper-case, de-duped, first-mention order).
     symbols: list[str] = field(default_factory=list)
 
 
@@ -365,7 +369,10 @@ def _extract_symbols(front_matter) -> list[str]:
     """Front-matter ``symbols:`` — a list of ticker strings, normalized upper-case, deduped.
 
     A malformed block (not a list, non-string items) warns and drops, mirroring the
-    reference-loading policy: a valid mandate never becomes fatal over a steering hint.
+    reference-loading policy: a valid mandate never becomes fatal over a steering hint. That
+    tolerance is the one difference from the roster surface (``config: universe:``, normalized
+    in :mod:`noctis.config.overlay`), where a bad ticker list is a fatal config error; the
+    normalization itself is identical on both, and a parity test holds them there.
     """
     if not front_matter:
         return []

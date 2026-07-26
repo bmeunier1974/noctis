@@ -406,6 +406,102 @@ def test_a_mandate_cannot_loosen_the_exhaustion_floor(tmp_path):
     assert settings.research.min_trials == 8
 
 
+def test_a_mandate_may_set_the_seed_universe_and_it_is_normalized(tmp_path):
+    """A sector personality names the roster it wants traded (#121), and the tickers are
+    normalized on the way in — upper-cased, stripped, de-duped, first-mention order kept — so
+    the echoed roster is the one the run will actually use."""
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "profiles" / "uranium.md",
+        "---\n"
+        "summary: The uranium complex.\n"
+        "config:\n"
+        '  universe: ["smr", "CCJ", " smr ", "leu", "ura", "nne", "oklo", "bwxt", "vst"]\n'
+        "---\n"
+        "Trade the uranium complex.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="uranium")
+    mandate = resolve_mandate(settings)
+
+    lines = apply_overrides(settings, mandate)
+
+    assert settings.universe == ["SMR", "CCJ", "LEU", "URA", "NNE", "OKLO", "BWXT", "VST"]
+    assert lines == [f"universe={settings.universe}"]
+
+
+def test_a_mandate_universe_that_starves_the_symbol_holdout_is_fatal_at_startup(tmp_path):
+    """The starvation guard lives in the applier, so it fires through this adapter with no
+    help from it: a roster too short to fill the fit set *and* a disjoint symbol holdout would
+    switch the second out-of-sample axis off in silence, so it stops the session — naming both
+    the steering file to fix and the gate that would have gone inert."""
+    settings = _settings(tmp_path, tmp_path / "mandate")
+    before = list(settings.universe)
+
+    with pytest.raises(MandateError) as exc:
+        apply_overrides(settings, _mandate_with({"universe": ["SMR", "CCJ"]}))
+
+    message = str(exc.value)
+    assert "profile:test" in message
+    assert "symbol-holdout gate" in message
+    assert settings.universe == before
+
+
+def test_both_ticker_surfaces_normalize_identically(tmp_path):
+    """``symbols:`` and ``config: universe:`` mean different things, but a ticker is a ticker:
+    an operator never has to spell one of them differently from the other."""
+    typed = '["smr", "CCJ", " smr ", "leu", "ura", "nne", "oklo", "bwxt", "vst"]'
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "profiles" / "both.md",
+        f"---\nsymbols: {typed}\nconfig:\n  universe: {typed}\n---\nUranium.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="both")
+    mandate = resolve_mandate(settings)
+
+    apply_overrides(settings, mandate)
+
+    assert mandate.symbols == settings.universe
+    assert settings.universe == ["SMR", "CCJ", "LEU", "URA", "NNE", "OKLO", "BWXT", "VST"]
+
+
+def test_symbols_steers_the_search_and_config_universe_sets_the_roster(tmp_path):
+    """The two surfaces stay two different things when one mandate sets both: ``symbols:`` is a
+    search prior that joins the session's focus set and never the roster; ``config: universe:``
+    is the seed roster the readiness check and the panel are drawn from."""
+    from noctis.engine.runtime import research_focus, trading_roster
+
+    roster = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH"]
+    mandate_dir = tmp_path / "mandate"
+    _write(
+        mandate_dir / "profiles" / "sector.md",
+        "---\n"
+        'symbols: ["smr", "ccj"]\n'
+        "config:\n"
+        f"  universe: {roster}\n"
+        "---\n"
+        "Uranium ideas, large-cap roster.\n",
+    )
+    settings = _settings(tmp_path, mandate_dir, selector="sector")
+    mandate = resolve_mandate(settings)
+    apply_overrides(settings, mandate)
+    lake = _AlwaysReadyLake()
+
+    assert mandate.symbols == ["SMR", "CCJ"]  # the search prior, normalized the same way
+    assert settings.universe == roster  # the seed roster is exactly what config: set
+    assert trading_roster(settings, lake) == roster  # symbols: never redefines the roster
+    focus = research_focus(settings, lake, mandate)
+    assert focus[: len(roster)] == roster  # fit set + symbol holdout window first
+    assert "SMR" in focus and "CCJ" in focus  # …then the declared symbols join the focus set
+
+
+class _AlwaysReadyLake:
+    """A lake whose every symbol is ready. No ``coverage`` attribute, so the trading roster is
+    exactly the config seed — which is the point here."""
+
+    def check_symbol_ready(self, symbol) -> bool:
+        return True
+
+
 def test_a_mandate_setting_every_allowed_knob_leaves_the_gates_byte_identical(tmp_path):
     """The maximal legal mandate — every knob the surface allows, at once — cannot move one
     byte of the refused subtree (the safety mode, the fill costs, the promotion thresholds,

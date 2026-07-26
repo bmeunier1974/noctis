@@ -259,6 +259,37 @@ def test_the_assertion_raises_and_names_what_moved_without_printing_a_secret(
     assert not caplog.records  # raised, never downgraded to a warning nobody reads
 
 
+def test_a_mandate_seed_universe_reaches_the_resolved_session_normalized(tmp_path):
+    """The seed trading roster is settable from a mandate (#121): it survives the whole
+    precedence chain onto the settings object, normalized, and is echoed like any other knob."""
+    cfg = _steered(
+        tmp_path,
+        "sector",
+        '  universe: ["smr", "ccj", "leu", "ura", "nne", "oklo", "bwxt", "vst"]\n',
+        "sector.yaml",
+    )
+
+    session = resolve_session(cfg)
+
+    assert session.settings.universe == ["SMR", "CCJ", "LEU", "URA", "NNE", "OKLO", "BWXT", "VST"]
+    assert session.overrides == [f"universe={session.settings.universe}"]
+
+
+def test_a_mandate_universe_that_starves_the_symbol_holdout_stops_resolution(tmp_path):
+    """The starvation guard sits in the applier, not in a caller, so the composition root
+    inherits it for free: a roster too short to fill the fit set plus the symbol holdout would
+    silently disable the second out-of-sample axis, and resolution refuses before any
+    long-running work starts. Nothing here knows the guard exists — that is the point."""
+    cfg = _steered(tmp_path, "narrow", '  universe: ["AAA", "BBB"]\n', "starved.yaml")
+
+    with pytest.raises(MandateError) as exc:
+        resolve_session(cfg)
+
+    message = str(exc.value)
+    assert "symbol-holdout gate" in message
+    assert "profile:narrow" in message
+
+
 def test_the_safety_gate_resolves_before_the_overlay(tmp_path, monkeypatch):
     """Ordering is unchanged: nothing downstream may run against an un-gated mode, so a closed
     gate is the failure an operator sees even when the mandate would also have failed."""

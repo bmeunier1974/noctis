@@ -5,7 +5,7 @@ no mandate, agent, or LLM concepts, so it is testable without a mandate file and
 any caller that wants to overlay a flat ``{"dotted.path": value}`` patch onto a loaded
 :class:`~noctis.config.settings.Settings`.
 
-Two properties make it safe:
+Three properties make it safe:
 
 * **Completeness, not omission.** Every leaf dotted path in ``Settings`` is classified
   exactly once — :data:`ALLOWED` (tier A, run-shaping), :data:`CLAMPED` (tier B, legal in
@@ -19,6 +19,12 @@ Two properties make it safe:
   the section through ``model_validate``. The metric parser, the fill-cost floor, ``Literal``
   membership, and ``int | None`` coercion therefore all run exactly as they do for
   ``config.yaml`` — no per-knob hand checks, one place for the rules.
+* **Post-apply consistency, inside the applier.** A knob can be legal on its own and still
+  disable a gate by starving it — an overlaid ``universe`` shorter than the fit set plus the
+  symbol holdout leaves the symbol-holdout axis with nothing to score. Those cross-knob checks
+  (:func:`_assert_holdout_is_not_starved`) run *here*, over the rebuilt values and before any
+  of them is assigned, so they hold for every caller of :func:`apply_patch` rather than for
+  whichever caller remembered them.
 
 Re-validating *sections* (never the whole settings object) is deliberate: rebuilding the
 root would re-read the environment, ``.env``, and the YAML file mid-assembly, and enabling
@@ -36,7 +42,7 @@ message. Nothing is clipped silently: a mandate says what it means or it does no
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -206,8 +212,29 @@ _HOUSEKEEPING: frozenset[str] = frozenset(
     }
 )
 
+# The seed trading roster — WHICH names the run starts from. A sector personality that cannot
+# name its own sector is barely a personality, so this is run-shaping in kind; but it is the one
+# tier-A path that a gate *reads through*, because the research panel (fit set + symbol holdout)
+# is drawn from the ready roster in order. Widening alone would therefore have left a hole: a
+# one-name universe starves the symbol-holdout axis instead of clearing it. So it carries two
+# behaviors the rest of tier A does not need — normalization (:func:`_normalized`) and the
+# post-apply starvation guard (:func:`_assert_holdout_is_not_starved`) — and it became settable
+# only once both existed.
+_SEED_UNIVERSE: frozenset[str] = frozenset(
+    {
+        # The symbols the trading roster is seeded with (the lake's own discoveries still join
+        # it afterwards) and the research panel is drawn from.
+        "universe",
+    }
+)
+
 ALLOWED: frozenset[str] = (
-    _MODEL_SEAM | _SPEND_CEILINGS | _SEARCH_SHAPE | _DATA_ACQUISITION | _HOUSEKEEPING
+    _MODEL_SEAM
+    | _SPEND_CEILINGS
+    | _SEARCH_SHAPE
+    | _DATA_ACQUISITION
+    | _HOUSEKEEPING
+    | _SEED_UNIVERSE
 )
 
 
@@ -282,13 +309,6 @@ _SESSION_CLOCK = (
 )
 _IDEATION = "legacy ideation path — deferred, and not run-shaping"
 
-# Everything destined for tiers A/B in a later stage: refused today, because the surface is
-# deny-by-default and a knob becomes settable only when it is deliberately classified.
-_NOT_YET = (
-    "not yet in the overlay surface — the overlay is deny-by-default, so a knob is settable "
-    "only once it has been classified as run-shaping"
-)
-
 REFUSED: dict[str, str] = {
     # Live-money double gate.
     "mode": _LIVE_MONEY,
@@ -351,11 +371,6 @@ REFUSED: dict[str, str] = {
     "ideation.max_indicators": _IDEATION,
     "ideation.web_search": _IDEATION,
     "ideation.max_web_searches": _IDEATION,
-    # Not yet in the surface — run-shaping in kind, but carrying a guard that does not exist
-    # yet, and a knob without its guard is a hole: shrinking ``universe`` below the fit-set +
-    # symbol-holdout sizes would starve the symbol-holdout axis, defeating a gate by emptying
-    # it rather than by clearing it, so it lands with its starvation guard.
-    "universe": _NOT_YET,
 }
 
 _UNKNOWN = "not a setting — check the spelling and the dotted path against config.example.yaml"
@@ -393,11 +408,13 @@ def apply_patch(settings: Settings, patch: Mapping[str, object]) -> list[str]:
     Classifies **every** key first — and direction-checks every :data:`CLAMPED` one against
     the value ``settings`` currently holds — then raises one :class:`OverlayError` listing all
     the violations, so an operator sees every problem at once. Survivors (allowed keys and
-    clamped keys moving the legal way, treated identically from here) are grouped by their
-    owning top-level section, deep-merged into that section's dump, and re-validated through
-    ``model_validate`` (top-level scalars go through a ``TypeAdapter`` over the field's own
-    annotation), so values are checked by exactly the validators ``config.yaml`` gets. Any
-    pydantic ``ValidationError`` is re-raised as an :class:`OverlayError`.
+    clamped keys moving the legal way, treated identically from here) are normalized where
+    their path asks for it (:func:`_normalized`), grouped by their owning top-level section,
+    deep-merged into that section's dump, and re-validated through ``model_validate``
+    (top-level scalars go through a ``TypeAdapter`` over the field's own annotation), so values
+    are checked by exactly the validators ``config.yaml`` gets. Any pydantic
+    ``ValidationError`` is re-raised as an :class:`OverlayError`. The whole rebuilt patch then
+    faces the post-apply consistency checks before a single value is assigned.
 
     Returns the sorted ``"path=value"`` echo lines for what was applied, read back off the
     validated objects so the echo shows the value the run will actually use.
@@ -407,7 +424,7 @@ def apply_patch(settings: Settings, patch: Mapping[str, object]) -> list[str]:
     for path, value in patch.items():
         violation = _violation(settings, classify(path), value)
         if violation is None:
-            survivors[path] = value
+            survivors[path] = _normalized(path, value)
         else:
             violations.append(violation)
     if violations:
@@ -429,6 +446,7 @@ def apply_patch(settings: Settings, patch: Mapping[str, object]) -> list[str]:
             rebuilt.update(_validated_scalars(entries))
         else:
             rebuilt[section] = _validated_section(settings, section, entries)
+    _assert_holdout_is_not_starved(settings, rebuilt)
     for name, value in rebuilt.items():
         setattr(settings, name, value)
     return sorted(f"{path}={_read_path(settings, path)}" for path in survivors)
@@ -502,6 +520,80 @@ def _as_number(value: object) -> float | None:
 def _show(value: object) -> str:
     """A value as it reads in an operator-facing message (``None`` says what it means)."""
     return "null (no bound)" if value is None else repr(value)
+
+
+def _normalized_tickers(value: object) -> object:
+    """Upper-case, strip and de-dupe a ticker list, first-mention order preserved.
+
+    The same normalization the mandate's ``symbols:`` front matter already applies (see
+    ``noctis.research.mandate``), so the two ticker surfaces a mandate has cannot disagree
+    about whether ``smr`` and ``SMR`` are one name or two — and the starvation guard below
+    counts real, distinct symbols rather than spellings.
+
+    Anything that is not a list of strings is handed on untouched: a type diagnosis belongs to
+    pydantic, not to a normalizer guessing at intent.
+    """
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return value
+    out: list[str] = []
+    for item in value:
+        ticker = item.strip().upper()
+        if ticker and ticker not in out:
+            out.append(ticker)
+    return out
+
+
+# Per-path canonicalization, applied on the overlay's way in and nowhere else. Deliberately
+# tiny: pydantic still owns *validation*, and a path earns an entry here only when the spelling
+# an operator types is not the canonical one. ``config.yaml`` semantics are untouched by
+# design — normalizing there would be a change to every existing install's file, not to the
+# overlay surface, and is its own decision.
+_NORMALIZERS: dict[str, Callable[[object], object]] = {"universe": _normalized_tickers}
+
+
+def _normalized(path: str, value: object) -> object:
+    """The value to apply for ``path``: canonicalized when the path declares a normalizer."""
+    normalize = _NORMALIZERS.get(path)
+    return value if normalize is None else normalize(value)
+
+
+def _assert_holdout_is_not_starved(settings: Settings, rebuilt: Mapping[str, Any]) -> None:
+    """Refuse an overlaid ``universe`` too short to fill the two-axis research panel.
+
+    A gate can be defeated by *starving* it as well as by lowering it. The symbol-holdout gate
+    (``champions/promotion.py``) only bites when a scorecard carries a symbol-holdout metric,
+    and that needs ``research.fit_set_size + research.symbol_holdout_size`` ready symbols —
+    enough for a fit set *and* a disjoint set of names tuning never saw. A mandate naming one
+    symbol would therefore switch the second out-of-sample axis (AGENTS.md rule 4) off in
+    silence, having touched no refused knob at all. So too few names is fatal, and the message
+    names the gate that would otherwise go inert.
+
+    The threshold is read from the ``settings`` object being patched, never from ``rebuilt``:
+    both geometry paths are :data:`REFUSED`, so a patch can never carry either one and the
+    rebuilt ``research`` section is guaranteed to hold exactly the sizes config resolved. Those
+    are therefore both the right bound and the only bound obtainable — the way around this
+    guard is closed by the refusal table, not by this arithmetic.
+
+    Runs after every key is classified and every replacement validated, but *before* any
+    replacement is assigned, so a starved roster leaves the settings object byte-identical like
+    any other rejected patch.
+    """
+    if "universe" not in rebuilt:
+        return
+    universe = rebuilt["universe"]
+    fit_n = settings.research.fit_set_size
+    holdout_n = settings.research.symbol_holdout_size
+    needed = fit_n + holdout_n
+    if len(universe) >= needed:
+        return
+    raise OverlayError(
+        f"invalid config override for universe: {len(universe)} distinct symbol(s), but the "
+        f"research panel needs {needed} (research.fit_set_size {fit_n} + "
+        f"research.symbol_holdout_size {holdout_n}, neither of which an overlay may set). "
+        "Too few names and no scorecard ever carries a symbol-holdout metric, so the "
+        f"symbol-holdout gate goes inert instead of being cleared — name at least {needed} "
+        "symbols."
+    )
 
 
 def _sections() -> frozenset[str]:
