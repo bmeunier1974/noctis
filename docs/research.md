@@ -257,10 +257,39 @@ local so steering never pollutes the repo. `research.mandate` selects which gove
 `--mandate <name>` or an inline `--directive "<text>"` wins over the config selector (the two
 flags are mutually exclusive).
 
-A mandate **carries its own risk dial**: its front-matter `config:` block may set
-`promotion.metric` (`sharpe|sortino|total_return`) — and nothing else. A `--metric` CLI flag,
-when passed, wins over the overlay. A mandate steers *what to look for*; it never loosens a
-gate, the exhaustion rule, or the honesty contract.
+A mandate **configures the run it steers**: its front-matter `config:` block overlays the
+run-shaping settings — which model thinks (`research.model`, the coder split, the loop), what
+one session may spend (the Class-B ceilings, the wall-clock budgets), how big its prompt gets,
+how much history its names are fetched over, the seed `universe`, and `promotion.metric`, the
+risk dial it started as. A mandate written for a local 30B coder and one written for a hosted
+frontier model are different research *personalities*, and the personality file is the honest
+place to say which brain it needs. What it may **not** touch is the arena: the safety mode, the
+fill costs, the promotion thresholds, the fit-set/symbol-holdout geometry, the state paths, the
+secrets are all refused by name, and a refused, unknown, or invalid key is **fatal at startup**
+with its reason printed — never a warning under a multi-day run. Two knobs move one way only:
+`research.min_trials` raises (more evidence per verdict, never less) and `data.budget_usd`
+lowers (less of your vendor money, never more). A `--metric` CLI flag, when passed, still wins
+over the overlay. The full tier tables, the precedence chain, and the refusal reasons live in
+[configuration.md](configuration.md#the-mandate-overlay); the whole surface also ships
+commented-out in `mandate/MANDATE.md.example`.
+
+Under the shipped `research.mandate: auto`, the agent picks its profile *mid-session*, long
+after settings are assembled — so an auto-selected profile's `config:` block never reaches the
+overlay at all. Startup warns and names every profile whose keys would be lost, with the remedy
+(pin the mandate); `promotion.metric` alone is suppressed from that warning because `auto` is
+metric-neutral by contract. The five shipped profiles are therefore deliberately kept
+**metric-only**: a profile `auto` may pick must never declare a knob that would be silently
+inert on the default config, and a second key in a shipped profile would make every stock
+install warn.
+
+**Two ticker surfaces, two different jobs.** A mandate's front-matter `symbols:` is a **search
+prior**: those names join the session's research focus set (the prompt's market digest, the
+holdout candidate pool, the episodic driver's session-start fetch) — what to *look at*. A
+mandate's `config: universe:` is the **seed trading roster** — what is *traded*, and what the
+research panel is drawn from. Both normalize identically (upper-case, de-duped, first-mention
+order), and the roster carries a guard the prior does not need: it must name at least
+`research.fit_set_size + research.symbol_holdout_size` symbols, or the run stops rather than let
+the symbol-holdout gate go inert for want of names ([configuration.md](configuration.md#the-mandate-overlay)).
 
 To satisfy a profile the configured universe lacks, the agent **discovers symbols**. On the
 conversation loop that is the agent's own tool sequence: `web_search` → `preview_bars` →
@@ -272,7 +301,7 @@ verdict time the agent may nominate `holdout_symbols` it deliberately kept out o
 the toolbox refuses any name found in the strategy's experiment journal. See
 `mandate/README.md` to author your own or pick a shipped profile.
 
-A mandate's front-matter `symbols:` are honored the same way on **both** loops. The episodic
+Those declared `symbols:` are honored the same way on **both** loops. The episodic
 driver opens each session with a deterministic **PREFLIGHT** stage (#111, no model call): every
 declared symbol the lake cannot research yet is fetched in one `ensure_data` call over the
 `data.history_days` window ending at the session date (its end sits at the vendor's T+1

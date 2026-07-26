@@ -89,6 +89,55 @@ python -m noctis account [--reset]         # the continuous paper account; --res
 python -m noctis champions [--reset]       # the champion board; --reset re-fills slots under current gates
 ```
 
+### What `status` reports about steering
+
+`status` resolves the **whole** session the way `run` does (gate → mandate → overlay), so every
+value it prints is the **post-overlay** one a run would actually use, not what `config.yaml` said
+before the mandate touched it. It closes with the provenance: which mandate steered this
+configuration and every `k=v` override that applied.
+
+```
+research_budget:   17 min
+research model:    ollama_chat/noctis-qwen3:14b
+data provider:     databento (budget $3.5)
+trading driver:    replay (execution=auto)
+mandate:           profile:homelab
+overrides:
+  data.history_days=45
+  promotion.metric=sortino
+```
+
+With no mandate the last two lines read `mandate: none (unconstrained)` and
+`overrides: none` — "unconstrained" is a configuration too, so it is said out loud. The override
+lines are read back off the validated settings, so they show the value the run will use rather
+than the value the file asked for.
+
+A **mandate the overlay refuses** is reported, not raised: `status` is the command you run
+*because* something is wrong, so it still exits 0 and prints the refusal verbatim under
+
+```
+mandate:           UNUSABLE — the values above are pre-overlay; `run` would refuse to start:
+```
+
+`run` and `research` still exit 1 on that same mandate, which is where a fatal configuration
+error belongs. A `SafetyGateError` is *not* degraded this way — an unresolvable mode is not a
+configuration `status` can narrate, so it still exits 1.
+
+### The kickoff echo
+
+`run` and `research` both echo the resolved mandate and every applied override before any work
+starts, so the assembled configuration lands in the log an operator already reads:
+
+```
+Mandate: profile:homelab
+  mandate profile:homelab overrides:
+    data.history_days=45
+    promotion.metric=sortino
+```
+
+Same lines, same order as `status`, so the two surfaces can never disagree. No mandate — or a
+mandate whose overlay applied nothing — prints nothing extra.
+
 ## Research & strategies
 
 ```bash
@@ -102,7 +151,10 @@ python -m noctis backtest <name>           # replay a library strategy on its sh
 `research` accepts the same `--mandate` / `--directive` one-session overrides as `run`, and the
 same `--debug` QA recorder (see [QA report (`--debug`)](#qa-report---debug) above). A `research`
 session only records when the agent loop is actually buildable — it never opens a report tree for a
-legacy session that would immediately exit.
+legacy session that would immediately exit. `--metric` is applied **after** the mandate overlay, so
+it wins over a mandate's `promotion.metric` (as `--time-limit-hours` does over its knob on `run`);
+everything else a mandate binds comes from the mandate file —
+[configuration.md](configuration.md#the-mandate-overlay).
 
 ## Data
 

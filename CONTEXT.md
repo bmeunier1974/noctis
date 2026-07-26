@@ -20,11 +20,14 @@ panel of one under the sentinel symbol `"*"`; the sentinel never binds eligibili
 
 ## Election metric
 
-The one metric a candidate is ranked and promoted on (`promotion.metric`; the only knob a
-mandate may bind). Stated once and threaded through the whole evaluation pipeline —
-prefilter coarse ranking, validation, Scorecard, promotion — by `PipelineConfig.auto()`.
-Champions scored under a different election metric are **stale** (displaceable), because
-cross-metric numbers aren't comparable.
+The one metric a candidate is ranked and promoted on (`promotion.metric`). Stated once and
+threaded through the whole evaluation pipeline — prefilter coarse ranking, validation,
+Scorecard, promotion — by `PipelineConfig.auto()`. Champions scored under a different
+election metric are **stale** (displaceable), because cross-metric numbers aren't
+comparable. It is the operator's risk appetite, so an operator mandate may bind it — and it
+is the *only* `promotion.*` key a mandate may bind: the thresholds beside it are read in the
+metric's own units, so they are no more comparable across a metric change than a stale
+champion's number is.
 
 ## Evaluation pipeline
 

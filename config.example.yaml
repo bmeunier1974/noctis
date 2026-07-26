@@ -3,13 +3,27 @@
 # Every knob has a safe built-in default, so this file lists only the ones operators
 # actually touch. The full reference for every knob: docs/configuration.md
 # Secrets (API keys, the ALLOW_LIVE gate) live in .env, never here.
+#
+# A pinned mandate (mandate/, selected by research.mandate below) overlays the RUN-SHAPING
+# knobs of this file on top of everything else — CLI flags still win, and the mandate wins
+# over the environment for the subset it may bind. Each section below says what a mandate
+# may and may not override; the surface ships commented out in mandate/MANDATE.md.example,
+# and a mandate that reaches for a refused knob stops the run at startup with the reason.
 
 mode: paper # "live" additionally requires ALLOW_LIVE=true in .env — see docs/safety.md
+# Mandate: REFUSED (both halves of the live-money double gate stay here and in .env).
 
 # Symbols to research and trade. The first 6 are the tuning fit set, the next 2 the
 # out-of-sample symbol holdout, the rest round out the trading roster.
+# Mandate: may override — a sector personality names its own sector. It must still name at
+# least fit_set_size + symbol_holdout_size symbols (8), or the run stops rather than let the
+# symbol-holdout gate go inert. Those two sizes are REFUSED, so a mandate can't shrink them.
 universe: [AAPL, XOM, UNH, JPM, NVDA, WMT, CAT, GOOGL, SPY, IWM]
 
+# Mandate: may override the run-shaping knobs here (model, base_url, cost_profile,
+# draft_ttl_hours, focus_size, the whole agent: block of spend/compat ceilings) and may only
+# RAISE min_trials. REFUSED: mandate + mode (an overlay may not choose which overlay is read
+# or which engine runs) and fit_set_size/symbol_holdout_size (the two-axis holdout geometry).
 research:
   model: openai/gpt-5.4 # LiteLLM provider/model — `noctis setup` configures and verifies this
   # research brief: MANDATE (your own mandate/MANDATE.md), a profile name, or null (unconstrained).
@@ -25,6 +39,10 @@ research:
   #   context_window: 32768 # the local model's num_ctx — trims prompts to fit, and a
   #                          # window ≤32768 flips the default loop:auto to episodic (#76)
 
+# Mandate: may override `metric` (the risk appetite IS steering) and NOTHING else here. Every
+# threshold is read in the metric's units, so it isn't comparable across a metric change —
+# refused rather than clamped "tighten-only", for the same reason a champion scored under a
+# different metric is stale rather than beatable.
 promotion:
   metric: sharpe # sharpe | sortino | total_return — the risk appetite every candidate is scored on
   min_test_activity: 0.05 # reject candidates that almost never trade (lucky-window filter)
@@ -34,24 +52,33 @@ promotion:
 # paper fills alike, so they can never disagree. The baseline is ALSO the enforced minimum:
 # the knob may only be RAISED toward per-venue realism, never lowered (a cheaper arena just
 # manufactures champions that die on real fills). Uncomment only to model a harsher venue.
+# Mandate: REFUSED — a personality steers what to look for, never how forgiving the arena is.
 # backtest:
 #   fee_bps: 1.0 # per side; must be >= 1.0
 #   slippage_bps: 1.0 # per side; must be >= 1.0
 
+# Mandate: REFUSED — the trading loop, not research.
 risk: # trading-loop limits, percent of account equity
   max_position_pct: 10.0
   max_gross_exposure_pct: 100.0
   max_daily_loss_pct: 3.0
 
+# Mandate: may override auto_backfill + history_days (the mandate's own names decide how much
+# history their thesis needs) and may only LOWER budget_usd. REFUSED: provider, dataset and
+# lake_dir — the lake and every catalog are built under one vendor, in one place.
 data:
   provider: yfinance # TRADING feed: yfinance = free delayed live bars; anything else = replay
   auto_backfill: true # first `run` backfills missing history (needs DATABENTO_API_KEY in .env)
   history_days: 720 # lookback window for that one-time backfill
   budget_usd: 125.0 # DataBento spend cap, enforced by the cost preflight
 
+# Mandate: may override the two wall-clock ceilings; champion_count is REFUSED (board size
+# changes how easy it is to beat the weakest champion).
 research_time_budget_minutes: 60 # wall-clock cap on one nightly research session
 champion_count: 3 # champion board size
 time_limit_hours: null # overall run limit (null = run until stopped)
 
 # Everything Noctis writes lands under this one gitignored folder (env: NOCTIS_WORKSPACE).
+# Mandate: REFUSED — moving an output root moves the experiment journal the exhaustion gate
+# counts from and the champion tier itself; that is structural, not a setting.
 workspace_dir: workspace/

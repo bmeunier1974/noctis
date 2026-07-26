@@ -7,6 +7,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The mandate is the sole run input.** A mandate's `config:` block now overlays the whole
+  run-shaping tier — the model seam, the spend ceilings, the search shape, the data window,
+  housekeeping, and the seed `universe` — rather than the single `promotion.metric` knob of
+  0.1.0. Every setting is classified exactly once by a deny-by-default classifier
+  (`src/noctis/config/overlay.py`), with a completeness ratchet in the suite: the arena (safety
+  mode, fill costs, promotion thresholds, holdout geometry, output paths, secrets) is refused
+  **by name**, a refused/unknown/invalid key is now **fatal at startup** with its reason printed
+  (it used to warn and be silently skipped), and two knobs are clamped to the disciplined
+  direction only — `research.min_trials` may only be raised, `data.budget_usd` only lowered.
+  For the overlaid subset the mandate applies *above* the environment; `noctis status` and the
+  `run`/`research` kickoff now echo the active mandate and every applied override.
+
 ## [0.1.0] - 2026-07-13
 
 First public release. Noctis is an autonomous, **paper-only** quantitative research system: it

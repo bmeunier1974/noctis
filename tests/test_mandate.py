@@ -806,6 +806,70 @@ def test_shipped_profiles_catalog_has_all_five_with_summaries():
     assert all(c["summary"].strip() for c in catalog)
 
 
+def _example_config_surface() -> dict:
+    """Every ``config:`` override ``MANDATE.md.example`` shows — the live block plus the
+    commented-out one, flattened to dotted paths.
+
+    The example's front matter is the operator's discoverability surface for the overlay: the
+    live block binds the metric, and the whole rest of the bindable tier ships beside it behind
+    a ``# `` prefix. The convention that makes that readable *and* checkable is that every
+    commented line *inside* ``config:`` (i.e. indented) is one YAML line with exactly one ``# ``
+    in front of it — prose in the block is therefore itself a YAML comment (``# #`` in the raw
+    file), so removing one ``# `` from every line yields exactly what an operator gets by
+    uncommenting. Column-0 comments are the other front-matter keys' own guidance (``symbols:``)
+    and stay out of it.
+    """
+    import yaml
+
+    from noctis.research.mandate import _FRONT_MATTER_RE, _extract_overrides, _flatten
+
+    raw = (_REPO_MANDATE / "MANDATE.md.example").read_text(encoding="utf-8")
+    match = _FRONT_MATTER_RE.match(raw)
+    assert match is not None, "MANDATE.md.example must open with a --- front-matter fence"
+    uncommented = []
+    for line in match.group(1).splitlines():
+        body = line.lstrip()
+        indent = line[: len(line) - len(body)]
+        if not indent or not body.startswith("#"):
+            continue
+        body = body[1:]
+        uncommented.append(indent + (body[1:] if body.startswith(" ") else body))
+    surface = _extract_overrides(yaml.safe_load(match.group(1)))
+    surface.update(_flatten(yaml.safe_load("\n".join(uncommented)) or {}))
+    return surface
+
+
+def test_shipped_mandate_example_documents_the_whole_bindable_surface():
+    """The example's ``config:`` block is ratcheted both ways against the classifier.
+
+    It is the only place an operator learns the overlay surface without reading
+    ``noctis/config/overlay.py``, so a documented path the classifier refuses (or has never
+    heard of) is a lie, and a widened allowed/clamped tier nobody wrote down is a surface
+    nobody can find.
+    """
+    from noctis.config.overlay import ALLOWED, CLAMPED, classify
+
+    documented = set(_example_config_surface())
+    unbindable = sorted(p for p in documented if classify(p).tier not in {"allowed", "clamped"})
+    assert not unbindable, f"MANDATE.md.example documents unbindable paths: {unbindable}"
+    missing = sorted((set(ALLOWED) | set(CLAMPED)) - documented)
+    assert not missing, f"bindable paths missing from MANDATE.md.example's config: block: {missing}"
+
+
+def test_shipped_mandate_example_block_applies_as_written(tmp_path):
+    """Uncomment the whole block and the run still starts.
+
+    Classification alone would let the example ship an illustrative value the owning section
+    rejects, a clamp pointed the undisciplined way, or a seed universe too short for the
+    research panel. Applying it is the honest check, and it costs one call.
+    """
+    from noctis.config.overlay import ALLOWED, CLAMPED, apply_patch
+
+    settings = load_settings(config_path=tmp_path / "missing.yaml")
+    applied = apply_patch(settings, _example_config_surface())
+    assert len(applied) == len(ALLOWED) + len(CLAMPED)
+
+
 def test_shipped_mandate_md_resolves_to_sortino(tmp_path):
     """The committed MANDATE.md.example — exactly what `noctis init` installs as the local
     MANDATE.md — resolves and binds sortino. Hermetic on purpose: seeded into a tmp

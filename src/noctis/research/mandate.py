@@ -7,7 +7,8 @@ gate; :mod:`noctis.config.overlay` owns that list). This module is pure and
 unit-testable — no agent, no network — so the loader, the overlay, and the seam are all
 exercised without a client.
 
-Design constraints (see ``docs/operator-mandate.md``):
+Design constraints (the operator-facing reference is ``docs/configuration.md`` — "The mandate
+overlay" — and ``mandate/README.md``):
 
 * **Errors are loud at startup, quiet mid-session.** An unresolvable selector (typo'd
   profile, missing file/dir, unreadable file) raises :class:`MandateError` so an entrypoint

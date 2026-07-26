@@ -108,12 +108,16 @@ editing them never touches the repo):
   appetite, symbols. Pick a shipped profile (`aggressive`, `conservative`, `long-term`,
   `short-term`, `sector-specialist`), write your own brief in `mandate/MANDATE.md` (selector
   `MANDATE`), let the agent choose per session (`auto`), or leave it `null` for unconstrained
-  research. A mandate steers the *search* — it can never loosen a validation gate.
+  research. A pinned mandate also **configures the run** it steers — which model thinks, what
+  one session may spend, which names it starts from — but it can never loosen a validation
+  gate: the arena (safety mode, fill costs, promotion thresholds, holdouts, paths, secrets) is
+  refused by name, and a mandate that reaches for it doesn't start.
   → [mandate/README.md](mandate/README.md)
 - **The election metric** (`promotion.metric` in `config.yaml`) — the risk appetite every
   candidate is scored, ranked, and promoted on: `sharpe` (penalizes all volatility),
   `sortino` (penalizes only downside), or `total_return` (raw profit). It threads through
-  the whole pipeline, and it is the **one** knob a mandate may override.
+  the whole pipeline, and it is the **one** `promotion.*` knob a mandate may bind — the
+  thresholds beside it are read in its units, so they stay yours.
   → [docs/configuration.md](docs/configuration.md) · [docs/research.md](docs/research.md)
 
 Secrets (LLM/vendor keys, the `ALLOW_LIVE` gate) go in `.env` — see

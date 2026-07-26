@@ -70,7 +70,7 @@ def resolve_session(
     time_limit_hours: float | None = None,
     require_gate: bool = False,
 ) -> SessionInputs:
-    """Resolve one session's settings by the one precedence order (docs/operator-mandate §5).
+    """Resolve one session's settings by the one precedence order (docs/configuration.md).
 
     ``load_settings`` → safety gate (when ``require_gate``) → ``resolve_mandate`` →
     :func:`overlay_mandate` → explicit CLI flags last, so a one-off ``--metric`` still wins
