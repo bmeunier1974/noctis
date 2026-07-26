@@ -658,6 +658,34 @@ def _invalid_message(paths: list[str], exc: ValidationError) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Snapshots
+# ─────────────────────────────────────────────────────────────────────────────
+def patch_snapshot(settings: Settings, patch: Mapping[str, object]) -> dict[str, Any]:
+    """Dump the live value of every readable path a patch names — one side of an overlay diff.
+
+    The sibling of :func:`gate_snapshot`: that one dumps a fixed subtree (the assertion's), this
+    one dumps exactly the paths *this* patch touches, so a caller can take it on either side of
+    :func:`apply_patch` and read off what actually moved — the *pre*-value included, which the
+    ``"k=v"`` echo lines deliberately do not carry. Neither snapshot interprets anything; both
+    are plain reads.
+
+    Total over any patch, like :func:`classify`: a key that names no setting is skipped rather
+    than raised on, because diagnosing it is :func:`apply_patch`'s job (it refuses it as
+    *unknown*, with the reason for that path) and a snapshot that raised first would replace
+    that one diagnosis with a worse one. Deep-copied for the same aliasing reason as
+    :func:`gate_snapshot`.
+    """
+    snapshot: dict[str, Any] = {}
+    for path in patch:
+        try:
+            value = _read_path(settings, path)
+        except AttributeError:  # not a settings path at all — apply_patch owns that verdict
+            continue
+        snapshot[path] = copy.deepcopy(value)
+    return snapshot
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # The gate-unmoved assertion
 # ─────────────────────────────────────────────────────────────────────────────
 def gate_snapshot(settings: Settings) -> dict[str, Any]:

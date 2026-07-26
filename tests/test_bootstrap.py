@@ -91,6 +91,43 @@ def test_metric_precedence_config_then_overlay_then_flag(tmp_path):
     assert flagged.overrides == ["promotion.metric=sortino"]  # the echo still records the overlay
 
 
+def test_a_resolved_session_carries_the_pre_overlay_value_of_every_override(tmp_path):
+    """The overlay's echo lines say what a knob ended up as; the session also carries what it
+    *was*, captured around the same guarded seam, so a preflight can render the change from
+    what to what without re-deriving a second precedence chain of its own (#124)."""
+    mandate_dir = _mandate_dir(
+        tmp_path,
+        "homelab",
+        "---\nconfig:\n  promotion:\n    metric: sortino\n  research_time_budget_minutes: 17\n"
+        "---\nSteer this session.\n",
+    )
+    cfg = _config(
+        tmp_path,
+        [
+            "promotion:",
+            "  metric: sharpe",
+            f"mandate_dir: {mandate_dir}",
+            "research:",
+            "  mandate: homelab",
+        ],
+    )
+
+    resolved = resolve_session(cfg)
+
+    assert [(c.path, c.before, c.after) for c in resolved.changes] == [
+        ("promotion.metric", "sharpe", "sortino"),
+        ("research_time_budget_minutes", 60, 17),
+    ]
+    # The two renderings of one overlay can never name different paths: same source, same order.
+    assert [c.path for c in resolved.changes] == [
+        line.split("=", 1)[0] for line in resolved.overrides
+    ]
+
+
+def test_a_session_without_an_overlay_carries_no_changes(tmp_path):
+    assert resolve_session(_config(tmp_path, ["mode: paper"])).changes == []
+
+
 def test_directive_and_mandate_are_mutually_exclusive(tmp_path):
     with pytest.raises(UsageError, match="either --directive or --mandate"):
         resolve_session(_config(tmp_path, ["mode: paper"]), directive="go", mandate="spicy")

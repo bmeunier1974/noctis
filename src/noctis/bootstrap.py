@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -49,6 +49,22 @@ class UsageError(ValueError):
 
 
 @dataclass(frozen=True)
+class OverrideChange:
+    """One setting a mandate's overlay moved, from what to what.
+
+    ``before`` is the value **config** resolved for the path (``config.yaml`` + ``.env`` + the
+    environment) and ``after`` is the value the session will actually use — the same value the
+    ``"k=v"`` echo line carries. Read off the live settings object either side of the one
+    guarded overlay seam (:func:`~noctis.config.overlay.patch_snapshot`), never re-derived, so
+    a preflight can render the change without owning a second copy of the precedence chain.
+    """
+
+    path: str
+    before: Any
+    after: Any
+
+
+@dataclass(frozen=True)
 class SessionInputs:
     """The resolved inputs of one session: settings after every override, plus provenance."""
 
@@ -59,6 +75,10 @@ class SessionInputs:
     mandate: Mandate | None
     # "k=v" echo lines for each mandate override actually applied (the CLI prints them).
     overrides: list[str]
+    # The same overrides with their pre-overlay value alongside, path-sorted — what `noctis
+    # mandate` renders as the effective settings diff. Same paths as ``overrides`` by
+    # construction (both come from the one applied patch); empty when nothing was overlaid.
+    changes: list[OverrideChange] = field(default_factory=list)
 
 
 def resolve_session(
@@ -83,6 +103,7 @@ def resolve_session(
     any long-running work starts.
     """
     from noctis.backtest.scorecard import Metric
+    from noctis.config.overlay import patch_snapshot
     from noctis.research import resolve_mandate
 
     if directive is not None and mandate is not None:
@@ -96,13 +117,26 @@ def resolve_session(
     settings = load_settings(config_path=config_path)
     mode = resolve_execution_mode(settings) if require_gate else None
     active = resolve_mandate(settings, cli_directive=directive, cli_mandate=mandate)
+    # The overlay is applied once, and both readings of it are taken around that one call: the
+    # applier's ``"k=v"`` echo lines, and the same paths' values snapshotted either side. The
+    # pre-values have to be captured *here* — after config resolved and before the patch lands
+    # — because nothing downstream can recover them; ``noctis mandate`` renders the pair as the
+    # effective settings diff without owning a second copy of the precedence chain.
+    patch = active.config_overrides if active is not None else {}
+    before = patch_snapshot(settings, patch)
     overrides = overlay_mandate(settings, active)
+    changes = [
+        OverrideChange(path=path, before=before[path], after=after)
+        for path, after in sorted(patch_snapshot(settings, patch).items())
+    ]
     warn_if_auto_overlay_is_inert(settings, active)
     if metric is not None:
         settings.promotion.metric = metric
     if time_limit_hours is not None:
         settings.time_limit_hours = time_limit_hours
-    return SessionInputs(settings=settings, mode=mode, mandate=active, overrides=overrides)
+    return SessionInputs(
+        settings=settings, mode=mode, mandate=active, overrides=overrides, changes=changes
+    )
 
 
 def overlay_mandate(settings: Settings, mandate: Mandate | None) -> list[str]:

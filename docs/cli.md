@@ -84,6 +84,7 @@ plus `jq` one-liners over `events.jsonl` — see
 
 ```bash
 python -m noctis status                    # resolved mode, market state, next transition, champions
+python -m noctis mandate <name>            # preflight a mandate: provenance + the effective settings diff
 python -m noctis report [--as-of DATE]     # generate / print the close-of-day report
 python -m noctis account [--reset]         # the continuous paper account; --reset archives + starts fresh
 python -m noctis champions [--reset]       # the champion board; --reset re-fills slots under current gates
@@ -137,6 +138,52 @@ Mandate: profile:homelab
 
 Same lines, same order as `status`, so the two surfaces can never disagree. No mandate — or a
 mandate whose overlay applied nothing — prints nothing extra.
+
+### Preflighting a mandate
+
+```bash
+python -m noctis mandate homelab           # what would this mandate actually do?
+```
+
+`mandate <name>` is the dry run before committing a machine to a multi-day loop. `<name>` is a
+selector in the same vocabulary `--mandate` takes (a profile name, `MANDATE`, or `auto`). It
+resolves through the same composition root a real session does — so what it prints is what a run
+would get, not a second reading of the precedence chain — and then **starts nothing**: no
+research session, no LLM client, no orders.
+
+```
+mandate:           profile:homelab
+summary:           A small-context homelab personality — local coder, tight spend.
+symbols:           SMR, CCJ, LEU
+references:
+  references/watchlist.md (49 bytes)
+overrides:
+  data.budget_usd                125.0 → 3.5
+  data.history_days              365 → 45
+  promotion.metric               sharpe → sortino
+  research.agent.context_window  None → 32768
+  research.model                 openai/gpt-5.4 → ollama_chat/noctis-qwen3:14b
+  research_time_budget_minutes   60 → 17
+```
+
+The **effective settings diff** is the part `status` cannot show: every path the overlay binds,
+with the value config resolved for it *and* the value the run would use. A mandate with no
+`config:` block still prints its provenance, and reads `overrides: none (this mandate binds no
+settings)`. `auto` binds nothing by contract (the agent picks its profile mid-session, long after
+settings are assembled), so its diff is empty too.
+
+It **exits non-zero** on any refusal, wrong-direction clamp, invalid value, or unresolvable
+selector, printing exactly what startup would print — every problem at once, each with the reason
+for that path — so a cron job or a shell script can gate on it:
+
+```
+$ python -m noctis mandate sneaky; echo $?
+MANDATE: mandate profile:sneaky — 3 config overrides refused:
+  - promotion.max_gap: promotion gates + metric robustness — …
+  - research.metrik: not a setting — check the spelling and the dotted path against config.example.yaml
+  - research.min_trials: may only be raised by an overlay — 2 is below the configured 8
+1
+```
 
 ## Research & strategies
 

@@ -1,9 +1,10 @@
 """Command-line interface (Typer).
 
 Commands: ``setup`` (the guided first-run wizard), ``init``/``migrate`` (scaffold /
-legacy-layout move), ``run``, ``status``, ``report``, ``backtest``, ``champions``,
-``account`` (the continuous paper account), ``research`` (one observable agent research
-session), ``strategies`` (the authored library index), and the ``data`` sub-app.
+legacy-layout move), ``run``, ``status``, ``mandate`` (the steering preflight), ``report``,
+``backtest``, ``champions``, ``account`` (the continuous paper account), ``research`` (one
+observable agent research session), ``strategies`` (the authored library index), and the
+``data`` sub-app.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import typer
 from noctis.config import SafetyGateError, load_settings, resolve_execution_mode
 
 if TYPE_CHECKING:  # the composition root imports at call time (fast `--help`), types don't
-    from noctis.bootstrap import SessionInputs
+    from noctis.bootstrap import OverrideChange, SessionInputs
 
 
 def _logging_level(verbose: int) -> int:
@@ -182,6 +183,37 @@ def _echo_status_mandate(mandate, override_lines: list[str], error: str | None) 
     typer.echo("overrides:")
     for line in override_lines:
         typer.echo(f"  {line}")
+
+
+def _echo_mandate_preflight(mandate, changes: list[OverrideChange]) -> None:
+    """The whole body of ``noctis mandate``: what this selector resolved to, and what it moves.
+
+    Same label gutter as ``status`` (and the same ``overrides:`` block, ``none`` included), so
+    the two read as one tool: an operator who has seen one has read the other. The diff is the
+    part ``status`` cannot show — every bound path with the value config resolved for it *and*
+    the value the run would use — because a preflight's question is "what would this change?",
+    not "what is set?".
+    """
+    if mandate is None:  # an empty MANDATE.md — the one selector that resolves to no steering
+        typer.echo("mandate:           none — this selector resolves to no steering at all")
+        typer.echo("overrides:         none (a run under it would be unconstrained)")
+        return
+    typer.echo(f"mandate:           {mandate.source}")
+    typer.echo(f"summary:           {mandate.summary or 'none'}")
+    typer.echo(f"symbols:           {', '.join(mandate.symbols) if mandate.symbols else 'none'}")
+    if not mandate.references:
+        typer.echo("references:        none")
+    else:
+        typer.echo("references:")
+        for ref in mandate.references:
+            typer.echo(f"  {ref.path} ({len(ref.text.encode('utf-8'))} bytes)")
+    if not changes:
+        typer.echo("overrides:         none (this mandate binds no settings)")
+        return
+    typer.echo("overrides:")
+    width = max(len(change.path) for change in changes)
+    for change in changes:
+        typer.echo(f"  {change.path:<{width}}  {change.before} → {change.after}")
 
 
 def _echo_research_engine(settings) -> None:
@@ -425,6 +457,34 @@ def status(
         f"(execution={settings.trading.execution})"
     )
     _echo_status_mandate(inputs.mandate, inputs.overrides, mandate_error)
+
+
+@app.command()
+def mandate(
+    name: str = typer.Argument(
+        ...,
+        help="Mandate selector — the same vocabulary --mandate takes: a profile name, "
+        "MANDATE, or auto.",
+    ),
+    config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
+) -> None:
+    """Preflight one mandate: what it resolves to, and every setting it would change.
+
+    The dry run before committing a machine to a multi-day loop — the mandate's source,
+    summary, declared symbols and references, then the effective settings diff: every path
+    the overlay binds, from the value config resolved for it to the value the run would use.
+    Starts nothing: no research session, no LLM client, no orders.
+
+    Exits non-zero on any refusal, wrong-direction clamp, invalid value, or unresolvable
+    selector — listing every problem at once, exactly as startup would — so a cron job or a
+    shell script can gate on it.
+    """
+    # Straight through the composition root, so a preflight can never drift from what a run
+    # assembles: one precedence chain, two renderings. ``require_gate`` stays off for the same
+    # reason ``research`` leaves it off — a preflight places no orders — which also keeps a
+    # mandate diagnosable on a box whose ``mode`` will not resolve.
+    inputs = _resolve_session_or_exit(config, mandate=name)
+    _echo_mandate_preflight(inputs.mandate, inputs.changes)
 
 
 @app.command()

@@ -29,6 +29,7 @@ from noctis.config.overlay import (
     assert_gates_unmoved,
     classify,
     gate_snapshot,
+    patch_snapshot,
 )
 from noctis.config.settings import Settings
 
@@ -825,6 +826,38 @@ def test_apply_never_rereads_env_dotenv_or_yaml(tmp_path, monkeypatch):
     assert settings.promotion.metric == "sortino"
     assert settings.promotion.max_gap == 0.25  # the rebuilt section kept its loaded values
     assert settings.champion_count == 5  # and no sibling was re-resolved
+
+
+# ── the patch snapshot: the pre-value side of an overlay diff (#124) ─────────────────────
+def test_patch_snapshot_reads_the_live_value_of_every_path_a_patch_names(tmp_path):
+    """Taken either side of an apply, the two snapshots are the change, from what to what."""
+    settings = _settings(tmp_path)
+    patch = {"promotion.metric": "sortino", "research_time_budget_minutes": 17}
+
+    before = patch_snapshot(settings, patch)
+    apply_patch(settings, patch)
+    after = patch_snapshot(settings, patch)
+
+    assert before == {"promotion.metric": "sharpe", "research_time_budget_minutes": 60}
+    assert after == {"promotion.metric": "sortino", "research_time_budget_minutes": 17}
+
+
+def test_patch_snapshot_skips_a_key_that_names_no_setting(tmp_path):
+    """A snapshot never raises first: an unknown key belongs to ``apply_patch``, which refuses
+    it with the reason, and a snapshot that blew up would replace that diagnosis with a worse
+    one."""
+    settings = _settings(tmp_path)
+
+    assert patch_snapshot(settings, {"promotion.metrik": "sortino"}) == {}
+    with pytest.raises(OverlayError, match="not a setting"):
+        apply_patch(settings, {"promotion.metrik": "sortino"})
+
+
+def test_patch_snapshot_does_not_alias_mutable_values(tmp_path):
+    settings = _settings(tmp_path)
+    before = patch_snapshot(settings, {"universe": ["SMR"]})
+    settings.universe.append("SMR")
+    assert before["universe"] != settings.universe
 
 
 # ── the gate snapshot + the gates-unmoved assertion ──────────────────────────────────────

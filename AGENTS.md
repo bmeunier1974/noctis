@@ -77,6 +77,7 @@ python -m noctis migrate [--dry-run]   # move a pre-workspace layout into worksp
 python -m noctis run -v            # the day/night loop (stops at time_limit_hours)
 python -m noctis research -v       # ONE observable agent research session (needs ANTHROPIC_API_KEY)
 python -m noctis status            # resolved mode, market state, next transition, champions
+python -m noctis mandate <name>    # preflight a mandate: provenance + the effective settings diff
 python -m noctis backtest <name>   # replay a library strategy on its shipped Params defaults
 python -m noctis champions [--reset]   # list champions; --reset re-fills slots under current gates
 python -m noctis report [--as-of DATE]
