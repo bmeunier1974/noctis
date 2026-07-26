@@ -566,8 +566,12 @@ class ResearchSession:
 
     @property
     def model(self) -> str:
-        """The resolved provider/model string this session will drive."""
-        return self.settings.research.model or self.settings.research.agent.model
+        """The resolved provider/model string this session will drive — the one resolution the
+        research seam owns, so the session, the client probe, and the CLI's status line all name
+        the same model (post-overlay, when a mandate moved it)."""
+        from noctis.research import resolved_research_model
+
+        return resolved_research_model(self.settings)
 
     def run(self, *, max_iterations: int | None = None, stop_event=None) -> ResearchSummary:
         """Run the session behind the ``research.agent.loop`` selector. ``max_iterations`` falls

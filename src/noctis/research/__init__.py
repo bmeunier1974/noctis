@@ -33,6 +33,7 @@ from .llm import (
     client_status,
     effective_web_search,
     provider_of,
+    resolved_research_model,
     thinking_for,
 )
 from .mandate import (
@@ -77,6 +78,7 @@ __all__ = [
     "Turn",
     "ToolCall",
     "provider_of",
+    "resolved_research_model",
     "thinking_for",
     "effective_web_search",
     "CostProfile",
