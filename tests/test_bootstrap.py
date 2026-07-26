@@ -1,10 +1,11 @@
 """The composition root — one module resolves a session and builds its collaborators.
 
 ``resolve_session`` is the single home of the precedence chain that used to span four
-files (``load_settings`` → safety gate → ``resolve_mandate`` → ``apply_overrides`` →
+files (``load_settings`` → safety gate → ``resolve_mandate`` → ``overlay_mandate`` →
 explicit CLI flags), and the builders here are the one copy of assembly the CLI and the
 runtime used to duplicate (lake vendor selection, the MEMORY.md store, PromotionRules
-from settings, the agent research session bundle).
+from settings, the agent research session bundle). Every overlay the root performs goes
+through ``overlay_mandate``, which is the one place the gate-unmoved assertion lives.
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ from noctis.bootstrap import (
     resolve_session,
 )
 from noctis.champions.promotion import PromotionRules
-from noctis.config import SafetyGateError, load_settings
+from noctis.config import SafetyGateError, load_settings, overlay
+from noctis.config.overlay import OverlayError, gate_snapshot
 from noctis.engine.research import ResearchSummary
 from noctis.research import Capabilities, MandateError
 from noctis.strategies.families import FamilyRegistry
@@ -187,6 +189,117 @@ def test_effective_precedence_is_flag_over_mandate_over_env_over_dotenv_over_yam
 
     # 6. the CLI flag beats everything.
     assert resolve_session(steered, time_limit_hours=0.25).settings.time_limit_hours == 0.25
+
+
+# ── resolve_session: the gate-unmoved assertion around every overlay (#119) ───────────────
+# Belt and braces on top of the deny-by-default classifier: the resolver snapshots the refused
+# subtree, overlays the mandate, and asserts the subtree is byte-identical afterwards. The
+# snapshot is derived from ``overlay.REFUSED`` itself, so the two tables can never drift — the
+# tests below drive that from both sides (a refused path smuggled into ALLOWED, and a path
+# newly added to REFUSED) through the real composition root.
+def _steered(tmp_path, profile: str, config_block: str, name: str = "guarded.yaml") -> str:
+    """A config whose active mandate carries ``config_block`` as its front-matter overlay."""
+    mandate_dir = _mandate_dir(
+        tmp_path, profile, f"---\nconfig:\n{config_block}---\nSteer this session.\n"
+    )
+    return _config(
+        tmp_path,
+        [f"mandate_dir: {mandate_dir}", "research:", f"  mandate: {profile}"],
+        name,
+    )
+
+
+def test_a_refused_path_smuggled_into_the_allowed_set_makes_resolution_raise(tmp_path, monkeypatch):
+    """A mis-classified path is the bug this assertion exists for: with ``promotion.max_gap``
+    wrongly in ALLOWED the overlay itself would happily loosen the overfit guard, and the
+    resolver still refuses to hand back the session."""
+    monkeypatch.setattr(overlay, "ALLOWED", frozenset(set(overlay.ALLOWED) | {"promotion.max_gap"}))
+    cfg = _steered(tmp_path, "sneaky", "  promotion:\n    max_gap: 5.0\n")
+
+    with pytest.raises(OverlayError) as exc:
+        resolve_session(cfg)
+
+    assert "promotion.max_gap" in str(exc.value)
+
+
+def test_a_path_newly_added_to_the_refusal_table_is_asserted_without_further_edits(
+    tmp_path, monkeypatch
+):
+    """The snapshot is derived from the refusal table, not hand-listed in the composition root:
+    a path that becomes refused is covered by the assertion with no edit anywhere else. Here it
+    is left in ALLOWED as well — exactly the drift a classification bug would leave behind — so
+    the overlay applies it and only the derived assertion can catch it."""
+    monkeypatch.setattr(
+        overlay,
+        "REFUSED",
+        {**overlay.REFUSED, "research.focus_size": "refused for the duration of this test"},
+    )
+    cfg = _steered(tmp_path, "narrow", "  research:\n    focus_size: 3\n")
+
+    with pytest.raises(OverlayError) as exc:
+        resolve_session(cfg)
+
+    assert "research.focus_size" in str(exc.value)
+
+
+def test_the_assertion_raises_and_names_what_moved_without_printing_a_secret(
+    tmp_path, monkeypatch, caplog
+):
+    """It raises rather than warns, and the failure names the moved path — but never its value:
+    the refused subtree carries the API keys, and a diagnostic is no place for a credential."""
+    monkeypatch.setattr(overlay, "ALLOWED", frozenset(set(overlay.ALLOWED) | {"databento_api_key"}))
+    cfg = _steered(tmp_path, "leaky", "  databento_api_key: db-secret-123\n")
+
+    with caplog.at_level(logging.WARNING), pytest.raises(OverlayError) as exc:
+        resolve_session(cfg)
+
+    message = str(exc.value)
+    assert "databento_api_key" in message
+    assert "db-secret-123" not in message
+    assert not caplog.records  # raised, never downgraded to a warning nobody reads
+
+
+def test_the_safety_gate_resolves_before_the_overlay(tmp_path, monkeypatch):
+    """Ordering is unchanged: nothing downstream may run against an un-gated mode, so a closed
+    gate is the failure an operator sees even when the mandate would also have failed."""
+    monkeypatch.delenv("ALLOW_LIVE", raising=False)
+    monkeypatch.setattr(overlay, "ALLOWED", frozenset(set(overlay.ALLOWED) | {"promotion.max_gap"}))
+    mandate_dir = _mandate_dir(
+        tmp_path, "sneaky", "---\nconfig:\n  promotion:\n    max_gap: 5.0\n---\nSteer.\n"
+    )
+    cfg = _config(
+        tmp_path,
+        ["mode: live", f"mandate_dir: {mandate_dir}", "research:", "  mandate: sneaky"],
+        "gated.yaml",
+    )
+
+    with pytest.raises(SafetyGateError):
+        resolve_session(cfg, require_gate=True)
+
+
+def test_a_session_without_a_mandate_passes_the_assertion_unchanged(tmp_path):
+    cfg = _config(tmp_path, ["promotion:", "  metric: sharpe"], "plain.yaml")
+
+    resolved = resolve_session(cfg)
+
+    assert resolved.mandate is None and resolved.overrides == []
+    assert gate_snapshot(resolved.settings) == gate_snapshot(load_settings(config_path=cfg))
+
+
+def test_a_metric_only_mandate_passes_the_assertion_and_moves_only_the_metric(tmp_path):
+    """The everyday case: a legal overlay applies, the gates are byte-identical to a session
+    that never overlaid anything, and the CLI flag still lands after the assertion."""
+    cfg = _steered(tmp_path, "spicy", "  promotion:\n    metric: sortino\n", "metric-only.yaml")
+
+    resolved = resolve_session(cfg)
+
+    assert resolved.settings.promotion.metric == "sortino"
+    assert resolved.overrides == ["promotion.metric=sortino"]
+    assert gate_snapshot(resolved.settings) == gate_snapshot(load_settings(config_path=cfg))
+
+    flagged = resolve_session(cfg, metric="total_return")
+    assert flagged.settings.promotion.metric == "total_return"
+    assert gate_snapshot(flagged.settings) == gate_snapshot(load_settings(config_path=cfg))
 
 
 # ── PromotionRules.from_settings: the one config→rules mapping ────────────────────────────

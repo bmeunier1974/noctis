@@ -8,7 +8,8 @@ copy of the agent research session (client + budgets + toolbox + loop kwargs).
 
 Everything here is plain assembly, no policy: the safety gate, the settings-overlay
 classifier, and the budget tables all stay with their owners (``config.gate``,
-``config.overlay``, ``research.cost``). This module only fixes the *order* in one place
+``config.overlay``, ``research.cost``). This module only fixes the *order* in one place,
+wraps every overlay it performs in the gate-unmoved assertion (:func:`overlay_mandate`),
 and hands back built
 collaborators. Errors are typed, never printed — the CLI maps them to red text + exit
 codes; a library caller sees ordinary exceptions.
@@ -72,14 +73,17 @@ def resolve_session(
     """Resolve one session's settings by the one precedence order (docs/operator-mandate §5).
 
     ``load_settings`` → safety gate (when ``require_gate``) → ``resolve_mandate`` →
-    ``apply_overrides`` → explicit CLI flags last, so a one-off ``--metric`` still wins over
-    a mandate's overlay. Raises :class:`UsageError` on bad flags (both mandate selectors,
-    an unknown metric), :class:`~noctis.research.MandateError` on an unresolvable selector,
-    and :class:`~noctis.config.SafetyGateError` when the gate refuses — all before any
-    long-running work starts.
+    :func:`overlay_mandate` → explicit CLI flags last, so a one-off ``--metric`` still wins
+    over a mandate's overlay. The gate resolves *before* the overlay because nothing
+    downstream may run against an un-gated mode; the gate-unmoved assertion then proves the
+    overlay never reached it anyway. Raises :class:`UsageError` on bad flags (both mandate
+    selectors, an unknown metric), :class:`~noctis.research.MandateError` on an unresolvable
+    selector, :class:`~noctis.config.SafetyGateError` when the gate refuses, and
+    :class:`~noctis.config.OverlayError` if an overlay moved a refused setting — all before
+    any long-running work starts.
     """
     from noctis.backtest.scorecard import Metric
-    from noctis.research import apply_overrides, resolve_mandate
+    from noctis.research import resolve_mandate
 
     if directive is not None and mandate is not None:
         raise UsageError("Pass either --directive or --mandate, not both.")
@@ -92,12 +96,40 @@ def resolve_session(
     settings = load_settings(config_path=config_path)
     mode = resolve_execution_mode(settings) if require_gate else None
     active = resolve_mandate(settings, cli_directive=directive, cli_mandate=mandate)
-    overrides = apply_overrides(settings, active)
+    overrides = overlay_mandate(settings, active)
     if metric is not None:
         settings.promotion.metric = metric
     if time_limit_hours is not None:
         settings.time_limit_hours = time_limit_hours
     return SessionInputs(settings=settings, mode=mode, mandate=active, overrides=overrides)
+
+
+def overlay_mandate(settings: Settings, mandate: Mandate | None) -> list[str]:
+    """Apply one mandate's config overlay, with the gate-unmoved assertion around it.
+
+    **Every** overlay this composition root performs goes through here, so no call site can
+    forget the assertion: snapshot the refused settings subtree, apply the patch, assert the
+    subtree is byte-identical afterwards. Returns the ``"k=v"`` echo lines ``apply_overrides``
+    produced; ``None`` (no mandate) is the same no-op it always was.
+
+    This is belt and braces on top of the deny-by-default classifier, in the spirit of the two
+    live-money gates: the classifier decides what a mandate *may* bind, and this proves — after
+    the fact, against the live settings object — that nothing else moved. The snapshot is
+    derived from :data:`~noctis.config.overlay.REFUSED` itself, so classifying one more path as
+    refused extends the assertion with no edit here and the two can never drift.
+
+    It **raises** (:class:`~noctis.config.OverlayError`), never warns: refused settings that
+    moved mean the allowlist has a bug, not that the operator mis-typed something, and a run
+    that continued would be researching in an arena nobody configured. The message names the
+    moved paths and deliberately not their values — the refused subtree carries the API keys.
+    """
+    from noctis.config.overlay import assert_gates_unmoved, gate_snapshot
+    from noctis.research import apply_overrides
+
+    before = gate_snapshot(settings)
+    overrides = apply_overrides(settings, mandate)
+    assert_gates_unmoved(before, gate_snapshot(settings))
+    return overrides
 
 
 # ─────────────────────────────────────────────────────────────────────────────
