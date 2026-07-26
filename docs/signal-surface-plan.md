@@ -168,7 +168,8 @@ field it already carries. A helper keeps strategies pure and the schema frozen.
 ```python
 m = session.minutes_to_close(bar.ts_event)
 if m is not None and m <= 15:
-    ctx.set_target(0); return
+    ctx.set_target(0)
+    return
 ```
 
 **Size:** ~1 session. Purely additive; no engine files touched.
@@ -197,8 +198,9 @@ a new delivery channel:
        self.htf_ema = ind.EmaState(self.params.trend_period)
        self.trend = float("nan")
 
+
    def on_bar(self, ctx, bar):
-       done = self.htf.add(bar)          # completed 1h bar or None
+       done = self.htf.add(bar)  # completed 1h bar or None
        if done is not None:
            self.trend = self.htf_ema.update(done.close)
        ...

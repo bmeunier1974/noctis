@@ -142,10 +142,11 @@ parameter — source-compatible with every existing strategy file:
 
 ```python
 @dataclass(frozen=True)
-class ExitRules:                      # beside Bar in src/noctis/strategies/base.py
-    stop_pct: float | None = None     # exit if adverse move ≥ this fraction of entry
+class ExitRules:  # beside Bar in src/noctis/strategies/base.py
+    stop_pct: float | None = None  # exit if adverse move ≥ this fraction of entry
     take_profit_pct: float | None = None
-    trail_pct: float | None = None    # exit if drawdown from best-since-entry ≥ this
+    trail_pct: float | None = None  # exit if drawdown from best-since-entry ≥ this
+
 
 def set_target(self, target: int, exits: ExitRules | None = None) -> None: ...
 ```
