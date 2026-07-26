@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -245,10 +246,59 @@ def apply_overrides(settings, mandate) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 def profiles_catalog(mandate_dir) -> list[dict]:
     """``[{"name", "summary"}, ...]`` for ``mandate/profiles/*.md`` (empty if the dir is absent)."""
+    return [
+        {"name": name, "summary": _extract_summary(front_matter, body)}
+        for name, front_matter, body in _iter_profiles(mandate_dir)
+    ]
+
+
+# Under ``research.mandate: auto`` the agent chooses its profile *inside* the session, long
+# after settings assembly, so a profile's ``config:`` block never reaches the overlay — it is
+# inert whatever it declares. ``promotion.metric`` is the one key that is inert **by contract**
+# rather than by accident, so it alone is suppressed from the startup warning below:
+#
+# * the ``auto`` instruction already tells the model to select "REGARDLESS of the metric each
+#   profile tunes on", on the neutral Sharpe basis — metric-neutrality *is* the auto contract;
+# * the shipped ``config.yaml`` selector line already says a session under ``auto`` is "scored
+#   on the base promotion.metric", so a stock install has been told, in the file it was
+#   configured from, exactly what this warning would repeat.
+#
+# The five shipped profiles are metric-only, so a default install stays silent — and that is the
+# point: a warning that fires for everyone, every startup, about the one knob the epic
+# deliberately keeps as the safe one, is the noise that gets the *interesting* warning ignored.
+# Everything else a profile may bind (the model, the loop, the spend ceilings, the data window)
+# has no such answer: it simply vanishes, so it warns. The boundary is exactly one key wide, and
+# it doubles as a ratchet on the shipped catalog — a second key in a shipped profile makes every
+# default install warn.
+_AUTO_DOCUMENTED_INERT: frozenset[str] = frozenset({"promotion.metric"})
+
+
+def inert_auto_overrides(mandate_dir) -> dict[str, list[str]]:
+    """``{profile: [dotted key, …]}`` for profiles whose ``config:`` block ``auto`` makes inert.
+
+    Pure and total: keys documented as inert under ``auto``
+    (:data:`_AUTO_DOCUMENTED_INERT`) are dropped, a profile left with nothing is omitted, and an
+    absent or unreadable profiles directory reports nothing at all. This feeds a diagnostic, and
+    a diagnostic never becomes the reason a session fails to start.
+    """
+    found: dict[str, list[str]] = {}
+    for name, front_matter, _body in _iter_profiles(mandate_dir):
+        inert = sorted(set(_extract_overrides(front_matter)) - _AUTO_DOCUMENTED_INERT)
+        if inert:
+            found[name] = inert
+    return found
+
+
+def _iter_profiles(mandate_dir) -> Iterator[tuple[str, dict, str]]:
+    """``(name, front-matter, body)`` per readable ``mandate/profiles/*.md``, name-sorted.
+
+    The one profile-folder reader: the ``auto`` catalog and the inert-overlay scan share it, so
+    they can never disagree about which files are profiles. An absent (or unreadable) profiles
+    directory yields nothing, and a single unreadable file warns and is skipped.
+    """
     base = Path(mandate_dir) / "profiles"
     if not base.is_dir():
-        return []
-    catalog: list[dict] = []
+        return
     for path in sorted(base.glob("*.md")):
         try:
             raw = path.read_text(encoding="utf-8")
@@ -256,8 +306,7 @@ def profiles_catalog(mandate_dir) -> list[dict]:
             logger.warning("profile %s unreadable (%s); skipping catalog entry.", path, exc)
             continue
         front_matter, body = _split_front_matter(raw, path)
-        catalog.append({"name": path.stem, "summary": _extract_summary(front_matter, body)})
-    return catalog
+        yield path.stem, front_matter, body
 
 
 # ─────────────────────────────────────────────────────────────────────────────

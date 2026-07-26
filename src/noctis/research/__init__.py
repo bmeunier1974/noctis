@@ -40,6 +40,7 @@ from .mandate import (
     MandateError,
     Reference,
     apply_overrides,
+    inert_auto_overrides,
     profiles_catalog,
     resolve_mandate,
 )
@@ -87,4 +88,5 @@ __all__ = [
     "resolve_mandate",
     "apply_overrides",
     "profiles_catalog",
+    "inert_auto_overrides",
 ]

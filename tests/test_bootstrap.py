@@ -302,6 +302,210 @@ def test_a_metric_only_mandate_passes_the_assertion_and_moves_only_the_metric(tm
     assert gate_snapshot(flagged.settings) == gate_snapshot(load_settings(config_path=cfg))
 
 
+# ── resolve_session: the `auto` inert-overlay warning (#120) ──────────────────────────────
+# ``research.mandate: auto`` is the shipped default, and under it the agent picks its profile
+# *inside* the session — long after settings assembly — so a profile's ``config:`` block can
+# never reach the overlay. Since the overlay grew from one knob to the whole run configuration
+# that loss is the entire session's steering, lost silently. These drive the one startup warning
+# that says so, through the real composition root every session-assembling entrypoint calls.
+_REPO_PROFILES = Path(__file__).resolve().parents[1] / "mandate" / "profiles"
+
+# A custom (operator-authored, gitignored) profile that binds its backend and its spend — the
+# case the warning exists for: every one of these keys is legal when the mandate is pinned.
+_INERT_PROFILE = (
+    "---\n"
+    "summary: A homelab personality that binds its own backend.\n"
+    "config:\n"
+    "  research:\n"
+    "    agent:\n"
+    "      model: ollama_chat/local-30b\n"
+    "  data:\n"
+    "    budget_usd: 5.0\n"
+    "---\n"
+    "Run the session on the local coder.\n"
+)
+
+
+def _profiles(tmp_path, bodies: dict[str, str]) -> Path:
+    """A mandate dir holding one ``profiles/<name>.md`` per entry. Returns the mandate dir."""
+    base = tmp_path / "mandate" / "profiles"
+    base.mkdir(parents=True, exist_ok=True)
+    for name, body in bodies.items():
+        (base / f"{name}.md").write_text(body, encoding="utf-8")
+    return tmp_path / "mandate"
+
+
+def _auto_config(tmp_path, mandate_dir, *, name: str = "auto.yaml", prelude=()) -> str:
+    """A config whose selector is ``research.mandate: auto`` against ``mandate_dir``."""
+    return _config(
+        tmp_path,
+        [*prelude, f"mandate_dir: {mandate_dir}", "research:", "  mandate: auto"],
+        name,
+    )
+
+
+def _warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_auto_warns_once_naming_the_profile_and_its_inert_keys(tmp_path, caplog):
+    mandate_dir = _profiles(tmp_path, {"homelab": _INERT_PROFILE})
+    cfg = _auto_config(tmp_path, mandate_dir)
+
+    with caplog.at_level(logging.WARNING):
+        resolved = resolve_session(cfg)
+
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1  # exactly one, per session
+    assert "homelab" in warnings[0]  # which profile
+    assert "research.agent.model" in warnings[0]  # ...and which keys go nowhere
+    assert "data.budget_usd" in warnings[0]
+    assert resolved.mandate is not None and resolved.mandate.source == "auto"
+
+
+def test_the_auto_warning_names_pinning_a_mandate_as_the_remedy(tmp_path, caplog):
+    """A warning an operator can't act on is noise: this one carries the fix, in both spellings
+    (the config selector and the one-session flag)."""
+    cfg = _auto_config(tmp_path, _profiles(tmp_path, {"homelab": _INERT_PROFILE}))
+
+    with caplog.at_level(logging.WARNING):
+        resolve_session(cfg)
+
+    message = _warnings(caplog)[0]
+    assert "research.mandate" in message
+    assert "--mandate" in message
+
+
+def test_auto_warns_once_for_the_whole_catalog_not_once_per_profile(tmp_path, caplog):
+    """Once per session — a catalog of offenders is one warning naming them all, never one
+    record per profile read."""
+    thrifty = "---\nconfig:\n  research:\n    cost_profile: economy\n---\nSpend little.\n"
+    mandate_dir = _profiles(tmp_path, {"homelab": _INERT_PROFILE, "thrifty": thrifty})
+    cfg = _auto_config(tmp_path, mandate_dir)
+
+    with caplog.at_level(logging.WARNING):
+        resolve_session(cfg)
+
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "homelab" in warnings[0] and "thrifty" in warnings[0]
+    assert "research.cost_profile" in warnings[0]
+
+
+def test_auto_stays_an_empty_overlay_and_never_becomes_fatal(tmp_path, caplog):
+    """The warning is informational: ``auto`` remains a valid, shipped configuration. Even a
+    profile whose block would be *fatal* when pinned (a refused promotion gate) only warns
+    here — and moves nothing."""
+    mandate_dir = _profiles(
+        tmp_path, {"sneaky": "---\nconfig:\n  promotion:\n    max_gap: 5.0\n---\nGo.\n"}
+    )
+    cfg = _auto_config(tmp_path, mandate_dir, prelude=["promotion:", "  metric: sortino"])
+
+    with caplog.at_level(logging.WARNING):
+        resolved = resolve_session(cfg)
+
+    assert resolved.overrides == []  # auto still yields an empty overlay
+    assert resolved.settings.promotion.max_gap == load_settings(config_path=cfg).promotion.max_gap
+    assert "promotion.max_gap" in _warnings(caplog)[0]
+    # ...and the contrast that makes the warning worth reading: pinned, the same file is fatal.
+    with pytest.raises(MandateError):
+        resolve_session(cfg, mandate="sneaky")
+
+
+def test_the_shipped_metric_only_profiles_are_deliberately_silent_under_auto(tmp_path, caplog):
+    """THE CHOICE (#120, criterion 4): ``promotion.metric`` alone is suppressed.
+
+    It is the one key ``auto`` already answers for — the auto instruction tells the model to
+    select on the neutral Sharpe basis "REGARDLESS of the metric each profile tunes on", and the
+    shipped ``config.yaml`` line says the session is "scored on the base promotion.metric" — so a
+    stock install is told nothing it does not already know. Keeping the default install quiet is
+    what keeps the warning worth reading when it does fire. The boundary is exactly one key wide:
+    add any second key to a shipped profile and the same install warns.
+    """
+    base = tmp_path / "mandate" / "profiles"
+    base.mkdir(parents=True)
+    for src in sorted(_REPO_PROFILES.glob("*.md")):
+        (base / src.name).write_bytes(src.read_bytes())
+    cfg = _auto_config(tmp_path, tmp_path / "mandate")
+
+    with caplog.at_level(logging.WARNING):
+        resolved = resolve_session(cfg)
+
+    assert _warnings(caplog) == []  # five metric-only profiles: silence
+    assert resolved.overrides == []
+
+    # One non-metric key in one shipped profile, and the ratchet fires.
+    aggressive = base / "aggressive.md"
+    aggressive.write_text(
+        aggressive.read_text(encoding="utf-8").replace(
+            "config:\n", "config:\n  research:\n    cost_profile: economy\n", 1
+        ),
+        encoding="utf-8",
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        resolve_session(cfg)
+
+    warnings = _warnings(caplog)
+    assert len(warnings) == 1
+    assert "aggressive" in warnings[0] and "research.cost_profile" in warnings[0]
+    assert "promotion.metric" not in warnings[0]  # still suppressed, even alongside a live key
+
+
+def test_a_pinned_mandate_produces_no_inert_overlay_warning(tmp_path, caplog):
+    """Pinned — by flag or by config selector — the overlay actually applies, so there is
+    nothing inert to warn about."""
+    mandate_dir = _profiles(tmp_path, {"homelab": _INERT_PROFILE})
+
+    flagged_cfg = _config(tmp_path, [f"mandate_dir: {mandate_dir}"], "pinned.yaml")
+    with caplog.at_level(logging.WARNING):
+        flagged = resolve_session(flagged_cfg, mandate="homelab")
+    assert _warnings(caplog) == []
+    assert "research.agent.model=ollama_chat/local-30b" in flagged.overrides
+
+    selector_cfg = _config(
+        tmp_path,
+        [f"mandate_dir: {mandate_dir}", "research:", "  mandate: homelab"],
+        "selector.yaml",
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        selected = resolve_session(selector_cfg)
+    assert _warnings(caplog) == []
+    assert "research.agent.model=ollama_chat/local-30b" in selected.overrides
+
+
+def test_an_absent_profiles_dir_under_auto_warns_nothing(tmp_path, caplog):
+    mandate_dir = tmp_path / "mandate"
+    mandate_dir.mkdir()
+    cfg = _auto_config(tmp_path, mandate_dir)
+
+    with caplog.at_level(logging.WARNING):
+        resolved = resolve_session(cfg)
+
+    assert _warnings(caplog) == []
+    assert resolved.mandate is not None and resolved.mandate.source == "auto"
+
+
+def test_an_unreadable_profiles_dir_degrades_to_no_warning(tmp_path, caplog):
+    """A diagnostic never becomes the reason a session fails to start."""
+    mandate_dir = _profiles(tmp_path, {"homelab": _INERT_PROFILE})
+    profiles = mandate_dir / "profiles"
+    os.chmod(profiles, 0o000)
+    if os.access(profiles / "homelab.md", os.R_OK):  # running as root: the chmod proves nothing
+        os.chmod(profiles, 0o755)
+        pytest.skip("cannot make a directory unreadable for this user")
+    try:
+        cfg = _auto_config(tmp_path, mandate_dir)
+        with caplog.at_level(logging.WARNING):
+            resolved = resolve_session(cfg)
+    finally:
+        os.chmod(profiles, 0o755)
+
+    assert _warnings(caplog) == []
+    assert resolved.mandate is not None and resolved.mandate.source == "auto"
+
+
 # ── PromotionRules.from_settings: the one config→rules mapping ────────────────────────────
 def test_promotion_rules_from_settings_maps_every_field(tmp_path):
     settings = load_settings(

@@ -97,6 +97,7 @@ def resolve_session(
     mode = resolve_execution_mode(settings) if require_gate else None
     active = resolve_mandate(settings, cli_directive=directive, cli_mandate=mandate)
     overrides = overlay_mandate(settings, active)
+    warn_if_auto_overlay_is_inert(settings, active)
     if metric is not None:
         settings.promotion.metric = metric
     if time_limit_hours is not None:
@@ -130,6 +131,46 @@ def overlay_mandate(settings: Settings, mandate: Mandate | None) -> list[str]:
     overrides = apply_overrides(settings, mandate)
     assert_gates_unmoved(before, gate_snapshot(settings))
     return overrides
+
+
+def warn_if_auto_overlay_is_inert(settings: Settings, mandate: Mandate | None) -> None:
+    """Warn — once per session — when ``research.mandate: auto`` makes a profile's overlay inert.
+
+    Under ``auto`` the agent chooses its profile *inside* the session, long after settings are
+    assembled, so no profile's ``config:`` block can ever reach the overlay. That used to cost one
+    knob; now that the overlay carries the whole run configuration (the model, the loop, the spend
+    ceilings, the data window) it costs the run's entire steering — and the loss is otherwise
+    completely silent: nothing fails, the session simply isn't steered. So scan the catalog at
+    startup and name the profiles whose keys will go nowhere, plus the remedy (pin the mandate).
+
+    **Informational, never fatal.** ``auto`` is a valid, shipped configuration and picking a
+    profile mid-session against the champion board is the point of it, so this warns and continues
+    — the same loud-degradation contract as the LLM-client and reference-loading warnings — rather
+    than refusing to start. Pre-selecting the profile before assembly would be a redesign of the
+    ``auto`` contract, not a warning.
+
+    "Once per session" is structural, not a flag: this is called from :func:`resolve_session`,
+    which every session-assembling entrypoint calls exactly once, before any phase loop starts.
+    Which keys count as inert (``promotion.metric`` is deliberately excluded) is the mandate
+    module's decision, beside the ``auto`` contract that justifies it.
+    """
+    from noctis.research import inert_auto_overrides
+
+    if mandate is None or mandate.source != "auto":
+        return
+    inert = inert_auto_overrides(settings.mandate_dir)
+    if not inert:
+        return
+    named = "; ".join(f"{name} ({', '.join(keys)})" for name, keys in sorted(inert.items()))
+    logger.warning(
+        "research.mandate: auto — %d profile(s) declare config: keys that will NOT apply this "
+        "session: %s. Under auto the agent picks its profile mid-session, long after settings "
+        "are assembled, so a profile's config: block never reaches the overlay. Pin the mandate "
+        "to make it apply: research.mandate: <profile> in config.yaml, or --mandate <profile> "
+        "for one session.",
+        len(inert),
+        named,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
