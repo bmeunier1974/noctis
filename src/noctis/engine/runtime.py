@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -421,9 +422,49 @@ class Runtime:
         mean_drift = weighted_mean / n if n else 0.0
         return ReconciliationReport(n, max_drift, mean_drift, threshold, flagged=flagged)
 
+    def _mark_equity(self, as_of: str) -> None:
+        """Append this CLOSE's daily equity mark to the run's own account ledger (story #142).
+
+        The mark is the **account's** mark-to-market — read back off ``paper_account.json``, the
+        cumulative paper account — not the session's own end equity, so the curve is the account's
+        and a resumed run continues the same line. The session's fills, orders and closing
+        positions ride with it, which is what makes the run record's trade log derivable from one
+        durable artifact instead of from a report that a later ``noctis report`` could overwrite.
+
+        No account file means no mark: a night that never traded has no equity to state, and an
+        invented flat 100 000 would be a claim about trading that never happened (epic D10).
+
+        Never fatal, like every other reporting step at CLOSE: a ledger that cannot be written
+        costs the record a day, never the run.
+        """
+        from noctis.broker.persistence import EQUITY_CURVE_NAME, AccountStore, EquityLedger
+
+        try:
+            state_dir = Path(self.settings.state_dir)
+            summary = AccountStore(state_dir / "paper_account.json").summary()
+            if summary is None:
+                return
+            EquityLedger(state_dir / EQUITY_CURVE_NAME).mark(
+                date=as_of,
+                equity=summary.equity,
+                start_equity=self._cycle.start_equity,
+                end_equity=self._cycle.end_equity,
+                realized_pnl=self._cycle.end_equity - self._cycle.start_equity,
+                orders_submitted=len(self._cycle.trades),
+                positions_end=dict(self._cycle.positions),
+                trades=[trade.as_dict() for trade in self._cycle.trades],
+            )
+        except Exception:  # noqa: BLE001 — the record is evidence, never a gate
+            logger.exception("close: equity mark failed for %s; continuing", as_of)
+
     def _run_close(self, t: datetime) -> None:
+        as_of = t.astimezone(UTC).date().isoformat()
+        # Before the report and before the cycle accumulator is reset: the mark belongs to the
+        # session that just closed, and the run record re-derives the whole curve from the ledger
+        # at its next write.
+        self._mark_equity(as_of)
         data = assemble_report(
-            as_of=t.astimezone(UTC).date().isoformat(),
+            as_of=as_of,
             mode=self.mode,
             registry=self.registry,
             memory=self.memory,

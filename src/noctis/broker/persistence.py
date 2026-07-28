@@ -13,6 +13,7 @@ operator resets deliberately via ``noctis account --reset``.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -21,6 +22,12 @@ from noctis.broker.paper import PaperBroker
 from noctis.broker.seam import FeeModel, SlippageModel
 
 _ACCOUNT_VERSION = 1
+
+# The account's daily record, beside the account itself: one line per session close carrying the
+# equity mark and the session that produced it (story #142). Append-only and dated, so the run
+# record's equity curve is **re-derived from it at every write** rather than carried in memory —
+# the same "derived, never incremented" rule that makes resume correct everywhere else in the epic.
+EQUITY_CURVE_NAME = "equity_curve.jsonl"
 
 
 @dataclass(frozen=True)
@@ -33,6 +40,84 @@ class AccountSummary:
     open_positions: int
     opened: str
     last_session: str | None
+
+
+class EquityLedger:
+    """The paper account's **daily** record: one dated mark per session close, append-only.
+
+    ``AccountStore`` beside it holds the account as it is *now* — cash, positions, marks — which is
+    everything trading needs and nothing a curve can be drawn from. This is the missing half: at
+    each CLOSE the engine appends the account's equity for that session date, together with the
+    session's own fills, orders and closing positions. Nothing derived is stored (no returns, no
+    drawdown); the numbers are the marks, and every metric the run record publishes is recomputed
+    from them at write time.
+
+    Three properties it is built for:
+
+    * **Append-only.** A night is added, never rewritten, so a crash mid-run loses at most the
+      session it was writing.
+    * **One mark per date, last write wins** (:meth:`marks`). CLOSE can legitimately run twice for
+      one date — a re-run, a catch-up, a resumed segment — and a curve that doubled a day would
+      make every derived total a lie. Deduplication happens on *read*, so the file stays a plain
+      append and the dedup rule lives in exactly one place.
+    * **Never fatal.** A line that cannot be parsed (a kill mid-append) costs that mark and nothing
+      else: the record is evidence, and evidence that is partly unreadable is still evidence.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+
+    def mark(
+        self,
+        *,
+        date: str,
+        equity: float,
+        start_equity: float | None = None,
+        end_equity: float | None = None,
+        realized_pnl: float | None = None,
+        orders_submitted: int = 0,
+        positions_end: Mapping[str, float] | None = None,
+        trades: Sequence[Mapping[str, object]] = (),
+    ) -> None:
+        """Append one session's mark. ``date`` is the session's own ``YYYY-MM-DD``.
+
+        ``equity`` is the **account's** mark-to-market at that close — the curve — while
+        ``start_equity``/``end_equity`` are that session's own bounds, which differ from it
+        whenever the account carried positions into the day.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "date": date,
+            "equity": float(equity),
+            "start_equity": None if start_equity is None else float(start_equity),
+            "end_equity": None if end_equity is None else float(end_equity),
+            "realized_pnl": None if realized_pnl is None else float(realized_pnl),
+            "orders_submitted": int(orders_submitted),
+            "positions_end": {str(k): float(v) for k, v in (positions_end or {}).items()},
+            "trades": [dict(trade) for trade in trades],
+        }
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    def marks(self) -> list[dict]:
+        """Every session's mark, one per date (the last written wins), oldest first."""
+        if not self.path.is_file():
+            return []
+        latest: dict[str, dict] = {}
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:  # pragma: no cover - an unreadable ledger is a curve we do not have
+            return []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue  # a truncated append costs that mark, never the ledger
+            if isinstance(entry, dict) and isinstance(entry.get("date"), str):
+                latest[entry["date"]] = entry
+        return [latest[key] for key in sorted(latest)]
 
 
 class AccountStore:

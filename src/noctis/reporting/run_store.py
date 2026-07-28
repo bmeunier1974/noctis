@@ -57,6 +57,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from noctis.reporting.metrics import Benchmark, DailySession, TradeFill
 from noctis.reporting.run_record import (
     EMBED_ALL_SOURCES_SETTING,
     EngineIdentity,
@@ -104,8 +105,10 @@ __all__ = [
     "index_entry",
     "open_run",
     "prune_run_state",
+    "read_benchmark",
     "read_record",
     "read_run_record",
+    "read_sessions",
     "read_strategies",
     "read_trials",
     "rebuild_index",
@@ -600,6 +603,11 @@ def collect(
     # Candidates are read under the run's own frozen inputs too: whether a source is embedded is
     # the run's choice, made once at creation, not this process's.
     strategies = read_strategies(run_dir, _frozen_inputs(prior.get("inputs")) if prior else None)
+    # The realised record (story #142), derived like every cumulative fact beside it: the sessions
+    # off the run's own account ledger, and the benchmark priced from the shared lake under the
+    # run's own frozen data settings — a read, never a fetch.
+    sessions = read_sessions(run_dir)
+    benchmark = read_benchmark(sessions, _frozen_inputs(prior.get("inputs")) if prior else None)
     if prior is not None:
         try:
             return _artifacts_from(
@@ -611,6 +619,8 @@ def collect(
                 pricing_table_version=table_version,
                 champions=champions,
                 strategies=strategies,
+                sessions=sessions,
+                benchmark=benchmark,
             )
         except Exception as exc:  # a hand-edited or foreign file, still valid JSON
             note = RecordEvent(
@@ -631,6 +641,8 @@ def collect(
         pricing_table_version=table_version,
         champions=champions,
         strategies=strategies,
+        sessions=sessions,
+        benchmark=benchmark,
     )
 
 
@@ -724,6 +736,192 @@ def _price_overrides(inputs: Mapping[str, object] | None) -> Mapping[str, Mappin
     for key in ("settings", "resolved", "research", "pricing"):
         node = node.get(key) if isinstance(node, Mapping) else None
     return node if isinstance(node, Mapping) else {}  # type: ignore[return-value]
+
+
+def read_sessions(run_dir: Path | str) -> tuple[DailySession, ...]:
+    """Every session this run's paper account closed, off its own daily ledger (story #142).
+
+    **Read, never counted** — the same family as :func:`read_trials`, :func:`read_spend` and
+    :func:`read_strategies`, and for the same reason: ``<run>/state/equity_curve.jsonl`` is the
+    *run's*, not the process's, so the curve derived from it is cumulative across every segment by
+    construction. Nothing about the equity curve is carried in memory across a restart; a resumed
+    segment re-reads the whole ledger at every write, which is what makes "three short nights equal
+    one long night" true of the curve rather than merely intended.
+
+    One :class:`~noctis.reporting.metrics.DailySession` per session date (the ledger deduplicates,
+    last write wins), oldest first. Never raises: an unreadable ledger is a curve we do not have,
+    not a reason to fail a run's write.
+    """
+    from noctis.broker.persistence import EQUITY_CURVE_NAME, EquityLedger
+
+    try:
+        state_dir = _state_dir(Path(run_dir))
+        marks = EquityLedger(state_dir / EQUITY_CURVE_NAME).marks()
+    except Exception:  # pragma: no cover - an unreadable ledger is evidence we do not have
+        return ()
+    return tuple(_daily_session(mark) for mark in marks)
+
+
+def _daily_session(mark: Mapping[str, object]) -> DailySession:
+    """One journaled mark as the value the metrics module consumes."""
+    positions = mark.get("positions_end")
+    trades = mark.get("trades")
+    return DailySession(
+        date=str(mark.get("date", "")),
+        equity=_number(mark.get("equity")) or 0.0,
+        start_equity=_number(mark.get("start_equity")),
+        end_equity=_number(mark.get("end_equity")),
+        realized_pnl=_number(mark.get("realized_pnl")),
+        orders_submitted=int(_number(mark.get("orders_submitted")) or 0),
+        fills=tuple(
+            _trade_fill(trade)
+            for trade in (trades if isinstance(trades, list) else [])
+            if isinstance(trade, Mapping)
+        ),
+        positions_end={
+            str(symbol): float(quantity)
+            for symbol, quantity in (positions if isinstance(positions, Mapping) else {}).items()
+            if isinstance(quantity, int | float) and not isinstance(quantity, bool)
+        },
+    )
+
+
+def _trade_fill(trade: Mapping[str, object]) -> TradeFill:
+    """One journaled fill. The ledger stores the *report's* field names, which is deliberate — one
+    trade shape is written at CLOSE and read back here, rather than two that could drift."""
+    return TradeFill(
+        ts=_optional_str(trade.get("ts")),
+        symbol=str(trade.get("symbol", "")),
+        side=str(trade.get("side", "")),
+        quantity=_number(trade.get("quantity")) or 0.0,
+        price=_number(trade.get("price")) or 0.0,
+        fees_usd=_number(trade.get("fees")) or 0.0,
+        slippage_bps=_number(trade.get("slippage_bps")),
+        champion=_optional_str(trade.get("champion")),
+        rationale=_optional_str(trade.get("rationale")),
+    )
+
+
+# The bar schema the engine trades and researches on, and therefore the one the benchmark is priced
+# from. Stated here rather than read from the frozen settings because it is not one of the keys the
+# provenance block froze (``inputs.data`` carries provider/dataset/lake_dir); a symbol the lake
+# holds under another schema simply yields no bars, and the benchmark degrades to a note.
+BAR_SCHEMA = "ohlcv-1m"
+
+
+def read_benchmark(
+    sessions: Sequence[DailySession], inputs: Mapping[str, object] | None
+) -> Benchmark:
+    """Equal-weight buy-and-hold over the names this run traded, priced from the **shared lake**.
+
+    The fair question a results page has to answer — did the strategy beat simply holding the names
+    it traded? — computed with **no vendor call and no new spend**: the bars either are already in
+    the workspace lake or they are not, and a symbol that is not is left out with a note rather
+    than fetched. That is why this is a read and not an ``ensure_coverage``.
+
+    The roster is derived from the run's own fills, the window from its own session dates, and the
+    weights are set at the first session mark and never rebalanced (the convention is stated on the
+    record so the comparison is reproducible). Daily levels are the last close of each UTC date; a
+    symbol with no bar on a date carries its previous close forward, so one missing session cannot
+    silently re-weight the basket.
+
+    Never raises, and never reads a bar outside the run's own session window: a benchmark is
+    evidence, and a record write must not fail on a parquet file it could not open.
+    """
+    symbols = sorted({fill.symbol for session in sessions for fill in session.fills if fill.symbol})
+    dates = [session.date for session in sessions if session.date]
+    if not symbols or not dates:
+        return Benchmark(symbols=(), points=(), note="this run has traded nothing to benchmark")
+    window = f"{dates[0]}…{dates[-1]}"
+    try:
+        closes = _lake_closes(symbols, dates, inputs)
+    except Exception:  # pragma: no cover - an unreadable lake is a benchmark we do not have
+        closes = {}
+    points = _equal_weight_levels(closes, dates)
+    if len(points) < 2:
+        return Benchmark(
+            symbols=tuple(symbols),
+            points=(),
+            note=(
+                f"the shared lake holds no usable bars for {', '.join(symbols)} over {window}, so "
+                "this run is not benchmarked — a benchmark is never worth a vendor fetch"
+            ),
+        )
+    return Benchmark(symbols=tuple(symbols), points=tuple(points))
+
+
+def _lake_closes(
+    symbols: Sequence[str], dates: Sequence[str], inputs: Mapping[str, object] | None
+) -> dict[str, dict[str, float]]:
+    """``{symbol: {date: last close}}`` for the run's window, read straight off the catalog.
+
+    Deferred imports, as everywhere in this module: the run store is written on the core install
+    and must stay importable without pulling pandas in behind it. Nothing here writes, fetches or
+    creates a directory — a lake that is not there yields nothing.
+    """
+    import pandas as pd
+
+    from noctis.data.types import SeriesKey
+
+    data = inputs.get("data") if isinstance(inputs, Mapping) else None
+    section: Mapping[str, object] = data if isinstance(data, Mapping) else {}
+    lake_dir = Path(str(section.get("lake_dir") or "data_lake"))
+    dataset = str(section.get("dataset") or "")
+    if not dataset or not lake_dir.is_dir():
+        return {}
+    wanted = set(dates)
+    closes: dict[str, dict[str, float]] = {}
+    for symbol in symbols:
+        path = lake_dir / SeriesKey(dataset, BAR_SCHEMA, symbol).rel_path
+        if not path.is_file():
+            continue
+        frame = pd.read_parquet(path, columns=["ts_event", "close"])
+        if frame.empty:
+            continue
+        stamps = pd.to_datetime(frame["ts_event"], unit="ns", utc=True)
+        frame = frame.assign(session=stamps.dt.strftime("%Y-%m-%d"))
+        # The run's own window and nothing else: bars from before the account opened or after its
+        # last mark are never read into the comparison.
+        frame = frame[frame["session"].isin(wanted)]
+        if frame.empty:
+            continue
+        last = frame.groupby("session")["close"].last()
+        closes[symbol] = {str(day): float(value) for day, value in last.items()}
+    return closes
+
+
+def _equal_weight_levels(
+    closes: Mapping[str, Mapping[str, float]], dates: Sequence[str]
+) -> list[tuple[str, float]]:
+    """The equal-weight buy-and-hold level per session date, starting at 1.0.
+
+    Weights are set on the first date the lake can price at all, and never rebalanced: each
+    symbol's contribution is its own close over its base close, and the level is their mean. A
+    symbol with no bar on a later date carries its last known close forward rather than dropping
+    out, which would re-weight the basket without saying so.
+    """
+    priced = [day for day in dates if any(day in series for series in closes.values())]
+    if not priced:
+        return []
+    base_day = priced[0]
+    basis = {
+        symbol: series[base_day] for symbol, series in closes.items() if series.get(base_day, 0) > 0
+    }
+    if not basis:
+        return []
+    carried = dict(basis)
+    levels: list[tuple[str, float]] = []
+    for day in priced:
+        for symbol in basis:
+            value = closes[symbol].get(day)
+            if value is not None:
+                carried[symbol] = value
+        levels.append((day, sum(carried[s] / basis[s] for s in basis) / len(basis)))
+    return levels
+
+
+def _number(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
 def read_champions(run_dir: Path | str) -> int | None:
@@ -963,13 +1161,17 @@ def _artifacts_from(
     pricing_table_version: str | None = None,
     champions: int | None = None,
     strategies: tuple[StrategyArtifact, ...] = (),
+    sessions: tuple[DailySession, ...] = (),
+    benchmark: Benchmark | None = None,
 ) -> RunArtifacts:
     """One prior record, parsed back into artifacts. Raises on a shape it cannot read.
 
-    ``trials``, ``spend``, ``champions`` and ``strategies`` are deliberately **not** read back off
-    the record: all four are derived from the run's own durable artifacts at every write
-    (:func:`read_trials`, :func:`read_spend`, :func:`read_champions`, :func:`read_strategies`), and
-    a value carried forward from a prior write could only ever go stale.
+    ``trials``, ``spend``, ``champions``, ``strategies`` and the realised ``sessions`` are
+    deliberately **not** read back off the record: every one of them is derived from the run's own
+    durable artifacts at every write (:func:`read_trials`, :func:`read_spend`,
+    :func:`read_champions`, :func:`read_strategies`, :func:`read_sessions`), and a value carried
+    forward from a prior write could only ever go stale — or, worse for the equity curve, be
+    double-counted by a segment that appended to it.
     """
     run = prior.get("run")
     if not isinstance(run, Mapping):
@@ -998,6 +1200,8 @@ def _artifacts_from(
         pricing_table_version=pricing_table_version,
         champions=champions,
         strategies=strategies,
+        sessions=sessions,
+        benchmark=benchmark,
         # Carried forward verbatim, never re-derived from what is on disk: it states that the heavy
         # directories were deliberately removed, and a later write must not un-say it because
         # something recreated an empty ``state/``.
@@ -1924,6 +2128,8 @@ class RunStore:
             ),
             champions=changes.get("champions", current.champions),  # type: ignore[arg-type]
             strategies=changes.get("strategies", current.strategies),  # type: ignore[arg-type]
+            sessions=changes.get("sessions", current.sessions),  # type: ignore[arg-type]
+            benchmark=changes.get("benchmark", current.benchmark),  # type: ignore[arg-type]
             state_pruned=current.state_pruned,
         )
 
@@ -1933,12 +2139,18 @@ class RunStore:
         # segment that journalled trials and burned tokens all night lands them on disk without
         # anyone tracking a total in memory (epic D4). Spend prices under the run's frozen inputs.
         spend, table_version = read_spend(self._run_dir, self._artifacts.inputs)
+        # The equity curve and the trade log are re-read here for the same reason as everything
+        # above: the ledger is the run's, not the process's, so the curve a resumed segment
+        # publishes is the whole run's without a byte of it having survived the restart in memory.
+        sessions = read_sessions(self._run_dir)
         self._replace_artifacts(
             trials=read_trials(self._run_dir),
             spend=spend,
             pricing_table_version=table_version,
             champions=read_champions(self._run_dir),
             strategies=read_strategies(self._run_dir, self._artifacts.inputs),
+            sessions=sessions,
+            benchmark=read_benchmark(sessions, self._artifacts.inputs),
         )
         self._writer(self._run_dir, build(self._artifacts))
         # The roll-up follows the record, never leads it: it is refreshed *after* a successful

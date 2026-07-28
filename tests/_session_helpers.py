@@ -65,11 +65,21 @@ class _FakeEntry:
     params = {"fast": 3, "slow": 8}
     live_symbols = None
     test_metric = 1.0
+    # The one field the close report reads off a champion beside its metric. Present so the
+    # harness can drive a whole CLOSE phase (story #142's daily equity mark), not just TRADING.
+    # Deliberately nothing else: other tests here pin what a champion *without* a ``crowned_at``
+    # does to the forward ledger's key, so this fake stays as bare as it has always been.
+    gap = 0.0
 
 
 class _FakeRegistry:
+    history: list[dict] = []
+
     def list(self):
         return [_FakeEntry()]
+
+    def demotions(self):
+        return []
 
 
 def _make_runtime(tmp_path, lake, universe=("AAPL",)):

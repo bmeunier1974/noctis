@@ -9,6 +9,53 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The run record's realised performance: trades, the equity curve, a metrics module, a benchmark
+  and the Deflated Sharpe Ratio.** The profitability picture, published beside the funnel — and
+  kept structurally apart from the backtest numbers that decide promotions, so no website can
+  present one as the other.
+  - **Trades are enriched, and the per-day report is byte-identical.** `reporting/report.Trade`
+    gains `ts`, `fees`, `slippage_bps` and `champion` — all optional and **absent** (not `null`)
+    when unset, so every `<run>/reports/<date>.json` an operator already has is reproduced byte for
+    byte and the Markdown report renders exactly the five columns it always did. The champion
+    attribution comes from the same `assign_indices` call the forward P&L attribution makes, so
+    "which champion made this trade" and "which champion earned this P&L" are one answer.
+  - **New: `<run>/state/equity_curve.jsonl` and `broker.persistence.EquityLedger`.** At each CLOSE
+    the engine appends one dated mark — the *account's* mark-to-market, plus that session's fills,
+    orders and closing positions. Append-only, one mark per date with the last write winning (a
+    re-run CLOSE supersedes rather than doubles a day), and never fatal: an unreadable line costs
+    that mark and nothing else.
+  - **New: `sessions[]` and `performance` on the run record.** The curve is **re-derived from the
+    ledger at every write** and never carried in memory, so a run stopped and resumed three times
+    publishes exactly the curve one long night would — `tests/test_run_resume.py`'s segmentation
+    equivalence now compares the whole realised record, not just the counters. `performance` names
+    itself `source: "paper_account"`; scorecards stay under `strategies[].scorecard`.
+  - **New: `reporting/metrics.py` — a pure module, deliberately not an extension of
+    `scorecard.py`.** CAGR, annualised volatility, Sortino, Calmar, drawdown depth *and* duration,
+    recovery factor, profit factor, expectancy, payoff ratio, win/loss rates, exposure, turnover,
+    monthly returns, skew, kurtosis, PSR and DSR — plus per-champion trade statistics over **closed
+    round trips** (flat → position → flat, P&L as the cash the account gained, fees included, so no
+    second copy of the broker's accounting can drift from it). No I/O, no clock, no configuration,
+    enforced by AST; `scorecard.py` is untouched, and the promotion path still imports nothing from
+    `noctis.reporting`.
+  - **The Deflated Sharpe Ratio, deflated by the run's own cumulative trial count**, published
+    beside `n_trials_used` (and `deflation_basis`, which names the variance assumption) so the
+    correction is auditable from the record alone. PSR and DSR are pinned in the tests against
+    their published closed forms (Bailey & López de Prado 2012/2014) *and* cross-checked against
+    independent published results — Lo (2002) on the Sharpe ratio's standard error, and the exact
+    expected maximum of two standard normals. More trials always deflate further.
+  - **New benchmark: `equal_weight_universe_bh`** — equal-weight buy-and-hold over the symbols the
+    run actually traded, priced from bars **already in the shared lake** over the run's own session
+    window, with alpha, beta, information ratio, tracking error and correlation. **No vendor call
+    and no new spend**: a name the lake does not hold leaves the block `null` with a note saying
+    why. Only statistics are published — the price series never reaches the record.
+  - **`traded: false` ⇒ `performance: null`**, still, and now enforced with the block populated: a
+    research-only run (and a run whose account journaled no mark) reports nothing rather than
+    zeros, so "researching" can never render as a flat 0% curve.
+  - **`RECORD_SIZE_BUDGET_BYTES` is 384 KiB** (was 256 KiB): the same synthetic fortnight — 14
+    segments, 66 candidates, ~3 000 trials — now also carries 14 traded sessions at 30 fills each
+    and measures **285 899 bytes**, held by a test. The budget states measured reality; the caps
+    beside it (`TRADE_CAP`) bound the pathological run.
+
 - **Structured gate evidence, and the run record's strategies section: the rejections are now
   computable.** "47 of 66 candidates died at the symbol-holdout gate" is the sentence that makes
   these results credible where an equity curve does not, and until now it could not be computed

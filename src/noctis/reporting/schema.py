@@ -31,6 +31,7 @@ __all__ = [
     "EVENT_CAP",
     "GATE_KEYS",
     "KIND",
+    "PERFORMANCE_SOURCE",
     "PROMOTED_OUTCOME",
     "RECORD_SIZE_BUDGET_BYTES",
     "REJECTED_OUTCOME",
@@ -75,6 +76,10 @@ REQUIRED_SECTIONS = (
     # ``null``: "no candidates yet" is a fact a young run can state, and the *rejections* are what
     # this section exists to publish.
     "strategies",
+    # Every session this run's paper account closed, with its own trade log (story #142). A list —
+    # empty for a run that never traded — never ``null``: "this run has closed no session" is a
+    # fact, and the section is where the realised evidence behind ``performance`` is readable.
+    "sessions",
     "performance",
     "events",
     "errors",
@@ -106,16 +111,23 @@ EVENT_CAP = 2_000
 # it names the total.
 STRATEGY_CAP = 500
 
-# What a whole record is *meant* to weigh, and the number the caps above are sized against. Not
-# enforced — a byte ceiling that truncated mid-write would be the silent truncation this contract
-# forbids — but measured: a synthetic two-week run (14 segments, 66 candidates, 3 champions
-# embedded in full, ~3 000 trials) is held under it by a test, so a change that quietly makes the
-# record ten times heavier is a red test rather than a slow website.
+# What a whole record is *meant* to weigh. Not enforced — a byte ceiling that truncated mid-write
+# would be the silent truncation this contract forbids — but measured: a synthetic two-week run
+# (14 segments, 66 candidates, 3 champions embedded in full, ~3 000 trials, 14 traded sessions at
+# 30 fills each) is held under it by a test, so a change that quietly makes the record ten times
+# heavier is a red test rather than a slow website.
 #
-# The epic's planning estimate was ~40 KB; that predates §7.1's per-candidate gate evidence, which
-# is the single largest thing in the section and also the whole point of it. The budget states the
-# measured reality instead of the estimate.
-RECORD_SIZE_BUDGET_BYTES = 256 * 1024
+# It states measured reality, and it has moved twice for that reason. The epic's planning estimate
+# was ~40 KB; story #141's per-candidate gate evidence — the single largest thing in the strategies
+# section, and the whole point of it — took the worked fortnight to ~172 KB, so the budget became
+# 256 KiB. Story #142's realised record (the equity curve and the per-session trade log) adds ~110
+# KB to the same fortnight, measured at 286 KB, so it is 384 KiB now.
+#
+# The caps above are a different instrument and should not be read as sized against this: they
+# bound the *pathological* run (a record at :data:`TRADE_CAP` weighs well over a megabyte), while
+# this describes the fortnight an operator actually gets. Both are honest — one is a ceiling that
+# says so when it bites, the other is a measurement a test defends.
+RECORD_SIZE_BUDGET_BYTES = 384 * 1024
 
 # The keys the ``run`` section always carries — presence is the contract, ``null`` is a value.
 _RUN_KEYS = (
@@ -346,6 +358,96 @@ _EFFICIENCY_KEYS = (
     "research_hours_per_champion",
 )
 
+# One closed trading session (story #142) — the realised evidence the performance block is derived
+# from. ``equity`` is the *account's* mark at that close (the curve); ``start_equity`` /
+# ``end_equity`` are the session's own bounds, which differ whenever positions were carried in.
+_SESSION_KEYS = (
+    "as_of",
+    "equity",
+    "start_equity",
+    "end_equity",
+    "realized_pnl",
+    "orders_submitted",
+    "positions_end",
+    "trades",
+)
+
+# One fill, with the four fields story #142 added: when it happened, what it cost in fees and
+# modelled slippage, and **which champion** the symbol was assigned when it filled. The last is
+# what makes the trade log readable per champion instead of as one blended blob.
+_TRADE_KEYS = (
+    "ts",
+    "symbol",
+    "side",
+    "quantity",
+    "price",
+    "fees_usd",
+    "slippage_bps",
+    "champion",
+    "rationale",
+)
+
+# The realised paper-account record (story #142). Present only for a run that traded — the
+# ``traded: false`` ⇒ ``null`` pairing below is the contract — and then carrying every section,
+# with ``null`` wherever a metric's inputs do not exist yet.
+_PERFORMANCE_KEYS = (
+    # The section names what produced it. Backtest and scorecard numbers live under
+    # ``strategies[].scorecard`` and are never blended in; a consumer that renders both can tell
+    # them apart structurally rather than by convention.
+    "source",
+    "account",
+    "equity_curve",
+    "returns",
+    "risk_adjusted",
+    "drawdown",
+    "trades",
+    "benchmark",
+    "monthly_returns_pct",
+)
+_RISK_ADJUSTED_KEYS = (
+    "sharpe",
+    "sortino",
+    "calmar",
+    # The Probabilistic Sharpe Ratio, and the Deflated one beside the trial count that deflated it
+    # — ``n_trials_used`` is part of the contract, because a deflation nobody can audit is a
+    # number nobody should trust. ``deflation_basis`` names the variance assumption behind it.
+    "psr",
+    "deflated_sharpe",
+    "n_trials_used",
+    "deflation_basis",
+    "skew",
+    "excess_kurtosis",
+    "annualization_basis",
+)
+_DRAWDOWN_KEYS = (
+    "max_drawdown_pct",
+    "max_drawdown_days",
+    "peak_date",
+    "trough_date",
+    "recovered",
+    "recovery_factor",
+)
+_BENCHMARK_KEYS = (
+    # Named ``equal_weight_universe_bh``, never "the index": it is buy-and-hold over the names this
+    # run traded, priced from bars already in the lake. ``note`` carries why a number is missing —
+    # a run whose symbols the lake does not hold is not benchmarked rather than benchmarked wrongly.
+    "name",
+    "method",
+    "symbols",
+    "total_return_pct",
+    "sharpe",
+    "alpha_pct",
+    "beta",
+    "information_ratio",
+    "tracking_error_pct",
+    "correlation",
+    "note",
+)
+
+# The one name the realised block may call itself, checked rather than assumed: a section that
+# renamed its source could be presented beside a scorecard as if the two were the same measurement.
+PERFORMANCE_SOURCE = "paper_account"
+
 # The marker every dollar figure in the record must carry. Prices come from a versioned list-price
 # table and are therefore *estimates*; a field that named itself ``usd`` alone would read as a
 # receipt, and the difference matters most to exactly the reader who is comparing two runs on cost.
@@ -403,6 +505,7 @@ def validate(record: Mapping[str, object]) -> list[str]:
     problems += _check_inputs(record.get("inputs"))
     problems += _check_strategies(record.get("strategies"))
     problems += _check_spend(record.get("spend"))
+    problems += _check_sessions(record.get("sessions"))
     problems += _check_performance(record.get("performance"), run=run)
 
     for name in ("events", "errors"):
@@ -429,7 +532,56 @@ def _check_performance(performance: object, *, run: object) -> list[str]:
             "performance: must be null when run.traded is false — a run that never traded has no "
             "realised performance, and zeros would render as a result it never produced"
         ]
-    return []
+    problems = _check_keys("performance", performance, _PERFORMANCE_KEYS)
+    if performance.get("source") != PERFORMANCE_SOURCE:
+        problems.append(
+            f"performance.source: expected {PERFORMANCE_SOURCE!r} — this section is the paper "
+            "account's realised record, and a backtest scorecard must never be presented as one"
+        )
+    problems += _check_block(
+        "performance.risk_adjusted", performance.get("risk_adjusted"), _RISK_ADJUSTED_KEYS
+    )
+    problems += _check_block("performance.drawdown", performance.get("drawdown"), _DRAWDOWN_KEYS)
+    problems += _check_block("performance.benchmark", performance.get("benchmark"), _BENCHMARK_KEYS)
+    risk = performance.get("risk_adjusted")
+    if isinstance(risk, Mapping) and risk.get("deflated_sharpe") is not None:
+        if risk.get("n_trials_used") is None:
+            problems.append(
+                "performance.risk_adjusted.n_trials_used: a deflated Sharpe must publish the "
+                "trial count it was deflated by, or the deflation cannot be audited"
+            )
+    return problems
+
+
+def _check_sessions(sessions: object) -> list[str]:
+    """One entry per closed session, each carrying its own trade log.
+
+    Uncapped, like the segments: the sessions are the run's realised spine and losing one would
+    make every derived total a lie. The *trades* inside them are bounded (``TRADE_CAP``), and a
+    bounded log writes its note in ``run.truncated``.
+    """
+    if sessions is None:
+        return []
+    if not isinstance(sessions, Sequence) or isinstance(sessions, str | bytes):
+        return ["sessions: must be a list"]
+    problems: list[str] = []
+    for position, session in enumerate(sessions):
+        label = f"sessions[{position}]"
+        if not isinstance(session, Mapping):
+            problems.append(f"{label}: must be an object")
+            continue
+        problems += _check_keys(label, session, _SESSION_KEYS)
+        trades = session.get("trades")
+        if trades is None or isinstance(trades, str | bytes) or not isinstance(trades, Sequence):
+            problems.append(f"{label}.trades: must be a list")
+            continue
+        for index, trade in enumerate(trades):
+            entry = f"{label}.trades[{index}]"
+            if not isinstance(trade, Mapping):
+                problems.append(f"{entry}: must be an object")
+                continue
+            problems += _check_keys(entry, trade, _TRADE_KEYS)
+    return problems
 
 
 def _check_strategies(strategies: object) -> list[str]:

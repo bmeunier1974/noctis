@@ -80,11 +80,12 @@ def _record(run_dir: Path) -> dict:
 def _totals(record: dict) -> dict:
     """Every cumulative number a record carries, plus the work its segments account for.
 
-    The sections that hold the rest of the run's totals — the equity curve, the strategies —
-    arrive in stories #141–#142. They slot in *here*, as more keys of this one dict, and the
+    Each story in the epic slots its own totals in *here*, as more keys of this one dict, and the
     equivalence test above keeps passing unchanged: that is the whole point of the epic's
-    "derived, never incremented" rule. Nothing is invented in the meantime; what is summed below
-    is exactly what the record carries today.
+    "derived, never incremented" rule. Story #142 adds the realised record — the equity curve, the
+    per-session trade log and every performance number computed from them — which is the section
+    most exposed to the failure this test exists to catch, because a curve is the one thing an
+    engine is most tempted to *append to* across a restart instead of re-deriving.
 
     Per-*segment* breakdowns are summed rather than compared entry by entry — a three-segment run
     obviously has three of them. What must match is the total they add up to, which is exactly the
@@ -120,6 +121,11 @@ def _totals(record: dict) -> dict:
         "llm_usd_estimate": spend.get("llm_usd_estimate"),
         "pricing_table_version": spend.get("pricing_table_version"),
         "efficiency": spend.get("efficiency"),
+        # Story #142: the realised record. The sessions are compared whole — one per session date,
+        # whichever process happened to close them — and so is every number derived from them.
+        "sessions": record["sessions"],
+        "traded": record["run"]["traded"],
+        "performance": record["performance"],
     }
 
 
@@ -169,19 +175,55 @@ def _journal(run_dir: Path, session: str, episodes: list[dict]) -> None:
         )
 
 
+def _mark_sessions(run_dir: Path, days: list[tuple[str, float]]) -> None:
+    """Close ``days`` sessions on the run's own account ledger — the realised evidence #142 derives
+    the equity curve, the trade log and every performance number from.
+
+    Each day opens and closes one position, so the run has closed round trips (and therefore a win
+    rate, a profit factor and an expectancy) rather than only a curve.
+    """
+    from noctis.broker.persistence import EQUITY_CURVE_NAME, EquityLedger
+
+    ledger = EquityLedger(run_dir / "state" / EQUITY_CURVE_NAME)
+    for day, equity in days:
+        ledger.mark(
+            date=day,
+            equity=equity,
+            start_equity=100_000.0,
+            end_equity=equity,
+            orders_submitted=2,
+            trades=[
+                {
+                    "ts": f"{day}T14:31:00.000Z",
+                    "symbol": "NVDA",
+                    "side": side,
+                    "quantity": 10,
+                    "price": price,
+                    "fees": 0.1,
+                    "slippage_bps": 1.0,
+                    "champion": "momo_1",
+                    "rationale": "champion signal",
+                }
+                for side, price in (("BUY", 100.0), ("SELL", 100.0 + (equity - 100_000.0) / 10))
+            ],
+        )
+
+
 def _drive(
     runs_dir: Path,
     tmp_path: Path,
     *,
     segments: list[tuple[float, dict]],
     nights: list[list[dict]] | None = None,
+    marks: list[list[tuple[str, float]]] | None = None,
     monkeypatch=None,
 ) -> dict:
     """Run one experiment as ``segments`` process invocations, and return the record it left.
 
     ``nights[i]`` is the research evidence segment *i* journals into the run's own ledgers, stamped
     on the same injected clock the store runs on (production shares one wall clock between the
-    two), so the record can attribute each episode to the segment that spent it.
+    two), so the record can attribute each episode to the segment that spent it. ``marks[i]`` is
+    the trading evidence it closes: one dated equity mark per session, exactly as a CLOSE appends.
     """
     from noctis.research import ledger as ledger_module
 
@@ -198,6 +240,8 @@ def _drive(
         run_id, run_dir = store.run_id, store.run_dir
         if nights:
             _journal(run_dir, f"s{index}", nights[index])
+        if marks:
+            _mark_sessions(run_dir, marks[index])
         clock.advance(hours * HOUR)
         store.close(
             reason="time_limit", counters=counters, phase_seconds={"RESEARCH": hours * HOUR}
@@ -213,12 +257,24 @@ def test_three_one_hour_segments_total_exactly_what_one_three_hour_segment_does(
 
     Story #140 puts spend under the same rule: the token split, the priced estimate, the
     per-model/per-stage attribution and the efficiency ratios are all re-derived from the run's own
-    ledgers at write time, so how the work was *sliced into processes* cannot move a single one."""
+    ledgers at write time, so how the work was *sliced into processes* cannot move a single one.
+
+    Story #142 puts the **equity curve** under it, which is the sharpest version of the rule: a
+    curve is the one artifact an engine is tempted to append to in memory, and a run resumed three
+    times would then publish three partial curves (or one triple-counted one). Here it is
+    re-derived from the run's own account ledger at every write, so the six sessions produce one
+    curve — and the same Sharpe, drawdown, deflated Sharpe and trade statistics — whichever way the
+    nights were sliced into processes."""
     work = [{"cycles": 1, "research_iterations": 4, "trades": 2} for _ in range(3)]
     nights = [
         [_episode("formulate", 1000, 200), _episode("decide", 500, 90)],
         [_episode("formulate", 700, 150)],
         [_episode("decide", 300, 40), _episode("formulate", 20, 5)],
+    ]
+    marks = [
+        [("2026-07-27", 100_500.0), ("2026-07-28", 99_800.0)],
+        [("2026-07-29", 101_200.0), ("2026-07-30", 100_100.0)],
+        [("2026-07-31", 102_400.0), ("2026-08-03", 101_900.0)],
     ]
 
     one = _drive(
@@ -226,6 +282,7 @@ def test_three_one_hour_segments_total_exactly_what_one_three_hour_segment_does(
         tmp_path / "cfg",
         segments=[(3.0, _summed(work))],
         nights=[[episode for night in nights for episode in night]],
+        marks=[[day for night in marks for day in night]],
         monkeypatch=monkeypatch,
     )
     three = _drive(
@@ -233,6 +290,7 @@ def test_three_one_hour_segments_total_exactly_what_one_three_hour_segment_does(
         tmp_path / "cfg",
         segments=[(1.0, work[i]) for i in range(3)],
         nights=nights,
+        marks=marks,
         monkeypatch=monkeypatch,
     )
 
@@ -243,6 +301,11 @@ def test_three_one_hour_segments_total_exactly_what_one_three_hour_segment_does(
     assert one["spend"]["tokens"]["total_tokens"] == 3005
     assert one["spend"]["llm_usd_estimate"] > 0
     assert [b["total_tokens"] for b in three["spend"]["by_segment"]] == [1790, 850, 365]
+    # …and so was the realised record: one curve of six marks, with metrics computed off it.
+    assert len(one["performance"]["equity_curve"]) == 6
+    assert one["performance"]["risk_adjusted"]["sharpe"] is not None
+    assert one["performance"]["trades"]["count"] == 6
+    assert one["performance"]["risk_adjusted"]["deflated_sharpe"] is not None
 
 
 def _summed(counters: list[dict]) -> dict:

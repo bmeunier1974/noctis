@@ -517,11 +517,46 @@ def test_the_embed_choice_is_the_runs_own_frozen_one_not_this_processes(tmp_path
 # ── the size budget the source policy exists to hold ───────────────────────────────────────
 
 
-def _two_week_run(tmp_path: Path, *, embed_all: bool = False) -> Path:
-    """Fourteen nights: 66 candidates considered, 3 crowned, ~3 000 trials journaled.
+def _mark_session(run_dir: Path, day: str, equity: float, *, trades: int) -> None:
+    """One closed session on the run's account ledger — the realised evidence story #142 added.
 
-    The epic's own worked figures (§6, §11), so the number this weighs is the number an operator
-    would actually get — not a stub that would make any budget look comfortable.
+    The fortnight is weighed *with* its trade log, because that log is the heaviest thing the run
+    record gained: a budget measured against a run that never traded would be measuring the wrong
+    record.
+    """
+    from noctis.broker.persistence import EQUITY_CURVE_NAME, EquityLedger
+
+    EquityLedger(run_dir / "state" / EQUITY_CURVE_NAME).mark(
+        date=day,
+        equity=equity,
+        start_equity=100_000.0,
+        end_equity=equity,
+        orders_submitted=trades,
+        positions_end={"NVDA": 12.0},
+        trades=[
+            {
+                "ts": f"{day}T{14 + index % 6:02d}:31:00.000Z",
+                "symbol": "NVDA",
+                "side": "BUY" if index % 2 == 0 else "SELL",
+                "quantity": 12,
+                "price": 118.4012 + index,
+                "fees": 0.14,
+                "slippage_bps": 1.0,
+                "champion": "candidate_000",
+                "rationale": "champion signal",
+            }
+            for index in range(trades)
+        ],
+    )
+
+
+def _two_week_run(tmp_path: Path, *, embed_all: bool = False) -> Path:
+    """Fourteen nights: 66 candidates considered, 3 crowned, ~3 000 trials journaled, 14 sessions
+    traded at 30 fills each.
+
+    The epic's own worked figures (§6, §11) plus story #142's realised record, so the number this
+    weighs is the number an operator would actually get — not a stub that would make any budget
+    look comfortable.
     """
     from noctis.champions import ChampionRegistry, PromotionRules
 
@@ -540,12 +575,18 @@ def _two_week_run(tmp_path: Path, *, embed_all: bool = False) -> Path:
         registry.consider(challenger, rules)
         _write_strategy(run_dir, "champions" if promoted else "__tmp", name)
         _journal(run_dir, name, trials=45)
+    _mark_session(run_dir, "2026-07-27", 100_412.33, trades=30)
     clock.advance(HOUR)
-    store.close(reason="time_limit")
-    for _ in range(13):
+    store.close(reason="time_limit", counters={"cycles": 1, "trades": 30})
+    for night_index in range(13):
         night = _open(runs, clock, run_id=store.run_id, resume=True)
+        _mark_session(
+            run_dir, f"2026-07-{28 + night_index:02d}", 100_412.33 + night_index * 97.0, trades=30
+        )
         clock.advance(8 * HOUR)
-        night.close(reason="time_limit", counters={"cycles": 1, "research_iterations": 40})
+        night.close(
+            reason="time_limit", counters={"cycles": 1, "research_iterations": 40, "trades": 30}
+        )
     return run_dir
 
 
@@ -558,17 +599,22 @@ def test_a_synthetic_two_week_run_stays_inside_the_records_size_budget(tmp_path)
     assert schema.validate(record) == []
     assert len(record["segments"]) == 14
     assert len(record["strategies"]) == 66
+    assert len(record["sessions"]) == 14
+    assert sum(len(session["trades"]) for session in record["sessions"]) == 420
     assert size <= schema.RECORD_SIZE_BUDGET_BYTES, f"{size} bytes"
     assert record["run"]["truncated"] == {}  # nothing bit, so nothing is claimed
 
 
 def test_archiving_the_same_run_whole_is_what_the_source_policy_saves(tmp_path):
     """Why champions-only is the default, in one number: the same fourteen nights with every
-    candidate's source embedded — the bill ``--embed-all-sources`` pays deliberately."""
+    candidate's source embedded — the bill ``--embed-all-sources`` pays deliberately.
+
+    Measured as a *difference*, not a ratio: since story #142 the lean record also carries the
+    run's realised trade log, so the sources' own weight is what the two records differ by."""
     lean = (_two_week_run(tmp_path / "lean") / RUN_RECORD_NAME).stat().st_size
     whole = (_two_week_run(tmp_path / "whole", embed_all=True) / RUN_RECORD_NAME).stat().st_size
 
-    assert whole > 2 * lean
+    assert whole - lean > 150 * 1024
 
 
 # ── the operator's switch ──────────────────────────────────────────────────────────────────

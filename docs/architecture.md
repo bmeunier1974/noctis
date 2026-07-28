@@ -326,6 +326,7 @@ bare `research`), and the run `noctis migrate` adopts existing state into. The *
 | `<run>/run.json` + `run.lock` | One run's self-describing record and its liveness lock |
 | `<run>/state/champions.json` | That run's champion registry |
 | `<run>/state/paper_account.json` | That run's continuous paper account |
+| `<run>/state/equity_curve.jsonl` | That run's daily equity marks + per-session trade log (append-only; the run record's curve is re-derived from it) |
 | `<run>/state/trading_sessions.json` | That run's replay high-water mark |
 | `<run>/state/experiments/<strategy>.jsonl` | Per-strategy experiment journals, one line per backtest/sweep trial |
 | `<run>/state/specs.json` | LLM-minted `StrategySpec` definitions, re-registered at startup |
@@ -406,3 +407,39 @@ the prose rationale — and `gates[]`, the structured evidence `champions/promot
 - **Derived at every write**, from the run's own champion board (which journals each decision's
   gates), its experiment journals and its strategy tiers — never a list carried across a restart,
   so three short segments report exactly what one long one does.
+
+**`sessions[]` and `performance` — the realised paper account, kept apart from the backtest.**
+Two sections, one rule: what the paper account actually did is never blended with what a backtest
+said it would do. `sessions[]` is the evidence — one entry per closed session, carrying the
+account's equity mark for that date, its own start/end equity, orders submitted, closing positions
+and its **trade log**, where every fill states its timestamp, fees, modelled slippage and the
+**champion** the symbol was assigned when it filled. `performance` is what that evidence computes
+to, and it names itself `source: "paper_account"` so no consumer can present it as a scorecard;
+backtest numbers stay under `strategies[].scorecard` and are never mixed in.
+
+- **The curve is derived, never appended to.** At each CLOSE the engine writes one dated mark to
+  the run's own account ledger (`<run>/state/equity_curve.jsonl`, append-only, one mark per date
+  with the last write winning), and the record re-reads the whole ledger at every write. Nothing
+  about the curve survives a restart in memory, which is why a run stopped and resumed three times
+  publishes exactly the curve one long night would — the epic's D4 rule, at its sharpest.
+- **`reporting/metrics.py` is a new pure module, deliberately not part of `scorecard.py`.**
+  CAGR, annualised volatility, Sortino, Calmar, drawdown depth *and* duration, recovery factor,
+  profit factor, expectancy, payoff ratio, win/loss rates, exposure, turnover, monthly returns,
+  skew, kurtosis, PSR and DSR. `scorecard.py` feeds the promotion gates, so nothing computed for
+  reporting may drift into gate math (AGENTS.md rule 2) — the two are allowed to differ (this
+  Sortino uses the full-sample downside deviation, the scorecard's the negative-only one) and a
+  test proves the promotion path cannot reach `noctis.reporting` at all.
+- **The Deflated Sharpe Ratio, beside the count that deflated it.** DSR corrects the headline
+  Sharpe for selection under multiple testing, and the multiple-testing count is the run's **own
+  cumulative trial count** — the very lines the exhaustion gate reads off the experiment journals.
+  It is published with `n_trials_used` next to it, so the deflation is auditable from the record
+  alone. This is the number this project is uniquely able to compute honestly.
+- **A benchmark that costs nothing.** `equal_weight_universe_bh` — named so nobody mistakes it for
+  an index — is equal-weight buy-and-hold over the symbols the run actually traded, priced from
+  bars **already in the shared lake** over the run's own session window, with alpha, beta,
+  information ratio, tracking error and correlation. No vendor call and no new spend: a symbol the
+  lake does not hold is not benchmarked, and the block carries `null`s with a note saying why.
+  Only statistics reach the record — the benchmark's own price series never does.
+- **A run that never traded reports `traded: false` and `performance: null`** — not zeros
+  (epic D10), so a website renders "researching" rather than a flat 0% curve it was handed as a
+  result. The schema enforces the pairing.

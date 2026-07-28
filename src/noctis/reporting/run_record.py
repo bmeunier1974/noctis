@@ -30,12 +30,14 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TypeVar
 
+from noctis.reporting.metrics import Benchmark, DailySession, TradeFill, performance
 from noctis.reporting.schema import (
     EVENT_CAP,
     KIND,
     PROMOTED_OUTCOME,
     SCHEMA_VERSION,
     STRATEGY_CAP,
+    TRADE_CAP,
 )
 
 __all__ = [
@@ -47,12 +49,15 @@ __all__ = [
     "TRADES_COUNTER",
     "TRADING_PHASE",
     "USAGE_FIELDS",
+    "Benchmark",
+    "DailySession",
     "EngineIdentity",
     "RecordEvent",
     "RunArtifacts",
     "SegmentArtifact",
     "SpendEntry",
     "StrategyArtifact",
+    "TradeFill",
     "build",
     "mark_interrupted",
     "prune_refusal",
@@ -347,6 +352,17 @@ class RunArtifacts:
     # every other cumulative fact, never a list carried across a restart. An empty sequence is a
     # run that has considered nothing yet, which is a statement a young run can honestly make.
     strategies: Sequence[StrategyArtifact] = ()
+    # Every session this run's paper account has closed (story #142), read at write time off the
+    # run's own account ledger (``run_store.read_sessions``) — the daily marks the equity curve is
+    # **derived** from and the fills the trade log is. Never carried across a restart: a resumed
+    # segment re-reads the whole ledger, so three short nights publish exactly the curve one long
+    # night would, and a rewrite after a crash cannot double a day.
+    sessions: Sequence[DailySession] = ()
+    # The equal-weight buy-and-hold comparison over the names this run traded, priced from bars
+    # **already in the shared lake** (``run_store.read_benchmark``) — no vendor call, no new spend.
+    # ``None`` for a run nobody computed one for; a benchmark the lake could not price arrives as a
+    # :class:`~noctis.reporting.metrics.Benchmark` carrying no points and a note saying why.
+    benchmark: Benchmark | None = None
 
 
 def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
@@ -453,6 +469,7 @@ def build(artifacts: RunArtifacts) -> dict:
     events, events_note = _capped(artifacts.events, EVENT_CAP)
     errors, errors_note = _capped(artifacts.errors, EVENT_CAP)
     strategies, strategies_note = _capped(_ordered(artifacts.strategies), STRATEGY_CAP)
+    sessions, trades_note = _sessions(artifacts.sessions)
     truncated: dict[str, dict[str, int]] = {}
     if events_note is not None:
         truncated["events"] = events_note
@@ -460,6 +477,8 @@ def build(artifacts: RunArtifacts) -> dict:
         truncated["errors"] = errors_note
     if strategies_note is not None:
         truncated["strategies"] = strategies_note
+    if trades_note is not None:
+        truncated["trades"] = trades_note
 
     segments = [_segment(segment) for segment in artifacts.segments]
     runtime_s = _cumulative_runtime_s(segments)
@@ -476,7 +495,7 @@ def build(artifacts: RunArtifacts) -> dict:
             "last_active_utc": artifacts.last_active_utc,
             "completed_utc": completed_utc,
             "run_limit_hours": limit_hours,
-            "traded": _traded(segments),
+            "traded": _traded(segments, artifacts.sessions),
             "cumulative_runtime_s": runtime_s,
             "cumulative_research_s": _cumulative_phase_s(segments, RESEARCH_PHASE),
             "cumulative_trading_s": _cumulative_phase_s(segments, TRADING_PHASE),
@@ -503,13 +522,17 @@ def build(artifacts: RunArtifacts) -> dict:
         # What this run cost and what that bought (story #140) — derived here from the entries the
         # store read off the run's own ledgers, never from a counter carried across a restart.
         "spend": _spend(artifacts, segments),
-        # The realised paper-account record — an explicit key from story #137 on, and deliberately
-        # **always** ``null`` today: nothing in this engine computes a run's equity curve, Sharpe or
-        # drawdown yet (that is story #142), and a section invented to hold zeros would be
-        # indistinguishable from a run that genuinely flat-lined. What this slice pins is the rule
-        # #142 must keep — ``traded: false`` ⇒ ``performance: null`` — which ``schema.validate`` now
-        # enforces, so the degenerate zeros can never arrive by accident.
-        "performance": None,
+        # Every session the paper account closed, with its own trade log (story #142). One entry
+        # per session date, uncapped like the segments beside them — they are the run's realised
+        # spine — while the *trades* inside them are bounded by ``TRADE_CAP`` across the whole run.
+        "sessions": sessions,
+        # The realised paper-account record: the equity curve, the practitioner metric set, the
+        # deflated Sharpe beside the trial count that deflated it, and the equal-weight benchmark.
+        # ``null`` — never zeros — for a run that never traded (epic D10), so a website renders
+        # "researching" rather than a flat 0% curve it was handed as a result. Computed from the
+        # **whole** session history, not from the capped log above: a truncated trade log must not
+        # be able to move a metric.
+        "performance": _performance(artifacts, segments),
         "events": [event.as_dict() for event in events],
         "errors": [error.as_dict() for error in errors],
     }
@@ -699,7 +722,89 @@ def _ratio(numerator: float | None, denominator: float | None, *, digits: int = 
     return round(numerator / denominator, digits)
 
 
-def _traded(segments: Sequence[Mapping[str, object]]) -> bool:
+def _performance(artifacts: RunArtifacts, segments: Sequence[Mapping[str, object]]) -> dict | None:
+    """The paper account's realised record, or ``null`` for a run that never traded.
+
+    **The realised record and the backtest record are different sections, deliberately.** What is
+    here came out of the paper account: marks the engine wrote at a session close, fills it
+    actually placed. Backtest and scorecard numbers live under ``strategies[]`` and are never
+    blended in — the block names itself ``paper_account`` so no consumer can present one as the
+    other, which is the whole reason the two live apart.
+
+    ``n_trials`` is the run's own cumulative journaled trial count, so the deflated Sharpe is
+    deflated by the searching this run actually did (and publishes that count beside itself).
+
+    ``null`` in **two** cases, which are the same case seen from two sides: a run that never traded
+    (epic D10 — a website must render "researching", not a flat 0% curve), and a run whose account
+    journaled no daily mark at all. The second is what an adopted history looks like — segments
+    that counted orders under a Noctis that had no equity ledger — and a block of nulls beside them
+    would read as a measurement that came out empty rather than as one nobody took.
+    """
+    if not _traded(segments, artifacts.sessions) or not artifacts.sessions:
+        return None
+    return performance(
+        list(artifacts.sessions), n_trials=artifacts.trials, benchmark=artifacts.benchmark
+    )
+
+
+def _sessions(
+    sessions: Sequence[DailySession],
+) -> tuple[list[dict], dict[str, int] | None]:
+    """Every session the account closed, and the note if the run's trade log had to be bounded.
+
+    The cap is on **trades across the whole run**, not per session: a fortnight of quiet days
+    followed by one frantic one should publish the frantic one, and a per-session cap would hide
+    exactly the session worth reading. The earliest trades are kept (the run in order), and the
+    note names the total — silent truncation is forbidden.
+    """
+    kept = 0
+    total = sum(len(session.fills) for session in sessions)
+    rendered: list[dict] = []
+    for session in sessions:
+        room = max(TRADE_CAP - kept, 0)
+        fills = list(session.fills)[:room]
+        kept += len(fills)
+        rendered.append(_session(session, fills))
+    return rendered, None if total <= TRADE_CAP else {"kept": kept, "total": total}
+
+
+def _session(session: DailySession, fills: Sequence[TradeFill]) -> dict:
+    """One closed session: what the account was worth, what it traded, what it still holds."""
+    return {
+        "as_of": session.date,
+        "equity": session.equity,
+        "start_equity": session.start_equity,
+        "end_equity": session.end_equity,
+        "realized_pnl": session.realized_pnl,
+        "orders_submitted": session.orders_submitted,
+        "positions_end": dict(session.positions_end),
+        "trades": [_trade(fill) for fill in fills],
+    }
+
+
+def _trade(fill: TradeFill) -> dict:
+    """One fill, as the record states it — with the champion it is attributed to.
+
+    Every key is present, ``null`` where the fill did not carry the value: the record's convention
+    is the opposite of the per-day report's, where an absent enrichment field is *omitted* so an
+    operator's existing reports stay byte identical.
+    """
+    return {
+        "ts": fill.ts,
+        "symbol": fill.symbol,
+        "side": fill.side,
+        "quantity": fill.quantity,
+        "price": fill.price,
+        "fees_usd": fill.fees_usd,
+        "slippage_bps": fill.slippage_bps,
+        "champion": fill.champion,
+        "rationale": fill.rationale,
+    }
+
+
+def _traded(
+    segments: Sequence[Mapping[str, object]], sessions: Sequence[DailySession] = ()
+) -> bool:
     """Whether this run ever placed a paper order — the flag a ``null`` performance block hangs on.
 
     A **research-only run is first-class** (epic §5.6): a run may accumulate many research segments
@@ -708,12 +813,21 @@ def _traded(segments: Sequence[Mapping[str, object]]) -> bool:
     rather than zeros (D10), so a website renders "researching" instead of a fake flat 0% equity
     curve.
 
-    Derived, from the only evidence of trading the record carries **today**: the per-segment
-    ``trades`` counter the loop writes at each CLOSE. When story #142 adds ``sessions[]`` and the
-    realised paper account, that becomes the richer evidence and this reads it too — the rule
-    ("no trading was ever recorded ⇒ false") does not move, only the list of places it looks.
+    Derived from **every** piece of evidence the record carries, never latched by whichever one
+    was written first: the per-segment ``trades`` counter the loop writes at each CLOSE, and (story
+    #142) the fills the run's own account ledger journaled per session. Either is enough; neither
+    is required of the other, because a segment killed before its counter landed still leaves its
+    fills on the ledger, and a record adopted from a history that predates the ledger still has its
+    counters. The rule itself has not moved since story #137 — "no trading was ever recorded ⇒
+    false" — only the list of places it looks.
+
+    A run whose account exists but never filled an order is **not** traded: an account that opened
+    and sat flat has no realised record to show, and rendering its 100k flat line as a result is
+    exactly the lie D10 forbids.
     """
-    return any(_counted(segment, TRADES_COUNTER) > 0 for segment in segments)
+    if any(_counted(segment, TRADES_COUNTER) > 0 for segment in segments):
+        return True
+    return any(session.fills for session in sessions)
 
 
 def _counted(segment: Mapping[str, object], key: str) -> int:

@@ -228,6 +228,7 @@
   "inputs": null,
   "strategies": [],
   "spend": null,
+  "sessions": [],
   "performance": null,
   "events": [
     {
