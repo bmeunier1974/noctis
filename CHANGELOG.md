@@ -9,6 +9,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Config drift: `noctis run --resume … --show-config-drift` and `--rebase-config`.** A run's
+  configuration is frozen at creation and drift is normal — frozen wins, silently. These are the
+  two things an operator needs on top of that: *see* what the current `config.yaml` and `mandate/`
+  would change, and *adopt* them deliberately.
+  - **`--show-config-drift`** prints the diff and exits. It is an inspection: it opens no segment,
+    takes no lock and rewrites nothing, because looking first must never itself be a decision.
+    It compares the **frozen** keys and the **resolved mandate text** (so a rewritten profile behind
+    an unchanged selector shows up, and the same bytes behind a renamed one do not). The **live**
+    tier — paths, secrets, per-process budgets — is never reported: it is this process's by design.
+  - **`--rebase-config`** adopts the current files for the rest of the run: it re-freezes them,
+    bumps `inputs.config_epoch`, and appends a before/after entry to the new `inputs.config_changes`
+    list naming the **segment** it happened in. A mid-run config change is never silent — a record
+    whose config changed must say so *and say where*. After a rebase the new values are the run's
+    own, so the next resume restores those.
+  - **With no drift, `--rebase-config` is a documented no-op**: the epoch does not move and no
+    entry is written. A cosmetic bump would mark the run mixed-config forever.
+  - **`mode` and `allow_live` are never rebasable under any flag.** `mode` is not in the frozen
+    settings at all (the record keeps only the gate's verdict), so the concrete attempt — edit
+    `mode`, open `ALLOW_LIVE`, ask for the current files — is refused by the mode check that runs
+    before any rebase, with a message stating that no flag lifts it (AGENTS.md rule 1).
+  - `config_drift()` and `rebase_inputs()` are **pure** functions beside the freezing tiers in
+    `config/rehydrate.py` — `(record, settings) -> value`, no I/O and no clock — so the diff an
+    operator is shown and the entry the record stores are built from the one value.
 - **Resume addressing: `--resume latest`, a `run.json` path, `--resume @label`, and `--label`.**
   `--resume` now takes four address forms, resolved in one place (shared with `run-record`) in a
   fixed order, so one string always names one run whatever a workspace happens to contain: a

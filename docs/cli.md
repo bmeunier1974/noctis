@@ -50,6 +50,8 @@ python -m noctis run -vv --show-reasoning  # narrate each research session's rea
 python -m noctis run --time-limit-hours 8  # override the time limit
 python -m noctis run --label nightly-momo  # attach a human alias to this run
 python -m noctis run --resume <address>    # continue a run (id | latest | run.json path | @label)
+python -m noctis run --resume latest --show-config-drift   # what would adopting the files change?
+python -m noctis run --resume latest --rebase-config       # adopt them, on the record
 python -m noctis run --mandate aggressive  # one-session mandate override
 python -m noctis run --directive "..."     # one-session inline directive (excludes --mandate)
 python -m noctis run --debug               # also record an hour-segmented QA report under the run's qa/
@@ -170,6 +172,57 @@ The safety gate is never rehydrated. It re-resolves from `config.yaml` + `ALLOW_
 process start, so `mode: live` without `ALLOW_LIVE` is the same hard startup error on a resume as
 on a first start, and a run whose frozen mode disagrees with the freshly resolved one refuses to
 continue.
+
+#### Config drift: seeing it, and adopting it
+
+```bash
+python -m noctis run --resume latest --show-config-drift   # look: what would I be adopting?
+python -m noctis run --resume latest --rebase-config       # decide: adopt it, on the record
+```
+
+Drift is normal and costs nothing — a resume keeps using the frozen values whatever the files say.
+These two flags are the *see it* and the *adopt it deliberately*, and they are deliberately
+separate commands to type (passing both is refused): looking first must never be a decision.
+
+`--show-config-drift` prints the diff and exits. It is an **inspection**: no segment is opened, no
+lock is taken, and not one byte of the record is rewritten.
+
+```
+Config drift for run 20260727T142233Z-a1b2c3 (config_epoch 1, frozen at 2026-07-27T14:22:33.418Z):
+
+settings (frozen tier — a resume ignores the current files for these):
+  champion_count    5 → 1
+  promotion.metric  'sortino' → 'total_return'
+mandate (frozen as resolved text, not as a selector):
+  source       profile:aggressive → profile:aggressive
+  text_sha256  44502474589f → 4842800e26f7
+  frozen text  Trade the most volatile names. Risk appetite: high.
+  current text Buy and hold index funds. Risk appetite: low.
+```
+
+**What counts as drift** is exactly what freezing covers, and nothing else:
+
+| compared | not compared |
+|---|---|
+| every **frozen** key (`promotion.*`, `research.*`, `universe`, …) | the **live** tier — paths, secrets, per-process budgets. It is this process's *by design*, so it is not a difference to adopt |
+| the **resolved mandate text** (and its sha256) — so rewriting `mandate/profiles/aggressive.md` behind an unchanged selector shows up here | the mandate **selector**. The same bytes reached through a renamed profile changed nothing about what the run was told |
+| | `mode` / `allow_live` — never recorded, never restored, never rebasable |
+
+`--rebase-config` adopts the current files for the rest of the run: it re-freezes them onto the
+record, bumps `inputs.config_epoch`, and appends a before/after entry to `inputs.config_changes`
+naming the **segment** it happened in. A mid-run config change is never silent — a record whose
+config changed has to say so *and say where*, or every comparison built on it is false. From then
+on the new values are the run's own: the next resume restores those.
+
+**With no drift it is a documented no-op.** The epoch does not move, no entry is written, and the
+resume proceeds normally — a cosmetic bump would mark the run as mixed-config forever and make
+every consumer that renders `config_epoch > 1` as "this run changed mid-flight" a liar.
+
+`mode` and `allow_live` are **never rebasable under any flag**. `mode` is not even in the frozen
+settings — the record keeps only the gate's verdict — so the concrete attempt (edit `mode`, open
+`ALLOW_LIVE`, ask for the current files) is refused by the mode check that runs before any rebase,
+with a message saying no flag lifts it. The live-money double gate re-resolves from two independent
+sources at every process start (AGENTS.md rule 1); a record is neither of them.
 
 ### Verbosity
 

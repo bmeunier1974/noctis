@@ -39,8 +39,10 @@ from noctis.config.rehydrate import (
     RehydrationError,
     assert_mode_unchanged,
     classify,
+    config_drift,
     freeze_inputs,
     frozen_digest,
+    rebase_inputs,
     rehydrate,
 )
 from noctis.config.settings import SECRET_FIELDS, Settings
@@ -408,13 +410,207 @@ def test_the_frozen_inputs_name_the_keys_of_all_three_tiers(tmp_path):
     assert set(settings["refused_keys"]) == REFUSED
 
 
+# ── drift: what the current files would change, if a resume let them (story #134) ──────────
+
+
+def test_config_drift_names_a_changed_frozen_key_with_both_values(tmp_path):
+    """The whole point of the flag: an operator sees what they *would* be adopting, per key."""
+    record = _record(_settings(tmp_path / "a", "mode: paper\npromotion:\n  metric: sortino\n"))
+    current = _settings(tmp_path / "b", "mode: paper\npromotion:\n  metric: total_return\n")
+
+    drift = config_drift(record, current)
+
+    assert bool(drift) is True
+    assert [(change.path, change.frozen, change.current) for change in drift.settings] == [
+        ("promotion.metric", "sortino", "total_return")
+    ]
+
+
+def test_a_run_whose_files_have_not_moved_reports_no_drift(tmp_path):
+    settings = _settings(tmp_path, "mode: paper\npromotion:\n  metric: sortino\n")
+
+    drift = config_drift(_record(settings), settings)
+
+    assert bool(drift) is False
+    assert drift.settings == ()
+    assert drift.mandate is None
+
+
+def test_a_moved_live_tier_key_is_never_drift(tmp_path, monkeypatch):
+    """The live tier is live *by design* — paths, secrets and per-process budgets are always this
+    process's — so reporting one as drift would invite an operator to "adopt" a non-difference."""
+    monkeypatch.setenv("NOCTIS_WORKSPACE", f"{tmp_path}/old")
+    record = _record(_settings(tmp_path / "a", "mode: paper\ntime_limit_hours: 1.0\n"))
+    monkeypatch.setenv("NOCTIS_WORKSPACE", f"{tmp_path}/new")
+    current = _settings(tmp_path / "b", "mode: paper\ntime_limit_hours: 9.0\n")
+    current.databento_api_key = "sk-from-the-live-env"
+
+    drift = config_drift(record, current)
+
+    assert bool(drift) is False
+
+
+def test_the_live_money_gates_are_never_drift_even_if_a_record_smuggles_them_in(tmp_path):
+    """The refused tier is absolute: it is not recorded, not restored, and not rebasable — so it
+    is not drift either, whatever a hand-edited record claims."""
+    record = _record(_settings(tmp_path / "a", "mode: paper\n"))
+    record["inputs"]["settings"]["resolved"]["mode"] = "live"
+    record["inputs"]["settings"]["resolved"]["allow_live"] = True
+
+    drift = config_drift(record, _settings(tmp_path / "b", "mode: paper\n"))
+
+    assert [change.path for change in drift.settings] == []
+
+
+def test_mandate_drift_is_drift_in_the_resolved_text_not_in_the_selector(tmp_path):
+    settings = _settings(tmp_path, "mode: paper\n")
+    record = _record(settings, mandate=_Mandate())
+    rewritten = _Mandate()
+    rewritten.text = "Buy and hold index funds."
+
+    drift = config_drift(record, settings, mandate=rewritten)
+
+    assert drift.mandate is not None
+    assert drift.mandate.frozen_sha256 != drift.mandate.current_sha256
+    assert drift.mandate.frozen_text == "Trade only the most volatile names. Risk appetite: high."
+    assert drift.mandate.current_text == "Buy and hold index funds."
+
+
+def test_the_same_text_reached_through_a_different_selector_is_not_drift(tmp_path):
+    """A run freezes what it was *told*, not which file told it — so renaming the profile behind
+    identical text changes nothing about what the accumulated results mean."""
+    settings = _settings(tmp_path, "mode: paper\n")
+    record = _record(settings, mandate=_Mandate())
+    renamed = _Mandate()
+    renamed.source = "profile:volatility"
+
+    drift = config_drift(record, settings, mandate=renamed)
+
+    assert drift.mandate is None
+    assert bool(drift) is False
+
+
+def test_dropping_the_mandate_entirely_is_drift(tmp_path):
+    settings = _settings(tmp_path, "mode: paper\n")
+
+    drift = config_drift(_record(settings, mandate=_Mandate()), settings, mandate=None)
+
+    assert drift.mandate is not None
+    assert drift.mandate.current_sha256 is None
+
+
+def test_a_record_that_froze_no_config_has_nothing_to_drift_from(tmp_path):
+    """An adopted history (story #131) never froze a configuration, so there is no difference to
+    show — and nothing to rebase either."""
+    drift = config_drift({"run": {"status": "stopped"}, "inputs": None}, _settings(tmp_path))
+
+    assert bool(drift) is False
+    assert drift.frozen is False
+
+
+# ── rebasing: adopting the current config deliberately, never silently ─────────────────────
+
+
+def test_rebasing_bumps_the_epoch_and_appends_a_before_after_entry(tmp_path):
+    record = _record(_settings(tmp_path / "a", "mode: paper\npromotion:\n  metric: sortino\n"))
+    current = _settings(tmp_path / "b", "mode: paper\npromotion:\n  metric: total_return\n")
+
+    rebased = rebase_inputs(record, current, at=FROZEN_AT, segment=3)
+
+    assert rebased is not None
+    assert rebased["config_epoch"] == 2
+    (change,) = rebased["config_changes"]
+    assert change["at"] == FROZEN_AT
+    assert change["segment"] == 3
+    assert change["from_epoch"] == 1 and change["to_epoch"] == 2
+    assert change["settings"] == [
+        {"path": "promotion.metric", "from": "sortino", "to": "total_return"}
+    ]
+    assert change["digest_before"] == record["inputs"]["settings"]["digest"]
+    assert change["digest_after"] == frozen_digest(current)
+    assert rebased["settings"]["resolved"]["promotion"]["metric"] == "total_return"
+
+
+def test_rebasing_a_drift_free_run_is_a_no_op_that_does_not_bump_the_epoch(tmp_path):
+    settings = _settings(tmp_path, "mode: paper\npromotion:\n  metric: sortino\n")
+
+    assert rebase_inputs(_record(settings), settings, at=FROZEN_AT, segment=1) is None
+
+
+def test_rebasing_keeps_every_earlier_change_entry(tmp_path):
+    """The change log is append-only: a run that changed config twice must say so twice, or the
+    second rebase would erase the evidence of the first."""
+    record = _record(_settings(tmp_path / "a", "mode: paper\npromotion:\n  metric: sortino\n"))
+    once = rebase_inputs(
+        record,
+        _settings(tmp_path / "b", "mode: paper\npromotion:\n  metric: total_return\n"),
+        at=FROZEN_AT,
+        segment=1,
+    )
+    assert once is not None
+
+    twice = rebase_inputs(
+        {"run": {"status": "stopped"}, "inputs": once},
+        _settings(tmp_path / "c", "mode: paper\npromotion:\n  metric: sharpe\n"),
+        at=FROZEN_AT,
+        segment=2,
+    )
+
+    assert twice is not None
+    assert twice["config_epoch"] == 3
+    assert [change["to_epoch"] for change in twice["config_changes"]] == [2, 3]
+    assert [change["segment"] for change in twice["config_changes"]] == [1, 2]
+
+
+def test_a_rebased_block_never_carries_the_live_money_gates(tmp_path):
+    settings = _settings(tmp_path / "b", "mode: paper\npromotion:\n  metric: total_return\n")
+    settings.allow_live = True
+    settings.databento_api_key = "sk-do-not-leak"
+
+    rebased = rebase_inputs(
+        _record(_settings(tmp_path / "a", "mode: paper\npromotion:\n  metric: sortino\n")),
+        settings,
+        at=FROZEN_AT,
+        segment=1,
+    )
+
+    assert rebased is not None
+    assert not REFUSED & _flatten_keys(rebased["settings"]["resolved"])
+    assert "do-not-leak" not in json.dumps(rebased)
+
+
+def test_a_rebase_carries_the_current_mandate_text_forward(tmp_path):
+    settings = _settings(tmp_path, "mode: paper\n")
+    record = _record(settings, mandate=_Mandate())
+    rewritten = _Mandate()
+    rewritten.text = "Buy and hold index funds."
+
+    rebased = rebase_inputs(record, settings, mandate=rewritten, at=FROZEN_AT, segment=1)
+
+    assert rebased is not None
+    assert rebased["mandate"]["text"] == "Buy and hold index funds."
+    assert (
+        rebased["config_changes"][0]["mandate"]["to"]["text_sha256"]
+        == (rebased["mandate"]["text_sha256"])
+    )
+
+
+def test_a_fresh_run_freezes_an_empty_change_log_at_epoch_one(tmp_path):
+    inputs = _record(_settings(tmp_path))["inputs"]
+
+    assert inputs["config_epoch"] == 1
+    assert inputs["config_changes"] == []
+
+
 # ── purity, structurally ───────────────────────────────────────────────────────────────────
 
 
 def test_rehydration_reaches_no_io_no_clock_and_no_settings_source():
     """``(record, live_settings) -> Settings``, and nothing else. Rebuilding a ``Settings`` from
     its sources would re-read the environment, ``.env`` and the YAML file — exactly the files a
-    resume must ignore — so this module never constructs one."""
+    resume must ignore — so this module never constructs one. The drift diff and the rebase
+    (story #134) are held to the same rule: both are ``(record, settings) -> value``, so the CLI
+    owns every read and every render."""
     text = REHYDRATE_SOURCE.read_text()
     for forbidden in (
         "datetime.now",

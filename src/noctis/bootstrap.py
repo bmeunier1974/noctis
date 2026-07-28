@@ -21,7 +21,7 @@ and keeping test monkeypatching on the owning modules effective.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -80,6 +80,13 @@ class SessionInputs:
     # mandate` renders as the effective settings diff. Same paths as ``overrides`` by
     # construction (both come from the one applied patch); empty when nothing was overlaid.
     changes: list[OverrideChange] = field(default_factory=list)
+    # The run's frozen ``inputs`` re-frozen on the current files, when this session is a
+    # ``--rebase-config`` resume that found something to adopt (story #134): epoch already bumped,
+    # before/after entry already appended, built once by ``config.rehydrate.rebase_inputs``. The
+    # entrypoint hands it to :func:`open_run_store`, which lets it replace what the record carried.
+    # ``None`` on every other session — including a rebase of a run nothing changed under, which is
+    # a no-op by design rather than a cosmetic epoch bump.
+    rebase: Mapping[str, Any] | None = None
 
 
 def resolve_session(
@@ -91,6 +98,7 @@ def resolve_session(
     time_limit_hours: float | None = None,
     require_gate: bool = False,
     resume: str | None = None,
+    rebase_config: bool = False,
 ) -> SessionInputs:
     """Resolve one session's settings by the one precedence order (docs/configuration.md).
 
@@ -108,7 +116,8 @@ def resolve_session(
     reading ``mandate/``, applying its overlay — is replaced by the run's **frozen** config, while
     the ends are untouched. ``load_settings`` still runs (the live tier: paths, secrets,
     per-process budgets), the safety gate still resolves first and fresh, and the explicit CLI
-    flags still land last.
+    flags still land last. ``rebase_config`` (story #134) puts that middle back for one session:
+    the current files are read, resolved and **adopted** onto the run.
     """
     from noctis.backtest.scorecard import Metric
     from noctis.config.overlay import patch_snapshot
@@ -140,6 +149,13 @@ def resolve_session(
             run_id=resume,
             time_limit_hours=time_limit_hours,
             require_gate=require_gate,
+            rebase_config=rebase_config,
+        )
+    if rebase_config:
+        raise UsageError(
+            "--rebase-config adopts the current config.yaml and mandate/ onto an existing run, so "
+            "it only means something with --resume: a run being minted right now is already being "
+            "frozen on exactly those files."
         )
 
     settings = load_settings(config_path=config_path)
@@ -173,6 +189,7 @@ def resume_session(
     run_id: str,
     time_limit_hours: float | None = None,
     require_gate: bool = False,
+    rebase_config: bool = False,
 ) -> SessionInputs:
     """Resolve the session that **continues** an existing run, under that run's frozen config.
 
@@ -190,7 +207,13 @@ def resume_session(
     here exactly as at a first start — never rehydrated, never restored (AGENTS.md rule 1).
 
     Drift between the record and the current files is normal and silently fine: frozen wins.
-    Inspecting it, and deliberately adopting it, is story #134.
+    ``rebase_config`` (story #134) is how an operator adopts it instead — deliberately, once, and
+    on the record: the current ``config.yaml`` and ``mandate/`` are resolved exactly as on a first
+    start and re-frozen onto the run with the epoch bumped and a before/after entry appended
+    (:func:`~noctis.config.rehydrate.rebase_inputs`). With nothing to adopt it is a **no-op**: this
+    falls through to the ordinary resume rather than bumping an epoch for a change that never
+    happened. It never reaches the refused tier — ``mode``/``allow_live`` are checked before it and
+    refused with a message that says no flag lifts them.
     """
     from noctis.config.rehydrate import assert_mode_unchanged, has_frozen_inputs, rehydrate
     from noctis.reporting.run_store import assert_resumable, read_run_record
@@ -205,7 +228,13 @@ def resume_session(
     addressed = _addressed_id(record, run_id)
     assert_resumable(record, addressed)
     if mode is not None:
-        assert_mode_unchanged(record, mode)
+        assert_mode_unchanged(record, mode, rebasing=rebase_config)
+    if rebase_config:
+        adopted = _adopt_current_config(
+            settings, record, mode=mode, time_limit_hours=time_limit_hours, run_id=addressed
+        )
+        if adopted is not None:
+            return adopted
     if not has_frozen_inputs(record):
         logger.warning(
             "run %s froze no configuration (it predates config freezing, or it is history adopted "
@@ -224,6 +253,82 @@ def resume_session(
     if time_limit_hours is not None:
         settings.time_limit_hours = time_limit_hours
     return SessionInputs(settings=settings, mode=mode, mandate=active, overrides=overrides)
+
+
+def _adopt_current_config(
+    settings: Settings,
+    record: dict,
+    *,
+    mode: Literal["paper", "live"] | None,
+    time_limit_hours: float | None,
+    run_id: str,
+) -> SessionInputs | None:
+    """``--rebase-config``: run this segment on the current files and re-freeze them onto the run.
+
+    The middle of the ordinary precedence chain, put back for one session — ``resolve_mandate`` →
+    :func:`overlay_mandate` → the CLI's live-tier flags — and then the whole thing re-frozen, so the
+    session that adopts a configuration and the record that documents the adoption can never
+    describe two different configurations.
+
+    ``None`` means **nothing to adopt**: the current files and the run's frozen config already
+    agree, so the caller falls through to an ordinary resume and the epoch stays where it is. A
+    bump for a change that never happened would mark the run mixed-config forever, and every
+    consumer rendering ``config_epoch > 1`` as "this run changed mid-flight" would be lying.
+
+    That no-op is the reason the candidate configuration is assembled on a **copy**: a mandate may
+    bind per-process budgets, which are live tier and therefore never drift, so resolving the
+    current mandate to look for drift would otherwise leave its overlay applied to a session that
+    adopted nothing — and the same command would run under two different budgets depending on
+    whether some unrelated key happened to move. The copy is committed only by adopting it.
+
+    The stamp and the segment index are computed here, at the one point that knows both: the
+    appending segment's index is the number of segments the record already carries.
+    """
+    from datetime import UTC, datetime
+
+    from noctis.config.rehydrate import rebase_inputs
+    from noctis.reporting.run_record import utc_iso
+    from noctis.research import resolve_mandate
+
+    candidate = settings.model_copy(deep=True)
+    active = resolve_mandate(candidate, cli_directive=None, cli_mandate=None)
+    overrides = overlay_mandate(candidate, active)
+    warn_if_auto_overlay_is_inert(candidate, active)
+    rebase = rebase_inputs(
+        record,
+        candidate,
+        mandate=active,
+        overrides=overrides,
+        execution_mode=mode,
+        at=utc_iso(datetime.now(UTC)),
+        segment=len(record.get("segments") or []),
+    )
+    if rebase is None:
+        logger.info(
+            "run %s: --rebase-config found no drift — the current config.yaml and mandate/ still "
+            "match what this run froze, so its config_epoch stays at %s",
+            run_id,
+            _frozen_epoch(record),
+        )
+        return None
+    logger.warning(
+        "run %s: adopting the current config.yaml and mandate/ (--rebase-config) — config_epoch "
+        "%s → %s, recorded with a before/after entry in the run record",
+        run_id,
+        _frozen_epoch(record),
+        rebase.get("config_epoch"),
+    )
+    if time_limit_hours is not None:
+        candidate.time_limit_hours = time_limit_hours
+    return SessionInputs(
+        settings=candidate, mode=mode, mandate=active, overrides=overrides, rebase=rebase
+    )
+
+
+def _frozen_epoch(record: Mapping[str, Any]) -> object:
+    """The config epoch a record carries, for a message — never re-decided, only read."""
+    inputs = record.get("inputs")
+    return inputs.get("config_epoch") if isinstance(inputs, Mapping) else None
 
 
 def _addressed_id(record: dict, address: str) -> str:
@@ -727,6 +832,7 @@ def open_run_store(
     mandate: Mandate | None = None,
     mode: str | None = None,
     overrides: list[str] | None = None,
+    rebase: Mapping[str, Any] | None = None,
 ):
     """Open this invocation's run — the always-on run identity, minted here and nowhere else.
 
@@ -755,6 +861,11 @@ def open_run_store(
     is continuing an existing run rather than minting one, which turns an unknown id and a
     ``completed`` run into refusals rather than a surprise new run.
 
+    ``rebase`` is the deliberate re-freeze a ``--rebase-config`` resume built (story #134): already
+    epoch-bumped and change-stamped by :func:`resume_session`, it **replaces** the inputs the record
+    carried instead of being ignored like a fresh freeze would be. Absent (the normal case) nothing
+    about freezing changes at all.
+
     Raises :class:`~noctis.reporting.run_store.RunLockedError` when another engine already holds
     the addressed run — the one failure in this subsystem that is fatal rather than latched.
     """
@@ -775,13 +886,16 @@ def open_run_store(
         command=command,
         label=label,
         resume=resume,
-        inputs=freeze_inputs(
+        inputs=rebase
+        if rebase is not None
+        else freeze_inputs(
             settings,
             mandate=mandate,
             overrides=overrides or [],
             execution_mode=mode,
             frozen_at=utc_iso(tick()),
         ),
+        rebase_config=rebase is not None,
     )
     bind_run_dir(settings, store.run_dir)
     return store

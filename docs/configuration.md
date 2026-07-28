@@ -96,7 +96,8 @@ A run outlives the process that started it: `noctis run --resume <run_id>`
 the same record. That only *means* something if the configuration held still in between — so a
 run's config is **frozen at creation**, stored in its own `run.json`, and restored on every later
 segment. Editing `config.yaml` or a mandate profile tomorrow cannot retroactively change what a
-running experiment was told to do. Drift is normal and silently fine: frozen wins.
+running experiment was told to do. Drift is normal and silently fine: frozen wins — until an
+operator deliberately adopts it ([below](#seeing-the-drift-and-adopting-it)).
 
 Every leaf setting belongs to exactly one of three tiers, classified in
 `src/noctis/config/rehydrate.py` and ratcheted by the test suite the same way the overlay's table
@@ -137,6 +138,27 @@ Because the mandate and the metric are frozen, `--mandate` / `--directive` / `--
 **refused with a reason** on a resume rather than silently ignored. Start a new run to research
 something else — identity is minted, never derived, so a fresh run under any configuration is one
 command away.
+
+### Seeing the drift, and adopting it
+
+Frozen winning silently is right for the common case and wrong as the *only* option: an operator
+who really did mean to change the run's configuration needs a way to say so. Two flags on
+`noctis run --resume` (details and output in
+[cli.md](cli.md#config-drift-seeing-it-and-adopting-it)):
+
+- `--show-config-drift` prints how the current `config.yaml` and `mandate/` differ from what the
+  run froze, then exits. Inspection only — it opens no segment, takes no lock, writes nothing.
+  It compares the **69 frozen keys** and the resolved **mandate text**; the 17 live keys are never
+  reported (they are this process's by design) and the 2 refused ones never appear at all.
+- `--rebase-config` adopts the current files for the rest of the run: it re-freezes them, bumps
+  `inputs.config_epoch`, and appends a before/after entry to `inputs.config_changes` naming the
+  segment. **Never silent** — a run whose config changed mid-flight says so and says where. With
+  no drift it is a no-op: the epoch never moves for a change that did not happen.
+
+The refused tier is absolute here too. `mode` is not in the frozen settings at all (the record
+carries only the gate's verdict), so the one way to *attempt* rebasing it — editing `mode`, opening
+`ALLOW_LIVE`, and asking for the current files — is refused by the mode check that runs before any
+rebase, with a message saying that no flag lifts it.
 
 ## The mandate overlay
 

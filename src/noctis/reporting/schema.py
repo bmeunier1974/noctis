@@ -103,8 +103,32 @@ _EVENT_KEYS = ("t", "segment", "kind", "text")
 # The run's frozen configuration (story #132). Present as an explicit ``null`` on a run that never
 # froze one — an adopted history — and otherwise carrying the rehydration source plus the tier
 # lists that say which keys a resume restores and which it takes from the live process.
-_INPUTS_KEYS = ("config_epoch", "frozen_at_utc", "execution_mode", "mandate", "settings")
+_INPUTS_KEYS = (
+    "config_epoch",
+    "config_changes",
+    "frozen_at_utc",
+    "execution_mode",
+    "mandate",
+    "settings",
+)
 _INPUT_SETTINGS_KEYS = ("digest", "resolved", "frozen_keys", "live_keys", "refused_keys")
+
+# One deliberate mid-run config change (story #134, ``--rebase-config``). The list lives **inside
+# ``inputs``**, beside the ``config_epoch`` each entry bumps, rather than in a per-segment list:
+# the run's configuration is one run-level thing, and every entry names the ``segment`` it happened
+# in — the same shape the record's one event stream already uses, so a reader gets a single
+# chronology instead of stitching per-segment lists together. Empty (never absent) on the runs that
+# never rebased, which is how "this run's config never changed" is a stated fact.
+_CONFIG_CHANGE_KEYS = (
+    "at",
+    "segment",
+    "from_epoch",
+    "to_epoch",
+    "digest_before",
+    "digest_after",
+    "settings",
+    "mandate",
+)
 
 # The two settings a record may never carry, whatever else it grows: the live-money double gate.
 # The safety gate re-resolves from the config file and the ALLOW_LIVE environment variable at every
@@ -165,6 +189,7 @@ def _check_inputs(inputs: object) -> list[str]:
         return ["inputs: section must be an object or null"]
     problems = _check_keys("inputs", inputs, _INPUTS_KEYS)
     problems += _check_stamp("inputs.frozen_at_utc", inputs.get("frozen_at_utc"))
+    problems += _check_config_changes(inputs.get("config_changes"))
     settings = inputs.get("settings")
     if not isinstance(settings, Mapping):
         return [*problems, "inputs.settings: must be an object"]
@@ -176,6 +201,28 @@ def _check_inputs(inputs: object) -> list[str]:
             for key in UNRECORDABLE_SETTINGS
             if key in resolved
         ]
+    return problems
+
+
+def _check_config_changes(changes: object) -> list[str]:
+    """Every deliberate config change carries its before/after, its stamp, and its segment.
+
+    A mid-run config change is never silent (epic §5.4): a record that changed configuration must
+    say so *and say where*, or every comparison built on it is false. So the segment index is part
+    of the contract, not an optional nicety.
+    """
+    if changes is None:
+        return []
+    if not isinstance(changes, Sequence) or isinstance(changes, str | bytes):
+        return ["inputs.config_changes: must be a list"]
+    problems: list[str] = []
+    for position, change in enumerate(changes):
+        label = f"inputs.config_changes[{position}]"
+        if not isinstance(change, Mapping):
+            problems.append(f"{label}: must be an object")
+            continue
+        problems += _check_keys(label, change, _CONFIG_CHANGE_KEYS)
+        problems += _check_stamp(f"{label}.at", change.get("at"))
     return problems
 
 

@@ -44,8 +44,13 @@ default, which is the safe direction — it keeps meaning attached to results �
 or credential joins the live tier the moment it is classified in the table it already has to be
 classified in.
 
-**Drift is normal and silently fine here: frozen wins.** Inspecting drift, and deliberately
-adopting it, is story #134; nothing in this module compares the record against the current files.
+**Drift is normal and silently fine: frozen wins.** Seeing it, and deliberately adopting it, is
+story #134 and lives here too, as two more pure functions over the same tiers: :func:`config_drift`
+diffs a record against the settings this process assembled from the current files, and
+:func:`rebase_inputs` turns that diff into a new frozen block with the epoch bumped and a
+before/after ``config_change`` entry appended. Both take values and return values — the CLI does
+every read and every render — and both are defined over :data:`FROZEN` alone, so the live tier is
+never reported as drift (it is live by design) and the refused pair is never rebasable.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ import copy
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -67,12 +73,17 @@ __all__ = [
     "LIVE",
     "REFUSED",
     "RUN_IDENTITY",
+    "ConfigDrift",
+    "MandateDrift",
     "RehydrationError",
+    "SettingDrift",
     "assert_mode_unchanged",
     "classify",
+    "config_drift",
     "freeze_inputs",
     "frozen_digest",
     "has_frozen_inputs",
+    "rebase_inputs",
     "rehydrate",
 ]
 
@@ -194,6 +205,10 @@ def freeze_inputs(
     frozen = _frozen_values(settings)
     return {
         "config_epoch": CONFIG_EPOCH,
+        # Append-only, and empty on a run that never rebased — an explicit ``[]`` rather than an
+        # omitted key, so "this run's config never changed" is a stated fact — see
+        # :func:`rebase_inputs`, the only thing that ever appends to it.
+        "config_changes": [],
         "frozen_at_utc": frozen_at,
         "execution_mode": execution_mode,
         "mandate": _frozen_mandate(mandate, overrides),
@@ -283,7 +298,9 @@ def _assert_gates_unmoved(live: Settings, resumed: Settings) -> None:
         )
 
 
-def assert_mode_unchanged(record: Mapping[str, Any], execution_mode: str) -> None:
+def assert_mode_unchanged(
+    record: Mapping[str, Any], execution_mode: str, *, rebasing: bool = False
+) -> None:
     """Refuse a resume whose frozen execution mode differs from the freshly resolved one.
 
     The safety gate is never rehydrated — it re-resolves from ``config.yaml`` + ``ALLOW_LIVE`` at
@@ -292,17 +309,248 @@ def assert_mode_unchanged(record: Mapping[str, Any], execution_mode: str) -> Non
     acquire paper ones: either way the accumulated numbers would silently mix two different kinds
     of evidence. So this raises rather than preferring a side. A record that froze no mode (an
     adopted run) never blocks a resume.
+
+    ``rebasing`` says the operator asked to adopt the current configuration (``--rebase-config``),
+    which is the one concrete way to *attempt* rebasing the mode: edit ``mode`` in ``config.yaml``,
+    open ``ALLOW_LIVE``, and ask for the current files. The refusal is the same one — the check runs
+    before, and independently of, any rebase — and the message says explicitly that no flag lifts
+    it, because a silent ignore here would be a live-money gate quietly overruled (AGENTS.md
+    rule 1).
     """
     frozen = _inputs(record).get("execution_mode")
     if frozen is None or frozen == execution_mode:
         return
-    raise RehydrationError(
+    refusal = (
         f"this run's segments were produced in {frozen!r} mode, but this process resolved "
         f"{execution_mode!r}. The safety gate re-resolves at every start and is never restored "
         "from a record, so the two must already agree: a run's accumulated results may not mix "
         f"paper and live segments. Start a new run, or restore the {frozen!r} configuration "
         "(config mode + the ALLOW_LIVE environment gate) and resume again."
     )
+    if rebasing:
+        refusal += (
+            " --rebase-config does not lift this and never will: `mode` and `allow_live` are the "
+            f"live-money double gate ({', '.join(sorted(REFUSED))}) — never written to a record, "
+            "never restored from one, and never rebasable. Only the frozen tier, what the "
+            "accumulated results mean, can be rebased."
+        )
+    raise RehydrationError(refusal)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Drift — what the current files would change, and adopting it deliberately
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class SettingDrift:
+    """One frozen key the current files disagree with the record about, both values in hand."""
+
+    path: str
+    frozen: Any
+    current: Any
+
+    def as_record(self) -> dict[str, Any]:
+        return {"path": self.path, "from": self.frozen, "to": self.current}
+
+
+@dataclass(frozen=True)
+class MandateDrift:
+    """The mandate as the run was told it, beside the mandate the current files resolve to.
+
+    Drift is in the **resolved text** (and its digest), never in the selector: a run freezes what
+    it was told, not which file told it, so renaming a profile behind identical bytes changes
+    nothing about what the accumulated results mean — and rewriting ``profiles/aggressive.md``
+    behind an unchanged selector is exactly the drift this has to catch.
+    """
+
+    frozen_source: str | None
+    current_source: str | None
+    frozen_sha256: str | None
+    current_sha256: str | None
+    frozen_text: str | None
+    current_text: str | None
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "from": {"source": self.frozen_source, "text_sha256": self.frozen_sha256},
+            "to": {"source": self.current_source, "text_sha256": self.current_sha256},
+        }
+
+
+@dataclass(frozen=True)
+class ConfigDrift:
+    """How the current ``config.yaml`` + ``mandate/`` differ from what a run froze.
+
+    Structured, not rendered: the CLI decides how to print it, and the record's ``config_change``
+    entry is built from the same value, so what an operator was shown and what a rebase wrote can
+    never be two different diffs. Falsy when there is nothing to adopt — which is both the
+    "no drift" report and the no-op rebase.
+    """
+
+    settings: tuple[SettingDrift, ...] = ()
+    mandate: MandateDrift | None = None
+    # Whether the record froze a configuration at all. ``False`` for an adopted history (story
+    # #131): there is no frozen side, so there is no difference to show and nothing to rebase.
+    frozen: bool = True
+
+    def __bool__(self) -> bool:
+        return bool(self.settings) or self.mandate is not None
+
+
+def config_drift(
+    record: Mapping[str, Any],
+    settings: Settings,
+    *,
+    mandate: Any = None,
+    overrides: Sequence[str] = (),
+) -> ConfigDrift:
+    """Diff one run's frozen configuration against the settings this process just assembled.
+
+    Pure, and deliberately defined over the same tiers everything else here is:
+
+    * only :data:`FROZEN` keys are compared, so a path knob, a secret or a per-process budget that
+      moved is **not** drift — the live tier is always this process's *by design*, and offering it
+      for adoption would invite an operator to "fix" a non-difference;
+    * :data:`REFUSED` keys are skipped whatever a record claims, because the live-money pair is
+      never recorded, never restored, and never rebasable;
+    * the mandate is compared as **resolved text** (:class:`MandateDrift`), which is the whole
+      reason it is frozen that way — an edited profile behind an unchanged selector shows up here.
+
+    Drift alone changes nothing: a resume runs under the frozen values regardless. This exists so
+    an operator can see what they *would* be adopting before deciding to (:func:`rebase_inputs`).
+    """
+    if not has_frozen_inputs(record):
+        return ConfigDrift(frozen=False)
+    frozen = _frozen_from(record)
+    current = _frozen_values(settings)
+    changes = tuple(
+        SettingDrift(path=path, frozen=frozen.get(path), current=current.get(path))
+        for path in sorted(set(frozen) | set(current))
+        if frozen.get(path) != current.get(path)
+    )
+    return ConfigDrift(settings=changes, mandate=_mandate_drift(record, mandate, overrides))
+
+
+def rebase_inputs(
+    record: Mapping[str, Any],
+    settings: Settings,
+    *,
+    mandate: Any = None,
+    overrides: Sequence[str] = (),
+    execution_mode: str | None = None,
+    at: str,
+    segment: int,
+) -> dict[str, Any] | None:
+    """The run's ``inputs`` block re-frozen on the current files — or ``None`` when nothing moved.
+
+    The deliberate half of drift (``--rebase-config``). The new block is an ordinary
+    :func:`freeze_inputs` of the settings and mandate this process assembled, with two additions
+    that make the change **impossible to miss**: ``config_epoch`` moves, and the before/after diff
+    is appended to ``config_changes`` naming the segment it happened in. A run whose config changed
+    mid-flight says so, and says where, or every cross-run comparison built on it is false.
+
+    **No drift ⇒ no bump.** Returning ``None`` keeps "rebase a run nothing changed under" a real
+    no-op rather than a cosmetic epoch bump that would mark a run as mixed-config for nothing. A
+    record that froze no configuration also returns ``None``: an ordinary resume freezes the
+    current files onto it anyway, which is the same adoption without a change to record.
+
+    Pure: ``at`` arrives as an already-formatted stamp and ``segment`` as the index the appending
+    segment will take, because nothing here reads a clock or a record writer.
+    """
+    drift = config_drift(record, settings, mandate=mandate, overrides=overrides)
+    if not drift:
+        return None
+    prior = _inputs(record)
+    epoch = _recorded_epoch(prior)
+    rebased = freeze_inputs(
+        settings,
+        mandate=mandate,
+        overrides=overrides,
+        execution_mode=execution_mode,
+        frozen_at=at,
+    )
+    digest_before = _recorded_digest(prior)
+    rebased["config_epoch"] = epoch + 1
+    rebased["config_changes"] = [
+        *_recorded_changes(prior),
+        {
+            "at": at,
+            "segment": segment,
+            "from_epoch": epoch,
+            "to_epoch": epoch + 1,
+            "digest_before": digest_before,
+            "digest_after": rebased["settings"]["digest"],
+            "settings": [change.as_record() for change in drift.settings],
+            "mandate": drift.mandate.as_record() if drift.mandate is not None else None,
+        },
+    ]
+    _assert_gates_unrecorded(rebased)
+    return rebased
+
+
+def _assert_gates_unrecorded(inputs: Mapping[str, Any]) -> None:
+    """Prove, after the fact, that a rebase wrote neither live-money gate into the record.
+
+    :func:`freeze_inputs` excludes the pair by construction, so this can only fire on a bug here —
+    which is exactly when it matters, and exactly the belt-and-braces :func:`_assert_gates_unmoved`
+    applies on the way back in. The gates need two independent sources; a record is neither.
+    """
+    resolved = _frozen_resolved({"inputs": inputs})
+    smuggled = sorted(path for path in REFUSED if path in _flattened(resolved))
+    if smuggled:  # pragma: no cover - unreachable unless freezing itself is wrong
+        raise RehydrationError(
+            "a config rebase tried to write a live-money safety gate into the record: "
+            f"{', '.join(smuggled)}. `mode` and `allow_live` are never recorded and never "
+            "rebasable — this is a bug in the freezing tiers, not in the operator's config."
+        )
+
+
+def _frozen_from(record: Mapping[str, Any]) -> dict[str, Any]:
+    """The record's frozen-tier values as dotted leaves — the one reading both sides share."""
+    return {
+        path: value
+        for path, value in _flattened(_frozen_resolved(record)).items()
+        if classify(path) == "frozen"
+    }
+
+
+def _mandate_drift(
+    record: Mapping[str, Any], mandate: Any, overrides: Sequence[str]
+) -> MandateDrift | None:
+    """The mandate half of the diff, or ``None`` when the resolved text is byte-identical."""
+    frozen = _inputs(record).get("mandate")
+    frozen = frozen if isinstance(frozen, Mapping) else None
+    current = _frozen_mandate(mandate, overrides)
+    frozen_sha = str(frozen.get("text_sha256")) if frozen else None
+    current_sha = current["text_sha256"] if current else None
+    if frozen_sha == current_sha:
+        return None
+    return MandateDrift(
+        frozen_source=str(frozen.get("source")) if frozen else None,
+        current_source=current["source"] if current else None,
+        frozen_sha256=frozen_sha,
+        current_sha256=current_sha,
+        frozen_text=str(frozen.get("text")) if frozen else None,
+        current_text=current["text"] if current else None,
+    )
+
+
+def _recorded_changes(inputs: Mapping[str, Any]) -> list[Any]:
+    """The change entries already on the record — carried forward, never rewritten."""
+    changes = inputs.get("config_changes")
+    return list(changes) if isinstance(changes, Sequence) and not isinstance(changes, str) else []
+
+
+def _recorded_epoch(inputs: Mapping[str, Any]) -> int:
+    """The epoch a record is at, defaulting to the first — a block that lost the key still bumps
+    to a *larger* number rather than restarting the count."""
+    epoch = inputs.get("config_epoch")
+    return epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else CONFIG_EPOCH
+
+
+def _recorded_digest(inputs: Mapping[str, Any]) -> str | None:
+    settings = inputs.get("settings")
+    digest = settings.get("digest") if isinstance(settings, Mapping) else None
+    return str(digest) if digest is not None else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

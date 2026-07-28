@@ -165,6 +165,9 @@ def test_every_record_carries_an_engine_identity_even_with_a_null_component():
 
 FROZEN_INPUTS = {
     "config_epoch": 1,
+    # Empty until an operator deliberately adopts a changed configuration (story #134): the epoch
+    # and its change log live together, because one is meaningless without the other.
+    "config_changes": [],
     "frozen_at_utc": "2026-07-27T14:22:33.418Z",
     "execution_mode": "paper",
     "mandate": {"source": "profile:aggressive", "text": "Trade volatility.", "text_sha256": "ab"},
@@ -218,6 +221,42 @@ def test_the_validator_names_a_frozen_inputs_block_missing_a_key():
 
 def test_validate_accepts_a_record_with_frozen_inputs():
     assert schema.validate(build(_artifacts(inputs=FROZEN_INPUTS))) == []
+
+
+def test_validate_accepts_a_record_whose_config_was_rebased_mid_run():
+    """A run that adopted a new configuration mid-flight is a valid record — a *marked* one."""
+    inputs = json.loads(json.dumps(FROZEN_INPUTS))
+    inputs["config_epoch"] = 2
+    inputs["config_changes"] = [_CONFIG_CHANGE]
+
+    assert schema.validate(build(_artifacts(inputs=inputs))) == []
+
+
+def test_the_validator_names_a_config_change_that_does_not_say_where_it_happened():
+    """A mid-run config change must say so *and say where*, or a reader cannot tell which segments
+    ran under which configuration — and every comparison built on the record is then guesswork."""
+    inputs = json.loads(json.dumps(FROZEN_INPUTS))
+    change = json.loads(json.dumps(_CONFIG_CHANGE))
+    del change["segment"]
+    change["at"] = "yesterday"
+    inputs["config_changes"] = [change]
+
+    problems = schema.validate(build(_artifacts(inputs=inputs)))
+
+    assert any("inputs.config_changes[0].segment" in problem for problem in problems)
+    assert any("inputs.config_changes[0].at" in problem for problem in problems)
+
+
+_CONFIG_CHANGE = {
+    "at": "2026-08-03T02:10:04.002Z",
+    "segment": 4,
+    "from_epoch": 1,
+    "to_epoch": 2,
+    "digest_before": "0f1e2d3c4b5a",
+    "digest_after": "5a4b3c2d1e0f",
+    "settings": [{"path": "promotion.metric", "from": "sharpe", "to": "sortino"}],
+    "mandate": None,
+}
 
 
 # ── resuming is refused only where it must be ──────────────────────────────────────────────

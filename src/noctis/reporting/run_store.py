@@ -155,6 +155,7 @@ def open_run(
     stale_after_s: float = STALE_HEARTBEAT_S,
     resume: bool = False,
     inputs: Mapping[str, object] | None = None,
+    rebase_config: bool = False,
 ) -> RunStore:
     """Open a run for this process: mint or address it, lock it, append a segment, write.
 
@@ -175,6 +176,11 @@ def open_run(
     yet** — freezing happens once, at creation. Every later segment carries the record's own inputs
     forward untouched, which is what makes "the current ``config.yaml`` is ignored" true of the
     artifact and not just of the rehydration path.
+
+    ``rebase_config`` is the one deliberate exception (story #134): the operator asked to adopt the
+    current configuration, so ``inputs`` **replaces** what the record carried. It arrives already
+    re-frozen — epoch bumped, before/after entry appended — because what a config change *is* stays
+    in ``config.rehydrate``; this only decides that a rebased block wins over a carried one.
     """
     from noctis.observability.debug import new_run_id
 
@@ -207,6 +213,7 @@ def open_run(
         writer=writer or write,
         opening_note=steal_note,
         inputs=inputs,
+        rebase_config=rebase_config,
     )
 
 
@@ -893,6 +900,7 @@ class RunStore:
         writer: Callable[[Path, dict], None] = write,
         opening_note: RecordEvent | None = None,
         inputs: Mapping[str, object] | None = None,
+        rebase_config: bool = False,
     ) -> None:
         self._run_dir = Path(run_dir)
         self._clock = clock
@@ -925,8 +933,9 @@ class RunStore:
             events=tuple(artifacts.events),
             errors=tuple(artifacts.errors),
             # Frozen at creation: the record's own inputs win, and this process's are taken only
-            # by a run that has never frozen any (a fresh one, or an adopted history).
-            inputs=artifacts.inputs if artifacts.inputs is not None else inputs,
+            # by a run that has never frozen any (a fresh one, or an adopted history) — or by a
+            # deliberate ``--rebase-config``, which is the operator saying "adopt these instead".
+            inputs=inputs if rebase_config or artifacts.inputs is None else artifacts.inputs,
         )
         if opening_note is not None:
             self._append(

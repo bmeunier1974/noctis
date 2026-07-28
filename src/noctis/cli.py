@@ -250,6 +250,132 @@ def _echo_mandate_preflight(mandate, changes: list[OverrideChange]) -> None:
         typer.echo(f"  {change.path:<{width}}  {change.before} → {change.after}")
 
 
+def _show_config_drift(config: str | None, resume: str | None) -> None:
+    """``--show-config-drift``: print what a rebase *would* adopt, and leave the run alone.
+
+    An inspection, structurally: it resolves the current files exactly as a first start would,
+    reads the addressed record, and renders the diff. It opens no segment, takes no lock and
+    writes nothing — a command an operator runs to decide must not itself be a decision.
+
+    The comparison is the freezing tiers' own (:func:`~noctis.config.rehydrate.config_drift`), so
+    what is shown here is exactly what ``--rebase-config`` would write: the frozen keys and the
+    resolved mandate text, never the live tier (always this process's, so never drift) and never
+    the refused pair (never recorded, never restored, never rebasable).
+    """
+    from noctis.bootstrap import UsageError
+    from noctis.config.rehydrate import config_drift
+    from noctis.reporting.run_store import RunNotFoundError, read_run_record
+
+    if resume is None:
+        _exit_red(
+            UsageError(
+                "--show-config-drift compares a run's frozen config against the current files, so "
+                "it needs the run: pass --resume <address> (`noctis runs` lists them)."
+            )
+        )
+    current = _resolve_session_or_exit(config)
+    try:
+        record = read_run_record(current.settings.runs_dir, resume)
+    except RunNotFoundError as exc:
+        _exit_red(exc, prefix="RESUME: ")
+    run = record.get("run")
+    run_id = str((run.get("run_id") if isinstance(run, Mapping) else None) or resume)
+    inputs = record.get("inputs")
+    inputs = inputs if isinstance(inputs, Mapping) else None
+    drift = config_drift(
+        record, current.settings, mandate=current.mandate, overrides=current.overrides
+    )
+    _echo_config_drift(drift, run_id=run_id, inputs=inputs)
+
+
+def _echo_config_drift(drift, *, run_id: str, inputs: Mapping | None) -> None:
+    """Render one run's config drift — the only place the diff becomes text.
+
+    Three shapes, because they are three different situations: a run that froze nothing has
+    nothing to compare, a run in step with the files has nothing to adopt, and a run that has
+    drifted needs every changed key with both values side by side. The closing lines always say
+    what happens *next* — frozen wins unless you rebase — because the diff itself decides nothing.
+    """
+    if not drift.frozen:
+        typer.echo(
+            f"Run {run_id} froze no configuration (it predates config freezing, or it is history "
+            "adopted by `noctis migrate`), so there is nothing to compare. Its next resume "
+            "freezes the current config.yaml and mandate/ onto it."
+        )
+        return
+    epoch = inputs.get("config_epoch") if inputs is not None else None
+    frozen_at = inputs.get("frozen_at_utc") if inputs is not None else None
+    if not drift:
+        typer.echo(
+            f"No config drift for run {run_id}: the current config.yaml and mandate/ still match "
+            f"what it froze (config_epoch {epoch}, frozen at {frozen_at})."
+        )
+        return
+    typer.echo(f"Config drift for run {run_id} (config_epoch {epoch}, frozen at {frozen_at}):")
+    typer.echo("")
+    if drift.settings:
+        typer.echo("settings (frozen tier — a resume ignores the current files for these):")
+        width = max(len(change.path) for change in drift.settings)
+        for change in drift.settings:
+            typer.echo(f"  {change.path:<{width}}  {change.frozen!r} → {change.current!r}")
+    if drift.mandate is not None:
+        mandate = drift.mandate
+        typer.echo("mandate (frozen as resolved text, not as a selector):")
+        typer.echo(f"  source       {mandate.frozen_source} → {mandate.current_source}")
+        frozen_sha, current_sha = _short(mandate.frozen_sha256), _short(mandate.current_sha256)
+        typer.echo(f"  text_sha256  {frozen_sha} → {current_sha}")
+        typer.echo(f"  frozen text  {_excerpt(mandate.frozen_text)}")
+        typer.echo(f"  current text {_excerpt(mandate.current_text)}")
+    typer.echo("")
+    typer.echo(
+        "Frozen wins: resuming this run keeps the left-hand values, which is what makes its "
+        "accumulated results mean one thing. Adopt the right-hand ones deliberately with "
+        "`--rebase-config` (it bumps config_epoch and records a before/after entry)."
+    )
+    typer.echo(
+        "The live tier — paths, secrets, and per-process budgets like --time-limit-hours — is "
+        "always this process's and is never drift; `mode`/`allow_live` are never rebasable."
+    )
+
+
+def _short(digest: str | None) -> str:
+    """A digest as a label, not a wall of hex — the full value is in the record."""
+    return "none" if digest is None else digest[:12]
+
+
+def _excerpt(text: str | None, limit: int = 160) -> str:
+    """One mandate body as a single readable line, truncated honestly."""
+    if text is None:
+        return "none"
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else f"{flat[:limit]}… ({len(flat)} chars)"
+
+
+def _echo_config_rebase(rebase: Mapping | None, *, rebased: bool) -> None:
+    """Say what ``--rebase-config`` did — including when it deliberately did nothing.
+
+    The no-op is worth a line of its own: an operator who asked to adopt the current files and is
+    told nothing would reasonably assume an epoch moved. It did not, because nothing had changed.
+    """
+    if not rebased:
+        return
+    if rebase is None:
+        typer.echo(
+            "Config rebase: no drift — this run's frozen config already matches the "
+            "current config.yaml and mandate/, so config_epoch is unchanged."
+        )
+        return
+    change = rebase["config_changes"][-1]
+    moved = len(change["settings"])
+    parts = [f"{moved} setting(s)"] if moved else []
+    if change["mandate"] is not None:
+        parts.append("the mandate text")
+    typer.echo(
+        f"Config rebased: config_epoch {change['from_epoch']} → {change['to_epoch']} "
+        f"({', '.join(parts)}), recorded in segment {change['segment']}."
+    )
+
+
 def _echo_research_engine(settings) -> None:
     """Announce, up front, which research engine the loop will run — the agent (an LLM authoring
     strategies) or the legacy proposer/Optuna fallback — and the model behind it. The fallback is
@@ -294,6 +420,24 @@ def run(
         "and a label may be reused, in which case @LABEL refuses rather than guess. Also accepted "
         "with --resume, where it renames the run it addressed (a nickname decides nothing).",
     ),
+    show_config_drift: bool = typer.Option(
+        False,
+        "--show-config-drift",
+        help="With --resume: print how the current config.yaml and mandate/ differ from the "
+        "config that run froze, then exit. Inspection only — it opens no segment, takes no lock "
+        "and writes nothing. Drift alone is normal and costs nothing: a resume keeps using the "
+        "frozen values. Only frozen keys and the resolved mandate text are compared; the live "
+        "tier (paths, secrets, per-process budgets) is always this process's and is never drift.",
+    ),
+    rebase_config: bool = typer.Option(
+        False,
+        "--rebase-config",
+        help="With --resume: deliberately adopt the current config.yaml and mandate/ for the rest "
+        "of this run. Bumps inputs.config_epoch and appends a before/after config_change entry "
+        "naming the segment, so a run whose config changed mid-flight always says so. A NO-OP "
+        "when there is no drift — the epoch never moves for nothing. `mode` and `allow_live` are "
+        "never rebasable: the safety gate re-resolves from two independent sources every start.",
+    ),
     directive: str = typer.Option(
         None,
         "--directive",
@@ -334,6 +478,7 @@ def run(
     import sys
 
     from noctis.bootstrap import (
+        UsageError,
         build_event_sink,
         build_lake,
         build_memory,
@@ -352,6 +497,19 @@ def run(
         level=_logging_level(verbose), format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
 
+    # Seeing what you would adopt is not adopting it (story #134): --show-config-drift prints the
+    # diff and exits *before* anything opens a run, so an inspection never becomes a decision.
+    if show_config_drift and rebase_config:
+        _exit_red(
+            UsageError(
+                "--show-config-drift inspects and exits; --rebase-config adopts. Pass one: look "
+                "first, then decide."
+            )
+        )
+    if show_config_drift:
+        _show_config_drift(config, resume)
+        return
+
     # The composition root owns the ordering: safety gate → mandate → overlay → CLI flags.
     # Under `run` a pinned mandate's overlay IS the metric selector (there is no --metric).
     inputs = _resolve_session_or_exit(
@@ -361,6 +519,7 @@ def run(
         time_limit_hours=time_limit_hours,
         require_gate=True,
         resume=resume,
+        rebase_config=rebase_config,
     )
     settings, mode, active_mandate = inputs.settings, inputs.mode, inputs.mandate
     assert mode is not None  # require_gate=True always resolves it
@@ -393,11 +552,13 @@ def run(
             mandate=active_mandate,
             mode=mode,
             overrides=inputs.overrides,
+            rebase=inputs.rebase,
         )
     except RunLockedError as exc:
         _exit_red(exc, prefix="RUN LOCKED: ")
     typer.echo(f"{'Resumed run' if resume else 'Run'}: {store.run_id}")
     typer.echo(f"Run record: {store.record_path}")
+    _echo_config_rebase(inputs.rebase, rebased=rebase_config)
 
     # --debug assembles the QA recorder in the composition root (prune-on-start → run tree →
     # stamped manifest), echoes the run id + report path here at start, and — when the legacy
