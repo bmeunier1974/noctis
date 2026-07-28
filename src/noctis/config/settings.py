@@ -291,6 +291,21 @@ class AgentResearchConfig(BaseModel):
     episode_retries: int = 2
 
 
+class ModelPriceConfig(BaseModel):
+    """One model prefix's four ``$/Mtok`` rates — the shape ``research.pricing`` entries take.
+
+    All four are required on purpose: input, output, cache-write and cache-read bill separately,
+    and a half-stated price would silently value the unstated fields at nothing. The record calls
+    everything derived from these an *estimate* (see ``noctis/research/pricing.py``), because list
+    prices ignore discounts, batch tiers and mid-month changes.
+    """
+
+    input_usd_per_mtok: float
+    output_usd_per_mtok: float
+    cache_write_usd_per_mtok: float
+    cache_read_usd_per_mtok: float
+
+
 class ResearchConfig(BaseModel):
     """Cross-sectional (panel) research configuration.
 
@@ -359,6 +374,15 @@ class ResearchConfig(BaseModel):
     # 0 = off (the default). Degrades to the always-on code-side consolidation without a
     # client; never runs inside a research session's own loop.
     memory_distill_every: int = 0
+    # Price overrides for the run record's spend estimate (story #140), keyed by **model prefix**
+    # — ``{"anthropic/claude-opus-4": {input_usd_per_mtok: 5.0, …}}``. Empty (the default) means
+    # the shipped table in ``noctis/research/pricing.py`` under its own version. An override adds
+    # a model the table never heard of or restates one it did; the resulting table identifies
+    # itself as ``<version>+custom.<digest>`` in the record, so a reader can always tell whether
+    # the numbers came from the engine's own prices. Pure accounting: nothing here is read by a
+    # gate, a budget or a research decision — it only changes what the record *reports* a run
+    # cost, which is why the mandate overlay refuses it (an experiment may not restate its bill).
+    pricing: dict[str, ModelPriceConfig] = Field(default_factory=dict)
 
 
 class ObservabilityConfig(BaseModel):

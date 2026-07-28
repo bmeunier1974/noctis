@@ -466,6 +466,55 @@ def test_result_fields_persist_to_the_session_ledger(tmp_path):
     assert episode.misfires == 1
 
 
+def test_result_carries_the_four_field_usage_split_summed_across_attempts(tmp_path):
+    """The split the price table needs (story #140): the same completions the token total already
+    sums, kept field by field instead of collapsed, and persisted with the episode line."""
+    result, _ = _run(
+        [
+            text_turn("<tool_call>x</tool_call>", usage={"input_tokens": 7, "output_tokens": 3}),
+            emit_turn(
+                {"action": "promote", "confidence": 0.8},
+                usage={
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 60,
+                },
+            ),
+        ]
+    )
+
+    assert result.usage == {
+        "input_tokens": 107,
+        "output_tokens": 23,
+        "cache_creation_input_tokens": 5,
+        "cache_read_input_tokens": 60,
+    }
+    assert result.tokens == sum(result.usage.values())
+
+    ledger = SessionLedger(tmp_path, "s1")
+    ledger.record_episode(
+        stage="decide",
+        model=result.model,
+        outcome=result.outcome,
+        tokens=result.tokens,
+        misfires=result.misfires,
+        usage=result.usage,
+    )
+    assert ledger.episodes()[0].usage == result.usage
+
+
+def test_a_backend_that_reports_no_usage_at_all_contributes_a_real_zero_split():
+    result, _ = _run([emit_turn({"action": "hold", "confidence": 0.5})])
+
+    assert result.usage == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
+
+
 def test_result_is_a_frozen_typed_record():
     result, _ = _run([emit_turn({"action": "hold", "confidence": 0.5})])
     assert isinstance(result, EpisodeResult)

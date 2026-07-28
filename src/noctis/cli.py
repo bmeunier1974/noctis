@@ -1630,6 +1630,24 @@ def research(
             f"{session.toolbox.backtests_run} backtests,{coder_calls} "
             f"{summary.promotions} promotion(s), {summary.rejections} rejection(s)."
         )
+        # What the session spent, and — deliberately — that the dollars are an *estimate* priced
+        # from a versioned table rather than a charge anyone made (story #140). A model the table
+        # does not carry is named as unpriced: a zero would be a confidently false bill.
+        if summary.tokens_total:
+            # The version named here is the session's **own** table (the one the run was priced
+            # with, config override included), read off the same session that spent the tokens —
+            # so the line can never credit a bill to a table that did not produce it.
+            table_version = session.price_table.version
+            if summary.usd_estimate is None:
+                typer.echo(
+                    f"Spend: {summary.tokens_total:,} tokens; no price for {session.model!r} in "
+                    f"table {table_version} — cost not estimated"
+                )
+            else:
+                typer.echo(
+                    f"Spend: {summary.tokens_total:,} tokens ≈ ${summary.usd_estimate:.4f} "
+                    f"(estimate, price table {table_version})"
+                )
         if summary.candidates:
             typer.echo(f"Strategies worked on: {', '.join(summary.candidates)}")
             typer.echo(

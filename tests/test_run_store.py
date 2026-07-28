@@ -382,6 +382,179 @@ def test_the_trial_count_is_re_read_from_the_journals_never_carried_across_a_res
     assert _record(second.run_dir)["run"]["cumulative_trials"] == 2
 
 
+# ── spend, read off the run's own ledgers and board (story #140) ───────────────────────────
+
+
+def _journal_episode(run_dir: Path, session: str, *, stage: str, model: str, **usage) -> None:
+    """Journal one model judgment into the run's own session ledger — the only place the record's
+    spend is ever read from."""
+    from noctis.research.ledger import SessionLedger
+
+    split = {
+        "input_tokens": usage.get("inp", 0),
+        "output_tokens": usage.get("out", 0),
+        "cache_creation_input_tokens": usage.get("write", 0),
+        "cache_read_input_tokens": usage.get("read", 0),
+    }
+    SessionLedger(run_dir / "state", session).record_episode(
+        stage=stage,
+        model=model,
+        outcome="ok",
+        tokens=sum(split.values()),
+        usage=split,
+    )
+
+
+def _crown(run_dir: Path, *families: str) -> None:
+    """Crown champions on the run's own board — the denominator of the per-champion numbers."""
+    from noctis.champions.registry import ChampionEntry, ChampionRegistry
+    from tests.test_champions import make_scorecard
+
+    registry = ChampionRegistry(run_dir / "state" / "champions.json", capacity=len(families))
+    registry.champions = [
+        ChampionEntry(
+            family=name,
+            params={},
+            scorecard=make_scorecard(name, 1.2, 1.4),
+            crowned_at="2026-07-27T15:00:00+00:00",
+            rationale="free slot",
+        )
+        for name in families
+    ]
+    registry.save()
+
+
+def test_the_record_derives_its_spend_from_the_runs_own_session_ledgers(tmp_path):
+    """Token usage was computed and then only logged; now it is read back off the ledgers that
+    journaled it, so cost per champion is recoverable from the artifact alone (story #140)."""
+    runs = tmp_path / "runs"
+    clock = FakeClock()
+    store = _open(runs, clock)
+    assert _record(store.run_dir)["spend"] is None  # nothing journaled yet ⇒ null, not zeros
+
+    _journal_episode(
+        store.run_dir, "s1", stage="formulate", model="anthropic/claude-opus-4-8", inp=1000, out=200
+    )
+    _journal_episode(
+        store.run_dir, "s1", stage="decide", model="anthropic/claude-opus-4-8", inp=500, read=4000
+    )
+    _journal_episode(
+        store.run_dir, "s2", stage="author", model="ollama/qwen3-coder-30b", inp=9000, out=3000
+    )
+    _crown(store.run_dir, "momo_1", "drift_2")
+    _journal_trial(store.run_dir, "momo_1", lookback=10)
+    clock.advance(3600)
+    store.close(reason="time_limit", phase_seconds={"RESEARCH": 3600.0})
+
+    spend = _record(store.run_dir)["spend"]
+    assert spend["tokens"] == {
+        "input_tokens": 10500,
+        "output_tokens": 3200,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 4000,
+        "total_tokens": 17700,
+    }
+    assert set(spend["by_model"]) == {"anthropic/claude-opus-4-8", "ollama/qwen3-coder-30b"}
+    assert set(spend["by_stage"]) == {"formulate", "decide", "author"}
+    assert spend["by_model"]["ollama/qwen3-coder-30b"]["usd_estimate"] == 0.0  # a stated zero
+    assert spend["llm_usd_estimate"] > 0
+    # The efficiency numbers, over the run's own champions, trials and research hours.
+    assert spend["efficiency"]["usd_per_champion_estimate"] == round(
+        spend["llm_usd_estimate"] / 2, 6
+    )
+    assert spend["efficiency"]["trials_per_hour"] == 1.0
+    assert schema.validate(_record(store.run_dir)) == []
+
+
+def test_the_record_names_the_price_table_that_produced_its_estimate(tmp_path):
+    from noctis.research.pricing import PRICING_TABLE_VERSION
+
+    runs = tmp_path / "runs"
+    store = _open(runs, FakeClock())
+    _journal_episode(store.run_dir, "s1", stage="decide", model="openai/gpt-5.4", inp=10, out=2)
+    store.checkpoint()
+
+    assert _record(store.run_dir)["spend"]["pricing_table_version"] == PRICING_TABLE_VERSION
+
+
+def test_an_operator_price_override_prices_the_run_and_says_the_table_is_no_longer_the_shipped_one(
+    tmp_path,
+):
+    """The override travels with the run's frozen config, and it cannot borrow the shipped
+    version label — a reader must always be able to tell whose prices these are."""
+    from noctis.research.pricing import PRICING_TABLE_VERSION
+
+    inputs = {
+        "settings": {
+            "resolved": {
+                "research": {
+                    "pricing": {
+                        "acme/oracle": {
+                            "input_usd_per_mtok": 1_000_000.0,
+                            "output_usd_per_mtok": 0.0,
+                            "cache_write_usd_per_mtok": 0.0,
+                            "cache_read_usd_per_mtok": 0.0,
+                        }
+                    }
+                }
+            }
+        }
+    }
+    runs = tmp_path / "runs"
+    store = _open(runs, FakeClock(), inputs=inputs)
+    _journal_episode(store.run_dir, "s1", stage="decide", model="acme/oracle-1", inp=1_000_000)
+    store.checkpoint()
+
+    spend = _record(store.run_dir)["spend"]
+    assert spend["llm_usd_estimate"] == 1_000_000.0
+    assert spend["pricing_table_version"].startswith(f"{PRICING_TABLE_VERSION}+custom.")
+
+
+def test_a_model_the_price_table_never_heard_of_costs_null_not_zero(tmp_path):
+    runs = tmp_path / "runs"
+    store = _open(runs, FakeClock())
+    _journal_episode(store.run_dir, "s1", stage="decide", model="acme/oracle-1", inp=10, out=2)
+    _crown(store.run_dir, "momo_1")
+    store.checkpoint()
+
+    spend = _record(store.run_dir)["spend"]
+    assert spend["tokens"]["total_tokens"] == 12  # the tokens are known
+    assert spend["by_model"]["acme/oracle-1"]["usd_estimate"] is None
+    assert spend["llm_usd_estimate"] is None
+    assert spend["efficiency"]["usd_per_champion_estimate"] is None
+
+
+def test_spend_is_re_derived_from_the_ledgers_never_carried_across_a_restart(tmp_path):
+    runs = tmp_path / "runs"
+    clock = FakeClock()
+    first = _open(runs, clock)
+    _journal_episode(first.run_dir, "s1", stage="decide", model="openai/gpt-5.4", inp=100)
+    clock.advance(3600)
+    first.close(reason="time_limit")
+
+    second = _open(runs, clock, run_id=first.run_id, resume=True, command="research")
+    _journal_episode(second.run_dir, "s2", stage="decide", model="openai/gpt-5.4", inp=300)
+    clock.advance(1800)
+    second.close(reason="agent_done")
+
+    # Nothing was handed forward: the resumed process read both nights' ledgers off disk.
+    assert _record(second.run_dir)["spend"]["tokens"]["input_tokens"] == 400
+
+
+def test_an_unreadable_ledger_costs_the_record_its_spend_not_the_run(tmp_path):
+    """Missing evidence is not a reason to fail a write — the record says it does not know."""
+    runs = tmp_path / "runs"
+    store = _open(runs, FakeClock())
+    sessions = store.run_dir / "state" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "s1.jsonl").write_text("{not json at all\n")
+    store.checkpoint()
+
+    record = _record(store.run_dir)
+    assert record["spend"]["tokens"]["total_tokens"] == 0  # a malformed line is skipped, not fatal
+    assert schema.validate(record) == []
+
+
 def test_a_run_killed_mid_segment_is_marked_interrupted_on_the_next_open(tmp_path, caplog):
     runs = tmp_path / "runs"
     clock = FakeClock()

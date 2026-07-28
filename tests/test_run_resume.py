@@ -80,58 +80,169 @@ def _record(run_dir: Path) -> dict:
 def _totals(record: dict) -> dict:
     """Every cumulative number a record carries, plus the work its segments account for.
 
-    The sections that hold the rest of the run's totals — trials, tokens, champions, the equity
-    curve — arrive in stories #140–#142. They slot in *here*, as more keys of this one dict, and
-    the equivalence test above keeps passing unchanged: that is the whole point of the epic's
+    The sections that hold the rest of the run's totals — the equity curve, the strategies —
+    arrive in stories #141–#142. They slot in *here*, as more keys of this one dict, and the
+    equivalence test above keeps passing unchanged: that is the whole point of the epic's
     "derived, never incremented" rule. Nothing is invented in the meantime; what is summed below
     is exactly what the record carries today.
+
+    Per-*segment* breakdowns are summed rather than compared entry by entry — a three-segment run
+    obviously has three of them. What must match is the total they add up to, which is exactly the
+    claim "attribution is per night, but the bill is the run's".
     """
     counters: dict[str, int] = {}
     for segment in record["segments"]:
         for name, value in segment["counters"].items():
             counters[name] = counters.get(name, 0) + value
+    spend = record["spend"] or {}
+    per_segment: dict[str, float] = {}
+    for bucket in spend.get("by_segment") or []:
+        for name, value in bucket.items():
+            if name != "index" and isinstance(value, int | float):
+                per_segment[name] = per_segment.get(name, 0) + value
     return {
         "status": record["run"]["status"],
         "complete": record["run"]["complete"],
         "cumulative_runtime_s": record["run"]["cumulative_runtime_s"],
+        "cumulative_research_s": record["run"]["cumulative_research_s"],
+        "cumulative_trials": record["run"]["cumulative_trials"],
         "truncated": record["run"]["truncated"],
         "counters": counters,
         "events": [event["text"] for event in record["events"]],
         "errors": [error["text"] for error in record["errors"]],
         "engine": record["engine"],
         "frozen_inputs": record["inputs"],
+        # Story #140: the whole spend roll-up, minus the per-segment attribution it is summed into.
+        "spend_tokens": spend.get("tokens"),
+        "spend_by_model": spend.get("by_model"),
+        "spend_by_stage": spend.get("by_stage"),
+        "spend_by_segment_summed": per_segment,
+        "llm_usd_estimate": spend.get("llm_usd_estimate"),
+        "pricing_table_version": spend.get("pricing_table_version"),
+        "efficiency": spend.get("efficiency"),
     }
 
 
-def _drive(runs_dir: Path, tmp_path: Path, *, segments: list[tuple[float, dict]]) -> dict:
-    """Run one experiment as ``segments`` process invocations, and return the record it left."""
+OPUS = "anthropic/claude-opus-4-8"
+
+
+def _episode(stage: str, inp: int, out: int) -> dict:
+    """One judgment episode's journal line — the ledger evidence spend is derived from."""
+    return {
+        "stage": stage,
+        "model": OPUS,
+        "usage": {
+            "input_tokens": inp,
+            "output_tokens": out,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    }
+
+
+def _journal(run_dir: Path, session: str, episodes: list[dict]) -> None:
+    """Journal a night's episodes and one trial into the run's **own** state — the artifacts the
+    record re-derives every total from."""
+    from noctis.research.journal import ExperimentJournal
+    from noctis.research.ledger import SessionLedger
+    from tests.test_champions import make_scorecard
+
+    ledger = SessionLedger(run_dir / "state", session)
+    journal = ExperimentJournal(run_dir / "state")
+    for episode in episodes:
+        ledger.record_episode(
+            stage=episode["stage"],
+            model=episode["model"],
+            outcome="ok",
+            tokens=sum(episode["usage"].values()),
+            usage=episode["usage"],
+        )
+        # One trial per episode, its params keyed on the episode itself, so the same work journals
+        # the same distinct param sets however it is sliced into processes.
+        journal.record_trial(
+            "momo_1",
+            source="sweep",
+            symbols=["AAPL"],
+            params={"lookback": episode["usage"]["input_tokens"]},
+            window={},
+            card=make_scorecard("momo_1", 1.2, 1.4),
+        )
+
+
+def _drive(
+    runs_dir: Path,
+    tmp_path: Path,
+    *,
+    segments: list[tuple[float, dict]],
+    nights: list[list[dict]] | None = None,
+    monkeypatch=None,
+) -> dict:
+    """Run one experiment as ``segments`` process invocations, and return the record it left.
+
+    ``nights[i]`` is the research evidence segment *i* journals into the run's own ledgers, stamped
+    on the same injected clock the store runs on (production shares one wall clock between the
+    two), so the record can attribute each episode to the segment that spent it.
+    """
+    from noctis.research import ledger as ledger_module
+
     clock = FakeClock()
+    if monkeypatch is not None:
+        monkeypatch.setattr(ledger_module, "_now_iso", lambda: clock().isoformat())
     inputs = _inputs(tmp_path)
     run_id: str | None = None
     run_dir = runs_dir
-    for hours, counters in segments:
+    for index, (hours, counters) in enumerate(segments):
         store = _open(
             runs_dir, clock, run_id=run_id, resume=run_id is not None, inputs=inputs, writer=None
         )
         run_id, run_dir = store.run_id, store.run_dir
+        if nights:
+            _journal(run_dir, f"s{index}", nights[index])
         clock.advance(hours * HOUR)
-        store.close(reason="time_limit", counters=counters)
+        store.close(
+            reason="time_limit", counters=counters, phase_seconds={"RESEARCH": hours * HOUR}
+        )
     return _record(run_dir)
 
 
-def test_three_one_hour_segments_total_exactly_what_one_three_hour_segment_does(tmp_path):
+def test_three_one_hour_segments_total_exactly_what_one_three_hour_segment_does(
+    tmp_path, monkeypatch
+):
     """The epic's most important test (D4). Same injected clock, same work, same fakes — one long
-    night and three short ones leave records whose derived totals are identical."""
-    work = [{"cycles": 1, "research_iterations": 4, "trades": 2} for _ in range(3)]
+    night and three short ones leave records whose derived totals are identical.
 
-    one = _drive(tmp_path / "one", tmp_path / "cfg", segments=[(3.0, _summed(work))])
+    Story #140 puts spend under the same rule: the token split, the priced estimate, the
+    per-model/per-stage attribution and the efficiency ratios are all re-derived from the run's own
+    ledgers at write time, so how the work was *sliced into processes* cannot move a single one."""
+    work = [{"cycles": 1, "research_iterations": 4, "trades": 2} for _ in range(3)]
+    nights = [
+        [_episode("formulate", 1000, 200), _episode("decide", 500, 90)],
+        [_episode("formulate", 700, 150)],
+        [_episode("decide", 300, 40), _episode("formulate", 20, 5)],
+    ]
+
+    one = _drive(
+        tmp_path / "one",
+        tmp_path / "cfg",
+        segments=[(3.0, _summed(work))],
+        nights=[[episode for night in nights for episode in night]],
+        monkeypatch=monkeypatch,
+    )
     three = _drive(
-        tmp_path / "three", tmp_path / "cfg", segments=[(1.0, work[i]) for i in range(3)]
+        tmp_path / "three",
+        tmp_path / "cfg",
+        segments=[(1.0, work[i]) for i in range(3)],
+        nights=nights,
+        monkeypatch=monkeypatch,
     )
 
     assert _totals(one) == _totals(three)
     assert one["run"]["cumulative_runtime_s"] == 3 * HOUR
     assert len(one["segments"]) == 1 and len(three["segments"]) == 3
+    # …and the spend really was measured, so the equality above is not two nulls agreeing.
+    assert one["spend"]["tokens"]["total_tokens"] == 3005
+    assert one["spend"]["llm_usd_estimate"] > 0
+    assert [b["total_tokens"] for b in three["spend"]["by_segment"]] == [1790, 850, 365]
 
 
 def _summed(counters: list[dict]) -> dict:

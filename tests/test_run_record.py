@@ -25,6 +25,7 @@ from noctis.reporting.run_record import (
     RecordEvent,
     RunArtifacts,
     SegmentArtifact,
+    SpendEntry,
     build,
     mark_interrupted,
     resume_refusal,
@@ -641,6 +642,235 @@ def test_the_run_reports_the_trials_it_journaled_or_an_explicit_null():
     assert build(_artifacts(trials=3180))["run"]["cumulative_trials"] == 3180
     assert build(_artifacts())["run"]["cumulative_trials"] is None
     assert "cumulative_trials" in build(_artifacts())["run"]
+
+
+# ── spend: token split, priced estimates and efficiency (story #140) ───────────────────────
+
+
+def _usage(inp: int = 0, out: int = 0, write: int = 0, read: int = 0) -> dict[str, int]:
+    return {
+        "input_tokens": inp,
+        "output_tokens": out,
+        "cache_creation_input_tokens": write,
+        "cache_read_input_tokens": read,
+    }
+
+
+OPUS = "anthropic/claude-opus-4-8"
+LOCAL = "ollama/qwen3-coder-30b"
+
+
+def _entry(
+    at: str,
+    *,
+    stage: str = "formulate",
+    model: str = OPUS,
+    usage: dict[str, int] | None = None,
+    usd: float | None = 0.5,
+) -> SpendEntry:
+    """One journaled model judgment, already priced by the store (the record only sums)."""
+    usage = _usage(inp=100, out=20) if usage is None else usage
+    return SpendEntry(
+        at=at,
+        stage=stage,
+        model=model,
+        tokens=sum(usage.values()) if usage else 0,
+        usage=usage,
+        usd_estimate=usd,
+    )
+
+
+# Two nights of judgment episodes, each stamped inside the segment that produced it.
+SPEND = (
+    _entry("2026-07-27T15:00:00.000Z", stage="formulate", usage=_usage(inp=100, out=20, read=8)),
+    _entry("2026-07-27T16:00:00.000Z", stage="decide", usage=_usage(inp=200, out=40), usd=1.0),
+    _entry(
+        "2026-07-28T01:30:00.000Z",
+        stage="author",
+        model=LOCAL,
+        usage=_usage(inp=900, out=300),
+        usd=0.0,
+    ),
+)
+
+
+def _spent(**overrides) -> dict:
+    base = dict(spend=SPEND, pricing_table_version="2026-07", trials=300, champions=2)
+    base.update(overrides)
+    return build(_artifacts(**base))["spend"]
+
+
+def test_the_run_publishes_its_token_split_not_one_opaque_total():
+    """Four fields, because they are billed at four rates — a total cannot be turned into money."""
+    spend = _spent()
+
+    assert spend["tokens"] == {
+        "input_tokens": 1200,
+        "output_tokens": 360,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 8,
+        "total_tokens": 1568,
+    }
+
+
+def test_the_split_is_broken_out_by_model_by_stage_and_by_segment():
+    """Spend has to be attributable: which model, doing what, on which night."""
+    spend = _spent()
+
+    assert set(spend["by_model"]) == {OPUS, LOCAL}
+    assert spend["by_model"][OPUS]["total_tokens"] == 368
+    assert spend["by_model"][LOCAL]["input_tokens"] == 900
+    assert set(spend["by_stage"]) == {"formulate", "decide", "author"}
+    assert spend["by_stage"]["decide"]["output_tokens"] == 40
+    assert [s["index"] for s in spend["by_segment"]] == [0, 1]
+    assert spend["by_segment"][0]["total_tokens"] == 368
+    assert spend["by_segment"][1]["total_tokens"] == 1200
+
+
+def test_every_cost_field_is_named_an_estimate():
+    """The prices are list prices from a versioned table — nothing here is a receipt."""
+    spend = _spent()
+
+    assert spend["llm_usd_estimate"] == 1.5
+    assert spend["pricing_table_version"] == "2026-07"
+    assert spend["by_model"][OPUS]["usd_estimate"] == 1.5
+    assert spend["by_segment"][1]["usd_estimate"] == 0.0
+    priced = [key for key in spend["efficiency"] if "usd" in key]
+    assert priced and all(key.endswith("_estimate") for key in priced)
+
+
+def test_an_unpriced_model_leaves_its_own_cost_and_the_total_null_never_zero():
+    """The story's central rule: an operator must never be shown a confidently false figure."""
+    spend = _spent(
+        spend=(
+            _entry("2026-07-27T15:00:00.000Z", usd=1.25),
+            _entry("2026-07-27T16:00:00.000Z", model="acme/oracle-1", usd=None),
+        )
+    )
+
+    assert spend["by_model"]["acme/oracle-1"]["usd_estimate"] is None
+    assert spend["by_model"][OPUS]["usd_estimate"] == 1.25
+    assert spend["llm_usd_estimate"] is None  # a partial sum is not a total
+    assert spend["by_segment"][0]["usd_estimate"] is None
+    assert spend["efficiency"]["usd_per_champion_estimate"] is None
+
+
+def test_tokens_without_a_split_report_a_known_total_and_null_fields():
+    """A ledger written before the split existed still knows what it spent — just not on what."""
+    spend = _spent(
+        spend=(
+            SpendEntry(
+                at="2026-07-27T15:00:00.000Z",
+                stage="formulate",
+                model=OPUS,
+                tokens=500,
+                usage=None,
+                usd_estimate=None,
+            ),
+        )
+    )
+
+    assert spend["tokens"]["total_tokens"] == 500
+    assert spend["tokens"]["input_tokens"] is None
+    assert spend["by_model"][OPUS]["input_tokens"] is None
+    assert spend["by_model"][OPUS]["total_tokens"] == 500
+
+
+def test_the_efficiency_numbers_are_the_runs_currency_for_comparison():
+    spend = _spent()
+
+    # $1.50 across 2 champions and 300 trials; 15 400 research seconds over both segments.
+    assert spend["efficiency"]["usd_per_champion_estimate"] == 0.75
+    assert spend["efficiency"]["usd_per_trial_estimate"] == 0.005
+    assert spend["efficiency"]["trials_per_hour"] == round(300 / (15400 / 3600), 3)
+    assert spend["efficiency"]["research_hours_per_champion"] == round(15400 / 3600 / 2, 3)
+
+
+def test_an_efficiency_number_with_a_zero_denominator_is_null_not_infinity():
+    """No champion yet is the normal state of a young run — and it is not a division."""
+    spend = _spent(champions=0, trials=0)
+
+    assert spend["efficiency"]["usd_per_champion_estimate"] is None
+    assert spend["efficiency"]["usd_per_trial_estimate"] is None
+    assert spend["efficiency"]["research_hours_per_champion"] is None
+    assert spend["efficiency"]["trials_per_hour"] == 0.0  # zero trials in real hours IS zero
+
+
+def test_a_run_that_never_measured_research_hours_reports_null_throughput():
+    spend = _spent(segments=(_segment_without_phases(),))
+
+    assert spend["efficiency"]["trials_per_hour"] is None
+    assert spend["efficiency"]["research_hours_per_champion"] is None
+
+
+def _segment_without_phases() -> SegmentArtifact:
+    return SegmentArtifact(
+        index=0,
+        started_utc="2026-07-27T14:22:33.418Z",
+        stopped_utc="2026-07-27T18:22:33.418Z",
+        stopped_reason="time_limit",
+        status="stopped",
+        engine=ENGINE,
+        phase_seconds=None,
+    )
+
+
+def test_a_run_with_no_llm_key_reports_null_spend_rather_than_zeros():
+    """The legacy loop needs no key and journals no ledger — so there is nothing to bill."""
+    record = build(_artifacts())
+
+    assert record["spend"] is None
+    assert "spend" in record  # an explicit null, never an omitted key
+    assert schema.validate(record) == []
+
+
+def test_a_run_that_researched_without_an_llm_still_reports_its_trials_and_null_costs():
+    spend = _spent(spend=None, pricing_table_version=None, champions=1)
+
+    assert spend["tokens"] is None
+    assert spend["llm_usd_estimate"] is None
+    assert spend["pricing_table_version"] is None
+    assert spend["efficiency"]["usd_per_trial_estimate"] is None
+    assert spend["efficiency"]["trials_per_hour"] == round(300 / (15400 / 3600), 3)
+
+
+def test_a_journaled_session_that_spent_nothing_reports_a_real_zero():
+    """An empty ledger is not an unknown: the session ran and cost nothing."""
+    spend = _spent(spend=())
+
+    assert spend["tokens"]["total_tokens"] == 0
+    assert spend["llm_usd_estimate"] == 0.0
+
+
+def test_spend_entries_outside_every_segment_window_still_reach_the_run_total():
+    """Attribution is best-effort; the run's own total is not. A number must never vanish."""
+    spend = _spent(spend=(*SPEND, _entry("2020-01-01T00:00:00.000Z", usage=_usage(inp=7))))
+
+    assert spend["tokens"]["total_tokens"] == 1575
+    assert sum(s["total_tokens"] for s in spend["by_segment"]) == 1568
+
+
+def test_the_spend_section_is_valid_and_deterministic():
+    assert schema.validate(build(_artifacts(spend=SPEND, trials=300, champions=2))) == []
+    assert _spent() == _spent()
+
+
+def test_the_validator_names_a_spend_block_missing_a_key():
+    record = build(_artifacts(spend=SPEND, trials=300, champions=2))
+    del record["spend"]["pricing_table_version"]
+
+    assert any("pricing_table_version" in problem for problem in schema.validate(record))
+
+
+def test_the_validator_refuses_a_cost_field_that_does_not_call_itself_an_estimate():
+    """Structural, not a convention: a dollar figure the record does not label an estimate would
+    read as a receipt for prices nobody was charged."""
+    record = build(_artifacts(spend=SPEND, trials=300, champions=2))
+    record["spend"]["by_model"][OPUS]["usd"] = 1.5
+
+    problems = schema.validate(record)
+
+    assert any("usd" in problem and "estimate" in problem for problem in problems)
 
 
 # ── interrupted is decided on the next OPEN, never guessed at write time ────────────────────

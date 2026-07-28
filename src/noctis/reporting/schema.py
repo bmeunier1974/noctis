@@ -53,6 +53,10 @@ KIND = "noctis.run"
 REQUIRED_SECTIONS = (
     "run",
     "segments",
+    # What the run cost and what that bought (story #140). ``null`` for a run with no research
+    # evidence at all — the shape of a run with no LLM key, which must report an unknown bill
+    # rather than a free one.
+    "spend",
     # The newest machine this run has worked on (story #139), derived from the per-segment blocks
     # beside it. ``null`` for a run no segment of which measured an environment.
     "environment_latest",
@@ -238,6 +242,33 @@ _CONFIG_CHANGE_KEYS = (
     "mandate",
 )
 
+# The spend block (story #140): the token split three ways, what it cost, which price table said
+# so, and the efficiency ratios the whole thing exists to make comparable. Present as an explicit
+# ``null`` for a run with no research evidence, and otherwise carrying every key — with ``null``
+# wherever a number is genuinely unknown (an unpriced model, a ledger with no split, a ratio with a
+# zero denominator).
+_SPEND_KEYS = (
+    "tokens",
+    "by_model",
+    "by_stage",
+    "by_segment",
+    "llm_usd_estimate",
+    "pricing_table_version",
+    "efficiency",
+)
+_EFFICIENCY_KEYS = (
+    "usd_per_champion_estimate",
+    "usd_per_trial_estimate",
+    "trials_per_hour",
+    "research_hours_per_champion",
+)
+
+# The marker every dollar figure in the record must carry. Prices come from a versioned list-price
+# table and are therefore *estimates*; a field that named itself ``usd`` alone would read as a
+# receipt, and the difference matters most to exactly the reader who is comparing two runs on cost.
+USD_MARKER = "usd"
+ESTIMATE_MARKER = "estimate"
+
 # The two settings a record may never carry, whatever else it grows: the live-money double gate.
 # The safety gate re-resolves from the config file and the ALLOW_LIVE environment variable at every
 # process start, so a record that carried either one could offer a second source for a decision
@@ -287,6 +318,7 @@ def validate(record: Mapping[str, object]) -> list[str]:
         problems.append("engine: section must be an object")
 
     problems += _check_inputs(record.get("inputs"))
+    problems += _check_spend(record.get("spend"))
     problems += _check_performance(record.get("performance"), run=run)
 
     for name in ("events", "errors"):
@@ -314,6 +346,43 @@ def _check_performance(performance: object, *, run: object) -> list[str]:
             "realised performance, and zeros would render as a result it never produced"
         ]
     return []
+
+
+def _check_spend(spend: object) -> list[str]:
+    """The spend block: ``null``, or every key present — and every cost field an *estimate*.
+
+    The labelling check is structural rather than a convention, because the failure it prevents is
+    silent: a website rendering ``usd`` as a charge, when the number came from a list-price table
+    that ignores discounts, batch tiers and mid-month changes. So a dollar-bearing key that does
+    not say ``estimate`` is a schema violation, wherever in the block it appears.
+    """
+    if spend is None:
+        return []
+    if not isinstance(spend, Mapping):
+        return ["spend: section must be an object or null"]
+    problems = _check_keys("spend", spend, _SPEND_KEYS)
+    problems += _check_block("spend.efficiency", spend.get("efficiency"), _EFFICIENCY_KEYS)
+    return problems + _check_estimate_labels("spend", spend)
+
+
+def _check_estimate_labels(label: str, section: Mapping[str, object]) -> list[str]:
+    """Every key naming dollars, at any depth, must also name itself an estimate."""
+    problems: list[str] = []
+    for key, value in section.items():
+        name = str(key)
+        if USD_MARKER in name.lower() and ESTIMATE_MARKER not in name.lower():
+            problems.append(
+                f"{label}.{name}: a cost field must name itself an estimate "
+                f"(e.g. {name}_{ESTIMATE_MARKER}) — these prices come from a versioned table, "
+                "not from an invoice"
+            )
+        if isinstance(value, Mapping):
+            problems += _check_estimate_labels(f"{label}.{name}", value)
+        elif isinstance(value, Sequence) and not isinstance(value, str | bytes):
+            for position, item in enumerate(value):
+                if isinstance(item, Mapping):
+                    problems += _check_estimate_labels(f"{label}.{name}[{position}]", item)
+    return problems
 
 
 def _check_inputs(inputs: object) -> list[str]:

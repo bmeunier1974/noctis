@@ -295,6 +295,43 @@ def test_pruning_keeps_the_progress_history_the_record_counted_from_the_pruned_s
     assert len(record["segments"]) == 1
 
 
+def test_pruning_keeps_the_spend_the_record_derived_from_the_pruned_ledgers(tmp_path):
+    """The same ordering rule for the same reason (story #140): spend is summed off
+    ``state/sessions/*.jsonl`` at every write, so it is collected before the removal and the bill
+    the record already published stands after it."""
+    runs = tmp_path / "runs"
+    clock = FakeClock()
+    store = _open(runs, clock)
+    _journal_spend(store.run_dir)
+    clock.advance(HOUR)
+    store.close(reason="stop_requested")
+    _finish(runs, store.run_id, clock)
+    spent = _on_disk(store.run_dir)["spend"]
+    assert spent["tokens"]["total_tokens"] == 1200
+
+    _prune(runs, store.run_id, clock)
+
+    assert _on_disk(store.run_dir)["spend"] == spent
+
+
+def _journal_spend(run_dir: Path) -> None:
+    """Journal one priced judgment episode into the run's own session ledger."""
+    from noctis.research.ledger import SessionLedger
+
+    SessionLedger(run_dir / "state", "s1").record_episode(
+        stage="decide",
+        model="anthropic/claude-opus-4-8",
+        outcome="ok",
+        tokens=1200,
+        usage={
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    )
+
+
 def _journal(run_dir: Path, *, trials: int) -> None:
     """Write ``trials`` distinct trial lines into the run's own experiment journal."""
     path = run_dir / "state" / "experiments" / "momentum.jsonl"

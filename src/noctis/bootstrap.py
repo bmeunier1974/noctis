@@ -1458,6 +1458,18 @@ class ResearchSession:
     on_event: Callable | None
 
     @property
+    def price_table(self):
+        """The ``$/Mtok`` table this session's spend is estimated with (story #140).
+
+        Assembled here, from this run's own ``research.pricing`` — one resolution both loops are
+        handed, so the session line an operator reads and the run record's spend block can never be
+        priced from two different tables.
+        """
+        from noctis.research.pricing import table_from_config
+
+        return table_from_config(self.settings.research.pricing)
+
+    @property
     def model(self) -> str:
         """The resolved provider/model string this session will drive — the one resolution the
         research seam owns, so the session, the client probe, and the CLI's status line all name
@@ -1498,6 +1510,7 @@ class ResearchSession:
             prefix_trim=self.budgets.prefix_trim,
             on_event=self.on_event,
             mandate=self.mandate,
+            price_table=self.price_table,
         )
 
     def _run_episodic(self, *, max_iterations: int | None, stop_event) -> ResearchSummary:
@@ -1556,6 +1569,7 @@ class ResearchSession:
             models={"driver": self.model, "coder": agent_cfg.coder_model},
             sweep_trials=self.toolbox.default_sweep_trials,
             on_event=self.on_event,
+            price_table=self.price_table,
         )
 
 

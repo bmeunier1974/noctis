@@ -25,7 +25,7 @@ Two honesty rules the builder implements rather than documents:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -38,10 +38,12 @@ __all__ = [
     "TERMINAL_STATUSES",
     "TRADES_COUNTER",
     "TRADING_PHASE",
+    "USAGE_FIELDS",
     "EngineIdentity",
     "RecordEvent",
     "RunArtifacts",
     "SegmentArtifact",
+    "SpendEntry",
     "build",
     "mark_interrupted",
     "prune_refusal",
@@ -85,6 +87,25 @@ TRADES_COUNTER = "trades"
 # the record is by construction the number the engine rehydrates and enforces — and "the cap is
 # frozen" needs no second mechanism to be true.
 RUN_LIMIT_SETTING = "run_limit_hours"
+
+# The four neutral token fields every provider reports and every provider bills separately (story
+# #140). Spelled here as the record's own field names — with their unit, like every other number —
+# because the record must stay readable without the research package that produced them.
+USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+# The key holding a bucket's summed tokens, whatever the split's fate. A bucket always knows its
+# total (the ledger journals it) even when the split behind it was never recorded.
+TOTAL_TOKENS = "total_tokens"
+
+# Every dollar figure in the record carries this suffix. The prices come from a versioned list-price
+# table (``research/pricing.py``); they ignore volume discounts, batch tiers and mid-month changes,
+# so a number derived from them is an estimate and says so in its own name.
+USD_ESTIMATE = "usd_estimate"
 
 
 def utc_iso(moment: datetime) -> str:
@@ -180,6 +201,30 @@ class SegmentArtifact:
 
 
 @dataclass(frozen=True)
+class SpendEntry:
+    """One journaled model judgment's spend — the atom every spend roll-up is summed from.
+
+    One per ``episode`` line in the run's own session ledgers, read (never counted) by
+    ``run_store.read_spend`` and already priced there, because pricing needs the table and the
+    table comes from the run's frozen configuration — which is I/O. What is left here is
+    arithmetic: sums by model, by stage and by segment, and the efficiency ratios over them.
+
+    ``at`` is what attributes an entry to a segment: the ledgers and the segments share one UTC
+    wall clock, so the segment whose window contains the stamp is the process that spent it.
+    ``usage`` is ``None`` when the line journaled no split (a ledger written before #140) —
+    unknown, never zero — while ``tokens`` stays known either way. ``usd_estimate`` is ``None``
+    for a model the price table does not carry.
+    """
+
+    at: str | None
+    stage: str
+    model: str
+    tokens: int
+    usage: Mapping[str, int] | None = None
+    usd_estimate: float | None = None
+
+
+@dataclass(frozen=True)
 class RunArtifacts:
     """Everything the run tree and this engine know about one run — the builder's only input.
 
@@ -226,6 +271,20 @@ class RunArtifacts:
     # the path-plus-hash references into them no longer resolve"), and re-deriving it from whatever
     # happens to be on disk would let a half-restored directory quietly make it false again.
     state_pruned: bool = False
+    # Every judgment episode this run journaled, priced (story #140) — read at write time off the
+    # run's own session ledgers (``run_store.read_spend``), exactly like ``trials`` is read off its
+    # experiment journals. ``None`` when the run journaled no ledger at all, which is what a run
+    # with no LLM key looks like: it reports a ``null`` bill rather than a $0 one. An **empty**
+    # sequence is different and deliberate — a session that ran and spent nothing.
+    spend: Sequence[SpendEntry] | None = None
+    # Which price table produced the estimates on those entries (``2026-07``, or a
+    # ``2026-07+custom.<digest>`` label when an operator overrode it in config). Carried into the
+    # record so a later reader knows which prices are behind the numbers.
+    pricing_table_version: str | None = None
+    # Champions this run currently holds, read off its own champion board at write time — the
+    # denominator of the two per-champion efficiency numbers. ``None`` when the board could not be
+    # read at all (a pruned or absent state dir), which is not the same as an honest zero.
+    champions: int | None = None
 
 
 def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
@@ -372,6 +431,9 @@ def build(artifacts: RunArtifacts) -> dict:
         "environment_latest": _environment_latest(segments),
         "engine": _engine(artifacts),
         "inputs": dict(artifacts.inputs) if artifacts.inputs is not None else None,
+        # What this run cost and what that bought (story #140) — derived here from the entries the
+        # store read off the run's own ledgers, never from a counter carried across a restart.
+        "spend": _spend(artifacts, segments),
         # The realised paper-account record — an explicit key from story #137 on, and deliberately
         # **always** ``null`` today: nothing in this engine computes a run's equity curve, Sharpe or
         # drawdown yet (that is story #142), and a section invented to hold zeros would be
@@ -382,6 +444,190 @@ def build(artifacts: RunArtifacts) -> dict:
         "events": [event.as_dict() for event in events],
         "errors": [error.as_dict() for error in errors],
     }
+
+
+def _spend(artifacts: RunArtifacts, segments: Sequence[Mapping[str, object]]) -> dict | None:
+    """What the run spent, attributed three ways, plus the ratios it is compared on.
+
+    ``None`` for a run with no research evidence at all — no journaled usage and no journaled
+    trials. That is exactly the shape of a run with no LLM key: the legacy loop needs none, writes
+    no session ledger, and a block of zeros beside it would read as "this run was free" rather than
+    "nobody measured" (epic D10). Once *either* kind of evidence exists the block is present, with
+    an explicit ``null`` wherever a number is unknown.
+
+    Everything here is **derived at write time** from the entries the store read back off the run's
+    own ledgers, so three short segments total exactly what one long one does and a rewrite after a
+    crash cannot double-count (epic D4).
+    """
+    entries = artifacts.spend
+    if entries is None and artifacts.trials is None:
+        return None
+    # The whole bill, priced once and used twice — the headline number and the denominator of the
+    # two cost ratios are the same figure by construction, never two sums that could disagree.
+    # ``None`` the moment any entry is unpriceable: a partial sum presented as a total understates
+    # the bill while looking complete.
+    usd = _summed_usd(entries)
+    return {
+        "tokens": _tokens_of(entries),
+        "by_model": _grouped(entries, lambda entry: entry.model),
+        "by_stage": _grouped(entries, lambda entry: entry.stage),
+        "by_segment": _by_segment(entries, segments),
+        f"llm_{USD_ESTIMATE}": usd,
+        "pricing_table_version": artifacts.pricing_table_version,
+        "efficiency": _efficiency(artifacts, segments, usd=usd),
+    }
+
+
+def _tokens_of(entries: Sequence[SpendEntry] | None) -> dict | None:
+    """One bucket's token counts: the four billed fields, plus the total behind them.
+
+    The total is always known (the ledger journals it per episode); the four fields are ``null``
+    when *any* contributing entry never journaled its split, because a sum over the entries that
+    did would silently report less spend than happened.
+    """
+    if entries is None:
+        return None
+    totals = dict.fromkeys(USAGE_FIELDS, 0)
+    split_known = True
+    total = 0
+    for entry in entries:
+        total += int(entry.tokens)
+        if entry.usage is None:
+            split_known = False
+            continue
+        for name in USAGE_FIELDS:
+            totals[name] += int(entry.usage.get(name, 0) or 0)
+    counts: dict[str, int | None] = (
+        dict(totals) if split_known else dict.fromkeys(USAGE_FIELDS, None)
+    )
+    counts[TOTAL_TOKENS] = total
+    return counts
+
+
+def _bucket(entries: Sequence[SpendEntry]) -> dict:
+    """One axis bucket: its token counts and what they cost."""
+    counts = _tokens_of(entries) or {}
+    return {**counts, USD_ESTIMATE: _summed_usd(entries)}
+
+
+def _grouped(entries: Sequence[SpendEntry] | None, key: Callable[[SpendEntry], str]) -> dict | None:
+    """Spend by one attribution axis — the model that was asked, or the stage it was asked in.
+
+    Both axes are read straight off what the ledgers already record per episode; the record
+    invents no taxonomy of its own, so what a consumer sees here is what the driver actually did.
+    """
+    if entries is None:
+        return None
+    groups: dict[str, list[SpendEntry]] = {}
+    for entry in entries:
+        groups.setdefault(key(entry), []).append(entry)
+    return {name: _bucket(group) for name, group in sorted(groups.items())}
+
+
+def _by_segment(
+    entries: Sequence[SpendEntry] | None, segments: Sequence[Mapping[str, object]]
+) -> list | None:
+    """Spend per process invocation — one night's bill, comparable to another night's.
+
+    An entry belongs to the segment whose window contains its stamp: the ledgers and the segments
+    are written by the same process against the same UTC wall clock, so the join needs no third
+    record. An entry that falls in no window (an unparseable stamp, a ledger adopted from before
+    this run) is attributed to no segment but still counted in the run's own totals — a number may
+    lose its attribution, never its existence.
+    """
+    if entries is None:
+        return None
+    buckets: list[list[SpendEntry]] = [[] for _ in segments]
+    for entry in entries:
+        index = _segment_of(entry, segments)
+        if index is not None:
+            buckets[index].append(entry)
+    return [
+        {"index": segment.get("index", position), **_bucket(buckets[position])}
+        for position, segment in enumerate(segments)
+    ]
+
+
+def _segment_of(entry: SpendEntry, segments: Sequence[Mapping[str, object]]) -> int | None:
+    """The index of the segment that was open when this entry was journaled, or ``None``.
+
+    Searched **newest first**, which is what settles the one ambiguous case: one segment's stop
+    stamp and the next one's start stamp can land on the same instant, and the work journaled at
+    that instant belongs to the process that had just opened, not to the one that had just left.
+    """
+    moment = _moment(entry.at)
+    if moment is None:
+        return None
+    for position in reversed(range(len(segments))):
+        segment = segments[position]
+        started = _moment(segment.get("started_utc"))
+        if started is None or moment < started:
+            continue
+        stopped = _moment(segment.get("stopped_utc"))
+        if stopped is None or moment <= stopped:
+            return position
+    return None
+
+
+def _moment(stamp: object) -> datetime | None:
+    """One record stamp as a moment, or ``None`` for anything that is not one."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return _parse(stamp)
+    except ValueError:
+        return None
+
+
+def _summed_usd(entries: Sequence[SpendEntry] | None) -> float | None:
+    """The bill for a set of entries — ``None`` if **any** of them could not be priced.
+
+    Deliberately all-or-nothing, the same rule the price table itself applies: an operator must
+    never be shown a confidently false figure, and a total that quietly skipped the models it did
+    not know would be exactly that.
+    """
+    if entries is None:
+        return None
+    total = 0.0
+    for entry in entries:
+        if entry.usd_estimate is None:
+            return None
+        total += float(entry.usd_estimate)
+    return round(total, 6)
+
+
+def _efficiency(
+    artifacts: RunArtifacts, segments: Sequence[Mapping[str, object]], *, usd: float | None
+) -> dict:
+    """The four numbers a run is compared on — cost per result, and results per hour.
+
+    Every one of them is a ratio, and every ratio is ``null`` when its denominator is zero or
+    unknown: a run that has crowned no champion yet has no cost per champion, and reporting one
+    (or an infinity, or a zero) would be an answer to a question nobody can answer yet. That is
+    the normal state of a young run, not an error.
+    """
+    trials = artifacts.trials
+    champions = artifacts.champions
+    hours = _hours_of(_cumulative_phase_s(segments, RESEARCH_PHASE))
+    return {
+        # Both dollar ratios say ``estimate`` in their own names, because both inherit it from the
+        # price table that produced their numerator.
+        "usd_per_champion_estimate": _ratio(usd, champions),
+        "usd_per_trial_estimate": _ratio(usd, trials),
+        "trials_per_hour": _ratio(trials, hours, digits=3),
+        "research_hours_per_champion": _ratio(hours, champions, digits=3),
+    }
+
+
+def _hours_of(seconds: float | None) -> float | None:
+    return None if seconds is None else seconds / 3600.0
+
+
+def _ratio(numerator: float | None, denominator: float | None, *, digits: int = 6) -> float | None:
+    """One efficiency ratio, or ``None`` when either side is unknown or the denominator is zero."""
+    if numerator is None or denominator is None or denominator == 0:
+        return None
+    return round(numerator / denominator, digits)
 
 
 def _traded(segments: Sequence[Mapping[str, object]]) -> bool:

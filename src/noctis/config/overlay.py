@@ -321,6 +321,11 @@ _SESSION_CLOCK = (
     "session clock — the lake and every catalog are aligned to one calendar and timezone"
 )
 _IDEATION = "legacy ideation path — deferred, and not run-shaping"
+_ACCOUNTING = (
+    "cost accounting — the price table decides what a run is *reported* to have cost, not what "
+    "it does; a mandate that could restate its own bill would make every cross-run cost "
+    "comparison a claim the experiment made about itself"
+)
 
 REFUSED: dict[str, str] = {
     # Live-money double gate.
@@ -363,6 +368,8 @@ REFUSED: dict[str, str] = {
     "databento_api_key": SECRETS,
     "anthropic_api_key": SECRETS,
     "openai_api_key": SECRETS,
+    # Cost accounting — what the record says a run cost, never what it does.
+    "research.pricing": _ACCOUNTING,
     # Self-selection / recursion.
     "research.mandate": _SELF_SELECTION,
     "research.mode": _SELF_SELECTION,

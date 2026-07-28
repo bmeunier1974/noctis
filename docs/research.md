@@ -252,6 +252,39 @@ hardcoded lower anywhere else. `balanced` (the default) is exactly the standard 
 free/local provider. The knob binds *resource ceilings only*: it can never lower the
 `min_trials` exhaustion floor or touch a promotion gate — those are quality, not cost.
 
+## What a session spent, and what it bought
+
+Both loops end a session by reporting what it burned: `ResearchSummary.tokens_total`, the same
+tokens **split** the four ways they are billed (`usage`: input / output / cache-write / cache-read),
+and `usd_estimate` — those tokens priced through the versioned table in
+`src/noctis/research/pricing.py`. Neither loop is instrumented twice for it: the conversation loop
+fills the split from the per-round usage it already accumulates, and the episodic driver *sums the
+ledger it already wrote* (one `episode` line per judgment, carrying its own stage, model and
+split). That is what lets the run record re-derive the same numbers from the same lines at write
+time instead of trusting a counter to survive a restart.
+
+The run record turns those lines into an attribution — spend **by model, by stage and by segment** —
+plus the efficiency numbers a run is actually compared on: USD per champion, USD per trial, trials
+per hour, research hours per champion. Every ratio is `null` when its denominator is zero or
+unknown; a run that has crowned no champion yet has no cost per champion, and that is the normal
+state of a young run, not an error.
+
+Two honesty rules apply throughout, and they are the reason the block is worth reading at all:
+
+- **`null`, never zero.** A model the price table does not carry costs `null`, and so does any
+  total it belongs to. A run with no LLM key journals no ledger and reports `null` spend — never a
+  `$0` bill it did not earn. A ledger written before the split existed reports its token *total*
+  and `null` for the four fields, because tokens without their split cannot be priced.
+- **Every dollar figure says `estimate`** — in the record's field names and in the CLI line — since
+  the prices are list prices, not receipts. See
+  [configuration.md → Pricing the spend estimate](configuration.md#pricing-the-spend-estimate) for
+  the table, the config override, and how an overridden table identifies itself.
+
+Note what is *not* in the figure: authoring runs on a separate coder client whose completions are
+not token-metered, so the estimate covers the **judgment/driver model** only — the same boundary
+`tokens_total` has always drawn. Vendor data spend is tracked separately by the data preflight
+(`data.budget_usd`).
+
 ## Mandates + a growing universe
 
 A human steers agent sessions through the `mandate/` folder — the ownable input surface:

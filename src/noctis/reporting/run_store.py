@@ -61,6 +61,7 @@ from noctis.reporting.run_record import (
     RecordEvent,
     RunArtifacts,
     SegmentArtifact,
+    SpendEntry,
     build,
     mark_interrupted,
     prune_refusal,
@@ -111,6 +112,9 @@ RUNS_SUBDIR = "runs"
 RUN_RECORD_NAME = "run.json"
 RUN_LOCK_NAME = "run.lock"
 RUN_INDEX_NAME = "index.json"
+# The run's champion board, inside its own state dir — the denominator of the record's
+# per-champion numbers. Named beside the other run-tree file names; the registry owns its schema.
+CHAMPIONS_NAME = "champions.json"
 
 # The index's self-declared type, so a consumer can tell the roll-up from a run record at a glance.
 RUN_INDEX_KIND = "noctis.run-index"
@@ -560,9 +564,24 @@ def collect(
     engine = read_engine_identity(election_metric, root=engine_root)
     trials = read_trials(run_dir)
     prior, note = _read_record(path)
+    # Spend is derived here, beside the trial count and for the same reason, and it is priced
+    # under the run's **own** frozen configuration — so resuming tomorrow under different prices
+    # cannot restate what last night cost.
+    spend, table_version = read_spend(
+        run_dir, _frozen_inputs(prior.get("inputs")) if prior else None
+    )
+    champions = read_champions(run_dir)
     if prior is not None:
         try:
-            return _artifacts_from(prior, run_dir=Path(run_dir), current=engine, trials=trials)
+            return _artifacts_from(
+                prior,
+                run_dir=Path(run_dir),
+                current=engine,
+                trials=trials,
+                spend=spend,
+                pricing_table_version=table_version,
+                champions=champions,
+            )
         except Exception as exc:  # a hand-edited or foreign file, still valid JSON
             note = RecordEvent(
                 t=None,
@@ -578,6 +597,9 @@ def collect(
         current_engine=engine,
         events=(note,) if note is not None else (),
         trials=trials,
+        spend=spend,
+        pricing_table_version=table_version,
+        champions=champions,
     )
 
 
@@ -609,18 +631,110 @@ def read_trials(run_dir: Path | str) -> int | None:
     return None if totals is None else totals.n_trials
 
 
+def read_spend(
+    run_dir: Path | str, inputs: Mapping[str, object] | None = None
+) -> tuple[tuple[SpendEntry, ...] | None, str | None]:
+    """What this run has spent on model judgments, read off its own session ledgers (story #140).
+
+    **Read, never counted** — the exact twin of :func:`read_trials`, and for the same reason: the
+    ledgers under ``<run>/state/sessions/*.jsonl`` are the run's, not the process's, so a total
+    summed from them is cumulative across every segment by construction and a rewrite after a crash
+    cannot double-count it. One :class:`~noctis.reporting.run_record.SpendEntry` per journaled
+    episode, priced here (pricing needs the table, and the table comes from the run's frozen
+    configuration — both of which are this side of the I/O boundary), leaving the record builder
+    with nothing but arithmetic.
+
+    Returns ``(entries, table_version)``: ``(None, None)`` when the run journaled no ledger at all —
+    the shape of a run with no LLM key, which must report an unknown bill rather than a free one —
+    and an *empty* tuple when a session ran and spent nothing, which is a real zero.
+
+    ``inputs`` is the run's frozen inputs, the only source of a price override: a run prices under
+    the table it was created with, so resuming it tomorrow with a different ``research.pricing`` in
+    ``config.yaml`` cannot restate what last night cost.
+
+    Never raises: unreadable evidence is missing evidence, not a reason to fail a run's write.
+    """
+    from noctis.config.settings import run_scoped_paths
+    from noctis.research.ledger import SESSIONS_DIRNAME, SessionLedger, episode_usage
+    from noctis.research.pricing import table_from_config
+
+    try:
+        table = table_from_config(_price_overrides(inputs))
+        state_dir = run_scoped_paths(Path(run_dir))["state_dir"]
+        ledgers = sorted((Path(state_dir) / SESSIONS_DIRNAME).glob("*.jsonl"))
+        if not ledgers:
+            return None, None
+        entries: list[SpendEntry] = []
+        for path in ledgers:
+            for episode in SessionLedger.from_path(path).episodes():
+                usage = episode_usage(episode)
+                entries.append(
+                    SpendEntry(
+                        at=episode.at or None,
+                        stage=episode.stage,
+                        model=episode.model,
+                        tokens=episode.tokens,
+                        usage=usage,
+                        usd_estimate=table.estimate_usd(episode.model, usage),
+                    )
+                )
+        return tuple(entries), table.version
+    except Exception:  # pragma: no cover - a ledger we cannot read is evidence we do not have
+        return None, None
+
+
+def _price_overrides(inputs: Mapping[str, object] | None) -> Mapping[str, Mapping[str, object]]:
+    """The run's own ``research.pricing`` block, read out of its frozen settings (or nothing).
+
+    A plain read, deliberately tolerant: a record that carries no inputs, or carries something
+    else in that slot, prices under the shipped table rather than failing a write.
+    """
+    node: object = inputs
+    for key in ("settings", "resolved", "research", "pricing"):
+        node = node.get(key) if isinstance(node, Mapping) else None
+    return node if isinstance(node, Mapping) else {}  # type: ignore[return-value]
+
+
+def read_champions(run_dir: Path | str) -> int | None:
+    """How many champions this run currently holds, off its own board — or ``None`` if unreadable.
+
+    The denominator of the record's two per-champion numbers, and read at write time like every
+    other cumulative fact (epic D4). The *board*, not the promotion history: a champion that was
+    displaced is no longer something this run has, and the board is the run's actual product.
+
+    ``None`` — never ``0`` — when there is no board to read (a fresh run, a pruned one), because
+    "no champions yet" and "nobody could look" are different claims and only one of them is a
+    number. Capacity is irrelevant to a count, so the registry is opened with none.
+    """
+    from noctis.champions.registry import ChampionRegistry
+    from noctis.config.settings import run_scoped_paths
+
+    try:
+        state_dir = run_scoped_paths(Path(run_dir))["state_dir"]
+        board = Path(state_dir) / CHAMPIONS_NAME
+        if not board.is_file():
+            return None
+        return len(ChampionRegistry(board, capacity=0).list())
+    except Exception:  # pragma: no cover - an unreadable board is evidence we do not have
+        return None
+
+
 def _artifacts_from(
     prior: Mapping[str, object],
     *,
     run_dir: Path,
     current: EngineIdentity,
     trials: int | None = None,
+    spend: tuple[SpendEntry, ...] | None = None,
+    pricing_table_version: str | None = None,
+    champions: int | None = None,
 ) -> RunArtifacts:
     """One prior record, parsed back into artifacts. Raises on a shape it cannot read.
 
-    ``trials`` is deliberately **not** read back off the record: it is derived from the journals at
-    every write (:func:`read_trials`), and a number carried forward from a prior write could only
-    ever go stale.
+    ``trials``, ``spend`` and ``champions`` are deliberately **not** read back off the record: all
+    three are derived from the run's own durable artifacts at every write (:func:`read_trials`,
+    :func:`read_spend`, :func:`read_champions`), and a number carried forward from a prior write
+    could only ever go stale.
     """
     run = prior.get("run")
     if not isinstance(run, Mapping):
@@ -645,6 +759,9 @@ def _artifacts_from(
         # may have changed in between.
         inputs=_frozen_inputs(prior.get("inputs")),
         trials=trials,
+        spend=spend,
+        pricing_table_version=pricing_table_version,
+        champions=champions,
         # Carried forward verbatim, never re-derived from what is on disk: it states that the heavy
         # directories were deliberately removed, and a later write must not un-say it because
         # something recreated an empty ``state/``.
@@ -1564,13 +1681,26 @@ class RunStore:
             errors=changes.get("errors", current.errors),  # type: ignore[arg-type]
             inputs=current.inputs,
             trials=changes.get("trials", current.trials),  # type: ignore[arg-type]
+            spend=changes.get("spend", current.spend),  # type: ignore[arg-type]
+            pricing_table_version=changes.get(  # type: ignore[arg-type]
+                "pricing_table_version", current.pricing_table_version
+            ),
+            champions=changes.get("champions", current.champions),  # type: ignore[arg-type]
+            state_pruned=current.state_pruned,
         )
 
     def _flush(self) -> None:
         # Derived at write time, like every cumulative number the record carries: the run's own
-        # journals are re-counted here rather than handed forward, so a segment that journalled
-        # trials all night lands them on disk without anyone tracking a total in memory.
-        self._replace_artifacts(trials=read_trials(self._run_dir))
+        # journals, ledgers and champion board are re-read here rather than handed forward, so a
+        # segment that journalled trials and burned tokens all night lands them on disk without
+        # anyone tracking a total in memory (epic D4). Spend prices under the run's frozen inputs.
+        spend, table_version = read_spend(self._run_dir, self._artifacts.inputs)
+        self._replace_artifacts(
+            trials=read_trials(self._run_dir),
+            spend=spend,
+            pricing_table_version=table_version,
+            champions=read_champions(self._run_dir),
+        )
         self._writer(self._run_dir, build(self._artifacts))
         # The roll-up follows the record, never leads it: it is refreshed *after* a successful
         # write and re-read from the file just written, so the listing can never advertise a

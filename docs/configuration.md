@@ -29,6 +29,7 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `research.agent.coder_fallback_model`, `max_escalations`, `coder_fallback_thinking` | Paid escalation coder (#72): a local authoring job that spends its validator retries escalates the same brief, bounded per session by `max_escalations` (`0` = default = never). The escalated coder's thinking dial defaults `off` (#98) |
 | `research.agent.coder_max_tokens` | The coder's output-token ceiling — the *file's* budget: `null` (default) defers to the built-in `16000`; a number resizes it for a different coder backend. A thinking coder client gets a thinking allowance added on top (#98). A compat/sizing lever, **not** a cost budget (unused headroom is never billed); inert without a `coder_model` |
 | `research.cost_profile` | `full` / `balanced` / `economy` — resource ceilings only, never quality gates |
+| `research.pricing` | `$/Mtok` price overrides for the run record's **spend estimate**, keyed by model prefix (see **Pricing the spend estimate** below). Pure accounting: it changes what a run is *reported* to have cost, never what it does |
 | `research.agent.thinking` | `off` (default) / `on` — opt a **watch** session into provider-native reasoning; costs output tokens (see below) |
 | `research.agent.max_tokens`, `context_window` | Small-context-backend compatibility levers (see **Local backends** below) — not cost budgets. A declared `context_window` ≤ 32,768 also flips `research.agent.loop: auto` to the episodic driver (#76) |
 | `research.agent.sweep_workers` | Parallel workers for sweep trials + panel symbols (`1` = sequential) |
@@ -102,11 +103,11 @@ operator deliberately adopts it ([below](#seeing-the-drift-and-adopting-it)).
 
 Every leaf setting belongs to exactly one of three tiers, classified in
 `src/noctis/config/rehydrate.py` and ratcheted by the test suite the same way the overlay's table
-is. Today: **70 frozen, 17 live, 2 refused**.
+is. Today: **71 frozen, 17 live, 2 refused**.
 
 | Tier | Count | What | Where it comes from on a resume |
 |---|---|---|---|
-| **Frozen** | 70 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `live_feed.*` — **plus the whole mandate** | the record |
+| **Frozen** | 71 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `live_feed.*` — **plus the whole mandate** | the record |
 | **Live** | 17 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | the current process |
 | **Refused** | 2 | `mode`, `allow_live` | neither — see below |
 
@@ -157,7 +158,7 @@ who really did mean to change the run's configuration needs a way to say so. Two
 
 - `--show-config-drift` prints how the current `config.yaml` and `mandate/` differ from what the
   run froze, then exits. Inspection only — it opens no segment, takes no lock, writes nothing.
-  It compares the **69 frozen keys** and the resolved **mandate text**; the 17 live keys are never
+  It compares the **70 frozen keys** and the resolved **mandate text**; the 17 live keys are never
   reported (they are this process's by design) and the 2 refused ones never appear at all.
 - `--rebase-config` adopts the current files for the rest of the run: it re-freezes them, bumps
   `inputs.config_epoch`, and appends a before/after entry to `inputs.config_changes` naming the
@@ -179,7 +180,7 @@ fill-cost floor, the promotion thresholds, the two-axis holdout geometry, the ou
 secrets). Every leaf setting is classified **exactly once** in `src/noctis/config/overlay.py` —
 the authoritative table, with a justification comment per group — and a completeness ratchet in
 the test suite fails until a newly added knob is classified deliberately, so nothing is allowed
-by accident of omission. Today: **36 allowed, 2 clamped, 51 refused**. The whole surface also
+by accident of omission. Today: **36 allowed, 2 clamped, 52 refused**. The whole surface also
 ships commented-out in `mandate/MANDATE.md.example`, so it is discoverable without reading
 source.
 
@@ -297,6 +298,51 @@ per-venue realism, never lowered. For the same reason the whole `backtest:` sect
 **refused by name** in the mandate overlay, however wide that surface grows: a research
 personality steers *what* to look for, never how forgiving the arena is. A mandate that tries
 it does not start, and the error says so.
+
+## Pricing the spend estimate
+
+The run record publishes what a run cost — `spend.llm_usd_estimate`, `usd_per_champion_estimate`,
+`usd_per_trial_estimate` — and every one of those numbers is an **estimate**, priced from a
+versioned `$/Mtok` table in `src/noctis/research/pricing.py` and labelled as such in the record and
+in any CLI output. Tokens are measured; dollars are inferred from list prices that ignore volume
+discounts, batch tiers and mid-month changes.
+
+Three rules make the estimate safe to publish, and they are worth knowing before you read one:
+
+- **An unknown model contributes `null`, never zero.** A model the table does not carry has no
+  price, and any total it belongs to is `null` too — a partial sum presented as a total would read
+  as complete while understating the bill. A `$0`/token local backend (`ollama/…`, `vllm/…`,
+  `lm_studio/…`) is priced at an explicit zero, because that zero is a *stated price*.
+- **The table version travels with the numbers.** `spend.pricing_table_version` names the table
+  that produced them, so a record read next year is still interpretable.
+- **The estimate is never a gate.** Nothing here is read by a promotion gate, a budget, or the
+  exhaustion floor. `data.budget_usd` (the vendor-data preflight) and `research.cost_profile` (the
+  session ceilings) are the knobs that actually bound spend; this one only reports it.
+
+`research.pricing` overrides or extends the table, keyed by **model prefix** (longest match wins),
+with all four rates required — input, output, cache-write and cache-read bill separately, and a
+half-stated price would silently value the rest at nothing:
+
+```yaml
+research:
+  pricing:
+    "anthropic/claude-opus-4":
+      input_usd_per_mtok: 15.0
+      output_usd_per_mtok: 75.0
+      cache_write_usd_per_mtok: 18.75
+      cache_read_usd_per_mtok: 1.5
+```
+
+An overridden table **cannot borrow the shipped version label**: it identifies itself as
+`<version>+custom.<digest>` (e.g. `2026-07+custom.a1b2c3d4`), derived from the override itself —
+stable for the same prices, different for any other. So a reader can always tell whether the
+numbers came from this engine's own table.
+
+Pricing is **frozen with the rest of the run's config**: a run prices under the table it was
+created with, so editing `research.pricing` tomorrow cannot restate what last night cost. And it is
+**refused by the mandate overlay** by name, for the reason the fill-cost floor is: an experiment
+that could restate its own bill would make every cross-run cost comparison a claim it made about
+itself.
 
 ## Local backends (noctis-ollama)
 

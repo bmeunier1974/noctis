@@ -220,6 +220,7 @@
     "engine_changes": []
   },
   "inputs": null,
+  "spend": null,
   "performance": null,
   "events": [
     {

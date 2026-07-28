@@ -9,6 +9,48 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The run record's spend roll-up: attributable tokens, a versioned price table, efficiency
+  numbers.** Token usage was already computed per session and then only *logged*, so cost per
+  champion — the single most useful cross-run number this system can publish — was not recoverable
+  from any artifact. It is now.
+  - **New: `spend` on the run record.** The cumulative token split (input / output / cache-write /
+    cache-read, plus the total behind it) broken out **by model, by stage and by segment**, so
+    spend is attributable rather than one opaque figure. The axes are read straight off what the
+    session ledgers already journal per episode; the record invents no taxonomy of its own.
+  - **New: `research/pricing.py` — a pure, versioned `$/Mtok` table** keyed by model prefix
+    (longest match wins), with all four rates stated separately because all four bill separately.
+    `spend.pricing_table_version` travels into the record beside the numbers it produced.
+    Overridable per model prefix through the new `research.pricing` config knob; an overridden
+    table **cannot borrow the shipped version label** — it identifies itself as
+    `<version>+custom.<digest>`, derived from the override, so a reader always knows whose prices
+    these are.
+  - **`null`, never zero, wherever a number is unknown.** A model the table does not carry costs
+    `null`, and so does any total it belongs to (a partial sum presented as a total understates the
+    bill while looking complete). A run with **no LLM key** journals no ledger and reports `null`
+    spend rather than a `$0` bill it never earned. A ledger written before the split existed
+    reports its token *total* with `null` fields. Every efficiency ratio with a zero or unknown
+    denominator is `null` — a run that has crowned no champion has no cost per champion.
+  - **New: `spend.efficiency`** — `usd_per_champion_estimate`, `usd_per_trial_estimate`,
+    `trials_per_hour`, `research_hours_per_champion`: the currency two runs are compared on, over
+    the run's own champion board, its own journaled trials and its own measured research hours.
+  - **Every cost field says `estimate`**, in the record's field names and in the CLI's session
+    line, and `schema.validate` now *enforces* it: a dollar-bearing key anywhere in the block that
+    does not name itself an estimate is a schema violation. These are list prices, not receipts.
+  - **`ResearchSummary` gained `usage` and `usd_estimate`, on both research paths.** The
+    conversation loop fills the split from the per-round usage it already accumulates; the episodic
+    driver **sums the ledger it already wrote** rather than re-instrumenting — its `episode` lines
+    now carry the four-field split beside the token total they always had (a tolerant, additive
+    ledger extension).
+  - **Derived at write time, never incremented.** Spend is re-read from the run's own session
+    ledgers (and champions from its own board) at every write, exactly as the trial count is read
+    from its experiment journals — so three short segments produce the same totals as one long one,
+    a rewrite after a crash cannot double-count, and the segmentation-equivalence test now covers
+    the whole spend block. Pricing uses the run's **frozen** config, so editing prices tomorrow
+    cannot restate what last night cost.
+  - **Evidence, never a gate** (AGENTS.md rule 2): nothing here is read by a promotion gate, a
+    research budget or the exhaustion floor, and the new knob is refused by the mandate overlay by
+    name — an experiment that could restate its own bill would make every cross-run cost comparison
+    a claim it made about itself.
 - **Per-segment environment capture, and the run record's frozen-inputs provenance block
   completed.** A run record now says *what machine* produced each night's numbers, and *what
   inputs* the run was started with.

@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Generic, TypeVar
 
@@ -119,12 +119,17 @@ class EpisodeResult(Generic[T]):
 
     ``value`` is the parsed record on success and ``None`` on any failure; ``outcome`` is one of
     :data:`OK` / :data:`MISFIRES_EXHAUSTED` / :data:`API_ERROR`. ``model``, ``tokens`` (summed
-    across the episode's completions, retries included), and ``misfires`` are exactly the fields
-    :meth:`~noctis.research.ledger.SessionLedger.record_episode` needs; ``note`` carries the last
-    misfire/error text for observability (never required by the ledger). ``misfire_details`` is
-    one bounded ``{"note", "raw"}`` per misfire in attempt order — the classifier note beside a
+    across the episode's completions, retries included), ``usage`` and ``misfires`` are exactly the
+    fields :meth:`~noctis.research.ledger.SessionLedger.record_episode` needs; ``note`` carries the
+    last misfire/error text for observability (never required by the ledger). ``misfire_details``
+    is one bounded ``{"note", "raw"}`` per misfire in attempt order — the classifier note beside a
     capped excerpt of the rejected payload/reply/exception — so a caller can persist what each
     retry actually saw (#102); empty when the episode never misfired.
+
+    ``usage`` is the *same* completions ``tokens`` sums, kept as the four fields they are billed
+    as (story #140) — the only shape a price table can turn into dollars. It is always present
+    from this runner (a backend that reports no usage contributes an honest four zeros); ``None``
+    exists for the hand-built results of callers that measured nothing.
     """
 
     outcome: str
@@ -134,6 +139,7 @@ class EpisodeResult(Generic[T]):
     misfires: int
     note: str = ""
     misfire_details: tuple[dict[str, str], ...] = ()
+    usage: dict[str, int] | None = None
 
     @property
     def ok(self) -> bool:
@@ -141,11 +147,22 @@ class EpisodeResult(Generic[T]):
         return self.value is not None
 
 
-def _turn_tokens(usage: dict | None) -> int:
-    """Total tokens one completion reported, 0 for any field a provider omits."""
+def _total(usage: Mapping[str, int]) -> int:
+    """The episode's token total — always the sum of its own split, never a second count."""
+    return sum(usage.values())
+
+
+def _accumulate_usage(totals: dict[str, int], usage: dict | None) -> None:
+    """Fold one completion's ``usage`` into the episode's four-field running split.
+
+    Every field is read defensively, so a provider that reports nothing (or nothing for one
+    field) contributes 0 rather than raising — the split is a measurement, never a gate. Keeping
+    the four fields apart is what makes the episode priceable later: they bill at four rates.
+    """
     if not usage:
-        return 0
-    return sum(int(usage.get(field, 0) or 0) for field in _USAGE_FIELDS)
+        return
+    for field in _USAGE_FIELDS:
+        totals[field] += int(usage.get(field, 0) or 0)
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -255,7 +272,10 @@ class EpisodeRunner:
         overrides the runner default for this call (a small-context backend compatibility lever).
         """
         resolved_model = model if model is not None else str(getattr(self._client, "model", ""))
-        tokens = 0
+        # The episode's running token split — four fields, because they bill at four rates. The
+        # total every caller already knows is derived from it (:func:`_total`), so the two can
+        # never disagree about what this episode spent.
+        usage = dict.fromkeys(_USAGE_FIELDS, 0)
         misfires = 0
         note = ""
         # One bounded {"note", "raw"} per misfire, in attempt order — what each rejected attempt
@@ -292,7 +312,8 @@ class EpisodeRunner:
                         outcome=API_ERROR,
                         value=value,
                         model=resolved_model,
-                        tokens=tokens,
+                        tokens=_total(usage),
+                        usage=dict(usage),
                         misfires=misfires,
                         note=_reason(exc),
                         misfire_details=tuple(details),
@@ -303,7 +324,7 @@ class EpisodeRunner:
                 messages = messages + [{"role": "user", "content": stumble.retry}]
                 continue
 
-            tokens += _turn_tokens(turn.usage)
+            _accumulate_usage(usage, turn.usage)
             self._emit_turn(turn)  # tee think/usage/say for the operator feed (#73)
             payload = _payload_from_turn(turn, contract.name)
             if payload is not None:
@@ -318,7 +339,8 @@ class EpisodeRunner:
                         outcome=OK,
                         value=value,
                         model=resolved_model,
-                        tokens=tokens,
+                        tokens=_total(usage),
+                        usage=dict(usage),
                         misfires=misfires,
                         misfire_details=tuple(details),
                     )
@@ -340,7 +362,8 @@ class EpisodeRunner:
             outcome=MISFIRES_EXHAUSTED,
             value=value,
             model=resolved_model,
-            tokens=tokens,
+            tokens=_total(usage),
+            usage=dict(usage),
             misfires=misfires,
             note=note,
             misfire_details=tuple(details),

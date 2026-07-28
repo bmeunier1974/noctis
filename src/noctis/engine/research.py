@@ -82,6 +82,19 @@ class ResearchSummary:
     # both, so the figure is one comparable spend axis (the parity harness's tokens/verdict row,
     # story #75). 0 by default keeps the legacy loop and every existing constructor unaffected.
     tokens_total: int = 0
+    # The same tokens, **split** the four ways they are billed — input / output / cache-write /
+    # cache-read (story #140). Four fields rather than one, because every provider prices cached
+    # input differently from fresh input, so a total cannot be turned into dollars. The
+    # conversation loop fills it from the usage it already accumulates; the episodic driver sums
+    # the split its ledger already journals per episode. ``None`` means **unmeasured**, never
+    # zero: a session that never ran (no client), or one whose ledger predates the split, has no
+    # honest number to report and must not look like a free one.
+    usage: dict[str, int] | None = None
+    # What that usage cost, in US dollars, priced through the versioned table in
+    # ``noctis.research.pricing`` — an **estimate**, and ``None`` whenever the model is one the
+    # table does not carry or the split was never measured. A confidently wrong bill is worse
+    # than an admitted unknown, so nothing here ever falls back to zero.
+    usd_estimate: float | None = None
 
 
 def _utcnow() -> datetime:

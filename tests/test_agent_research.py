@@ -267,6 +267,84 @@ def test_summary_tokens_total_sums_every_completions_usage(tmp_path):
     assert summary.tokens_total == 178
 
 
+def _one_round_session(tmp_path, *, model: str | None):
+    """One tool round plus a prose ending, on a client that may or may not name its model."""
+    toolbox = _make_toolbox(tmp_path)
+    client = FakeLLM(
+        [
+            tool_turn(
+                ("list_strategies", {}, "t0"),
+                usage={
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 3,
+                },
+            ),
+            *prose_ending("done", usage={"input_tokens": 40, "output_tokens": 10}),
+        ]
+    )
+    if model is not None:
+        client.model = model
+    return run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=20
+    )
+
+
+def test_the_conversation_summary_carries_the_token_split_and_a_priced_estimate(tmp_path):
+    """Story #140: the four fields the loop already accumulates now leave the session on the
+    summary, priced through the versioned table — so cost per champion is recoverable."""
+    from noctis.research.pricing import default_table
+
+    summary = _one_round_session(tmp_path, model="anthropic/claude-opus-4-8")
+
+    assert summary.usage == {
+        "input_tokens": 140,
+        "output_tokens": 30,
+        "cache_creation_input_tokens": 5,
+        "cache_read_input_tokens": 3,
+    }
+    assert summary.tokens_total == sum(summary.usage.values())
+    assert summary.usd_estimate == default_table().estimate_usd(
+        "anthropic/claude-opus-4-8", summary.usage
+    )
+    assert summary.usd_estimate > 0
+
+
+def test_a_session_on_an_unpriced_model_reports_the_split_and_a_null_estimate(tmp_path):
+    """An unknown model contributes ``null``, never an inferred or zero dollar figure."""
+    summary = _one_round_session(tmp_path, model="acme/oracle-1")
+
+    assert summary.usage["input_tokens"] == 140
+    assert summary.usd_estimate is None
+
+
+def test_an_operator_price_table_is_what_the_session_is_billed_at(tmp_path):
+    """The run's own table reaches the loop as a value, so the session line an operator reads and
+    the record's spend block are never priced from two different tables."""
+    from noctis.research.pricing import ModelPrice, PriceTable
+
+    toolbox = _make_toolbox(tmp_path)
+    client = FakeLLM([*prose_ending("done", usage={"input_tokens": 1_000_000})])
+    client.model = "acme/oracle-1"
+    table = PriceTable(version="custom", prices={"acme/": ModelPrice(7.0, 0.0, 0.0, 0.0)})
+
+    summary = run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=20, price_table=table
+    )
+
+    assert summary.usd_estimate == 7.0
+
+
+def test_a_session_that_never_ran_reports_no_usage_at_all(tmp_path):
+    """No client (no key, no extra) ⇒ no spend measured — ``null``, not a zero bill."""
+    summary = run_agent_research(toolbox=None, client=None, budget_minutes=60.0)
+
+    assert summary.stopped_reason == "no_client"
+    assert summary.usage is None
+    assert summary.usd_estimate is None
+
+
 def test_iteration_budget_halts_mid_protocol(tmp_path):
     toolbox = _make_toolbox(tmp_path)
     client = FakeLLM(_script())

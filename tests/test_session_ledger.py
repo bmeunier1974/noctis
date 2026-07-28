@@ -229,6 +229,88 @@ def test_episode_misfire_details_and_note_round_trip_and_default_empty(ledger):
     assert "misfire_details" not in clean_record and "note" not in clean_record
 
 
+def test_episode_usage_split_round_trips_and_is_absent_when_never_measured(ledger):
+    """The four-field token split rides the episode line as a tolerant extension (story #140).
+
+    Tokens alone cannot be priced — input, output, cache-write and cache-read bill at four
+    different rates — so the split is journaled beside the total and read back typed."""
+    split = {
+        "input_tokens": 900,
+        "output_tokens": 100,
+        "cache_creation_input_tokens": 50,
+        "cache_read_input_tokens": 200,
+    }
+    ledger.record_episode(
+        stage="formulate", model="anthropic/claude", outcome="ok", tokens=1250, usage=split
+    )
+    ledger.record_episode(stage="decide", model="anthropic/claude", outcome="ok", tokens=8)
+    measured, unmeasured = ledger.episodes()
+
+    assert measured.usage == split
+    assert unmeasured.usage is None  # spent tokens with no split ⇒ unknown, never zeros
+    assert "usage" not in [r for r in ledger.records() if r["stage"] == "decide"][0]
+
+
+def test_usage_totals_sum_the_episodes_that_recorded_a_split(ledger):
+    """What the episodic driver reads back for its summary — summed off the ledger, not counted."""
+    ledger.record_episode(
+        stage="formulate",
+        model="m",
+        outcome="ok",
+        tokens=30,
+        usage={
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    )
+    ledger.record_episode(
+        stage="decide",
+        model="m",
+        outcome="ok",
+        tokens=7,
+        usage={
+            "input_tokens": 5,
+            "output_tokens": 2,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    )
+    # An episode that spent nothing (a coder escalation line) is a real zero, not an unknown.
+    ledger.record_episode(stage="author", model="coder", outcome="ok", escalated=True)
+
+    assert ledger.usage_totals() == {
+        "input_tokens": 15,
+        "output_tokens": 22,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
+
+
+def test_usage_totals_are_null_when_any_spending_episode_recorded_no_split(ledger):
+    """A ledger written before the split existed reports ``None`` — never a partial sum."""
+    ledger.record_episode(
+        stage="formulate",
+        model="m",
+        outcome="ok",
+        tokens=30,
+        usage={
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    )
+    ledger.record_episode(stage="decide", model="m", outcome="ok", tokens=9)
+
+    assert ledger.usage_totals() is None
+
+
+def test_usage_totals_on_a_ledger_with_no_episodes_are_null(ledger):
+    assert ledger.usage_totals() is None
+
+
 def test_verdict_round_trips_with_class_lesson(ledger):
     ledger.record_verdict(
         "overnight_drift",

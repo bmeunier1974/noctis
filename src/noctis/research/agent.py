@@ -33,6 +33,7 @@ from noctis.research.misfire import (
     classify_completion_error,
     classify_turn,
 )
+from noctis.research.pricing import PriceTable, default_table
 from noctis.research.prompt import build_system_prompt
 
 if TYPE_CHECKING:
@@ -352,6 +353,7 @@ def run_agent_research(
     prefix_trim: bool = False,
     on_event: Callable[[Event | str], None] | None = None,
     mandate: Mandate | None = None,
+    price_table: PriceTable | None = None,
 ) -> ResearchSummary:
     """Run one agent research session; returns the same summary shape as ``run_research``.
 
@@ -375,7 +377,10 @@ def run_agent_research(
     place (P5); every other sink runs the loop non-streaming and byte-identically.
     ``mandate`` is the optional resolved operator
     mandate embedded in the system prompt; its one-line ``summary`` (not the full body) is echoed
-    into the kickoff turn.
+    into the kickoff turn. ``price_table`` prices this session's tokens into
+    ``summary.usd_estimate`` (story #140) — the run's own table, handed in as a value, so a config
+    price override reaches the summary the same way it reaches the record; ``None`` ⇒ the shipped
+    table, and an unpriced model leaves the estimate ``None`` rather than zero.
     """
     summary = ResearchSummary()
     if client is None:
@@ -594,6 +599,13 @@ def run_agent_research(
     # episodic driver fills the same field from its ledger, so the parity harness's tokens/verdict
     # row reads both loops off one honest number.
     summary.tokens_total = sum(usage_totals.values())
+    # The same four fields, kept apart and priced (story #140). The split is what a price table
+    # can bill — input, output, cache-write and cache-read cost four different amounts — and the
+    # estimate is ``None`` for a model the shipped table does not carry, never a guess or a zero.
+    summary.usage = dict(usage_totals)
+    summary.usd_estimate = (price_table or default_table()).estimate_usd(
+        str(getattr(client, "model", "")), usage_totals
+    )
     # Session-end honesty: whatever the stop reason (every loop exit flows through here), a
     # strategy authored but never carried to a verdict is left undecided. Surface the sorted list
     # on the summary and name each one in a WARNING — they are archived after the TTL, not lost
