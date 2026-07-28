@@ -1,10 +1,10 @@
 """Command-line interface (Typer).
 
 Commands: ``setup`` (the guided first-run wizard), ``init``/``migrate`` (scaffold /
-legacy-layout move), ``run``, ``status``, ``mandate`` (the steering preflight), ``report``,
-``backtest``, ``champions``, ``account`` (the continuous paper account), ``research`` (one
-observable agent research session), ``strategies`` (the authored library index), and the
-``data`` sub-app.
+legacy-layout move), ``run``, ``status``, ``mandate`` (the steering preflight), ``engine`` (the
+engine's identity and comparability key), ``report``, ``backtest``, ``champions``, ``account``
+(the continuous paper account), ``research`` (one observable agent research session),
+``strategies`` (the authored library index), and the ``data`` sub-app.
 """
 
 from __future__ import annotations
@@ -457,6 +457,38 @@ def status(
         f"(execution={settings.trading.execution})"
     )
     _echo_status_mandate(inputs.mandate, inputs.overrides, mandate_error)
+
+
+@app.command()
+def engine(
+    config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
+) -> None:
+    """Print the engine's identity: declared version, per-component digests, comparable key.
+
+    The one-command answer to "are these two runs comparable?". The declared
+    ``engine_version`` groups runs; the per-component fingerprint says *what* moved — a gate,
+    a prompt, a shipped profile, a seed — and the comparable key is the tuple two runs must
+    match on before their champion and scorecard numbers may be pooled or ranked together.
+    The ``gates`` and ``backtest`` digests carry that guarantee (they decide what passes and
+    what a number means), which is why they are marked, and why the election metric rides in
+    the key beside them: numbers under different metrics were never comparable.
+
+    Reads source files and the resolved election metric. Starts nothing, writes nothing.
+    """
+    from noctis.observability.engine_id import ARBITER_COMPONENTS, comparable_key, fingerprint
+
+    metric = _resolve_session_or_exit(config).settings.promotion.metric
+    fp = fingerprint()
+    width = max(len(name) for name in fp.components)
+    typer.echo(f"engine version:    {fp.engine_version}")
+    typer.echo("components:")
+    for name, component in fp.components.items():
+        arbiter = "  (arbiter — binds comparability)" if name in ARBITER_COMPONENTS else ""
+        typer.echo(f"  {name:<{width}}  {component.digest or 'null'}{arbiter}")
+        if component.note:
+            typer.echo(f"  {'':<{width}}  {component.note}")
+    typer.echo(f"election metric:   {metric}")
+    typer.echo(f"comparable key:    {comparable_key(metric, fp)}")
 
 
 @app.command()

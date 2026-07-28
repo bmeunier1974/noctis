@@ -7,6 +7,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Engine identity** (`src/noctis/observability/engine_id.py`) and the `noctis engine` verb.
+  A declared `ENGINE_VERSION` (a plain incrementing integer, decoupled from the package
+  version) plus a **per-component** fingerprint over the committed files that decide behaviour
+  — `gates`, `backtest`, `research`, `prompts`, `profiles`, `seeds`, `memory_seed`, `schema` —
+  and the comparable key `(engine_version, gates_digest, backtest_digest, election_metric)`
+  two runs must match on before their numbers may be pooled or ranked together. Only committed
+  scaffold is hashed, so an operator's gitignored mandate never moves a digest and fingerprints
+  stay portable between machines.
+
 ### Changed
 
 - **The mandate is the sole run input.** A mandate's `config:` block now overlays the whole

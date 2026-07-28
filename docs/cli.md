@@ -85,6 +85,7 @@ plus `jq` one-liners over `events.jsonl` — see
 ```bash
 python -m noctis status                    # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>            # preflight a mandate: provenance + the effective settings diff
+python -m noctis engine                    # engine identity: version, component fingerprint, comparable key
 python -m noctis report [--as-of DATE]     # generate / print the close-of-day report
 python -m noctis account [--reset]         # the continuous paper account; --reset archives + starts fresh
 python -m noctis champions [--reset]       # the champion board; --reset re-fills slots under current gates
@@ -184,6 +185,57 @@ MANDATE: mandate profile:sneaky — 3 config overrides refused:
   - research.min_trials: may only be raised by an overlay — 2 is below the configured 8
 1
 ```
+
+### Engine identity — "are these two runs comparable?"
+
+```bash
+python -m noctis engine                    # the declared version, what moved, and the key
+```
+
+Two runs' numbers are comparable only if the same engine produced them. A promotion threshold
+moved, a prompt reworded, a shipped profile edited, a seed strategy changed: each shifts results
+without a single config key differing. `engine` prints that identity in one screen.
+
+```
+engine version:    1
+components:
+  gates        f63d47b7b9604ab1  (arbiter — binds comparability)
+  backtest     3ba3e0bf1c97134f  (arbiter — binds comparability)
+  research     4baf9dea0c82c8cc
+  prompts      14eb169506a6b5aa
+  profiles     6803b9d26c63d6ae
+  seeds        4826fe7224641eb4
+  memory_seed  3337fa2cbf896932
+  schema       null
+               missing input(s): src/noctis/reporting/schema.py
+election metric:   sharpe
+comparable key:    1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
+```
+
+`engine version` is a plain incrementing integer versioning the **behavioural contract**,
+deliberately decoupled from the package version: a release that changes no behaviour must not
+fragment comparison buckets, and a one-line gate change that ships in no release must. The
+fingerprint beneath it is **per component**, not one opaque hash, because "a prompt was reworded"
+and "a gate moved" are not the same news: two runs with different `prompts` digests but identical
+`gates` and `backtest` digests still have comparable scorecards.
+
+The **comparable key** — `(engine_version, gates_digest, backtest_digest, election_metric)` — is
+the tuple two runs must match on before their champion and scorecard numbers may be pooled, ranked
+or plotted together. The two arbiter digests carry that guarantee rather than the declared version,
+because a digest cannot be forgotten in review; the election metric rides along for the reason
+promotion already treats a differently scored champion as *stale* (numbers in different units were
+never comparable), and it is the **post-overlay** metric, so a mandate that binds `promotion.metric`
+is reflected here.
+
+Digests cover committed files only — the shipped `mandate/` scaffold, the seed strategies,
+`MEMORY.seed.md` and the engine modules that decide what passes, what a number means, how
+candidates are found and what the model is told. An operator's gitignored `mandate/MANDATE.md`,
+custom profiles and personal references are deliberately **out**, so the same checkout fingerprints
+identically on every machine. Content is hashed raw (LF-normalized), *not* stripped of comments:
+prompt text is indistinguishable from a comment to any safe automated rule, so a docstring edit
+moving a component is the accepted cost of never silently pooling incomparable runs. A missing
+input — like the run-record `schema` module before it lands — reads `null` with a note, never a
+crash.
 
 ## Research & strategies
 
