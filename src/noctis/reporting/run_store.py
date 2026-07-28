@@ -233,6 +233,12 @@ def open_run(
     else:
         resolved_id = run_id or new_run_id(now)
         run_dir = Path(runs_dir) / resolved_id
+        # `completed` is terminal, not "terminal as long as the caller passed resume=True". The
+        # two arguments always travel together today, so this is unreachable from the CLI — but a
+        # published run silently gaining a segment is the failure this status exists to prevent,
+        # and the guard belongs where the segment is opened rather than in each caller.
+        if run_id is not None and run_dir.is_dir():
+            _assert_resumable(run_dir, resolved_id)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     steal_note = acquire_lock(run_dir, run_id=resolved_id, now=now, stale_after_s=stale_after_s)

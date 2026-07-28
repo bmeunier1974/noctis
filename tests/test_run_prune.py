@@ -427,6 +427,21 @@ def test_a_pruned_run_can_never_be_resumed(tmp_path):
         _open(runs, clock, run_id=run_dir.name, resume=True)
 
 
+def test_a_terminal_run_refuses_another_segment_even_without_the_resume_flag(tmp_path):
+    """``completed`` is terminal, not "terminal as long as you asked to resume". Opening an
+    existing run by id without ``resume=True`` must refuse it too — otherwise a caller that
+    passes the two apart could append a segment to a published (or pruned) run."""
+    from noctis.reporting.run_store import RunCompletedError
+
+    runs = tmp_path / "runs"
+    clock = FakeClock()
+    run_dir, _ = _completed_with_state(runs, clock)
+    _prune(runs, run_dir.name, clock)
+
+    with pytest.raises(RunCompletedError):
+        _open(runs, clock, run_id=run_dir.name, resume=False)
+
+
 def test_a_dry_run_reports_what_it_would_remove_and_leaves_every_byte_on_disk(tmp_path):
     runs = tmp_path / "runs"
     clock = FakeClock()
