@@ -4,6 +4,10 @@
     uv run python scripts/engine_fingerprint.py            # check (what CI and pre-commit run)
     uv run python scripts/engine_fingerprint.py --write     # regenerate, then commit the file
 
+Arbiter drift (``gates``, ``backtest``) with no ``ENGINE_VERSION`` bump fails the check — and
+``--write`` **refuses** to record it (writes nothing, exits 1), because regenerating rewrites every
+component at once and so cannot also be how an undeclared arbiter move gets committed (story #145).
+
 A thin I/O wrapper, exactly like ``scripts/parity_harness.py``: the rule, the comparison and the
 report live in :mod:`noctis.observability.engine_ratchet` (inside mypy's scope and covered by
 ``tests/test_engine_ratchet.py``); this file only puts them on a command line.

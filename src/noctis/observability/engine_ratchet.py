@@ -35,10 +35,21 @@ So "a stale record is what the contributor is told to fix" and "searcher drift w
 compose: staleness is always *reported* and always names the regeneration command; whether it is
 *blocking* is decided by which tier moved.
 
+**And the rule ``--write`` adds** (:func:`regenerate`): regenerating is the fix this module
+recommends in every message it prints, and it rewrites *every* component at once — so it cannot
+also be the way case 3's undeclared arbiter move gets recorded, or the ratchet would only hold for
+contributors who read the failure before typing the command it printed. ``--write`` therefore
+evaluates the check first and, on **arbiter drift with the versions in agreement**, writes nothing
+and exits 1, printing the same bump-or-restore guidance plus its refusal. Every other case still
+regenerates in one command — searcher-only drift, an arbiter move whose bump is declared, no drift
+at all, and a missing or unreadable record (there is nothing to compare against, and that is how
+the baseline is created). An arbiter move must arrive *declared*; the tool will not launder one.
+
 The comparison itself is pure — two records in, a structured result out — so every scenario is
 testable by fingerprinting a temp tree, editing one file, and fingerprinting it again. The I/O
 (reading the committed file, writing it, printing, the exit code) lives in :func:`main`, which
-``scripts/engine_fingerprint.py`` and the pre-commit hook call.
+``scripts/engine_fingerprint.py`` and the pre-commit hook call, and the refusal is a decision in
+that write path rather than a change to what a comparison *means*.
 """
 
 from __future__ import annotations
@@ -73,6 +84,12 @@ RECORD_KIND = "noctis.engine_fingerprint"
 
 # Where the declared version lives, quoted in the failure so nobody has to go looking.
 _VERSION_SOURCE = "src/noctis/observability/engine_id.py"
+
+# The one thing ``--write`` will not do. Printed under the ordinary bump-or-restore guidance, in
+# place of it, because "regenerate the record" is precisely the advice being refused here.
+_WRITE_REFUSAL = (
+    "refusing to regenerate: --write cannot be the way an undeclared arbiter move gets recorded"
+)
 
 Status = Literal["ok", "warn", "fail"]
 
@@ -109,18 +126,62 @@ class RatchetResult:
         """Whether CI passes. A warning is visible, not blocking."""
         return self.status != "fail"
 
+    @property
+    def undeclared_arbiter_drift(self) -> bool:
+        """The arbiter moved and the declared version does not say so — what ``--write`` refuses.
+
+        Read *off* the verdict, never folded into it: another reading of the same four cases, not a
+        fifth status, so ``--check`` still reports exactly what it always did. Arbiter drift whose
+        bump *is* already there is a record that was simply not regenerated yet, and regenerating it
+        is the fix — so only the case where both sides declare the same version is undeclared.
+        """
+        return bool(self.arbiter_drift) and self.recorded_version == self.computed_version
+
     def report(self) -> str:
         """The human-readable verdict CI prints: what moved, in which files, and the fix."""
+        if self.status == "ok":
+            advice = "the committed record matches this tree"
+        else:
+            advice = f"regenerate the record: {REGENERATE_COMMAND}"
+        return "\n".join([*self.findings(), f"  {advice}"])
+
+    def findings(self) -> list[str]:
+        """The header, the problems and the files that moved — everything but the closing advice.
+
+        Split out because :meth:`WriteOutcome.report` prints the same findings and then
+        *contradicts* that closing advice ("regenerate the record" is exactly what it is refusing),
+        and one renderer of a verdict is better than two that drift apart.
+        """
         lines = [f"{self.status.upper()}  engine fingerprint ratchet ({RECORD_PATH})"]
         lines += [f"  {problem}" for problem in self.problems]
         for drift in (*self.arbiter_drift, *self.searcher_drift):
             lines.append(f"  {drift.line()}")
             lines += [f"      {rel}" for rel in drift.files]
-        if self.status == "ok":
-            lines.append("  the committed record matches this tree")
-        else:
-            lines.append(f"  regenerate the record: {REGENERATE_COMMAND}")
-        return "\n".join(lines)
+        return lines
+
+
+@dataclass(frozen=True)
+class WriteOutcome:
+    """What ``--write`` did: the record it wrote, or the verdict it refused to record.
+
+    Exactly one of the two is meaningful — ``written`` is ``None`` on a refusal, and a refusal
+    always carries the verdict it refused on, because the contributor needs to see *which* arbiter
+    component moved to decide between bumping and restoring.
+    """
+
+    verdict: RatchetResult
+    written: Path | None
+
+    @property
+    def ok(self) -> bool:
+        """Whether the regeneration happened. A refusal is the one non-zero exit ``--write`` has."""
+        return self.written is not None
+
+    def report(self) -> str:
+        """One line on success; the verdict's findings plus the refusal when nothing was written."""
+        if self.written is not None:
+            return f"wrote {RECORD_PATH} ({self.written})"
+        return "\n".join([*self.verdict.findings(), f"  {_WRITE_REFUSAL}"])
 
 
 def build_record(root: Path | None = None) -> dict[str, Any]:
@@ -164,11 +225,40 @@ def load_record(root: Path | None = None) -> dict[str, Any] | None:
 
 
 def write_record(root: Path | None = None) -> Path:
-    """Regenerate the committed record for ``root``. Sorted keys, so its diff reads cleanly."""
+    """Write the record for ``root``, unconditionally. Sorted keys, so its diff reads cleanly.
+
+    The plain writer: it states the tree as it is and asks no questions, which is what creating a
+    baseline in a fresh tree needs. The *policy* about when regenerating is allowed lives one level
+    up in :func:`regenerate`, so the write path can refuse without this function — or
+    :func:`build_record` — ever having to know about the previous record.
+    """
     path = _record_path(root)
     record = build_record(root)
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def regenerate(root: Path | None = None) -> WriteOutcome:
+    """Regenerate the committed record — unless that would silently record an arbiter move.
+
+    ``--write`` is the one-command fix every failure and warning here names, and it rewrites
+    *every* component at once. That is the loophole it has to close: a PR that moves a searcher
+    component (the common case) is told to run this, and if it also absorbed an undeclared arbiter
+    digest on the way, the ratchet's whole promise would come down to whether the contributor read
+    the failure before typing the command it printed. So the write path evaluates the check first
+    and declines exactly the case the check exists to catch — arbiter drift while the recorded and
+    computed ``ENGINE_VERSION`` agree — leaving the tree checkable, and failing.
+
+    Every other case still regenerates in one command: searcher-only drift, an arbiter move whose
+    bump *is* declared (the record just had not caught up), no drift at all, and — the reason the
+    guard cannot simply be "never write over arbiter drift" — a missing or unreadable committed
+    record, which is how the baseline gets created in the first place.
+    """
+    base = default_root() if root is None else Path(root)
+    verdict = check(base)
+    if verdict.undeclared_arbiter_drift:
+        return WriteOutcome(verdict=verdict, written=None)
+    return WriteOutcome(verdict=verdict, written=write_record(base))
 
 
 def check(root: Path | None = None) -> RatchetResult:
@@ -245,7 +335,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=(
             "Check (or regenerate) the committed engine fingerprint record. Drift in an arbiter "
             "component without an ENGINE_VERSION bump fails; searcher-tier drift warns and "
-            "passes, naming the component and the files that moved."
+            "passes, naming the component and the files that moved. --write regenerates every "
+            "other case in one command, and refuses that one: an arbiter move must arrive "
+            "declared."
         ),
     )
     action = parser.add_mutually_exclusive_group()
@@ -257,7 +349,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     action.add_argument(
         "--write",
         action="store_true",
-        help=f"Regenerate {RECORD_PATH} from the tree. Commit it in the same PR.",
+        help=(
+            f"Regenerate {RECORD_PATH} from the tree. Commit it in the same PR. Refuses (writing "
+            "nothing, exit 1) on arbiter drift with no ENGINE_VERSION bump."
+        ),
     )
     parser.add_argument(
         "--root",
@@ -268,9 +363,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = None if args.root is None else Path(args.root)
 
     if args.write:
-        path = write_record(root)
-        print(f"wrote {RECORD_PATH} ({path})")
-        return 0
+        outcome = regenerate(root)
+        print(outcome.report())
+        return 0 if outcome.ok else 1
 
     result = check(root)
     print(result.report())

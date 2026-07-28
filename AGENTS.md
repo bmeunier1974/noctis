@@ -73,6 +73,7 @@ mypy                       # type-check src/noctis (config in pyproject.toml)
 pre-commit run --all-files # every quality gate (install once: pre-commit install)
 python scripts/engine_fingerprint.py [--write]   # the engine fingerprint ratchet: check, or
                            # regenerate engine_fingerprint.json after moving a behavioural file
+                           # (--write refuses arbiter drift with no ENGINE_VERSION bump: declare it)
 
 python -m noctis setup [--check]   # guided first-run wizard: files, extras, keys, LLM verify
 python -m noctis init              # scaffold local config/.env/mandate + workspace (idempotent)

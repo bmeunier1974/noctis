@@ -75,6 +75,11 @@ def _record(root: Path, *, engine_version: int | None = None) -> dict:
     return record
 
 
+def _commit_record(root: Path, record: dict) -> None:
+    """Put a record on disk as the committed baseline — including a deliberately doctored one."""
+    (root / RECORD_PATH).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+
 def _edit(root: Path, rel: str) -> None:
     path = root / rel
     path.write_text(path.read_text() + "# a behavioural change\n")
@@ -342,6 +347,99 @@ def test_the_check_is_the_default_action(tmp_path):
     assert main(["--root", str(root)]) == 0
 
 
+# ── regenerating: --write will not record an undeclared arbiter move ──────────────────────
+
+
+def test_regenerating_an_arbiter_move_with_no_bump_refuses_and_writes_nothing(tmp_path, capsys):
+    """The loophole (#145): ``--write`` is the fix the failure itself recommends, and it rewrites
+    every component at once — so if it absorbed an arbiter digest too, the ratchet's promise would
+    reduce to a contributor noticing the failure before typing the command it printed."""
+    root = _build_tree(tmp_path)
+    main(["--write", "--root", str(root)])
+    before = (root / RECORD_PATH).read_bytes()
+    _edit(root, GATES_FILE)
+    capsys.readouterr()
+
+    code = main(["--write", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert (root / RECORD_PATH).read_bytes() == before  # byte-identical: nothing was written
+    assert "gates" in out and GATES_FILE in out
+    assert "ENGINE_VERSION" in out
+    assert "refusing to regenerate" in out
+
+
+def test_a_refused_regeneration_leaves_the_check_still_failing(tmp_path, capsys):
+    """The sequence "edit, regenerate, commit, CI passes" is no longer reachable."""
+    root = _build_tree(tmp_path)
+    main(["--write", "--root", str(root)])
+    _edit(root, GATES_FILE)
+
+    assert main(["--write", "--root", str(root)]) == 1
+    assert main(["--check", "--root", str(root)]) == 1
+    assert "gates" in capsys.readouterr().out
+
+
+def test_a_searcher_edit_still_regenerates_in_one_command(tmp_path):
+    """The common case must stay one command, or the ratchet becomes a chore and gets disabled."""
+    root = _build_tree(tmp_path)
+    main(["--write", "--root", str(root)])
+    _edit(root, SEARCHER_EDITS["prompts"])
+    assert main(["--check", "--root", str(root)]) == 0  # a warning, and a record to refresh
+
+    assert main(["--write", "--root", str(root)]) == 0
+
+    assert load_record(root)["components"]["prompts"]["digest"] == fingerprint(root).digest(
+        "prompts"
+    )
+    assert check(root).status == "ok"
+
+
+def test_an_arbiter_move_with_a_bump_still_regenerates_in_one_command(tmp_path):
+    """The bump is there; the record simply had not been regenerated with it yet."""
+    root = _build_tree(tmp_path)
+    _commit_record(root, _record(root, engine_version=ENGINE_VERSION - 1))
+    _edit(root, GATES_FILE)
+
+    assert main(["--write", "--root", str(root)]) == 0
+
+    assert load_record(root)["engine_version"] == ENGINE_VERSION
+    assert check(root).status == "ok"
+
+
+def test_a_missing_record_still_regenerates_as_the_baseline(tmp_path):
+    """There is nothing to compare against, and this is how the baseline is created."""
+    root = _build_tree(tmp_path)
+    assert load_record(root) is None
+
+    assert main(["--write", "--root", str(root)]) == 0
+
+    assert check(root).status == "ok"
+
+
+def test_regenerating_an_unchanged_tree_is_idempotent(tmp_path):
+    root = _build_tree(tmp_path)
+    main(["--write", "--root", str(root)])
+    before = (root / RECORD_PATH).read_bytes()
+
+    assert main(["--write", "--root", str(root)]) == 0
+
+    assert (root / RECORD_PATH).read_bytes() == before
+
+
+def test_the_pure_writer_stays_available_for_creating_a_baseline(tmp_path):
+    """``write_record`` is the unguarded writer a test (or a fresh tree) uses; the refusal is a
+    decision in the ``--write`` path, so the comparison itself stays pure and unchanged."""
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _edit(root, GATES_FILE)
+
+    assert check(root).status == "fail"  # --check's four-case rule is untouched
+    assert write_record(root) == root / RECORD_PATH
+    assert check(root).status == "ok"
+
+
 # ── one arbiter line, drawn once ──────────────────────────────────────────────────────────
 
 
@@ -410,10 +508,23 @@ def test_the_regeneration_command_is_documented():
     assert RECORD_PATH in development
 
 
+def test_the_write_refusal_is_documented_where_a_contributor_reads_the_rule():
+    """A guard nobody has been told about reads as a broken tool, so the one place the ratchet is
+    explained to a contributor has to say that ``--write`` will not record an undeclared move."""
+    development = (REPO_ROOT / "docs" / "development.md").read_text()
+    script = (REPO_ROOT / "scripts" / "engine_fingerprint.py").read_text()
+
+    assert "refuses to regenerate" in development
+    assert "declared" in development
+    assert "refuses" in script
+
+
 def test_the_tier_rule_is_documented_in_the_module_docstring():
-    """The rule (fail on arbiter, warn on searcher, stale is what you are told to fix) is the
-    contract; it is written where the next reader of the code will be."""
+    """The rule (fail on arbiter, warn on searcher, stale is what you are told to fix, and
+    ``--write`` will not launder an undeclared arbiter move) is the contract; it is written where
+    the next reader of the code will be."""
     docstring = RATCHET_SOURCE.read_text().split('"""')[1].lower()
 
     assert "arbiter" in docstring and "searcher" in docstring
     assert "regenerate" in docstring
+    assert "--write" in docstring and "refus" in docstring

@@ -552,6 +552,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   For the overlaid subset the mandate applies *above* the environment; `noctis status` and the
   `run`/`research` kickoff now echo the active mandate and every applied override.
 
+### Fixed
+
+- **The engine ratchet's promise now actually holds: `--write` refuses to record an undeclared
+  arbiter move.** The ratchet compares the committed record against the freshly computed tree, so
+  the only state it could see was *disagreement between the two* — and regenerating erased it. "Edit
+  `promotion.py`, run `--write`, commit" therefore passed CI with no `ENGINE_VERSION` bump, which is
+  exactly the one change that invalidates every stored champion comparison. Worse, `--write` is the
+  one-command fix the failure message itself recommends and it rewrites *every* component at once, so
+  a PR that also moved a searcher component (the common case) was told to run the command that
+  laundered the arbiter move. `--write` now evaluates the check first and, on arbiter drift while the
+  recorded and computed `ENGINE_VERSION` agree, **writes nothing and exits 1**, printing the
+  bump-or-restore guidance plus its refusal — leaving the tree checkable, and failing. An arbiter
+  move must arrive *declared*: bump, then regenerate.
+  - Every legitimate regeneration stays a single command: searcher-only drift, an arbiter move whose
+    bump *is* in the tree (the record had simply not caught up), no drift at all, and a missing or
+    unreadable record — there is nothing to compare against, and that is how the baseline is created.
+  - The refusal is a decision in the `--write` I/O path (`regenerate`, reading one new derived
+    property off the existing verdict), so `compare_records` stays pure, `build_record` stays
+    independent of the previous record, and `--check`'s four-case rule and report text are unchanged.
+    The arbiter/searcher line is still the one `ARBITER_COMPONENTS` constant, read through `tier_of`.
+
 ## [0.1.0] - 2026-07-13
 
 First public release. Noctis is an autonomous, **paper-only** quantitative research system: it

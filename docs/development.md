@@ -73,6 +73,7 @@ uv run pre-commit run --all-files # all quality gates at once
 
 uv run python scripts/engine_fingerprint.py          # the engine fingerprint ratchet (below)
 uv run python scripts/engine_fingerprint.py --write  # regenerate engine_fingerprint.json
+                                                     # (refuses an undeclared arbiter move)
 ```
 
 ## The engine fingerprint ratchet
@@ -91,7 +92,7 @@ it asserts a comparability that does not hold. The check is split on the arbiter
 
 | Component drift, no `ENGINE_VERSION` bump | Result |
 |---|---|
-| `gates`, `backtest` — the **arbiter**: what passes, and what a number means | **Fail.** Naming the component and the files that moved. This is the change that invalidates every stored champion comparison, so it can never land silently |
+| `gates`, `backtest` — the **arbiter**: what passes, and what a number means | **Fail.** Naming the component and the files that moved. This is the change that invalidates every stored champion comparison, so it can never land silently — and `--write` **refuses to regenerate** it (see below) |
 | `research`, `prompts`, `profiles`, `seeds`, `memory_seed`, `schema` — the **searcher** | **Warn and pass.** Naming the component and the files. Improving the searcher must not invalidate an experiment whose arbiter held still, and a ratchet that fires on a docstring edit gets disabled |
 
 The **same line governs resuming a run** (`src/noctis/observability/engine_change.py`): arbiter
@@ -116,6 +117,30 @@ So, when you move a component:
 # 2. regenerate the record, and commit it in the SAME PR so the diff shows what moved
 uv run python scripts/engine_fingerprint.py --write
 ```
+
+**Step 1 is not optional, and `--write` enforces that.** Regenerating rewrites *every* component
+at once, so a PR that moves a searcher component (the common case) is told to run it — and if that
+also quietly absorbed a moved `gates` digest, the ratchet would hold only for contributors who read
+the failure before typing the command it printed. So `--write` runs the check first and **refuses to
+regenerate** on arbiter drift while the recorded and computed `ENGINE_VERSION` agree: it writes
+nothing, exits 1, and prints the bump-or-restore guidance plus its refusal.
+
+```text
+$ uv run python scripts/engine_fingerprint.py --write
+FAIL  engine fingerprint ratchet (engine_fingerprint.json)
+  arbiter drift with no ENGINE_VERSION bump: gates. A change here invalidates every stored
+  champion comparison — bump ENGINE_VERSION in src/noctis/observability/engine_id.py in this PR,
+  or restore the behaviour
+  gates (arbiter): 4a9c1e0f8b21d735 -> 0d45608deb971291
+      src/noctis/champions/promotion.py
+  refusing to regenerate: --write cannot be the way an undeclared arbiter move gets recorded
+```
+
+An arbiter move must therefore arrive **declared** — bump, then regenerate — and the two-step
+sequence above is the only one that lands it. Everything else stays a single command that leaves
+the tree checkable: searcher-only drift, an arbiter move whose bump *is* already in the tree (the
+record had simply not caught up), no drift at all, and a missing or unreadable record — there is
+nothing to compare against, and that is how the baseline is created in the first place.
 
 Files outside the allowlist in `COMPONENT_PATHS` — docs, tests, the README, an operator's
 gitignored mandate — move no digest and never fire the check.
