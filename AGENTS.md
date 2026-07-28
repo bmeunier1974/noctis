@@ -78,6 +78,8 @@ python -m noctis init              # scaffold local config/.env/mandate + worksp
 python -m noctis migrate [--dry-run]   # move a pre-workspace layout into workspace/
 python -m noctis run -v            # the day/night loop (stops at time_limit_hours)
 python -m noctis research -v       # ONE observable agent research session (needs ANTHROPIC_API_KEY)
+python -m noctis runs [--all]      # the run board: id, label, status, segments, headline numbers
+python -m noctis run-record <id>   # print one run's whole self-contained run.json
 python -m noctis status            # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>    # preflight a mandate: provenance + the effective settings diff
 python -m noctis engine            # engine identity: version, component fingerprint, comparable key

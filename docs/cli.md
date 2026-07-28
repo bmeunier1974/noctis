@@ -95,6 +95,8 @@ plus `jq` one-liners over `events.jsonl` — see
 ## Observability
 
 ```bash
+python -m noctis runs [--all]              # the run board: id, label, status, segments, headline numbers
+python -m noctis run-record <run_id>       # print one run's whole record (pipe it into jq)
 python -m noctis status                    # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>            # preflight a mandate: provenance + the effective settings diff
 python -m noctis engine                    # engine identity: version, component fingerprint, comparable key
@@ -102,6 +104,49 @@ python -m noctis report [--as-of DATE]     # generate / print the close-of-day r
 python -m noctis account [--reset]         # the continuous paper account; --reset archives + starts fresh
 python -m noctis champions [--reset]       # the champion board; --reset re-fills slots under current gates
 ```
+
+### The run board — `runs` and `run-record`
+
+```bash
+python -m noctis runs                      # the experiments worth comparing
+python -m noctis runs --all                # …plus the noise
+python -m noctis run-record <run_id> | jq .run
+```
+
+`runs` lists this workspace's runs newest first, so an experiment can be found and compared
+without opening a file:
+
+```
+run                      label              status      segments   runtime  comparable key
+20260730T025536Z-bc14eb  sector-specialist  stopped            1     1d01h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
+20260727T142233Z-7a8f9d  nightly-momo       running            4     2d12h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
+20260101T000000Z-brokn0  -                  unreadable         -         -  an unreadable run.json (JSONDecodeError)
+
+1 short run(s) hidden; pass --all to list them.
+```
+
+The last column is the **comparable key** (see [Engine identity](#engine-identity--are-these-two-runs-comparable)):
+runs may only be pooled or ranked against each other within one key, so the board is partitioned
+structurally rather than from memory. A run whose record is missing or unreadable is *listed as
+such*, with the reason where its key would be — a broken record is evidence, and hiding it would
+be the one thing a listing must never do.
+
+**The default listing hides noise**: a run that finished with under 60 seconds of cumulative
+runtime produced nothing to compare (a startup failure, a mistyped command, a config typo). The
+count of what was hidden is always printed, and `--all` shows everything. Two kinds are never
+hidden whatever their runtime — a run that is still `running`, and a run whose record could not
+be read.
+
+`run-record <run_id>` prints that run's whole `run.json` on stdout. The record has **no
+sidecars**: one file holds everything about the run, which is exactly what a website `fetch()`es
+and what `jq` reads here. It exits non-zero when no run answers the id, or when that one run's
+record cannot be read (the listing tolerates a broken record because it has others to show; a
+command asked for exactly one does not).
+
+Beside the run trees, `workspace/runs/index.json` is a **derived** roll-up of the same entries —
+one `fetch()` for a listing page. Derived, never authoritative: the engine refreshes it after
+every record write, `noctis runs` regenerates it from the records on disk, and a test pins that a
+rebuild reproduces the incrementally-maintained file byte for byte. Delete it whenever you like.
 
 ### What `status` reports about steering
 

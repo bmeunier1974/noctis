@@ -1,7 +1,8 @@
 """Command-line interface (Typer).
 
 Commands: ``setup`` (the guided first-run wizard), ``init``/``migrate`` (scaffold /
-legacy-layout move), ``run``, ``status``, ``mandate`` (the steering preflight), ``engine`` (the
+legacy-layout move), ``run``, ``runs``/``run-record`` (the run board and one run's record),
+``status``, ``mandate`` (the steering preflight), ``engine`` (the
 engine's identity and comparability key), ``report``, ``backtest``, ``champions``, ``account``
 (the continuous paper account), ``research`` (one observable agent research session),
 ``strategies`` (the authored library index), and the ``data`` sub-app.
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, NoReturn
@@ -492,6 +494,123 @@ def status(
         f"(execution={settings.trading.execution})"
     )
     _echo_status_mandate(inputs.mandate, inputs.overrides, mandate_error)
+
+
+@app.command("runs")
+def runs(
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Show every run, including the short ones the default listing hides "
+        "(a finished run under 60s of cumulative runtime: a startup failure or a typo).",
+    ),
+    config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
+) -> None:
+    """List this workspace's runs: id, label, status, segments and headline numbers.
+
+    The experiment board — how a run is found and compared without opening files. Runs are
+    listed newest first, and each line ends with the run's **comparable key**: the tuple two
+    runs must match on before their numbers may be pooled or ranked together, so a leaderboard
+    is partitioned structurally rather than from memory.
+
+    **The default listing hides noise**: a run that finished with less than 60 seconds of
+    cumulative runtime produced no evidence — it is a startup failure, a mistyped command or a
+    config typo — and a board full of those buries the experiments. ``--all`` shows everything,
+    and the count of what was hidden is always printed. Two kinds are never hidden whatever
+    their runtime: a run that is still ``running``, and a run whose record could not be read.
+
+    Rewrites the derived ``index.json`` roll-up from the records on disk as it goes: the index
+    is derived, never authoritative, so listing is also how it is regenerated.
+    """
+    from pathlib import Path
+
+    from noctis.reporting.run_store import rebuild_index, visible_runs, write_index
+
+    settings = load_settings(config_path=config)
+    runs_dir = Path(settings.runs_dir)
+    index = rebuild_index(runs_dir)
+    if runs_dir.is_dir():
+        write_index(runs_dir, index)
+    if not index["runs"]:
+        typer.echo(f"No runs yet under {runs_dir}. Every `noctis run` mints one.")
+        return
+
+    listed = visible_runs(index["runs"], include_all=show_all)
+    rows = [_run_row(entry) for entry in listed]
+    ids = max(len(row[0]) for row in rows)
+    labels = max(len(row[1]) for row in rows)
+    typer.echo(
+        f"{'run':<{ids}}  {'label':<{labels}}  {'status':<11} {'segments':>8} {'runtime':>9}  "
+        "comparable key"
+    )
+    for run_id, label, status, segments, runtime, key in rows:
+        typer.echo(
+            f"{run_id:<{ids}}  {label:<{labels}}  {status:<11} {segments:>8} {runtime:>9}  {key}"
+        )
+    hidden = len(index["runs"]) - len(listed)
+    if hidden:
+        typer.echo(f"\n{hidden} short run(s) hidden; pass --all to list them.")
+
+
+def _run_row(entry: Mapping[str, object]) -> tuple[str, str, str, str, str, str]:
+    """One index entry as the six columns the board prints.
+
+    The last column answers "may these numbers be pooled?" with the run's comparable key — or,
+    for a run whose record could not be read, says why there is no answer. Either way the line
+    explains itself without a second lookup.
+    """
+    readable = bool(entry.get("readable"))
+    segments = entry.get("segments")
+    return (
+        str(entry.get("run_id") or "-"),
+        str(entry.get("label") or "-"),
+        str(entry.get("status") or "-") if readable else "unreadable",
+        "-" if segments is None else str(segments),
+        _runtime(entry.get("cumulative_runtime_s")),
+        str(entry.get("comparable_key") or entry.get("note") or "-"),
+    )
+
+
+def _runtime(seconds: object) -> str:
+    """Cumulative runtime as an operator reads it — ``45s`` / ``38m`` / ``2h30m`` / ``4d02h``."""
+    if not isinstance(seconds, int | float) or isinstance(seconds, bool):
+        return "-"
+    minutes, hours = int(seconds // 60), int(seconds // 3600)
+    if minutes < 1:
+        return f"{int(seconds)}s"
+    if hours < 1:
+        return f"{minutes}m"
+    if hours < 24:
+        return f"{hours}h{minutes % 60:02d}m"
+    return f"{hours // 24}d{hours % 24:02d}h"
+
+
+@app.command("run-record")
+def run_record(
+    run_id: str = typer.Argument(..., help="Run id, exactly as `noctis runs` lists it."),
+    config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
+) -> None:
+    """Print one run's record — the whole self-contained ``run.json``, straight to stdout.
+
+    The record has no sidecars: everything about the run is in this one document, so the output
+    is exactly what a website would `fetch()` and is safe to pipe into ``jq``. Exits non-zero
+    when no run answers the id, or when its record cannot be read — the listing tolerates a
+    broken record because it has others to show; a command asked for exactly one does not.
+    """
+    import json
+    from pathlib import Path
+
+    from noctis.reporting.run_store import RunNotFoundError, read_record, resolve_run_dir
+
+    settings = load_settings(config_path=config)
+    try:
+        run_dir = resolve_run_dir(Path(settings.runs_dir), run_id)
+    except RunNotFoundError as exc:
+        _exit_red(exc)
+    record, note = read_record(run_dir)
+    if record is None:
+        _exit_red(RuntimeError(f"{run_dir / 'run.json'}: {note}"))
+    typer.echo(json.dumps(record, indent=2))
 
 
 @app.command()

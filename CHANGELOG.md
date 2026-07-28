@@ -32,6 +32,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     host, or a heartbeat colder than a week) is stolen with a warning and a recorded event.
   - **Honesty**: a run killed mid-segment is marked `interrupted` on the **next open**, never
     guessed at write time.
+- **Runs are findable: `noctis runs` / `noctis run-record`, and a derived `index.json`.**
+  `runs [--all]` is the experiment board — id, label, status, segment count, cumulative runtime
+  and the run's **comparable key** on one line, newest first — so experiments are found and
+  compared without opening files. The default listing hides *noise* (a finished run under 60 s of
+  cumulative runtime: a startup failure or a typo), always prints how many it hid, and never
+  hides a still-`running` run or one whose record could not be read. `run-record <id>` prints one
+  run's whole `run.json` on stdout (`| jq`), exiting non-zero when no run answers the id or that
+  record is unreadable. Address resolution lives in the run store, shared with the `--resume` the
+  next story adds.
+  - `workspace/runs/index.json` is a **derived** roll-up of one entry per run — a listing page in
+    one more `fetch()`. Refreshed after every record write (re-read from the file just written,
+    so it can never advertise a record that is not on disk), regenerated from scratch by
+    `noctis runs`, written atomically, and pinned by a test that a rebuild from the records alone
+    reproduces the incrementally-maintained file **byte for byte**. It is derived, never
+    authoritative: delete it whenever you like.
+  - Every index entry carries `comparable_key` (`null` when unknown) beside the record's own, so
+    a leaderboard partitions structurally instead of trusting a human to remember which runs are
+    poolable. A run with no `run.json` yet, or an unreadable/foreign one, is *listed as such* with
+    the reason where its key would be — one broken file can never take a listing down.
 - **Engine identity** (`src/noctis/observability/engine_id.py`) and the `noctis engine` verb.
   A declared `ENGINE_VERSION` (a plain incrementing integer, decoupled from the package
   version) plus a **per-component** fingerprint over the committed files that decide behaviour

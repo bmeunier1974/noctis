@@ -3,9 +3,18 @@
 A run is a real, addressable, always-on entity: ``noctis run`` mints a fresh id (never derives one
 from the config — two byte-identical configs are two runs) and the run gets its own tree::
 
-    workspace/runs/<run_id>/
-      run.json      ← THE record
-      run.lock      ← liveness lock (pid, hostname_hash, started, heartbeat)
+    workspace/runs/
+      index.json                ← the DERIVED listing roll-up (story #130)
+      <run_id>/
+        run.json    ← THE record
+        run.lock    ← liveness lock (pid, hostname_hash, started, heartbeat)
+
+**``run.json`` has no sidecars.** One ``fetch()`` of one URL returns everything a run page needs,
+so a website needs no server-side logic; ``index.json`` beside it serves the *listing* page in one
+more fetch. The index is **derived, never authoritative**: :func:`rebuild_index` regenerates it
+from the records on disk at any moment, and a test pins that a rebuild reproduces the
+incrementally-maintained file byte for byte. Anything that could only be learned from the index
+would be a second source of truth, free to drift from the records it summarizes.
 
 Everything in this module is I/O; everything about the record's *shape* is next door in
 ``run_record`` (pure) and ``schema`` (pure). :func:`collect` does every read and returns a
@@ -42,7 +51,7 @@ import json
 import logging
 import os
 import socket
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -55,17 +64,29 @@ from noctis.reporting.run_record import (
     mark_interrupted,
     utc_iso,
 )
+from noctis.reporting.schema import SCHEMA_VERSION
 
 __all__ = [
     "RUNS_SUBDIR",
+    "RUN_INDEX_KIND",
+    "RUN_INDEX_NAME",
     "RUN_LOCK_NAME",
     "RUN_RECORD_NAME",
+    "SHORT_RUN_S",
     "STALE_HEARTBEAT_S",
     "RunLockedError",
+    "RunNotFoundError",
     "RunStore",
     "collect",
+    "index_entry",
     "open_run",
+    "read_record",
+    "rebuild_index",
+    "resolve_run_dir",
+    "update_index",
+    "visible_runs",
     "write",
+    "write_index",
 ]
 
 logger = logging.getLogger(__name__)
@@ -74,6 +95,14 @@ logger = logging.getLogger(__name__)
 RUNS_SUBDIR = "runs"
 RUN_RECORD_NAME = "run.json"
 RUN_LOCK_NAME = "run.lock"
+RUN_INDEX_NAME = "index.json"
+
+# The index's self-declared type, so a consumer can tell the roll-up from a run record at a glance.
+RUN_INDEX_KIND = "noctis.run-index"
+
+# What the default listing calls noise: a finished run that never accumulated a minute of runtime
+# is a startup failure or a mistyped command, not an experiment. ``--all`` shows them.
+SHORT_RUN_S = 60.0
 
 # How cold a heartbeat must be before a lock we cannot otherwise check counts as abandoned.
 # Deliberately generous — a week. The heartbeat is touched at each CLOSE, i.e. roughly once per
@@ -85,6 +114,10 @@ STALE_HEARTBEAT_S = 7 * 24 * 3600.0
 
 class RunLockedError(RuntimeError):
     """Another engine holds this run. The one hard refusal — see the module docstring."""
+
+
+class RunNotFoundError(LookupError):
+    """No run answers this address. Raised by :func:`resolve_run_dir`, never by the listing."""
 
 
 def open_run(
@@ -152,7 +185,7 @@ def collect(
             note = RecordEvent(
                 t=None,
                 kind="warn",
-                text=f"the existing {RUN_RECORD_NAME} was unreadable "
+                text=f"this run had an unreadable {RUN_RECORD_NAME} "
                 f"({type(exc).__name__}); a fresh record was started in its place",
             )
     return RunArtifacts(
@@ -218,14 +251,217 @@ def write(run_dir: Path | str, record: Mapping[str, object]) -> None:
     either the whole previous record or the whole new one — never a half-written file. The temp
     file is removed on failure so a crashed write leaves no litter beside the record.
     """
-    target = Path(run_dir) / RUN_RECORD_NAME
-    tmp = target.with_name(f"{RUN_RECORD_NAME}.tmp-{os.getpid()}")
+    _write_json(Path(run_dir) / RUN_RECORD_NAME, record)
+
+
+def _write_json(target: Path, document: Mapping[str, object]) -> None:
+    """One atomic JSON write, shared by the record and the index — same discipline, one copy."""
+    tmp = target.with_name(f"{target.name}.tmp-{os.getpid()}")
     try:
-        tmp.write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(document, indent=2, default=str) + "\n", encoding="utf-8")
         os.replace(tmp, target)
     finally:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
+
+
+# ── addressing ─────────────────────────────────────────────────────────────────────────────
+
+
+def resolve_run_dir(runs_dir: Path | str, address: str) -> Path:
+    """Resolve one run **address** to its directory, or raise :class:`RunNotFoundError`.
+
+    The single place an operator-typed address becomes a path, shared by every verb that
+    addresses a run (``run-record`` today, ``--resume`` in story #133). This slice understands
+    exactly one form — a **run id**, the identity itself. The later forms (``latest``, a
+    ``run.json`` path, ``@label`` through the index) are additional branches here, deliberately
+    not implemented yet: an address form invented in two places would eventually resolve two
+    different runs from one string.
+
+    A run dir with no readable ``run.json`` still resolves. The record is evidence *about* the
+    run, and refusing to address a run because its evidence is corrupt would put the one case an
+    operator most needs to inspect out of reach.
+    """
+    runs = Path(runs_dir)
+    candidate = runs / address if _is_run_id(address) else None
+    if candidate is not None and candidate.is_dir():
+        return candidate
+    raise RunNotFoundError(
+        f"no run {address!r} under {runs}. `noctis runs --all` lists every run this workspace has."
+    )
+
+
+def _is_run_id(address: str) -> bool:
+    """A bare directory name. Anything with a separator is a path form (story #133), not an id —
+    and treating it as one would let ``../..`` address its way out of the run tree."""
+    if not address or address in (".", ".."):
+        return False
+    return "/" not in address and "\\" not in address
+
+
+# ── the derived index ──────────────────────────────────────────────────────────────────────
+
+
+def read_record(run_dir: Path | str) -> tuple[dict | None, str | None]:
+    """One run's record, or ``(None, why)`` when there is not a readable one.
+
+    The reading half of "a broken record is evidence, not a crash": the caller gets a reason it
+    can *show* — no record yet, unreadable JSON, a foreign shape — instead of an exception that
+    would take a whole listing down with one bad file.
+    """
+    return _record_at(Path(run_dir) / RUN_RECORD_NAME)
+
+
+def index_entry(run_dir: Path | str) -> dict:
+    """One run's listing entry, derived from its record alone — no sidecar, no other file.
+
+    Carries ``comparable_key`` (always, ``null`` when unknown), so a leaderboard partitions
+    structurally instead of trusting a human to remember which runs may be pooled. Every key is
+    always present: an absent value is an explicit ``null``, the record's own convention.
+    """
+    path = Path(run_dir)
+    record, note = read_record(path)
+    if record is not None:
+        try:
+            return _entry_from(record, run_dir=path)
+        except Exception as exc:  # a hand-edited or foreign file, still valid JSON
+            note = f"an unreadable {RUN_RECORD_NAME} ({type(exc).__name__}: {exc})"
+    return _unreadable_entry(path.name, note)
+
+
+def rebuild_index(runs_dir: Path | str) -> dict:
+    """Regenerate the whole roll-up from the records on disk. Cheap, pure of history, idempotent.
+
+    This is what "derived, never authoritative" means operationally: the index can be deleted at
+    any moment and this reproduces it exactly, so nothing downstream ever has to trust it more
+    than the records it summarizes.
+    """
+    runs = Path(runs_dir)
+    directories = [p for p in runs.iterdir() if p.is_dir()] if runs.is_dir() else []
+    return _index_of(index_entry(run_dir) for run_dir in directories)
+
+
+def update_index(runs_dir: Path | str, run_id: str) -> None:
+    """Refresh one run's entry in the index, leaving every other entry alone.
+
+    Re-derived from that run's record **on disk**, never from a caller's in-memory copy, so the
+    incrementally-maintained file cannot describe a record that was never written. An index that
+    is missing, unreadable, or of another shape is rebuilt from scratch rather than patched: it
+    is derived, so throwing it away costs nothing.
+    """
+    runs = Path(runs_dir)
+    index = _read_index(runs)
+    if index is None:
+        write_index(runs, rebuild_index(runs))
+        return
+    others = [entry for entry in index["runs"] if entry.get("run_id") != run_id]
+    write_index(runs, _index_of([*others, index_entry(runs / run_id)]))
+
+
+def write_index(runs_dir: Path | str, index: Mapping[str, object]) -> None:
+    """Write ``index.json`` atomically — the same tmp + ``os.replace`` the record uses."""
+    _write_json(Path(runs_dir) / RUN_INDEX_NAME, index)
+
+
+def visible_runs(
+    entries: Sequence[Mapping[str, object]], *, include_all: bool = False
+) -> list[Mapping[str, object]]:
+    """The default listing: every run **except** finished ones shorter than :data:`SHORT_RUN_S`.
+
+    A run that stopped after a handful of seconds produced no evidence — it is a startup failure,
+    a mistyped command or a config typo — and a board full of those hides the experiments an
+    operator came to compare. ``include_all`` (the CLI's ``--all``) widens to everything.
+
+    Two kinds are **never** hidden, whatever their runtime: a run that is still ``running`` (the
+    one you are most likely looking for), and a run whose record could not be read (breakage is
+    exactly what a listing exists to surface, so tidiness must not swallow it).
+    """
+    if include_all:
+        return list(entries)
+    return [entry for entry in entries if not _is_noise(entry)]
+
+
+def _is_noise(entry: Mapping[str, object]) -> bool:
+    if not entry.get("readable", True) or entry.get("status") == "running":
+        return False
+    runtime = entry.get("cumulative_runtime_s")
+    return isinstance(runtime, int | float) and float(runtime) < SHORT_RUN_S
+
+
+def _index_of(entries: Iterable[Mapping[str, object]]) -> dict:
+    """The index document: newest run first, and nothing that varies between two rebuilds.
+
+    Deliberately carries **no generation stamp** — a derived file that changed on every rebuild
+    could not be compared against the incrementally-maintained one, and that comparison is the
+    only thing keeping the two paths honest.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": RUN_INDEX_KIND,
+        "runs": sorted(entries, key=lambda entry: str(entry.get("run_id") or ""), reverse=True),
+    }
+
+
+def _entry_from(record: Mapping[str, object], *, run_dir: Path) -> dict:
+    """One record, reduced to its listing entry. Raises on a shape it cannot read."""
+    run = record.get("run")
+    engine = record.get("engine")
+    segments = record.get("segments")
+    if not isinstance(run, Mapping) or not isinstance(engine, Mapping):
+        raise TypeError("the 'run' or 'engine' section is missing or is not an object")
+    if not isinstance(segments, list):
+        raise TypeError("the 'segments' section is missing or is not a list")
+    version = engine.get("engine_version")
+    return {
+        "run_id": str(run.get("run_id") or run_dir.name),
+        "label": _optional_str(run.get("label")),
+        "status": _optional_str(run.get("status")),
+        "created_utc": _optional_str(run.get("created_utc")),
+        "last_active_utc": _optional_str(run.get("last_active_utc")),
+        "segments": len(segments),
+        "cumulative_runtime_s": _optional_number(run.get("cumulative_runtime_s")),
+        "complete": bool(run.get("complete", False)),
+        "engine_version": version if isinstance(version, int) else None,
+        "comparable_key": _optional_str(engine.get("comparable_key")),
+        "mixed_engine": bool(engine.get("mixed_engine", False)),
+        "readable": True,
+        "note": None,
+    }
+
+
+def _unreadable_entry(run_id: str, note: str | None) -> dict:
+    """A run that could not be read, listed as exactly that — same keys, honest nulls."""
+    return {
+        "run_id": run_id,
+        "label": None,
+        "status": None,
+        "created_utc": None,
+        "last_active_utc": None,
+        "segments": None,
+        "cumulative_runtime_s": None,
+        "complete": False,
+        "engine_version": None,
+        "comparable_key": None,
+        "mixed_engine": None,
+        "readable": False,
+        "note": note,
+    }
+
+
+def _read_index(runs_dir: Path) -> dict | None:
+    """The index as written, or ``None`` when there is nothing here worth patching."""
+    try:
+        index = json.loads((runs_dir / RUN_INDEX_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(index, dict) or index.get("kind") != RUN_INDEX_KIND:
+        return None
+    if index.get("schema_version") != SCHEMA_VERSION:
+        return None
+    entries = index.get("runs")
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        return None
+    return index
 
 
 # ── the lock ───────────────────────────────────────────────────────────────────────────────
@@ -564,6 +800,10 @@ class RunStore:
     def _flush(self) -> None:
         self._replace_artifacts()  # re-stamp ``complete`` from the current lifecycle state
         self._writer(self._run_dir, build(self._artifacts))
+        # The roll-up follows the record, never leads it: it is refreshed *after* a successful
+        # write and re-read from the file just written, so the listing can never advertise a
+        # record that is not on disk. A failed write latches the store and skips this entirely.
+        update_index(self._run_dir.parent, self._artifacts.run_id)
 
     def _release_lock(self) -> None:
         """Best effort, always attempted: a stale lock file is friction for the next invocation,
@@ -577,24 +817,39 @@ class RunStore:
 # ── reading a record back ──────────────────────────────────────────────────────────────────
 
 
-def _read_record(path: Path) -> tuple[dict | None, RecordEvent | None]:
-    """The prior record, or ``(None, note)`` when there is none / it cannot be read."""
+def _record_at(path: Path) -> tuple[dict | None, str | None]:
+    """The parsed record, or ``(None, reason)`` — the one place a record is read off disk.
+
+    The reason is written to be shown to an operator as-is, because both callers show it: the
+    listing puts it in the run's index entry, and the opening path folds it into the record's own
+    events. One phrasing, so a broken record is described the same way wherever it surfaces.
+    """
     if not path.is_file():
-        return None, None
+        return None, f"no {path.name} yet"
     try:
-        prior = json.loads(path.read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return None, RecordEvent(
-            t=None,
-            kind="warn",
-            text=f"the existing {path.name} was unreadable ({type(exc).__name__}); "
-            "a fresh record was started in its place",
-        )
-    if not isinstance(prior, dict):
-        return None, RecordEvent(
-            t=None, kind="warn", text=f"the existing {path.name} was unreadable (not an object)"
-        )
-    return prior, None
+        return None, f"an unreadable {path.name} ({type(exc).__name__})"
+    if not isinstance(record, dict):
+        return None, f"an unreadable {path.name} (not an object)"
+    return record, None
+
+
+def _read_record(path: Path) -> tuple[dict | None, RecordEvent | None]:
+    """The prior record for an *opening* run, or ``(None, note)`` when it cannot be read.
+
+    A missing record is the normal case for a fresh run and carries no note; anything else is
+    worth an event, because a run whose history could not be read must say so in the record it
+    starts in its place.
+    """
+    record, reason = _record_at(path)
+    if record is not None or not path.is_file():
+        return record, None
+    return None, RecordEvent(
+        t=None,
+        kind="warn",
+        text=f"this run had {reason}; a fresh record was started in its place",
+    )
 
 
 def _segment_from(raw: Mapping[str, object]) -> SegmentArtifact:
@@ -637,6 +892,10 @@ def _event_from(raw: Mapping[str, object]) -> RecordEvent:
 
 def _optional_str(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _optional_number(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
 def _noctis_version() -> str:
