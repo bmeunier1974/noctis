@@ -98,27 +98,38 @@ Once it's running: `noctis status` (mode, market state, champions), `noctis repo
 (close-of-day report), `noctis research -v` (watch one research session live). Every
 command: [docs/cli.md](docs/cli.md)
 
-## Steering it — your two most important knobs
+## Steering it — the mandate is your input surface
 
-Noctis researches on its own, but **what it hunts for** and **how results are judged** are
-yours to set. Both live in the local files `noctis setup` just created (gitignored —
-editing them never touches the repo):
+Noctis researches on its own, but **what it hunts for** is yours to set — and it lives in one
+place: the local `mandate/` folder `noctis setup` created (gitignored, so steering the agent
+never shows up as a repo change).
 
-- **The mandate** (`research.mandate` in `config.yaml`) — the research brief: style, risk
-  appetite, symbols. Pick a shipped profile (`aggressive`, `conservative`, `long-term`,
-  `short-term`, `sector-specialist`), write your own brief in `mandate/MANDATE.md` (selector
-  `MANDATE`), let the agent choose per session (`auto`), or leave it `null` for unconstrained
-  research. A pinned mandate also **configures the run** it steers — which model thinks, what
-  one session may spend, which names it starts from — but it can never loosen a validation
-  gate: the arena (safety mode, fill costs, promotion thresholds, holdouts, paths, secrets) is
-  refused by name, and a mandate that reaches for it doesn't start.
-  → [mandate/README.md](mandate/README.md)
-- **The election metric** (`promotion.metric` in `config.yaml`) — the risk appetite every
-  candidate is scored, ranked, and promoted on: `sharpe` (penalizes all volatility),
-  `sortino` (penalizes only downside), or `total_return` (raw profit). It threads through
-  the whole pipeline, and it is the **one** `promotion.*` knob a mandate may bind — the
-  thresholds beside it are read in its units, so they stay yours.
-  → [docs/configuration.md](docs/configuration.md) · [docs/research.md](docs/research.md)
+A mandate is two things in one file. The **prose brief** tells the agent what kind of trader you
+want the system to be: style, risk appetite, horizon, which names to look at. The front-matter
+`config:` block **shapes the run** it steers: which model thinks, what one session may spend,
+which universe it starts from — and the flagship knob, the election metric.
+
+- **The election metric** (`promotion.metric`) — the risk dial every candidate is scored,
+  ranked, and promoted on: `sharpe` (penalizes all volatility), `sortino` (penalizes only
+  downside), or `total_return` (raw profit). It threads through the whole pipeline, and it is
+  the **one** `promotion.*` knob a mandate may bind — the thresholds beside it are read in its
+  units, so they stay yours. `config.yaml` sets the base every run starts from, which is what
+  an unmandated run — or an `auto` session, whose profile is picked too late to overlay —
+  scores on.
+- **Which mandate governs a run** (`research.mandate` in `config.yaml`) — a shipped profile
+  (`aggressive`, `conservative`, `long-term`, `short-term`, `sector-specialist`), your own brief
+  in `mandate/MANDATE.md` (selector `MANDATE`), `auto` to let the agent pick a personality each
+  session, or `null` for unconstrained research. `--mandate <name>` and `--directive "<text>"`
+  (mutually exclusive) override the selector for one session; on `--resume` they are refused,
+  because a run's steering is frozen at creation.
+- **The run is yours, the arena is not.** A mandate can never loosen a validation gate. The
+  overlay allowlist is deny-by-default: the safety mode, the fill costs, every promotion
+  threshold but the metric, the holdout geometry, the state paths and the secrets are refused by
+  name, and a mandate that reaches for one doesn't start.
+
+→ [Authoring mandates](mandate/README.md) ·
+[the overlay surface, knob by knob](docs/configuration.md#the-mandate-overlay) ·
+[how a mandate steers research](docs/research.md)
 
 Secrets (LLM/vendor keys, the `ALLOW_LIVE` gate) go in `.env` — see
 [docs/configuration.md](docs/configuration.md).
