@@ -56,6 +56,48 @@ ENGINE = EngineIdentity(
 )
 
 
+def _environment(host: str, *, cores: int, degraded: list[str] | None = None) -> dict:
+    """One machine's environment block, stated by hand — the shape ``environment.capture`` emits.
+
+    Two of these differ in this file, because the whole reason the block is **per segment** is
+    that a run may migrate machines mid-experiment (story #139).
+    """
+    return {
+        "hostname_hash": host,
+        "os": {"system": "Linux", "release": "7.0.0-14-generic", "arch": "x86_64"},
+        "container": True,
+        "cpu": {
+            "model": "AMD Ryzen 9 7950X",
+            "cores_physical": cores // 2,
+            "cores_logical": cores,
+            "freq_max_mhz": 5881.0,
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+            "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+            "branch": "main",
+            "dirty": False,
+            "describe": "v0.1.0-42-ga380d3a",
+        },
+        "lockfile_digest": "sha256:9f2c1d",
+        "extras_present": {
+            "llm": "0.120.0",
+            "data": "0.82.0",
+            "research": None,
+            "engine": None,
+            "hardware": "7.2.2",
+        },
+        "degraded_seams": degraded if degraded is not None else ["engine", "research"],
+    }
+
+
+SMALL_BOX = _environment("9f2c1d3e4b5a", cores=8)
+BIG_BOX = _environment("0011223344ff", cores=32)
+
+
 def _segment(
     index: int,
     *,
@@ -66,6 +108,7 @@ def _segment(
     resumed: bool = False,
     counters: dict[str, int] | None = None,
     phase_seconds: dict[str, float] | None = None,
+    environment: dict | None = None,
 ) -> SegmentArtifact:
     return SegmentArtifact(
         index=index,
@@ -79,6 +122,7 @@ def _segment(
         counters=counters or {"cycles": 1, "research_iterations": 4, "trades": 2},
         phase_seconds=phase_seconds or {"RESEARCH": 12000.0, "TRADING": 2340.0, "CLOSE": 60.0},
         engine=ENGINE,
+        environment=environment if environment is not None else SMALL_BOX,
     )
 
 
@@ -108,6 +152,9 @@ def _artifacts(**overrides) -> RunArtifacts:
                 resumed=True,
                 counters={"cycles": 2, "research_iterations": 9, "trades": 0},
                 phase_seconds={"RESEARCH": 3400.0, "TRADING": 0.0, "CLOSE": 40.0},
+                # The run migrated machines between the two nights — the case the per-segment
+                # environment block exists for.
+                environment=BIG_BOX,
             ),
         ),
         engine=ENGINE,
@@ -174,6 +221,23 @@ FROZEN_INPUTS = {
     "frozen_at_utc": "2026-07-27T14:22:33.418Z",
     "execution_mode": "paper",
     "mandate": {"source": "profile:aggressive", "text": "Trade volatility.", "text_sha256": "ab"},
+    # The rest of the provenance block (story #139) — derived views over what ``resolved`` already
+    # carries, so a consumer reads "what produced these numbers" without rebuilding a fallback
+    # chain. A model name is public; the key that authenticates it is secret tier and never here.
+    "models": {
+        "research": "openai/gpt-5.4",
+        "coder": None,
+        "coder_fallback": None,
+        "ideation": "claude-opus-4-8",
+        "research_loop": "conversation",
+        "context_window": None,
+        "cost_profile": "balanced",
+    },
+    "data": {
+        "provider": "databento",
+        "dataset": "EQUS.MINI",
+        "lake_dir": "workspace/data_lake",
+    },
     "settings": {
         "digest": "0f1e2d3c4b5a",
         "resolved": {"promotion": {"metric": "sharpe"}},
@@ -351,6 +415,131 @@ def test_segments_are_uncapped_they_are_the_runs_spine():
 
     assert len(record["segments"]) == 3000
     assert record["run"]["truncated"] == {}
+
+
+# ── the environment is per segment, never per run (story #139) ─────────────────────────────
+
+
+def test_each_segment_carries_the_environment_it_actually_ran_in():
+    record = build(_artifacts())
+
+    first, second = record["segments"]
+    assert first["environment"] == SMALL_BOX
+    assert second["environment"] == BIG_BOX
+
+
+def test_a_run_whose_segments_ran_on_different_machines_shows_different_environments():
+    """The whole reason the block is per segment: research throughput is CPU-bound, so one
+    segment's trials-per-hour must never be attributed to another segment's hardware."""
+    record = build(_artifacts())
+
+    first, second = record["segments"]
+    assert first["environment"]["hostname_hash"] != second["environment"]["hostname_hash"]
+    assert first["environment"]["cpu"]["cores_logical"] == 8
+    assert second["environment"]["cpu"]["cores_logical"] == 32
+    assert schema.validate(record) == []
+
+
+def test_the_record_also_exposes_the_latest_environment():
+    """One fetch, one page: a consumer showing "the machine this run is on" reads one key rather
+    than walking segments backwards looking for the newest non-null one."""
+    record = build(_artifacts())
+
+    assert record["environment_latest"] == BIG_BOX
+    assert record["environment_latest"] == record["segments"][-1]["environment"]
+
+
+def test_the_latest_environment_skips_a_segment_that_measured_none():
+    """A record written before environments existed (or by a store handed none) still answers
+    "what machine has this run been on?" with the newest one that *was* measured."""
+    artifacts = _artifacts(
+        segments=(
+            _segment(
+                0,
+                started="2026-07-27T14:22:33.418Z",
+                stopped="2026-07-27T18:22:33.418Z",
+                reason="time_limit",
+                status="stopped",
+            ),
+            _segment(
+                1,
+                started="2026-07-28T01:10:04.002Z",
+                stopped=None,
+                reason=None,
+                status="running",
+                environment={},
+            ),
+        )
+    )
+
+    record = build(artifacts)
+
+    assert record["segments"][1]["environment"] is None
+    assert record["environment_latest"] == SMALL_BOX
+
+
+def test_a_run_that_measured_no_environment_at_all_says_so_with_an_explicit_null():
+    artifacts = _artifacts(
+        segments=(SegmentArtifact(index=0, started_utc="2026-07-27T14:22:33.418Z", engine=ENGINE),)
+    )
+
+    record = build(artifacts)
+
+    assert record["segments"][0]["environment"] is None
+    assert record["environment_latest"] is None
+    assert "environment_latest" in record  # an explicit null, never an omitted key
+    assert schema.validate(record) == []
+
+
+def test_the_validator_names_an_environment_block_missing_a_key():
+    """Absent values are explicit nulls here too — a silently missing key would be
+    indistinguishable from "this schema version did not record it"."""
+    record = build(_artifacts())
+    del record["segments"][0]["environment"]["degraded_seams"]
+    del record["environment_latest"]["git"]
+
+    problems = schema.validate(record)
+
+    assert any("degraded_seams" in problem for problem in problems)
+    assert any("environment_latest.git" in problem for problem in problems)
+
+
+def test_the_record_stays_valid_when_every_environment_fact_degraded():
+    """The degradation case end to end: no git, no psutil, no extras — schema-valid, explicit
+    nulls, and the seams that were missing named."""
+    degraded = {
+        "hostname_hash": None,
+        "os": {"system": "Linux", "release": None, "arch": None},
+        "container": None,
+        "cpu": dict.fromkeys(("model", "cores_physical", "cores_logical", "freq_max_mhz")),
+        "memory_total_bytes": None,
+        "disk_free_bytes": None,
+        "python": "3.11.9",
+        "noctis_version": None,
+        "git": None,
+        "lockfile_digest": None,
+        "extras_present": dict.fromkeys(("llm", "data", "research", "engine", "hardware")),
+        "degraded_seams": ["data", "engine", "git", "hardware", "llm", "lockfile", "research"],
+    }
+
+    record = build(
+        _artifacts(
+            segments=(
+                _segment(
+                    0,
+                    started="2026-07-27T14:22:33.418Z",
+                    stopped="2026-07-27T18:22:33.418Z",
+                    reason="time_limit",
+                    status="stopped",
+                    environment=degraded,
+                ),
+            )
+        )
+    )
+
+    assert schema.validate(record) == []
+    assert record["environment_latest"] == degraded
+    assert "git" in record["environment_latest"]["degraded_seams"]
 
 
 # ── a research-only run is a first-class shape, not a degenerate one (story #137) ───────────

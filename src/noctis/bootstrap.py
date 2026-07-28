@@ -393,6 +393,7 @@ def _adopt_current_config(
         mandate=active,
         overrides=overrides,
         execution_mode=mode,
+        research_loop=resolve_research_loop(candidate),
         at=utc_iso(datetime.now(UTC)),
         segment=len(record.get("segments") or []),
     )
@@ -913,6 +914,263 @@ def _digest_excluded_fields() -> set[str]:
     return set(_DIGEST_SECRET_FIELDS) | set(RUN_IDENTITY)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The per-segment environment probes (story #139)
+# ─────────────────────────────────────────────────────────────────────────────
+# How long the git probe may block. A reporting fact is never worth a stalled startup: a hung
+# `git` on a network filesystem degrades to a null git block with the seam named, exactly like a
+# wheel install with no checkout.
+_GIT_TIMEOUT_S = 5.0
+
+
+def build_environment_probes(root: Path | None = None):
+    """The real environment probes — the **only** place hardware, git and extras are read.
+
+    ``noctis.observability.environment`` is deliberately free of ``platform``, ``os``, ``socket``
+    and ``subprocess``: it shapes what these callables return and nothing more, so a test needs no
+    machine, no repository and no subprocess. The reading itself belongs here, beside every other
+    collaborator this root assembles.
+
+    ``root`` is the checkout the git state and the lockfile are read from; it defaults to this
+    installation's repo root (:func:`~noctis.observability.engine_id.default_root`, the same one
+    the engine fingerprint resolves its component paths against, so the record's two identities
+    describe the same tree). Injectable so a test can point it at a directory that is not a
+    repository and watch both degrade honestly.
+
+    Every probe returns data or ``None`` and none of them raises for an ordinary absence: no
+    ``psutil`` (an optional extra by design — the stdlib subset answers what it can), no git
+    checkout, no lockfile, none of the optional stacks. ``environment.capture`` turns each absence
+    into an explicit ``null`` plus a named degraded seam.
+    """
+    from noctis.observability.engine_id import default_root
+    from noctis.observability.environment import EnvironmentProbes
+
+    base = default_root() if root is None else Path(root)
+    return EnvironmentProbes(
+        hostname=_probe_hostname,
+        os_facts=_probe_os_facts,
+        hardware=_probe_hardware,
+        versions=_probe_versions,
+        git=lambda: _probe_git(base),
+        lockfile=lambda: _probe_lockfile(base),
+        extras=_probe_extras,
+    )
+
+
+def capture_environment(root: Path | None = None) -> dict:
+    """This machine's environment block, ready to ride on the segment this process opens.
+
+    One line of wiring — probes here, shaping there — so the record's per-segment environment has
+    exactly one production source and the run store never learns how to read a CPU.
+    """
+    from noctis.observability.environment import capture
+
+    return capture(build_environment_probes(root)).as_dict()
+
+
+def _probe_hostname() -> str | None:
+    """The raw machine name. Hashed by ``environment.capture`` and never recorded as-is — story
+    #129 made the same choice for ``run.lock``, and the two read one hashing function."""
+    import socket
+
+    try:
+        return socket.gethostname()
+    except OSError:  # pragma: no cover - a host that will not name itself
+        return None
+
+
+def _probe_os_facts() -> dict:
+    import os
+    import platform
+    from pathlib import Path
+
+    # Containerisation matters because it bounds the CPU and memory the numbers beside it were
+    # produced under. Marker files first (cheap, definitive when present), then the cgroup line a
+    # container runtime rewrites; a platform that offers neither answers ``None`` rather than a
+    # confident "no".
+    container: bool | None = None
+    if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
+        container = True
+    elif os.environ.get("container"):
+        container = True
+    else:
+        try:
+            cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            cgroup = ""
+        if cgroup:
+            container = any(marker in cgroup for marker in ("docker", "kubepods", "containerd"))
+    return {
+        "system": platform.system() or None,
+        "release": platform.release() or None,
+        "arch": platform.machine() or None,
+        "container": container,
+    }
+
+
+def _probe_hardware() -> dict:
+    """CPU, memory and free disk — ``psutil`` when the ``hardware`` extra is installed, the
+    stdlib subset otherwise.
+
+    The seam discipline AGENTS.md already applies to ``vectorbt`` and ``databento``: richer
+    hardware facts are a nicety, so they may not become a core dependency. Without the extra the
+    logical core count and free disk still land, and the rest is honest ``null`` with ``hardware``
+    named in ``degraded_seams``.
+    """
+    import os
+    import platform
+    import shutil
+
+    facts: dict[str, object] = {
+        "model": _stdlib_cpu_model() or platform.processor() or None,
+        "cores_physical": None,
+        "cores_logical": os.cpu_count(),
+        "freq_max_mhz": None,
+        "memory_total_bytes": _stdlib_memory_total_bytes(),
+        "disk_free_bytes": None,
+    }
+    try:
+        facts["disk_free_bytes"] = shutil.disk_usage(os.getcwd()).free
+    except OSError:  # pragma: no cover - a working directory that vanished
+        pass
+    try:
+        # The optional extra, imported only where it is used — never at module scope.
+        import psutil
+
+        facts["cores_physical"] = psutil.cpu_count(logical=False)
+        facts["cores_logical"] = psutil.cpu_count(logical=True) or facts["cores_logical"]
+        facts["memory_total_bytes"] = psutil.virtual_memory().total
+        facts["freq_max_mhz"] = getattr(psutil.cpu_freq(), "max", None) or None
+    except Exception:
+        # An absent extra and a psutil that cannot answer on this kernel are the same event here:
+        # the enrichment did not happen. Swallowed rather than raised so the stdlib facts already
+        # in hand survive — degrading the whole block to nulls would lose more than it reports.
+        return facts
+    return facts
+
+
+def _stdlib_cpu_model() -> str | None:
+    """The CPU's marketing name from ``/proc/cpuinfo``, or ``None`` off Linux.
+
+    ``platform.processor()`` is empty on most Linux builds, and the CPU model is the single most
+    useful hardware fact for reading two runs' trials-per-hour against each other — so it is worth
+    one file read that ``psutil`` does not offer at all.
+    """
+    from pathlib import Path
+
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip() or None
+    except (OSError, IndexError):
+        return None
+    return None
+
+
+def _stdlib_memory_total_bytes() -> int | None:
+    """Total RAM without ``psutil``: ``/proc/meminfo`` on Linux, ``None`` anywhere else."""
+    from pathlib import Path
+
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, IndexError, ValueError):
+        return None
+    return None
+
+
+def _probe_versions() -> dict:
+    import platform
+
+    return {"python": platform.python_version(), "noctis": _noctis_version()}
+
+
+def _probe_git(root: Path) -> dict | None:
+    """This checkout's commit, branch, dirty flag and describe — or ``None`` outside a repository.
+
+    Degrading to ``None`` rather than to a block of nulls is deliberate: "there is no git state
+    here" (a wheel install, a copied tree) is a different fact from "there is a repository that
+    could not answer", and only the first is an ordinary Noctis install.
+    """
+    commit = _git(root, "rev-parse", "HEAD")
+    if commit is None:
+        return None
+    status = _git(root, "status", "--porcelain")
+    return {
+        "commit": commit,
+        "branch": _git(root, "rev-parse", "--abbrev-ref", "HEAD"),
+        "dirty": None if status is None else bool(status),
+        "describe": _git(root, "describe", "--tags", "--always", "--dirty"),
+    }
+
+
+def _git(root: Path, *args: str) -> str | None:
+    """One git command, bounded and never fatal. ``None`` for anything that did not answer."""
+    import subprocess
+
+    try:
+        # A fixed argv (never an operator string), bounded, and never checked into a raise.
+        done = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def _probe_lockfile(root: Path) -> bytes | None:
+    """``uv.lock``'s bytes — the whole dependency resolution, pinned by one digest downstream."""
+    try:
+        return (root / "uv.lock").read_bytes()
+    except OSError:
+        return None
+
+
+def _probe_extras() -> dict:
+    """``{extra name: version or None}`` over the optional extras the installer knows.
+
+    One list, not two: :data:`noctis.onboarding.EXTRA_MODULES` is what ``noctis setup`` probes and
+    what this reports, so "missing extra" and "degraded seam" stay a single notion and the remedy
+    the record implies (``uv sync --extra <name>``) is one an operator can type.
+    """
+    from importlib import metadata
+    from importlib.util import find_spec
+
+    from noctis.onboarding import EXTRA_MODULES
+
+    present: dict[str, str | None] = {}
+    for extra, module in EXTRA_MODULES.items():
+        try:
+            installed = find_spec(module) is not None
+        except (ImportError, ValueError):  # pragma: no cover - a broken meta path entry
+            installed = False
+        if not installed:
+            present[extra] = None
+            continue
+        try:
+            present[extra] = metadata.version(module.replace("_", "-"))
+        except Exception:  # importable but not distribution-installed (a vendored/local module)
+            present[extra] = "unknown"
+    return present
+
+
+def _noctis_version() -> str | None:
+    """The package literal — informational, never a comparison key (that is the engine version)."""
+    from importlib import metadata
+
+    try:
+        return metadata.version("noctis")
+    except Exception:  # not pip-installed (editable/source tree)
+        from noctis import __version__
+
+        return __version__
+
+
 def open_run_store(
     settings,
     *,
@@ -948,10 +1206,18 @@ def open_run_store(
     a single path edit in a command body, and two runs in one workspace cannot contaminate each
     other. The shared data lake is untouched: vendor data is expensive and run-neutral.
 
+    **Opening a run also records what it ran on and under** (story #139): the appending segment
+    carries this machine's environment block — hardware, OS, python, git state, lockfile digest,
+    extras present and degraded seams — captured through :func:`build_environment_probes`. It is
+    per segment, never per run, because a stopped-and-resumed experiment may migrate machines and
+    research throughput is CPU-bound: one night's trials-per-hour must not be attributed to
+    another night's cores.
+
     **Opening a run also freezes its config** (story #132): the settings this invocation assembled,
-    the mandate as resolved *text* plus the overlay it applied, and the gate's verdict are pinned
-    onto the record at creation — and only at creation, so every later segment restores them
-    instead of re-reading files that may have changed since. ``resume=True`` says this invocation
+    the mandate as resolved *text* plus the overlay it applied, the resolved models and the data
+    provider/dataset, and the gate's verdict are pinned onto the record at creation — and only at
+    creation, so every later segment restores them instead of
+    re-reading files that may have changed since. ``resume=True`` says this invocation
     is continuing an existing run rather than minting one, which turns an unknown id and a
     ``completed`` run into refusals rather than a surprise new run.
 
@@ -992,10 +1258,15 @@ def open_run_store(
             mandate=mandate,
             overrides=overrides or [],
             execution_mode=mode,
+            research_loop=resolve_research_loop(settings),
             frozen_at=utc_iso(tick()),
         ),
         rebase_config=rebase is not None,
         engine_upgrade=engine_upgrade,
+        # The machine this process is on (story #139), captured through the injected probes above
+        # and stamped on THIS segment only: a run that migrates boxes mid-experiment keeps each
+        # night's throughput attributed to the hardware that produced it.
+        environment=capture_environment(),
     )
     bind_run_dir(settings, store.run_dir)
     return store
@@ -1069,7 +1340,6 @@ def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str |
     import hashlib
     import platform
     from datetime import UTC, datetime
-    from importlib import metadata
 
     from noctis.observability.debug import Recorder, new_run_id, prune_qa_dir
 
@@ -1078,16 +1348,11 @@ def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str |
     dump = settings.model_dump_json(exclude=_digest_excluded_fields())
     config_digest = hashlib.sha256(dump.encode("utf-8")).hexdigest()[:12]
 
-    try:
-        noctis_version = metadata.version("noctis")
-    except Exception:  # not pip-installed (editable/source tree) — fall back to the package literal
-        from noctis import __version__ as noctis_version
-
     manifest = {
         "argv": list(argv),
         "mode": mode,
         "config_digest": config_digest,
-        "versions": {"noctis": noctis_version, "python": platform.python_version()},
+        "versions": {"noctis": _noctis_version(), "python": platform.python_version()},
     }
     return Recorder(
         settings.qa_dir,

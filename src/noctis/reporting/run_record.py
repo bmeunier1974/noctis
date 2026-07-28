@@ -167,6 +167,16 @@ class SegmentArtifact:
     # never traded"). Waiting is not working: the between-phase waits (out a weekend, to a session
     # close) belong to the segment's ``duration_s`` and to no phase.
     phase_seconds: Mapping[str, float] | None = None
+    # The machine this process ran on, and the inputs it resolved: hardware, OS, python, git
+    # state, lockfile digest, extras present, degraded seams (story #139). Captured by the store
+    # through the injected probes of ``observability.environment`` and carried here as data, like
+    # every other value in this module. **Per segment, not per run**: a run may migrate machines
+    # mid-experiment, and research throughput is CPU-bound — one night's trials-per-hour must
+    # never be attributed to another night's hardware. ``None`` means "this segment measured
+    # nothing", which is what a record written before environments existed says, and it is
+    # deliberately different from a block whose values are individually null (a machine that
+    # *was* measured and could not answer).
+    environment: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -356,6 +366,10 @@ def build(artifacts: RunArtifacts) -> dict:
             "truncated": truncated,
         },
         "segments": segments,
+        # The newest machine this run has worked on (story #139). Derived from ``segments[]``, so
+        # it can never disagree with the per-segment blocks it summarizes — those stay the record
+        # of what actually produced each night's numbers.
+        "environment_latest": _environment_latest(segments),
         "engine": _engine(artifacts),
         "inputs": dict(artifacts.inputs) if artifacts.inputs is not None else None,
         # The realised paper-account record — an explicit key from story #137 on, and deliberately
@@ -409,6 +423,17 @@ def _status(artifacts: RunArtifacts, *, completed_utc: str | None) -> str:
     return last if last in ("running", "interrupted") else "stopped"
 
 
+def _environment_of(segment: SegmentArtifact) -> dict | None:
+    """One segment's environment block, or ``None`` when that segment measured none.
+
+    An empty mapping is treated as nothing measured rather than as an empty machine: a block with
+    no facts in it would satisfy "the key is present" while telling a reader nothing, and the
+    record's convention is that a *stated* value is a value.
+    """
+    environment = segment.environment
+    return dict(environment) if environment else None
+
+
 def _segment(segment: SegmentArtifact) -> dict:
     engine = segment.engine
     phases = segment.phase_seconds
@@ -424,9 +449,26 @@ def _segment(segment: SegmentArtifact) -> dict:
         "resumed": bool(segment.resumed),
         "counters": dict(segment.counters),
         "phase_seconds": dict(phases) if phases is not None else None,
+        "environment": _environment_of(segment),
         "engine_version": engine.engine_version if engine is not None else None,
         "engine_fingerprint": dict(engine.fingerprint) if engine is not None else None,
     }
+
+
+def _environment_latest(segments: Sequence[Mapping[str, object]]) -> dict | None:
+    """The newest environment any segment recorded, or ``None`` when none did.
+
+    **Derived, never stored twice.** A consumer rendering "the machine this run is on" reads one
+    key instead of walking ``segments[]`` backwards, and because it is recomputed from the
+    segments at every write it can never disagree with them. A segment that measured nothing is
+    skipped rather than blanking the answer — a resume by a Noctis too old to capture an
+    environment must not erase what the run already knew about itself.
+    """
+    for segment in reversed(segments):
+        environment = segment.get("environment")
+        if isinstance(environment, Mapping) and environment:
+            return dict(environment)
+    return None
 
 
 def _engine(artifacts: RunArtifacts) -> dict:

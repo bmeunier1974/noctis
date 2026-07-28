@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from noctis.bootstrap import capture_environment
 from noctis.cli import app
 from noctis.observability.debug import RUN_ID_RE
 from noctis.observability.engine_id import ENGINE_VERSION
@@ -217,6 +218,85 @@ def test_a_second_invocation_appends_its_own_segment_with_its_own_counters(tmp_p
     assert [s["stopped_reason"] for s in record["segments"]] == ["time_limit", "stop_requested"]
     assert record["run"]["cumulative_runtime_s"] == 5400.0
     assert record["run"]["created_utc"] == "2026-07-27T14:22:33.418Z"  # the FIRST segment's
+    assert schema.validate(record) == []
+
+
+# ── the environment is per segment, never per run (story #139) ─────────────────────────────
+
+
+def _machine(host: str, *, cores: int) -> dict:
+    """One machine's environment block, handed to the store the way the composition root hands
+    it the block its injected probes captured — no hardware is read from this test."""
+    return {
+        "hostname_hash": host,
+        "os": {"system": "Linux", "release": "7.0.0-14-generic", "arch": "x86_64"},
+        "container": False,
+        "cpu": {
+            "model": "AMD Ryzen 9 7950X",
+            "cores_physical": cores // 2,
+            "cores_logical": cores,
+            "freq_max_mhz": 5881.0,
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {"commit": "a380d3a", "branch": "main", "dirty": False, "describe": "v0.1.0-42"},
+        "lockfile_digest": "sha256:beef",
+        "extras_present": {
+            "llm": None,
+            "data": None,
+            "research": None,
+            "engine": None,
+            "hardware": None,
+        },
+        "degraded_seams": ["data", "engine", "hardware", "llm", "research"],
+    }
+
+
+def test_a_segment_records_the_machine_it_was_opened_on(tmp_path):
+    store = _open(tmp_path / "runs", FakeClock(), environment=_machine("aaaa1111", cores=8))
+
+    record = _record(store.run_dir)
+
+    assert record["segments"][0]["environment"] == _machine("aaaa1111", cores=8)
+    assert record["environment_latest"] == _machine("aaaa1111", cores=8)
+    assert schema.validate(record) == []
+
+
+def test_a_run_resumed_on_another_machine_keeps_both_segments_environments(tmp_path):
+    """A run may migrate boxes mid-experiment. Research throughput is CPU-bound, so the first
+    night's trials-per-hour must stay attributed to the first night's hardware."""
+    runs = tmp_path / "runs"
+    clock = FakeClock()
+    first = _open(runs, clock, environment=_machine("aaaa1111", cores=8))
+    clock.advance(3600)
+    first.close(reason="time_limit")
+
+    clock.advance(36000)
+    second = _open(
+        runs, clock, run_id=first.run_id, resume=True, environment=_machine("bbbb2222", cores=32)
+    )
+    second.close(reason="stop_requested")
+
+    record = _record(second.run_dir)
+    assert [s["environment"]["hostname_hash"] for s in record["segments"]] == [
+        "aaaa1111",
+        "bbbb2222",
+    ]
+    assert [s["environment"]["cpu"]["cores_logical"] for s in record["segments"]] == [8, 32]
+    assert record["environment_latest"]["hostname_hash"] == "bbbb2222"
+    assert schema.validate(record) == []
+
+
+def test_a_segment_opened_without_an_environment_says_so_with_an_explicit_null(tmp_path):
+    store = _open(tmp_path / "runs", FakeClock())
+
+    record = _record(store.run_dir)
+
+    assert record["segments"][0]["environment"] is None
+    assert record["environment_latest"] is None
+    assert "environment_latest" in record
     assert schema.validate(record) == []
 
 
@@ -644,11 +724,12 @@ def _masked(record: dict) -> dict:
 
 
 def test_a_two_segment_fixture_run_matches_the_committed_golden_record(tmp_path):
-    """Snapshot the file a real run leaves on disk — two segments, a kill in between, a stolen
-    lock — so drift between the store and the record contract is visible in review."""
+    """Snapshot the file a real run leaves on disk — two segments on two different machines, a
+    kill in between, a stolen lock — so drift between the store and the record contract is visible
+    in review."""
     runs = tmp_path / "runs"
     clock = FakeClock()
-    first = _open(runs, clock, argv=["run", "-v"])
+    first = _open(runs, clock, argv=["run", "-v"], environment=_machine("aaaa1111", cores=8))
     clock.advance(3600)
     first.checkpoint(counters={"cycles": 1, "research_iterations": 4, "trades": 2})
     clock.advance(3600)
@@ -662,7 +743,9 @@ def test_a_two_segment_fixture_run_matches_the_committed_golden_record(tmp_path)
     _write_lock(
         first.run_dir, pid=999_999, hostname_hash="0" * 12, heartbeat_utc="2020-01-01T00:00:00.000Z"
     )
-    second = _open(runs, clock, run_id=first.run_id, argv=["run"])
+    second = _open(
+        runs, clock, run_id=first.run_id, argv=["run"], environment=_machine("bbbb2222", cores=32)
+    )
     clock.advance(1800)
     second.close(
         reason="stop_requested",
@@ -1121,7 +1204,8 @@ def test_the_debug_qa_tree_reuses_the_runs_own_id(tmp_path):
 
 
 def test_no_secret_reaches_the_record(tmp_path, monkeypatch):
-    """A record is meant to be shared. Nothing the settings digest excludes may appear in one."""
+    """A record is meant to be shared. Nothing the settings digest excludes may appear in one —
+    not in the frozen settings, not in the resolved models, not in the environment block."""
     from noctis.bootstrap import _DIGEST_SECRET_FIELDS
 
     secrets = {field: f"sk-{field}-do-not-leak" for field in _DIGEST_SECRET_FIELDS}
@@ -1131,9 +1215,41 @@ def test_no_secret_reaches_the_record(tmp_path, monkeypatch):
     result = runner.invoke(app, ["run", "--config", _config(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    text = next(_runs_dir(tmp_path).rglob(RUN_RECORD_NAME)).read_text()
+    record_path = next(_runs_dir(tmp_path).rglob(RUN_RECORD_NAME))
+    text = record_path.read_text()
     for value in secrets.values():
         assert value not in text
+    record = json.loads(text)
+    assert record["inputs"]["models"]["research"] is not None  # the block IS populated
+    for field in _DIGEST_SECRET_FIELDS:
+        assert field not in json.dumps(record["inputs"]["models"])
+        assert field not in json.dumps(record["environment_latest"])
+
+
+def test_a_real_run_records_the_machine_it_ran_on(tmp_path):
+    """The composition root's probes, end to end: a bare ``noctis run`` on the core install
+    leaves a schema-valid environment block on its segment."""
+    result = runner.invoke(app, ["run", "--config", _config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    record = json.loads(next(_runs_dir(tmp_path).rglob(RUN_RECORD_NAME)).read_text())
+
+    environment = record["segments"][0]["environment"]
+    assert environment["python"] is not None
+    assert environment["os"]["system"] is not None
+    assert record["environment_latest"] == environment
+    assert schema.validate(record) == []
+
+
+def test_the_environments_hostname_hash_is_the_one_the_lock_writes(tmp_path):
+    """Story #129 hashes the hostname into the lock; #139 hashes it into the record. One machine,
+    one digest — otherwise two segments on one host would not be provably the same host."""
+    store = _open(tmp_path / "runs", FakeClock(), environment=capture_environment())
+
+    lock = _lock(store.run_dir)
+    environment = _record(store.run_dir)["segments"][0]["environment"]
+
+    assert environment["hostname_hash"] == lock["hostname_hash"]
 
 
 # ── the engine loop writes at each CLOSE ───────────────────────────────────────────────────

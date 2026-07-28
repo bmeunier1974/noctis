@@ -761,6 +761,82 @@ def test_build_recorder_config_digest_excludes_secrets(tmp_path):
     assert base == with_secret  # a secret never perturbs the digest
 
 
+# ── the environment probes: the one place hardware, git and extras are actually read ──────
+
+
+def test_the_default_probes_describe_this_machine_without_needing_any_extra(tmp_path):
+    """The composition root is where the real probes live, so this is the only place a test
+    touches real hardware — and it must pass on the **core install**, with no ``psutil``."""
+    import platform
+
+    from noctis.bootstrap import capture_environment
+    from noctis.observability.environment import ENVIRONMENT_KEYS
+    from noctis.onboarding import EXTRA_MODULES
+
+    block = capture_environment()
+
+    assert set(block) == set(ENVIRONMENT_KEYS)
+    assert block["python"] == platform.python_version()
+    assert block["os"]["system"] == platform.system()
+    assert block["cpu"]["cores_logical"] >= 1
+    assert block["noctis_version"] is not None
+    assert set(block["extras_present"]) == set(EXTRA_MODULES)
+    assert block["degraded_seams"] == sorted(block["degraded_seams"])
+
+
+def test_the_captured_environment_never_carries_a_raw_hostname():
+    """Story #129 chose a *hashed* hostname for the lock, for privacy and portability. The
+    environment block keeps that choice coherent rather than leaking the name back in."""
+    import socket
+
+    from noctis.bootstrap import capture_environment
+
+    block = capture_environment()
+
+    assert block["hostname_hash"] is not None
+    assert len(block["hostname_hash"]) == 12
+    assert socket.gethostname() not in str(block)
+
+
+def test_this_checkout_is_captured_as_a_git_state_and_a_lockfile_digest():
+    from noctis.bootstrap import capture_environment
+
+    block = capture_environment()
+
+    assert block["git"]["commit"] is not None
+    assert block["git"]["dirty"] in (True, False)
+    assert block["lockfile_digest"].startswith("sha256:")
+    assert "git" not in block["degraded_seams"]
+    assert "lockfile" not in block["degraded_seams"]
+
+
+def test_outside_a_repository_git_and_the_lockfile_degrade_to_null_and_name_their_seams(tmp_path):
+    """A wheel install has no checkout and no ``uv.lock``. That is an ordinary Noctis install, so
+    it degrades to explicit nulls with the seams named — never a crash and never a silent gap."""
+    from noctis.bootstrap import build_environment_probes
+    from noctis.observability.environment import capture
+
+    block = capture(build_environment_probes(root=tmp_path)).as_dict()
+
+    assert block["git"] is None
+    assert block["lockfile_digest"] is None
+    assert "git" in block["degraded_seams"]
+    assert "lockfile" in block["degraded_seams"]
+    assert block["python"] is not None  # the rest of the machine is still described
+
+
+def test_an_absent_extra_is_reported_as_null_and_named_a_degraded_seam(tmp_path):
+    """One notion of "degraded seam", one list behind it: the extras ``noctis setup`` probes for."""
+    from noctis.bootstrap import capture_environment
+    from noctis.onboarding import missing_extras
+
+    block = capture_environment()
+
+    for extra in missing_extras():
+        assert block["extras_present"][extra] is None
+        assert extra in block["degraded_seams"]
+
+
 # ── build_research_session: the one bundle both entrypoints run ───────────────────────────
 def _session_settings(
     tmp_path,

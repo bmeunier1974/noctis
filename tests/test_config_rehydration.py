@@ -359,6 +359,82 @@ def test_a_run_with_no_mandate_freezes_an_explicit_null(tmp_path):
     assert _record(_settings(tmp_path))["inputs"]["mandate"] is None
 
 
+# ── the rest of the provenance block: which models, and which data (story #139) ────────────
+
+
+def test_the_frozen_inputs_carry_the_resolved_models(tmp_path):
+    """Which model authored, judged and ideated is what a run's research trail *means*. It is
+    already frozen key-by-key in ``resolved``; this states it once, resolved, in one block a
+    website can render beside the mandate."""
+    settings = _settings(
+        tmp_path,
+        "mode: paper\nresearch:\n  model: openai/gpt-5.4\n  cost_profile: economy\n"
+        "  agent:\n    coder_model: anthropic/claude-sonnet-5\n"
+        "    coder_fallback_model: anthropic/claude-opus-4-8\n    context_window: 32768\n"
+        "ideation:\n  model: claude-opus-4-8\n",
+    )
+
+    models = freeze_inputs(
+        settings, research_loop="episodic", frozen_at=FROZEN_AT, execution_mode="paper"
+    )["models"]
+
+    assert models["research"] == "openai/gpt-5.4"
+    assert models["coder"] == "anthropic/claude-sonnet-5"
+    assert models["coder_fallback"] == "anthropic/claude-opus-4-8"
+    assert models["ideation"] == "claude-opus-4-8"
+    assert models["research_loop"] == "episodic"
+    assert models["context_window"] == 32768
+    assert models["cost_profile"] == "economy"
+
+
+def test_the_research_model_falls_back_to_the_agents_own_model(tmp_path):
+    """``research.model: null`` means "use ``research.agent.model``" — the record states the model
+    that will actually run, not the null that stood in for it."""
+    settings = _settings(tmp_path, "mode: paper\nresearch:\n  model: null\n")
+
+    models = freeze_inputs(settings, frozen_at=FROZEN_AT)["models"]
+
+    assert models["research"] == settings.research.agent.model
+
+
+def test_an_unset_model_is_an_explicit_null_never_an_omitted_key(tmp_path):
+    models = freeze_inputs(_settings(tmp_path), frozen_at=FROZEN_AT)["models"]
+
+    assert models["coder"] is None
+    assert models["coder_fallback"] is None
+    assert models["context_window"] is None
+    assert "research_loop" in models and models["research_loop"] is None
+
+
+def test_the_frozen_inputs_carry_the_data_provider_and_dataset(tmp_path):
+    """Which vendor, which dataset, and where the lake is — the run's data provenance, stated
+    beside its configuration rather than hunted for inside the resolved dump."""
+    settings = _settings(
+        tmp_path, "mode: paper\ndata:\n  provider: databento\n  dataset: EQUS.MINI\n"
+    )
+
+    data = freeze_inputs(settings, frozen_at=FROZEN_AT)["data"]
+
+    assert data["provider"] == "databento"
+    assert data["dataset"] == "EQUS.MINI"
+    # The lake is workspace-level and SHARED across runs by design — stated so a reader never
+    # mistakes it for something this run owns.
+    assert data["lake_dir"] == settings.data.lake_dir
+
+
+def test_no_secret_reaches_the_models_or_the_data_block(tmp_path):
+    """A model name is public; an API key is not, and the two live one settings section apart."""
+    settings = _settings(tmp_path, "mode: paper\n")
+    for field in SECRET_FIELDS:
+        setattr(settings, field, f"sk-{field}-do-not-leak")
+
+    frozen = freeze_inputs(settings, research_loop="conversation", frozen_at=FROZEN_AT)
+
+    assert "do-not-leak" not in json.dumps(frozen["models"])
+    assert "do-not-leak" not in json.dumps(frozen["data"])
+    assert "do-not-leak" not in json.dumps(frozen)
+
+
 # ── the frozen digest: a label for "these runs mean the same thing" ────────────────────────
 
 
@@ -529,6 +605,20 @@ def test_rebasing_bumps_the_epoch_and_appends_a_before_after_entry(tmp_path):
     assert change["digest_before"] == record["inputs"]["settings"]["digest"]
     assert change["digest_after"] == frozen_digest(current)
     assert rebased["settings"]["resolved"]["promotion"]["metric"] == "total_return"
+
+
+def test_a_rebased_block_carries_the_whole_provenance_section_again(tmp_path):
+    """A rebase re-freezes the *whole* inputs block, so the models and the data provenance are
+    re-stated for the new epoch rather than silently going null on the way through."""
+    record = _record(_settings(tmp_path / "a", "mode: paper\ndata:\n  provider: databento\n"))
+    current = _settings(tmp_path / "b", "mode: paper\ndata:\n  provider: yfinance\n")
+
+    rebased = rebase_inputs(record, current, research_loop="episodic", at=FROZEN_AT, segment=1)
+
+    assert rebased is not None
+    assert rebased["data"]["provider"] == "yfinance"
+    assert rebased["models"]["research_loop"] == "episodic"
+    assert rebased["models"]["research"] == current.research.model
 
 
 def test_rebasing_a_drift_free_run_is_a_no_op_that_does_not_bump_the_epoch(tmp_path):

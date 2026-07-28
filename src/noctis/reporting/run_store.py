@@ -46,7 +46,6 @@ ever reached from here.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -186,6 +185,7 @@ def open_run(
     inputs: Mapping[str, object] | None = None,
     rebase_config: bool = False,
     engine_upgrade: Mapping[str, object] | None = None,
+    environment: Mapping[str, object] | None = None,
 ) -> RunStore:
     """Open a run for this process: mint or address it, lock it, append a segment, write.
 
@@ -217,6 +217,13 @@ def open_run(
     one, the run is **re-frozen onto this process's engine** with the entry appended and the epoch
     it names — so a run whose arbiter moved mid-flight says so, and says where. Absent (the normal
     case) the run keeps the engine it was created under, whatever this process is.
+
+    ``environment`` is the machine **this process** is on (story #139), already captured through
+    the injected probes of ``observability.environment``. The store is the I/O side of the record's
+    boundary, but the probes are wired where every other collaborator is — the composition root —
+    so nothing here reads hardware, shells out to ``git`` or imports an optional package. It lands
+    on the appending segment and nowhere else: earlier segments keep the machines they actually
+    ran on, which is the entire reason the block is per segment.
     """
     from noctis.observability.debug import new_run_id
 
@@ -257,6 +264,7 @@ def open_run(
         inputs=inputs,
         rebase_config=rebase_config,
         engine_upgrade=engine_upgrade,
+        environment=environment,
     )
 
 
@@ -1248,9 +1256,13 @@ def _hostname_hash() -> str:
     """A stable, non-identifying host id: ``sha256(hostname)[:12]``.
 
     Hashed, not raw, because the record is meant to be shareable — two segments on one machine
-    are still provably the same host, without publishing a machine name.
+    are still provably the same host, without publishing a machine name. The hashing itself lives
+    in ``observability.environment`` (story #139), so the lock and the record's per-segment
+    environment block cannot drift into two different answers for one machine.
     """
-    return hashlib.sha256(socket.gethostname().encode("utf-8")).hexdigest()[:12]
+    from noctis.observability.environment import hostname_hash
+
+    return hostname_hash(socket.gethostname())
 
 
 def _write_lock(path: Path, *, run_id: str, started: datetime, heartbeat: datetime) -> None:
@@ -1304,6 +1316,7 @@ class RunStore:
         inputs: Mapping[str, object] | None = None,
         rebase_config: bool = False,
         engine_upgrade: Mapping[str, object] | None = None,
+        environment: Mapping[str, object] | None = None,
     ) -> None:
         self._run_dir = Path(run_dir)
         self._clock = clock
@@ -1329,6 +1342,9 @@ class RunStore:
             command=command,
             resumed=bool(prior),
             counters={},
+            # This process's machine, not the run's: like the engine digests beside it, a segment
+            # records what actually produced it (story #139).
+            environment=dict(environment) if environment else None,
         )
         self._artifacts = RunArtifacts(
             run_id=artifacts.run_id,
@@ -1621,6 +1637,7 @@ def _segment_from(raw: Mapping[str, object]) -> SegmentArtifact:
         )
     counters = raw.get("counters")
     phases = raw.get("phase_seconds")
+    environment = raw.get("environment")
     argv = raw.get("argv")
     index = raw.get("index")
     return SegmentArtifact(
@@ -1637,6 +1654,10 @@ def _segment_from(raw: Mapping[str, object]) -> SegmentArtifact:
         # Read back so the run's cumulative research/trading seconds are re-derived from every
         # segment on disk at every write — the totals are never carried in memory across a restart.
         phase_seconds=dict(phases) if isinstance(phases, Mapping) else None,  # type: ignore[arg-type]
+        # Carried forward verbatim, like the segment's engine digests: the machine a *past*
+        # segment ran on is history, and re-stamping it with whatever this process is running on
+        # would be the exact misattribution the per-segment block exists to prevent.
+        environment=dict(environment) if isinstance(environment, Mapping) else None,  # type: ignore[arg-type]
     )
 
 

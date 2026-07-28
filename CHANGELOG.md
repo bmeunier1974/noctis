@@ -9,6 +9,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-segment environment capture, and the run record's frozen-inputs provenance block
+  completed.** A run record now says *what machine* produced each night's numbers, and *what
+  inputs* the run was started with.
+  - **New: `segments[].environment`, and a derived `environment_latest`.** Hardware (CPU model,
+    physical/logical cores, max frequency, total RAM, free disk), OS (system, release, arch,
+    container), python and noctis versions, git state (commit, branch, dirty, describe), the
+    `uv.lock` digest, the optional extras present, and the seams that degraded. It is recorded
+    **per segment, never per run**: a stopped-and-resumed experiment may migrate machines, and
+    research throughput is CPU-bound (the sweep fork pool, the walk-forward splits) — so one
+    night's trials-per-hour and USD-per-champion must never be attributed to another night's
+    cores. `environment_latest` is derived from the segments, so it can never disagree with them.
+  - **`psutil` is an optional extra (`hardware`), never a core dependency.** Without it the
+    stdlib subset answers what it can (logical cores, free disk, `/proc/meminfo`) and the rest is
+    explicit `null` with `hardware` named in `degraded_seams` — the same seam discipline
+    `vectorbt` and `databento` already follow. Git capture degrades to `null` outside a
+    repository, and so does the lockfile digest. **Every absent value is an explicit `null` with
+    the missing capability named**, never a silently dropped key.
+  - **One notion of "degraded seam".** `extras_present` is keyed by the optional-extra names
+    `noctis setup` already probes for (`llm`, `data`, `research`, `engine`, `hardware`), so a
+    missing extra and a degraded seam are one thing with one list behind them — and the remedy the
+    record implies (`uv sync --extra <name>`) is one an operator can type.
+  - **The hostname is hashed, never stored.** `sha256(hostname)[:12]`, the same digest `run.lock`
+    has written since the run store landed and through the same function, so two segments on one
+    machine are provably the same host without a machine name ever being published.
+  - **New: `inputs.models` and `inputs.data`.** Which model researches, authors, escalates and
+    ideates, which research loop was resolved, the declared context window and cost profile; and
+    the data provider, dataset and (shared, workspace-level) lake directory. Both are derived
+    *views* over values `inputs.settings.resolved` already froze — stated once, resolved, so a
+    consumer never reconstructs a fallback chain. A model name is public; the API key that
+    authenticates it is secret tier and reaches no record (AGENTS.md rule 6).
+  - All probes are **injected**, wired once in the composition root, so the capture module reads
+    no hardware, shells out to no `git` and imports no optional package — and the test suite needs
+    none of them.
 - **`noctis run-prune <address> [--dry-run]` — opt-in retention for completed runs.** A run's
   `state/`, `strategies/` and `reports/` directories are the megabytes; its `run.json` is
   kilobytes and *is* the long-term progress history. This reclaims the first three and never the

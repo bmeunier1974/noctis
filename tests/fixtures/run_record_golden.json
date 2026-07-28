@@ -42,6 +42,43 @@
         "TRADING": 2340.0,
         "CLOSE": 60.0
       },
+      "environment": {
+        "hostname_hash": "9f2c1d3e4b5a",
+        "os": {
+          "system": "Linux",
+          "release": "7.0.0-14-generic",
+          "arch": "x86_64"
+        },
+        "container": true,
+        "cpu": {
+          "model": "AMD Ryzen 9 7950X",
+          "cores_physical": 4,
+          "cores_logical": 8,
+          "freq_max_mhz": 5881.0
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+          "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+          "branch": "main",
+          "dirty": false,
+          "describe": "v0.1.0-42-ga380d3a"
+        },
+        "lockfile_digest": "sha256:9f2c1d",
+        "extras_present": {
+          "llm": "0.120.0",
+          "data": "0.82.0",
+          "research": null,
+          "engine": null,
+          "hardware": "7.2.2"
+        },
+        "degraded_seams": [
+          "engine",
+          "research"
+        ]
+      },
       "engine_version": 1,
       "engine_fingerprint": {
         "gates": "f63d47b7b9604ab1",
@@ -77,6 +114,43 @@
         "TRADING": 0.0,
         "CLOSE": 40.0
       },
+      "environment": {
+        "hostname_hash": "0011223344ff",
+        "os": {
+          "system": "Linux",
+          "release": "7.0.0-14-generic",
+          "arch": "x86_64"
+        },
+        "container": true,
+        "cpu": {
+          "model": "AMD Ryzen 9 7950X",
+          "cores_physical": 16,
+          "cores_logical": 32,
+          "freq_max_mhz": 5881.0
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+          "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+          "branch": "main",
+          "dirty": false,
+          "describe": "v0.1.0-42-ga380d3a"
+        },
+        "lockfile_digest": "sha256:9f2c1d",
+        "extras_present": {
+          "llm": "0.120.0",
+          "data": "0.82.0",
+          "research": null,
+          "engine": null,
+          "hardware": "7.2.2"
+        },
+        "degraded_seams": [
+          "engine",
+          "research"
+        ]
+      },
       "engine_version": 1,
       "engine_fingerprint": {
         "gates": "f63d47b7b9604ab1",
@@ -90,6 +164,43 @@
       }
     }
   ],
+  "environment_latest": {
+    "hostname_hash": "0011223344ff",
+    "os": {
+      "system": "Linux",
+      "release": "7.0.0-14-generic",
+      "arch": "x86_64"
+    },
+    "container": true,
+    "cpu": {
+      "model": "AMD Ryzen 9 7950X",
+      "cores_physical": 16,
+      "cores_logical": 32,
+      "freq_max_mhz": 5881.0
+    },
+    "memory_total_bytes": 67351248896,
+    "disk_free_bytes": 412000000000,
+    "python": "3.11.9",
+    "noctis_version": "0.1.0",
+    "git": {
+      "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+      "branch": "main",
+      "dirty": false,
+      "describe": "v0.1.0-42-ga380d3a"
+    },
+    "lockfile_digest": "sha256:9f2c1d",
+    "extras_present": {
+      "llm": "0.120.0",
+      "data": "0.82.0",
+      "research": null,
+      "engine": null,
+      "hardware": "7.2.2"
+    },
+    "degraded_seams": [
+      "engine",
+      "research"
+    ]
+  },
   "engine": {
     "engine_version": 1,
     "engine_epoch": 1,

@@ -23,13 +23,16 @@ from pathlib import Path
 import typer
 
 # One representative module per optional extra: present ⇒ the extra is installed. These are
-# the four seams `uv sync --all-extras` fills; find_spec never executes the module, so the
-# probe stays instant even for the heavy stacks.
+# the seams `uv sync --all-extras` fills; find_spec never executes the module, so the probe
+# stays instant even for the heavy stacks. This is also the **one** list the run record's
+# per-segment environment block reports against (``observability/environment.py``), so
+# "missing extra" and "degraded seam" are a single notion with a single list behind them.
 EXTRA_MODULES = {
     "llm": "litellm",  # the research/ideation LLM seam
     "data": "databento",  # lake ingests + the yfinance live feed
     "research": "vectorbt",  # backtest prefilter + optuna sweeps
     "engine": "nautilus_trader",  # the trading-node seam
+    "hardware": "psutil",  # richer per-segment machine facts for the run record
 }
 
 OLLAMA_URL = "http://localhost:11434"

@@ -182,6 +182,7 @@ def freeze_inputs(
     mandate: Any = None,
     overrides: Sequence[str] = (),
     execution_mode: str | None = None,
+    research_loop: str | None = None,
     frozen_at: str,
 ) -> dict[str, Any]:
     """The record's ``inputs`` block: this run's configuration, pinned at creation.
@@ -200,6 +201,19 @@ def freeze_inputs(
     with the overlay it applied — so what the agent was told, and what that steering moved, are
     both pinned against a profile file that may be rewritten tomorrow.
 
+    ``models`` and ``data`` (story #139) complete the provenance block: which models this run
+    researches, authors, escalates and ideates with, and which vendor and dataset its bars came
+    from. Every value in them is *already* frozen key-by-key inside ``resolved`` — these are
+    **derived views**, stated once and resolved, so a reader (or a website) sees "what produced
+    these numbers" without reconstructing it from a settings dump, and cannot get the fallback
+    chains subtly wrong. No credential is reachable from either: a model *name* is public, and the
+    keys that authenticate it are secret tier, excluded from the record entirely.
+
+    ``research_loop`` is injected, like ``execution_mode`` and for the same reason: which loop
+    drives a session is resolved in the composition root
+    (:func:`noctis.bootstrap.resolve_research_loop`, whose ``auto`` flip reads the declared context
+    window), and this module does not reach across to ask.
+
     Pure: ``frozen_at`` arrives as an already-formatted stamp, because nothing here reads a clock.
     """
     frozen = _frozen_values(settings)
@@ -212,6 +226,8 @@ def freeze_inputs(
         "frozen_at_utc": frozen_at,
         "execution_mode": execution_mode,
         "mandate": _frozen_mandate(mandate, overrides),
+        "models": _frozen_models(settings, research_loop),
+        "data": _frozen_data(settings),
         "settings": {
             "digest": _digest(frozen),
             "resolved": _resolved_dump(settings),
@@ -437,6 +453,7 @@ def rebase_inputs(
     mandate: Any = None,
     overrides: Sequence[str] = (),
     execution_mode: str | None = None,
+    research_loop: str | None = None,
     at: str,
     segment: int,
 ) -> dict[str, Any] | None:
@@ -466,6 +483,7 @@ def rebase_inputs(
         mandate=mandate,
         overrides=overrides,
         execution_mode=execution_mode,
+        research_loop=research_loop,
         frozen_at=at,
     )
     digest_before = _recorded_digest(prior)
@@ -597,6 +615,45 @@ def _digest(values: Mapping[str, Any]) -> str:
     """``sha256[:12]`` over a canonical rendering — sorted keys, so it depends on values only."""
     payload = json.dumps(values, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _frozen_models(settings: Settings, research_loop: str | None) -> dict[str, Any]:
+    """Which models this run runs on — the *resolved* answer, not the raw knobs.
+
+    ``research.model`` is a seam override that falls back to ``research.agent.model``, so the
+    record states the model that will actually drive a session rather than the ``null`` standing
+    in for it. The optional coder and its paid escalation are explicit ``null`` when unset (which
+    is the shipped default), never omitted, so "this run authored through its driver" is a stated
+    fact rather than a missing key. No credential is reachable here: the provider prefix selects an
+    API key, and the keys themselves are secret tier and never recorded (AGENTS.md rule 6).
+    """
+    agent = settings.research.agent
+    return {
+        "research": settings.research.model or agent.model,
+        "coder": agent.coder_model,
+        "coder_fallback": agent.coder_fallback_model,
+        "ideation": settings.ideation.model if settings.ideation.enabled else None,
+        # Injected by the composition root — see :func:`freeze_inputs`. ``None`` when the caller
+        # had not resolved one (a freeze taken outside a session assembly).
+        "research_loop": research_loop,
+        "context_window": agent.context_window,
+        "cost_profile": settings.research.cost_profile,
+    }
+
+
+def _frozen_data(settings: Settings) -> dict[str, Any]:
+    """Which vendor and dataset this run's bars came from, and where the lake sits.
+
+    The lake path is stated deliberately even though it is live tier and re-derived on every
+    resume: it is **shared across runs** (vendor data is expensive, reproducible and run-neutral),
+    and a reader who finds it inside a per-run record must not mistake it for something this run
+    owns.
+    """
+    return {
+        "provider": settings.data.provider,
+        "dataset": settings.data.dataset,
+        "lake_dir": settings.data.lake_dir,
+    }
 
 
 def _frozen_mandate(mandate: Any, overrides: Sequence[str]) -> dict[str, Any] | None:

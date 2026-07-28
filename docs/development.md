@@ -54,6 +54,7 @@ none of them.
 | **research** | extra | `vectorbt`, `optuna`, `quantstats-lumi` |
 | **data** | extra | `databento`, `yfinance`, `exchange-calendars`, `transitions`, `apscheduler` |
 | **llm** | extra | `anthropic`, `litellm` |
+| **hardware** | extra | `psutil` — richer per-segment machine facts (CPU model, physical cores, RAM) in the run record; without it the block degrades to the stdlib subset and names `hardware` in its `degraded_seams` |
 
 ## Quality gates
 

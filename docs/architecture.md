@@ -335,3 +335,46 @@ bare `research`), and the run `noctis migrate` adopts existing state into. The *
 | `<run>/strategies/champions/` | Locally-promoted champions (never reach the public repo) |
 
 (`<run>` is `workspace/runs/<run_id>/`.)
+
+## What the record says about a run's machine and its inputs
+
+`run.json` is written by three modules with one boundary between them: `reporting/run_store.py`
+does every read and the one write, `reporting/run_record.py` is a **pure** builder over what was
+collected, and `reporting/schema.py` is a pure validator. Two of the sections that boundary
+carries are worth naming here.
+
+**`segments[].environment` — per segment, never per run.** Each process invocation records the
+machine it actually ran on: hardware (CPU model, physical/logical cores, max frequency, total RAM,
+free disk), OS (system, release, arch, container), python and noctis versions, git state (commit,
+branch, dirty, describe), the `uv.lock` digest, the optional extras present, and the seams that
+degraded. It is per segment because a run is stopped each morning and resumed each night and may
+migrate machines in between — and research throughput is CPU-bound (the sweep fork pool, the
+walk-forward splits), so trials-per-hour and USD-per-champion only compare across runs when the
+hardware behind each is on the record. `environment_latest` is **derived** from the segments, so a
+consumer showing "the machine this run is on" reads one key that cannot disagree with them.
+
+`observability/environment.py` shapes the block and nothing else: every probe is **injected**
+(hostname, OS facts, hardware, versions, git, lockfile, extras), and the real ones are wired once
+in `bootstrap.build_environment_probes`. So the module reads no hardware, shells out to no `git`
+and imports no optional package — and the test suite needs none of them either.
+
+Degradation is the ordinary case, and it is explicit. **`psutil` is an optional extra
+(`hardware`), never a core dependency**: without it the stdlib subset answers what it can and the
+rest is `null`. Git degrades to `null` outside a repository, and so does the lockfile digest. Every
+absent value is an explicit `null` **and** the missing capability is named in `degraded_seams`, so
+a reader can tell "this machine had no `psutil`" from "this schema version had no such field". The
+extra names are exactly the ones `noctis setup` probes for, so a missing extra and a degraded seam
+are one notion — and the remedy (`uv sync --extra <name>`) is one an operator can type. The
+hostname is stored **hashed** (`sha256[:12]`, the same digest `run.lock` writes, through the same
+function): two segments on one machine are provably the same host, without publishing a name.
+
+**`inputs` — the frozen provenance block.** The run's own configuration, pinned at creation and
+restored on every resume (`config/rehydrate.py`): the mandate as **resolved text** plus its applied
+overlay and digest, the secret-excluded settings dump with its digest and the three tier lists, the
+gate's verdict, and `config_epoch`/`config_changes`. Beside them sit two derived views —
+`inputs.models` (which model researches, authors, escalates and ideates; the resolved research
+loop; the declared context window; the cost profile) and `inputs.data` (provider, dataset, and the
+shared workspace-level lake directory) — stated once, resolved, so nothing downstream rebuilds a
+fallback chain to know what produced a run's numbers. No credential is reachable from any of it: a
+model name is public, and the keys are secret tier and excluded from the record entirely, which is
+why a resumed run takes its keys from the live `.env` (see [safety.md](safety.md)).

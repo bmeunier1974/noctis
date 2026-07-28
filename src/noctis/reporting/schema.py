@@ -50,7 +50,18 @@ KIND = "noctis.run"
 # grow, never shrink. ``performance`` is here from story #137 as an explicit ``null``: a run that
 # never traded must report *no* performance rather than zeros, and a consumer has to be able to
 # tell "this run is still researching" from "this schema version had no such key".
-REQUIRED_SECTIONS = ("run", "segments", "engine", "inputs", "performance", "events", "errors")
+REQUIRED_SECTIONS = (
+    "run",
+    "segments",
+    # The newest machine this run has worked on (story #139), derived from the per-segment blocks
+    # beside it. ``null`` for a run no segment of which measured an environment.
+    "environment_latest",
+    "engine",
+    "inputs",
+    "performance",
+    "events",
+    "errors",
+)
 
 # The run's lifecycle. ``interrupted`` is observed on the next open (a segment with a start stamp
 # and no stop stamp), never guessed at write time. ``completed`` is terminal.
@@ -123,8 +134,35 @@ _SEGMENT_KEYS = (
     # ``null`` when it measured none. The per-segment fact the run's cumulative research/trading
     # seconds are summed from — attributed to the process that produced it, like ``counters``.
     "phase_seconds",
+    # The machine this segment ran on and the inputs it resolved (story #139), or ``null`` when it
+    # measured none. **Per segment**, because a run may migrate machines mid-experiment and
+    # research throughput is CPU-bound: one night's trials-per-hour is only comparable to
+    # another's when the hardware behind each is on the record.
+    "environment",
     "engine_version",
     "engine_fingerprint",
+)
+
+# The environment block's own keys. Every one is present whenever the block is (an absent *fact*
+# is an explicit ``null`` plus the missing capability named in ``degraded_seams``), so a reader can
+# tell "this machine had no git checkout" from "this schema version did not record git".
+_ENVIRONMENT_KEYS = (
+    # ``sha256(hostname)[:12]`` — comparable across segments, never a machine name (story #129).
+    "hostname_hash",
+    "os",
+    "container",
+    "cpu",
+    "memory_total_bytes",
+    "disk_free_bytes",
+    "python",
+    "noctis_version",
+    "git",
+    "lockfile_digest",
+    # ``{extra name: version or null}`` over the optional extras the installer knows, and the
+    # names of every capability that was missing — the ``psutil`` hardware extra included, since it
+    # is an extra rather than a core dependency by design.
+    "extras_present",
+    "degraded_seams",
 )
 
 _ENGINE_KEYS = (
@@ -163,8 +201,24 @@ _INPUTS_KEYS = (
     "frozen_at_utc",
     "execution_mode",
     "mandate",
+    # The rest of the provenance block (story #139): which models this run researches, authors,
+    # escalates and ideates with, and which vendor/dataset its bars came from. Both are derived
+    # views over values ``settings.resolved`` already carries — stated once, resolved, so a
+    # consumer never has to reconstruct a fallback chain to know what produced these numbers.
+    "models",
+    "data",
     "settings",
 )
+_INPUT_MODEL_KEYS = (
+    "research",
+    "coder",
+    "coder_fallback",
+    "ideation",
+    "research_loop",
+    "context_window",
+    "cost_profile",
+)
+_INPUT_DATA_KEYS = ("provider", "dataset", "lake_dir")
 _INPUT_SETTINGS_KEYS = ("digest", "resolved", "frozen_keys", "live_keys", "refused_keys")
 
 # One deliberate mid-run config change (story #134, ``--rebase-config``). The list lives **inside
@@ -221,6 +275,7 @@ def validate(record: Mapping[str, object]) -> list[str]:
         problems.append("run: section must be an object")
 
     problems += _check_segments(record.get("segments"))
+    problems += _check_environment("environment_latest", record.get("environment_latest"))
 
     engine = record.get("engine")
     if isinstance(engine, Mapping):
@@ -270,6 +325,8 @@ def _check_inputs(inputs: object) -> list[str]:
     problems = _check_keys("inputs", inputs, _INPUTS_KEYS)
     problems += _check_stamp("inputs.frozen_at_utc", inputs.get("frozen_at_utc"))
     problems += _check_config_changes(inputs.get("config_changes"))
+    problems += _check_block("inputs.models", inputs.get("models"), _INPUT_MODEL_KEYS)
+    problems += _check_block("inputs.data", inputs.get("data"), _INPUT_DATA_KEYS)
     settings = inputs.get("settings")
     if not isinstance(settings, Mapping):
         return [*problems, "inputs.settings: must be an object"]
@@ -338,7 +395,35 @@ def _check_segments(segments: object) -> list[str]:
         problems += _check_status(f"{label}.command", segment.get("command"), SEGMENT_COMMANDS)
         problems += _check_stamp(f"{label}.started_utc", segment.get("started_utc"))
         problems += _check_stamp(f"{label}.stopped_utc", segment.get("stopped_utc"))
+        problems += _check_environment(f"{label}.environment", segment.get("environment"))
     return problems
+
+
+def _check_block(label: str, block: object, keys: Sequence[str]) -> list[str]:
+    """One optional sub-object whose keys are the contract: ``null``, or all of them present.
+
+    Shared by the provenance views (``inputs.models``, ``inputs.data``) and, one level up, by the
+    environment block: everywhere the record states a *set* of facts, an unset fact is an explicit
+    ``null`` and a dropped key is a schema violation.
+    """
+    if block is None:
+        return []
+    if not isinstance(block, Mapping):
+        return [f"{label}: must be an object or null"]
+    return _check_keys(label, block, keys)
+
+
+def _check_environment(label: str, environment: object) -> list[str]:
+    """One environment block: ``null``, or an object carrying every key (story #139).
+
+    Degradation is the *normal* case here — no git checkout, no ``psutil``, none of the optional
+    extras — so the check is deliberately about **presence**, never about values: a bare core
+    install must produce a schema-valid block whose facts are explicit nulls and whose
+    ``degraded_seams`` names what was missing. A block that simply dropped the keys it could not
+    answer would be indistinguishable from an older schema version, which is the one thing the
+    record's explicit-null convention exists to prevent.
+    """
+    return _check_block(label, environment, _ENVIRONMENT_KEYS)
 
 
 def _check_events(label: str, events: object) -> list[str]:
