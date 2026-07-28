@@ -161,8 +161,13 @@ _SPEND_CEILINGS: frozenset[str] = frozenset(
         "research.agent.worker_bar_budget",
         # Wall-clock ceiling on one research phase.
         "research_time_budget_minutes",
-        # Wall-clock ceiling on the whole run (the loop's global stop).
+        # Wall-clock ceiling on one process — how long tonight lasts (the loop's global stop).
         "time_limit_hours",
+        # The compute ceiling on the whole *run*, across every segment: "spend 100 research hours
+        # on this thesis, then stop" is steering of exactly the kind a personality file exists to
+        # carry, and it is the same kind of knob as the two above — a ceiling that can only end a
+        # run sooner. It bounds resources; it decides nothing about what passes.
+        "run_limit_hours",
     }
 )
 
@@ -269,7 +274,15 @@ CLAMPED: dict[str, Direction] = {
 # ─────────────────────────────────────────────────────────────────────────────
 # Tier C — REFUSED: fatal, with the reason in the error.
 # ─────────────────────────────────────────────────────────────────────────────
-_LIVE_MONEY = (
+# Three of the reasons below are **public**, because another module needs the set of paths that
+# carries one and re-listing those paths by hand is exactly the drift this table exists to
+# prevent: :mod:`noctis.config.rehydrate` derives its refused tier from :data:`LIVE_MONEY`, its
+# path knobs from :data:`STATE_IO`, and its secret set from :data:`SECRETS`, all through
+# :func:`refused_paths`. Classifying one more path under one of them therefore extends the other
+# module with no edit there. The rest stay private: nothing outside asks "which paths are refused
+# because they are promotion gates?", and publishing a constant nobody derives from would just be
+# a wider surface.
+LIVE_MONEY = (
     "live-money double gate — real orders are reachable only when the config mode and the "
     "ALLOW_LIVE environment gate are independently open, so neither may come from an overlay"
 )
@@ -289,12 +302,12 @@ _HOLDOUT_GEOMETRY = (
 _BOARD_SIZE = (
     "board size — the number of champion slots changes how easy it is to beat the weakest champion"
 )
-_STATE_IO = (
+STATE_IO = (
     "state / IO redirection — moving an output root moves the experiment journal the "
     "exhaustion gate counts, the champion board, and the strategy tiers; that is structural, "
     "not a setting"
 )
-_SECRETS = "secrets live in the environment only and never travel in a config overlay"
+SECRETS = "secrets live in the environment only and never travel in a config overlay"
 _SELF_SELECTION = (
     "self-selection / recursion — an overlay may not choose which overlay is read or which "
     "research engine runs"
@@ -308,11 +321,21 @@ _SESSION_CLOCK = (
     "session clock — the lake and every catalog are aligned to one calendar and timezone"
 )
 _IDEATION = "legacy ideation path — deferred, and not run-shaping"
+_RECORD_CONTENT = (
+    "record content — how much of a run the record embeds is an archival choice about the "
+    "artifact, made once at creation; steering says what to look for, never what the evidence "
+    "describing it contains"
+)
+_ACCOUNTING = (
+    "cost accounting — the price table decides what a run is *reported* to have cost, not what "
+    "it does; a mandate that could restate its own bill would make every cross-run cost "
+    "comparison a claim the experiment made about itself"
+)
 
 REFUSED: dict[str, str] = {
     # Live-money double gate.
-    "mode": _LIVE_MONEY,
-    "allow_live": _LIVE_MONEY,
+    "mode": LIVE_MONEY,
+    "allow_live": LIVE_MONEY,
     # Arena difficulty — the enforced cost floor.
     "backtest.fee_bps": _COST_FLOOR,
     "backtest.slippage_bps": _COST_FLOOR,
@@ -333,18 +356,27 @@ REFUSED: dict[str, str] = {
     # Board size.
     "champion_count": _BOARD_SIZE,
     # State / IO redirection.
-    "workspace_dir": _STATE_IO,
-    "state_dir": _STATE_IO,
-    "reports_dir": _STATE_IO,
-    "memory_path": _STATE_IO,
-    "qa_dir": _STATE_IO,
-    "strategies_dir": _STATE_IO,
-    "mandate_dir": _STATE_IO,
-    "data.lake_dir": _STATE_IO,
+    "workspace_dir": STATE_IO,
+    # The run's own root — the four run-scoped paths below derive from it, so an overlay that
+    # could move it would move a run's champion board and experiment journal wholesale. A run's
+    # identity is minted by the engine, never chosen by the mandate it is steered with.
+    "run_dir": STATE_IO,
+    "state_dir": STATE_IO,
+    "reports_dir": STATE_IO,
+    "memory_path": STATE_IO,
+    "qa_dir": STATE_IO,
+    "runs_dir": STATE_IO,
+    "strategies_dir": STATE_IO,
+    "mandate_dir": STATE_IO,
+    "data.lake_dir": STATE_IO,
     # Secrets.
-    "databento_api_key": _SECRETS,
-    "anthropic_api_key": _SECRETS,
-    "openai_api_key": _SECRETS,
+    "databento_api_key": SECRETS,
+    "anthropic_api_key": SECRETS,
+    "openai_api_key": SECRETS,
+    # Cost accounting — what the record says a run cost, never what it does.
+    "research.pricing": _ACCOUNTING,
+    # Record content — how much of itself the run archives.
+    "embed_all_sources": _RECORD_CONTENT,
     # Self-selection / recursion.
     "research.mandate": _SELF_SELECTION,
     "research.mode": _SELF_SELECTION,
@@ -379,6 +411,17 @@ _UNKNOWN = "not a setting — check the spelling and the dotted path against con
 # ─────────────────────────────────────────────────────────────────────────────
 # Classification
 # ─────────────────────────────────────────────────────────────────────────────
+def refused_paths(reason: str) -> frozenset[str]:
+    """Every path :data:`REFUSED` carries for exactly this ``reason``.
+
+    The one supported way another module derives a sub-tier of the refusal table instead of
+    re-listing it. A second hand-written copy of "which paths are the path knobs" or "which
+    fields are the secrets" would be free to drift from this one the day a field is added; a
+    derivation cannot.
+    """
+    return frozenset(path for path, declared in REFUSED.items() if declared == reason)
+
+
 def classify(path: str) -> Verdict:
     """Classify one dotted settings path. Total over *any* string: a path the tables don't
     carry is ``unknown`` (and therefore refused), never silently permitted."""
@@ -432,24 +475,42 @@ def apply_patch(settings: Settings, patch: Mapping[str, object]) -> list[str]:
     if not survivors:
         return []
 
+    # Build every replacement before assigning any of it: a patch that fails validation must
+    # leave the settings object exactly as it found it.
+    rebuilt = revalidated(settings, survivors)
+    _assert_holdout_is_not_starved(settings, rebuilt)
+    for name, value in rebuilt.items():
+        setattr(settings, name, value)
+    return sorted(f"{path}={_read_path(settings, path)}" for path in survivors)
+
+
+def revalidated(settings: Settings, values: Mapping[str, object]) -> dict[str, Any]:
+    """Turn a flat ``{"dotted.path": value}`` mapping into ``{top-level field: rebuilt value}``.
+
+    The one validating applier, and deliberately **not** a classifier: it answers "what would
+    these values become?", never "may they be set?". :func:`apply_patch` calls it after the
+    deny-by-default pass, and :mod:`noctis.config.rehydrate` calls it to put a run's frozen
+    settings back — so a value restored from a record faces exactly the validators
+    ``config.yaml`` faces (the metric parser, the fill-cost floor, ``Literal`` membership,
+    ``int | None`` coercion), with the rules stated once.
+
+    Nothing is assigned here: the caller does that, so a mapping that fails validation leaves
+    the settings object byte-identical. Raises :class:`OverlayError` on a value the owning
+    section rejects.
+    """
     sections = _sections()
     grouped: dict[str | None, dict[str, object]] = {}
-    for path, value in survivors.items():
+    for path, value in values.items():
         head = path.split(".", 1)[0]
         grouped.setdefault(head if head in sections else None, {})[path] = value
 
-    # Build every replacement before assigning any of it: a patch that fails validation must
-    # leave the settings object exactly as it found it.
     rebuilt: dict[str, Any] = {}
     for section, entries in grouped.items():
         if section is None:
             rebuilt.update(_validated_scalars(entries))
         else:
             rebuilt[section] = _validated_section(settings, section, entries)
-    _assert_holdout_is_not_starved(settings, rebuilt)
-    for name, value in rebuilt.items():
-        setattr(settings, name, value)
-    return sorted(f"{path}={_read_path(settings, path)}" for path in survivors)
+    return rebuilt
 
 
 def _violation(settings: Settings, verdict: Verdict, value: object) -> str | None:

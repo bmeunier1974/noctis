@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "kind": "noctis.run",
+  "run": {
+    "run_id": "<run_id>",
+    "label": null,
+    "status": "stopped",
+    "created_utc": "2026-07-27T14:22:33.418Z",
+    "last_active_utc": "2026-07-28T02:52:33.418Z",
+    "completed_utc": null,
+    "run_limit_hours": null,
+    "traded": true,
+    "cumulative_runtime_s": 9000.0,
+    "cumulative_research_s": 7100.0,
+    "cumulative_trading_s": 1800.0,
+    "cumulative_trials": null,
+    "state_pruned": false,
+    "complete": true,
+    "truncated": {}
+  },
+  "segments": [
+    {
+      "index": 0,
+      "started_utc": "2026-07-27T14:22:33.418Z",
+      "stopped_utc": "2026-07-27T16:22:33.418Z",
+      "duration_s": 7200.0,
+      "stopped_reason": "time_limit",
+      "status": "stopped",
+      "argv": [
+        "run",
+        "-v"
+      ],
+      "command": "run",
+      "resumed": false,
+      "counters": {
+        "cycles": 2,
+        "research_iterations": 9,
+        "trades": 2
+      },
+      "phase_seconds": {
+        "RESEARCH": 5400.0,
+        "TRADING": 1800.0,
+        "CLOSE": 30.0
+      },
+      "environment": {
+        "hostname_hash": "aaaa1111",
+        "os": {
+          "system": "Linux",
+          "release": "7.0.0-14-generic",
+          "arch": "x86_64"
+        },
+        "container": false,
+        "cpu": {
+          "model": "AMD Ryzen 9 7950X",
+          "cores_physical": 4,
+          "cores_logical": 8,
+          "freq_max_mhz": 5881.0
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+          "commit": "a380d3a",
+          "branch": "main",
+          "dirty": false,
+          "describe": "v0.1.0-42"
+        },
+        "lockfile_digest": "sha256:beef",
+        "extras_present": {
+          "llm": null,
+          "data": null,
+          "research": null,
+          "engine": null,
+          "hardware": null
+        },
+        "degraded_seams": [
+          "data",
+          "engine",
+          "hardware",
+          "llm",
+          "research"
+        ]
+      },
+      "engine_version": "<engine_version>",
+      "engine_fingerprint": [
+        "backtest",
+        "gates",
+        "memory_seed",
+        "profiles",
+        "prompts",
+        "research",
+        "schema",
+        "seeds"
+      ]
+    },
+    {
+      "index": 1,
+      "started_utc": "2026-07-28T02:22:33.418Z",
+      "stopped_utc": "2026-07-28T02:52:33.418Z",
+      "duration_s": 1800.0,
+      "stopped_reason": "stop_requested",
+      "status": "stopped",
+      "argv": [
+        "run"
+      ],
+      "command": "run",
+      "resumed": true,
+      "counters": {
+        "cycles": 3
+      },
+      "phase_seconds": {
+        "RESEARCH": 1700.0,
+        "TRADING": 0.0,
+        "CLOSE": 20.0
+      },
+      "environment": {
+        "hostname_hash": "bbbb2222",
+        "os": {
+          "system": "Linux",
+          "release": "7.0.0-14-generic",
+          "arch": "x86_64"
+        },
+        "container": false,
+        "cpu": {
+          "model": "AMD Ryzen 9 7950X",
+          "cores_physical": 16,
+          "cores_logical": 32,
+          "freq_max_mhz": 5881.0
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+          "commit": "a380d3a",
+          "branch": "main",
+          "dirty": false,
+          "describe": "v0.1.0-42"
+        },
+        "lockfile_digest": "sha256:beef",
+        "extras_present": {
+          "llm": null,
+          "data": null,
+          "research": null,
+          "engine": null,
+          "hardware": null
+        },
+        "degraded_seams": [
+          "data",
+          "engine",
+          "hardware",
+          "llm",
+          "research"
+        ]
+      },
+      "engine_version": "<engine_version>",
+      "engine_fingerprint": [
+        "backtest",
+        "gates",
+        "memory_seed",
+        "profiles",
+        "prompts",
+        "research",
+        "schema",
+        "seeds"
+      ]
+    }
+  ],
+  "environment_latest": {
+    "hostname_hash": "bbbb2222",
+    "os": {
+      "system": "Linux",
+      "release": "7.0.0-14-generic",
+      "arch": "x86_64"
+    },
+    "container": false,
+    "cpu": {
+      "model": "AMD Ryzen 9 7950X",
+      "cores_physical": 16,
+      "cores_logical": 32,
+      "freq_max_mhz": 5881.0
+    },
+    "memory_total_bytes": 67351248896,
+    "disk_free_bytes": 412000000000,
+    "python": "3.11.9",
+    "noctis_version": "0.1.0",
+    "git": {
+      "commit": "a380d3a",
+      "branch": "main",
+      "dirty": false,
+      "describe": "v0.1.0-42"
+    },
+    "lockfile_digest": "sha256:beef",
+    "extras_present": {
+      "llm": null,
+      "data": null,
+      "research": null,
+      "engine": null,
+      "hardware": null
+    },
+    "degraded_seams": [
+      "data",
+      "engine",
+      "hardware",
+      "llm",
+      "research"
+    ]
+  },
+  "engine": {
+    "engine_version": "<engine_version>",
+    "engine_epoch": 1,
+    "noctis_version": "<noctis_version>",
+    "fingerprint": [
+      "backtest",
+      "gates",
+      "memory_seed",
+      "profiles",
+      "prompts",
+      "research",
+      "schema",
+      "seeds"
+    ],
+    "comparable_key": "<comparable_key>",
+    "mixed_engine": false,
+    "engine_changes": []
+  },
+  "inputs": null,
+  "strategies": [],
+  "spend": null,
+  "sessions": [],
+  "performance": null,
+  "assumptions": {
+    "paper_only": null,
+    "live_gate": {
+      "execution_mode": null,
+      "real_orders_reachable": null,
+      "re_resolved_each_segment": true,
+      "note": "real-money orders need BOTH config mode: live and ALLOW_LIVE=true; the pair is re-resolved from the config file and the environment at every process start, is never written to this record and is never restored from one, and a resume whose verdict differs from the frozen one is refused rather than reconciled"
+    },
+    "fill_model": "next_bar_open",
+    "lookahead": "none \u2014 a decision taken on bar t is filled at bar t+1's open, and every walk-forward test window sits strictly after its train window",
+    "fee_bps": null,
+    "slippage_bps": null,
+    "round_trip_cost_bps": null,
+    "costs_charged": "per side \u2014 a round trip pays both legs",
+    "walk_forward": {
+      "sizing": "auto",
+      "min_train_bars": 40,
+      "max_train_bars": 120,
+      "min_test_bars": 20,
+      "max_test_bars": 40,
+      "step_bars": null,
+      "embargo_bars": 0,
+      "test_after_train": true
+    },
+    "forward_holdout": {
+      "min_bars": 20,
+      "max_bars": 40,
+      "reserved": true,
+      "note": "one test window of the most-recent bars, reserved from the pre-filter, the walk-forward and the optimizer alike; a panel too short to leave a full split behind degrades to no forward-holdout gate rather than starving the search"
+    },
+    "symbol_holdout": {
+      "size": null,
+      "fit_set_size": null,
+      "symbols": null
+    },
+    "min_trials": null,
+    "promotion_thresholds": null,
+    "benchmark": {
+      "name": "equal_weight_universe_bh",
+      "method": "equal-weight buy-and-hold over the symbols this run actually traded, priced from bars already in the shared lake over the run's own session window; weights are set at the first session mark and never rebalanced",
+      "rebalancing": "none \u2014 weights are set at the first session mark this run can price and are never rebalanced; each name's contribution drifts with its own return thereafter"
+    },
+    "state_scope": "run"
+  },
+  "events": [
+    {
+      "t": "2026-07-28T02:22:33.418Z",
+      "segment": 1,
+      "kind": "warn",
+      "text": "stole a stale run lock held by pid 999999: its heartbeat is 207368553s cold (older than the 604800s threshold)"
+    }
+  ],
+  "errors": []
+}

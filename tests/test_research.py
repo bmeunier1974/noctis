@@ -80,6 +80,26 @@ def test_loop_runs_promotes_and_stops_on_budget(tmp_path):
     assert len(registry.list()) == 1
 
 
+def test_the_legacy_loop_reports_no_llm_spend_at_all_rather_than_a_free_one(tmp_path):
+    """Story #140: the legacy loop calls no model, so its summary carries ``null`` usage and a
+    ``null`` estimate — never zeros, which would read as "this research was free"."""
+    registry = ChampionRegistry(tmp_path / "champs.json", capacity=3)
+    summary = run_research(
+        proposer=CandidateProposer(seed=1),
+        evaluate_fn=lambda cand: _sc(cand.family, test=1.0, train=1.0),
+        registry=registry,
+        rules=RULES,
+        memory=InMemoryMemory(),
+        budget_minutes=1.0,
+        now=FakeClock(step_seconds=30.0),
+    )
+
+    assert summary.iterations  # it really did research
+    assert summary.usage is None
+    assert summary.usd_estimate is None
+    assert summary.tokens_total == 0  # the one number that IS an honest zero: no model ran
+
+
 # --- 2. stop event mid-loop --------------------------------------------------------------
 
 

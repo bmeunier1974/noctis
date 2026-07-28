@@ -716,15 +716,17 @@ def test_library_paths_bare_path_coerces_to_the_sibling_layout(tmp_path):
     assert LibraryPaths.coerce(paths) is paths
 
 
-def test_library_paths_from_settings_splits_seeds_from_workspace_tiers(monkeypatch, tmp_path):
+def test_library_paths_from_settings_splits_seeds_from_the_runs_tiers(monkeypatch, tmp_path):
+    """The committed seeds stay read-only input; the two writable tiers belong to the RUN that
+    authored them (story #131), so they follow ``run_dir`` — here its reserved default."""
     from noctis.config import load_settings
     from noctis.strategies.library import LibraryPaths
 
     monkeypatch.delenv("NOCTIS_WORKSPACE", raising=False)
     paths = LibraryPaths.from_settings(load_settings(config_path=tmp_path / "missing.yaml"))
     assert paths.seeds == Path("strategies")
-    assert paths.tmp == Path("workspace/strategies/__tmp")
-    assert paths.champions == Path("workspace/strategies/champions")
+    assert paths.tmp == Path("workspace/runs/legacy/strategies/__tmp")
+    assert paths.champions == Path("workspace/runs/legacy/strategies/champions")
 
 
 def test_library_paths_pickles_through_pool_initargs(tmp_path):

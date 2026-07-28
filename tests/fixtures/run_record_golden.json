@@ -1,0 +1,280 @@
+{
+  "schema_version": 1,
+  "kind": "noctis.run",
+  "run": {
+    "run_id": "20260727T142233Z-a1b2c3",
+    "label": null,
+    "status": "stopped",
+    "created_utc": "2026-07-27T14:22:33.418Z",
+    "last_active_utc": "2026-07-28T02:10:04.002Z",
+    "completed_utc": null,
+    "run_limit_hours": null,
+    "traded": true,
+    "cumulative_runtime_s": 18000.0,
+    "cumulative_research_s": 15400.0,
+    "cumulative_trading_s": 2340.0,
+    "cumulative_trials": null,
+    "state_pruned": false,
+    "complete": true,
+    "truncated": {}
+  },
+  "segments": [
+    {
+      "index": 0,
+      "started_utc": "2026-07-27T14:22:33.418Z",
+      "stopped_utc": "2026-07-27T18:22:33.418Z",
+      "duration_s": 14400.0,
+      "stopped_reason": "time_limit",
+      "status": "stopped",
+      "argv": [
+        "run",
+        "-v"
+      ],
+      "command": "run",
+      "resumed": false,
+      "counters": {
+        "cycles": 1,
+        "research_iterations": 4,
+        "trades": 2
+      },
+      "phase_seconds": {
+        "RESEARCH": 12000.0,
+        "TRADING": 2340.0,
+        "CLOSE": 60.0
+      },
+      "environment": {
+        "hostname_hash": "9f2c1d3e4b5a",
+        "os": {
+          "system": "Linux",
+          "release": "7.0.0-14-generic",
+          "arch": "x86_64"
+        },
+        "container": true,
+        "cpu": {
+          "model": "AMD Ryzen 9 7950X",
+          "cores_physical": 4,
+          "cores_logical": 8,
+          "freq_max_mhz": 5881.0
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+          "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+          "branch": "main",
+          "dirty": false,
+          "describe": "v0.1.0-42-ga380d3a"
+        },
+        "lockfile_digest": "sha256:9f2c1d",
+        "extras_present": {
+          "llm": "0.120.0",
+          "data": "0.82.0",
+          "research": null,
+          "engine": null,
+          "hardware": "7.2.2"
+        },
+        "degraded_seams": [
+          "engine",
+          "research"
+        ]
+      },
+      "engine_version": 1,
+      "engine_fingerprint": {
+        "gates": "f63d47b7b9604ab1",
+        "backtest": "3ba3e0bf1c97134f",
+        "research": "4baf9dea0c82c8cc",
+        "prompts": "14eb169506a6b5aa",
+        "profiles": "6803b9d26c63d6ae",
+        "seeds": "4826fe7224641eb4",
+        "memory_seed": "3337fa2cbf896932",
+        "schema": null
+      }
+    },
+    {
+      "index": 1,
+      "started_utc": "2026-07-28T01:10:04.002Z",
+      "stopped_utc": "2026-07-28T02:10:04.002Z",
+      "duration_s": 3600.0,
+      "stopped_reason": "stop_requested",
+      "status": "stopped",
+      "argv": [
+        "run",
+        "-v"
+      ],
+      "command": "run",
+      "resumed": true,
+      "counters": {
+        "cycles": 2,
+        "research_iterations": 9,
+        "trades": 0
+      },
+      "phase_seconds": {
+        "RESEARCH": 3400.0,
+        "TRADING": 0.0,
+        "CLOSE": 40.0
+      },
+      "environment": {
+        "hostname_hash": "0011223344ff",
+        "os": {
+          "system": "Linux",
+          "release": "7.0.0-14-generic",
+          "arch": "x86_64"
+        },
+        "container": true,
+        "cpu": {
+          "model": "AMD Ryzen 9 7950X",
+          "cores_physical": 16,
+          "cores_logical": 32,
+          "freq_max_mhz": 5881.0
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+          "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+          "branch": "main",
+          "dirty": false,
+          "describe": "v0.1.0-42-ga380d3a"
+        },
+        "lockfile_digest": "sha256:9f2c1d",
+        "extras_present": {
+          "llm": "0.120.0",
+          "data": "0.82.0",
+          "research": null,
+          "engine": null,
+          "hardware": "7.2.2"
+        },
+        "degraded_seams": [
+          "engine",
+          "research"
+        ]
+      },
+      "engine_version": 1,
+      "engine_fingerprint": {
+        "gates": "f63d47b7b9604ab1",
+        "backtest": "3ba3e0bf1c97134f",
+        "research": "4baf9dea0c82c8cc",
+        "prompts": "14eb169506a6b5aa",
+        "profiles": "6803b9d26c63d6ae",
+        "seeds": "4826fe7224641eb4",
+        "memory_seed": "3337fa2cbf896932",
+        "schema": null
+      }
+    }
+  ],
+  "environment_latest": {
+    "hostname_hash": "0011223344ff",
+    "os": {
+      "system": "Linux",
+      "release": "7.0.0-14-generic",
+      "arch": "x86_64"
+    },
+    "container": true,
+    "cpu": {
+      "model": "AMD Ryzen 9 7950X",
+      "cores_physical": 16,
+      "cores_logical": 32,
+      "freq_max_mhz": 5881.0
+    },
+    "memory_total_bytes": 67351248896,
+    "disk_free_bytes": 412000000000,
+    "python": "3.11.9",
+    "noctis_version": "0.1.0",
+    "git": {
+      "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+      "branch": "main",
+      "dirty": false,
+      "describe": "v0.1.0-42-ga380d3a"
+    },
+    "lockfile_digest": "sha256:9f2c1d",
+    "extras_present": {
+      "llm": "0.120.0",
+      "data": "0.82.0",
+      "research": null,
+      "engine": null,
+      "hardware": "7.2.2"
+    },
+    "degraded_seams": [
+      "engine",
+      "research"
+    ]
+  },
+  "engine": {
+    "engine_version": 1,
+    "engine_epoch": 1,
+    "noctis_version": "0.1.0",
+    "fingerprint": {
+      "gates": "f63d47b7b9604ab1",
+      "backtest": "3ba3e0bf1c97134f",
+      "research": "4baf9dea0c82c8cc",
+      "prompts": "14eb169506a6b5aa",
+      "profiles": "6803b9d26c63d6ae",
+      "seeds": "4826fe7224641eb4",
+      "memory_seed": "3337fa2cbf896932",
+      "schema": null
+    },
+    "comparable_key": "1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe",
+    "mixed_engine": false,
+    "engine_changes": []
+  },
+  "inputs": null,
+  "strategies": [],
+  "spend": null,
+  "sessions": [],
+  "performance": null,
+  "assumptions": {
+    "paper_only": null,
+    "live_gate": {
+      "execution_mode": null,
+      "real_orders_reachable": null,
+      "re_resolved_each_segment": true,
+      "note": "real-money orders need BOTH config mode: live and ALLOW_LIVE=true; the pair is re-resolved from the config file and the environment at every process start, is never written to this record and is never restored from one, and a resume whose verdict differs from the frozen one is refused rather than reconciled"
+    },
+    "fill_model": "next_bar_open",
+    "lookahead": "none \u2014 a decision taken on bar t is filled at bar t+1's open, and every walk-forward test window sits strictly after its train window",
+    "fee_bps": null,
+    "slippage_bps": null,
+    "round_trip_cost_bps": null,
+    "costs_charged": "per side \u2014 a round trip pays both legs",
+    "walk_forward": {
+      "sizing": "auto",
+      "min_train_bars": 40,
+      "max_train_bars": 120,
+      "min_test_bars": 20,
+      "max_test_bars": 40,
+      "step_bars": null,
+      "embargo_bars": 0,
+      "test_after_train": true
+    },
+    "forward_holdout": {
+      "min_bars": 20,
+      "max_bars": 40,
+      "reserved": true,
+      "note": "one test window of the most-recent bars, reserved from the pre-filter, the walk-forward and the optimizer alike; a panel too short to leave a full split behind degrades to no forward-holdout gate rather than starving the search"
+    },
+    "symbol_holdout": {
+      "size": null,
+      "fit_set_size": null,
+      "symbols": null
+    },
+    "min_trials": null,
+    "promotion_thresholds": null,
+    "benchmark": {
+      "name": "equal_weight_universe_bh",
+      "method": "equal-weight buy-and-hold over the symbols this run actually traded, priced from bars already in the shared lake over the run's own session window; weights are set at the first session mark and never rebalanced",
+      "rebalancing": "none \u2014 weights are set at the first session mark this run can price and are never rebalanced; each name's contribution drifts with its own return thereafter"
+    },
+    "state_scope": "run"
+  },
+  "events": [
+    {
+      "t": "2026-07-28T01:10:04.002Z",
+      "segment": 1,
+      "kind": "warn",
+      "text": "stole a stale run lock (pid 4242 is not running on this host)"
+    }
+  ],
+  "errors": []
+}

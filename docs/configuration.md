@@ -29,6 +29,7 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `research.agent.coder_fallback_model`, `max_escalations`, `coder_fallback_thinking` | Paid escalation coder (#72): a local authoring job that spends its validator retries escalates the same brief, bounded per session by `max_escalations` (`0` = default = never). The escalated coder's thinking dial defaults `off` (#98) |
 | `research.agent.coder_max_tokens` | The coder's output-token ceiling — the *file's* budget: `null` (default) defers to the built-in `16000`; a number resizes it for a different coder backend. A thinking coder client gets a thinking allowance added on top (#98). A compat/sizing lever, **not** a cost budget (unused headroom is never billed); inert without a `coder_model` |
 | `research.cost_profile` | `full` / `balanced` / `economy` — resource ceilings only, never quality gates |
+| `research.pricing` | `$/Mtok` price overrides for the run record's **spend estimate**, keyed by model prefix (see **Pricing the spend estimate** below). Pure accounting: it changes what a run is *reported* to have cost, never what it does |
 | `research.agent.thinking` | `off` (default) / `on` — opt a **watch** session into provider-native reasoning; costs output tokens (see below) |
 | `research.agent.max_tokens`, `context_window` | Small-context-backend compatibility levers (see **Local backends** below) — not cost budgets. A declared `context_window` ≤ 32,768 also flips `research.agent.loop: auto` to the episodic driver (#76) |
 | `research.agent.sweep_workers` | Parallel workers for sweep trials + panel symbols (`1` = sequential) |
@@ -53,22 +54,124 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `backtest.fee_bps`, `backtest.slippage_bps` | Simulated fill costs **per side** (default `1.0`/`1.0` — a 4bp round trip). One value threaded to the pre-filter, validation, the agent's cost hint, and paper fills. Enforced minimum `1.0` each — see **Fill costs** below |
 | `ideation` | The legacy StrategySpec path |
 | `champion_count` | Champion board size |
-| `time_limit_hours` | Global stop from any phase |
+| `time_limit_hours` | Global stop from any phase — bounds **one process** (how long tonight lasts); the run stays resumable |
+| `run_limit_hours` | Compute cap on the **whole run**, in hours of cumulative runtime across every stop/resume (`--run-limit-hours`, frozen at creation). At the cap the loop stops between phases and the run is marked `completed` — terminal, so it refuses resume. `null` = uncapped. See [cli.md](cli.md#bounding-a-run----run-limit-hours-and---finish) |
+| `embed_all_sources` | Embed **every** candidate's strategy source in the run record, not just the champions' (`--embed-all-sources`, frozen at creation). Default `false`: champions are embedded in full, every other candidate is a run-relative path plus a content hash. See [cli.md](cli.md#archiving-a-run-whole----embed-all-sources) |
 | `workspace_dir` | **The one output root** (default `workspace/`; env `NOCTIS_WORKSPACE`) — every path below derives from it when not set |
-| `state_dir`, `reports_dir`, `memory_path`, `data.lake_dir` | Per-artifact overrides; each defaults to its workspace-derived location (`workspace/state`, `workspace/reports`, `workspace/memory/MEMORY.md`, `workspace/data_lake`) |
+| `runs_dir`, `data.lake_dir` | The workspace-level pair: the run tree (`workspace/runs`) and the data lake (`workspace/data_lake`), which is **shared by every run** |
+| `run_dir` | **The one run root** (default `workspace/runs/legacy`, the reserved run an invocation that never opened a run reads). `noctis run` / `noctis research` rebind it to the run they mint or resume |
+| `state_dir`, `reports_dir`, `memory_path`, `qa_dir` | Per-artifact overrides; each defaults to its **run**-derived location (`<run_dir>/state`, `<run_dir>/reports`, `<run_dir>/memory/MEMORY.md`, `<run_dir>/qa`) |
 | `strategies_dir`, `mandate_dir` | The committed input surfaces: the seed strategy library and the mandate scaffold |
 
 ## The workspace
 
-Everything the engine writes — run state, the data lake, reports, agent memory, and the
-strategy working/champion tiers — lands under the single gitignored `workspace_dir`. One
-gitignore line, one thing to back up or wipe. Setting the env var `NOCTIS_WORKSPACE`
-relocates all of it at once (useful when running the CLI from outside the repo); an explicit
-per-artifact knob is an absolute override. `noctis init` creates the workspace alongside the
-local config; `noctis migrate` moves a pre-workspace layout (`state/`, `data_lake/`,
-`reports/`, root `MEMORY.md`, `strategies/__tmp|champions`) into it — and every
-state-touching command refuses to run beside un-migrated legacy data until it has
-(`status` only warns), so a stale layout can never silently present an empty champion board.
+Everything the engine writes lands under the single gitignored `workspace_dir` — one gitignore
+line, one thing to back up or wipe — and inside it **a run owns its state**:
+
+```text
+workspace/
+  data_lake/            # SHARED by every run: vendor data is expensive and run-neutral
+  runs/<run_id>/        # run.json + run.lock, and everything that run produced:
+    state/  strategies/{__tmp,champions}/  memory/MEMORY.md  reports/  qa/
+```
+
+So two runs in one workspace cannot crown champions onto one board or trade one paper account.
+`state_dir`, `reports_dir`, `qa_dir` and `memory_path` derive from `run_dir`; `noctis run`
+rebinds `run_dir` to the run it mints, and unset it is the reserved `runs/legacy/` run that the
+read-only commands (`status`, `champions`, `account`, `report`, `backtest`) and a bare
+`research` read. Setting the env var `NOCTIS_WORKSPACE` relocates all of it at once (useful when
+running the CLI from outside the repo); an explicit per-artifact knob is an absolute override and
+survives the rebinding.
+
+`noctis init` creates the workspace alongside the local config; `noctis migrate` moves a
+pre-workspace layout (`state/`, `data_lake/`, `reports/`, root `MEMORY.md`,
+`strategies/__tmp|champions`) into it **and** adopts a pre-run-scoped `workspace/state|reports|
+memory|qa|strategies` into the reserved `legacy` run, which then has a real `run.json` and is
+resumable. Every state-touching command refuses to run beside abandoned pre-workspace data until
+it has (`status` only warns), so a stale layout can never silently present an empty champion
+board; un-adopted workspace state only **warns**, because that state is not abandoned — it is
+sitting in the same workspace waiting to be claimed by a run.
+
+## Config freezing — what a resumed run reads
+
+A run outlives the process that started it: `noctis run --resume <run_id>`
+([cli.md](cli.md#resuming-a-run----resume-address)) appends a segment and keeps accumulating into
+the same record. That only *means* something if the configuration held still in between — so a
+run's config is **frozen at creation**, stored in its own `run.json`, and restored on every later
+segment. Editing `config.yaml` or a mandate profile tomorrow cannot retroactively change what a
+running experiment was told to do. Drift is normal and silently fine: frozen wins — until an
+operator deliberately adopts it ([below](#seeing-the-drift-and-adopting-it)).
+
+Every leaf setting belongs to exactly one of three tiers, classified in
+`src/noctis/config/rehydrate.py` and ratcheted by the test suite the same way the overlay's table
+is. Today: **72 frozen, 17 live, 2 refused**. The record publishes the three lists it froze under
+`inputs.settings` ([run-record.md](run-record.md#inputs--the-frozen-configuration)), so a consumer
+never has to guess which tier a key is in.
+
+| Tier | Count | What | Where it comes from on a resume |
+|---|---|---|---|
+| **Frozen** | 72 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `embed_all_sources`, `live_feed.*` — **plus the whole mandate** | the record |
+| **Live** | 17 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | the current process |
+| **Refused** | 2 | `mode`, `allow_live` | neither — see below |
+
+**Frozen includes the mandate, as resolved text.** The record stores the mandate's body verbatim
+(with a digest), its summary, symbols, references and the overlay it applied — not the selector.
+Freezing `profile:aggressive` would freeze nothing at all, because the file behind that name is
+free to change tonight.
+
+**Live is not a gap, it is the design.** Secrets are redacted out of the record, so a record is
+shareable and resuming it needs *your own* keys from `.env`. Paths are live so a run can resume on
+a machine whose absolute paths differ. And the per-process budgets bound one *night*, not one
+experiment — `--time-limit-hours` is how you decide how long tonight lasts, weeks after the run
+started.
+
+**The two wall-clock ceilings sit in different tiers on purpose.** `time_limit_hours` is **live**:
+it bounds this process, and how long tonight lasts is your call every night. `run_limit_hours` is
+**frozen**: it bounds the whole run across every stop/resume, so it is part of what the experiment
+*is* — 100 research hours and 30 are not the same experiment, and a cap that could be raised each
+morning would bound nothing at all. Editing `run_limit_hours` in `config.yaml` therefore has no
+effect on a run already under way; it applies to the next run you mint
+([cli.md](cli.md#bounding-a-run----run-limit-hours-and---finish)).
+
+**Refused means never recorded and never restored.** The safety gate re-resolves from
+`config.yaml` + `ALLOW_LIVE` at every process start (see [safety.md](safety.md)); a record can
+never resurrect a mode, so `mode: live` without `ALLOW_LIVE` is the same hard startup error on a
+resume as on a first start. The record does carry the gate's *verdict* for the run
+(`inputs.execution_mode`) as evidence — and a resume whose freshly resolved mode disagrees with it
+is a **hard error**, so a paper run's results can never acquire live segments.
+
+Two of the three tiers are **derived, not re-listed**: the refused pair is exactly the overlay's
+live-money refusals, the path knobs are exactly its state/IO refusals, and the secrets are the one
+set `Settings` names — so classifying a new knob in the overlay's table (which you must do anyway)
+puts it in the right freezing tier with no second edit. Frozen is then the complement, which means
+a knob added tomorrow freezes by default: the safe direction, because it keeps meaning attached to
+results.
+
+Because the mandate and the metric are frozen, `--mandate` / `--directive` / `--metric` are
+**refused with a reason** on a resume rather than silently ignored. Start a new run to research
+something else — identity is minted, never derived, so a fresh run under any configuration is one
+command away.
+
+### Seeing the drift, and adopting it
+
+Frozen winning silently is right for the common case and wrong as the *only* option: an operator
+who really did mean to change the run's configuration needs a way to say so. Two flags on
+`noctis run --resume` (details and output in
+[cli.md](cli.md#config-drift-seeing-it-and-adopting-it)):
+
+- `--show-config-drift` prints how the current `config.yaml` and `mandate/` differ from what the
+  run froze, then exits. Inspection only — it opens no segment, takes no lock, writes nothing.
+  It compares the **72 frozen keys** and the resolved **mandate text**; the 17 live keys are never
+  reported (they are this process's by design) and the 2 refused ones never appear at all.
+- `--rebase-config` adopts the current files for the rest of the run: it re-freezes them, bumps
+  `inputs.config_epoch`, and appends a before/after entry to `inputs.config_changes` naming the
+  segment. **Never silent** — a run whose config changed mid-flight says so and says where. With
+  no drift it is a no-op: the epoch never moves for a change that did not happen.
+
+The refused tier is absolute here too. `mode` is not in the frozen settings at all (the record
+carries only the gate's verdict), so the one way to *attempt* rebasing it — editing `mode`, opening
+`ALLOW_LIVE`, and asking for the current files — is refused by the mode check that runs before any
+rebase, with a message saying that no flag lifts it.
 
 ## The mandate overlay
 
@@ -80,18 +183,18 @@ fill-cost floor, the promotion thresholds, the two-axis holdout geometry, the ou
 secrets). Every leaf setting is classified **exactly once** in `src/noctis/config/overlay.py` —
 the authoritative table, with a justification comment per group — and a completeness ratchet in
 the test suite fails until a newly added knob is classified deliberately, so nothing is allowed
-by accident of omission. Today: **35 allowed, 2 clamped, 49 refused**. The whole surface also
+by accident of omission. Today: **36 allowed, 2 clamped, 53 refused**. The whole surface also
 ships commented-out in `mandate/MANDATE.md.example`, so it is discoverable without reading
 source.
 
-**Allowed (35), in six groups.** None of them is read by the promotion gates
+**Allowed (36), in six groups.** None of them is read by the promotion gates
 (`champions/promotion.py`), the split geometry (`backtest/splits.py`), or the safety gate
 (`config/gate.py`) — that is the property that makes them settable at all.
 
 | Group | Knobs |
 |---|---|
 | Model seam | `research.model`, `research.base_url`, `research.agent.model` / `coder_model` / `coder_fallback_model`, the three thinking dials (`thinking`, `coder_thinking`, `coder_fallback_thinking`), `research.agent.loop` |
-| Spend ceilings | `research.cost_profile`, `research.agent.max_iterations` / `max_backtests` / `sweep_trials` / `max_author_calls` / `max_escalations` / `max_tokens` / `coder_max_tokens` / `context_window` / `episode_retries` / `web_search` / `max_web_searches` / `sweep_workers` / `worker_bar_budget`, `research_time_budget_minutes`, `time_limit_hours` |
+| Spend ceilings | `research.cost_profile`, `research.agent.max_iterations` / `max_backtests` / `sweep_trials` / `max_author_calls` / `max_escalations` / `max_tokens` / `coder_max_tokens` / `context_window` / `episode_retries` / `web_search` / `max_web_searches` / `sweep_workers` / `worker_bar_budget`, `research_time_budget_minutes`, `time_limit_hours`, `run_limit_hours` |
 | Search shape | `promotion.metric`, `research.focus_size`, `research.tuning_dispersion_penalty`, `research.draft_ttl_hours`, `research.memory_distill_every` |
 | Data acquisition | `data.history_days`, `data.auto_backfill` |
 | Housekeeping | `observability.heartbeat_polls`, `qa.keep_last_runs` |
@@ -112,15 +215,16 @@ while the run does another. `null` — "no bound": an unlimited budget, no exhau
 — ranks as the least-disciplined end of *either* scale, so an overlay may replace it with a
 number and never the reverse.
 
-**Refused (49) — fatal at startup, with the reason printed.** A refused, unknown, or invalid
+**Refused (53) — fatal at startup, with the reason printed.** A refused, unknown, or invalid
 key stops the process before any work starts, listing **every** problem in one error so a bad
 mandate is one fix rather than a fix-one-rerun loop. (Refusals used to be warned about and
 silently skipped, which meant discovering three days into a run that a knob never applied.) The
 refused set is the arena: the live-money double gate (`mode`, `allow_live`), the enforced
 fill-cost floor (`backtest.fee_bps`, `backtest.slippage_bps`), every `promotion.*` except
 `metric`, the holdout geometry (`research.fit_set_size`, `research.symbol_holdout_size`),
-`champion_count`, every state/IO path (`workspace_dir`, `state_dir`, `reports_dir`,
-`memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`), the three API keys,
+`champion_count`, every state/IO path (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`,
+`reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`), the
+three API keys, cost accounting (`research.pricing`), record content (`embed_all_sources`),
 self-selection (`research.mandate`, `research.mode`), `risk.*` / `trading.*` /
 `live_feed.poll_interval_s`, `data.provider` / `data.dataset`, `session.calendar` /
 `session.timezone`, and `ideation.*`.
@@ -197,6 +301,58 @@ per-venue realism, never lowered. For the same reason the whole `backtest:` sect
 **refused by name** in the mandate overlay, however wide that surface grows: a research
 personality steers *what* to look for, never how forgiving the arena is. A mandate that tries
 it does not start, and the error says so.
+
+## Pricing the spend estimate
+
+The run record publishes what a run cost — `spend.llm_usd_estimate`, `usd_per_champion_estimate`,
+`usd_per_trial_estimate` — and every one of those numbers is an **estimate**, priced from a
+versioned `$/Mtok` table in `src/noctis/research/pricing.py` and labelled as such in the record and
+in any CLI output. Tokens are measured; dollars are inferred from list prices that ignore volume
+discounts, batch tiers and mid-month changes.
+
+Three rules make the estimate safe to publish, and they are worth knowing before you read one:
+
+- **An unknown model contributes `null`, never zero.** A model the table does not carry has no
+  price, and any total it belongs to is `null` too — a partial sum presented as a total would read
+  as complete while understating the bill. A `$0`/token local backend (`ollama/…`, `ollama_chat/…`,
+  `vllm/…`, `lm_studio/…`, `local/…`) is priced at an explicit zero, because that zero is a *stated
+  price*. That list is an **allowlist**, deliberately: a provider that merely isn't one of the paid
+  clouds the table surveyed is *unknown*, not free — otherwise a paid third-party gateway would one
+  day publish a confident `$0`.
+- **The table version travels with the numbers.** `spend.pricing_table_version` names the table
+  that produced them, so a record read next year is still interpretable. The label is
+  `<month>[.<revision>]` — `2026-07.1` is July 2026's prices with corrected coverage (`ollama_chat/`
+  was missing, so the shipped local driver priced as an unknown model). Coverage earns a revision
+  because it changes the published number for the same model, and a record keeps whichever label was
+  in force when it was written: nothing is migrated, and that is the point of having one.
+- **The estimate is never a gate.** Nothing here is read by a promotion gate, a budget, or the
+  exhaustion floor. `data.budget_usd` (the vendor-data preflight) and `research.cost_profile` (the
+  session ceilings) are the knobs that actually bound spend; this one only reports it.
+
+`research.pricing` overrides or extends the table, keyed by **model prefix** (longest match wins),
+with all four rates required — input, output, cache-write and cache-read bill separately, and a
+half-stated price would silently value the rest at nothing:
+
+```yaml
+research:
+  pricing:
+    "anthropic/claude-opus-4":
+      input_usd_per_mtok: 15.0
+      output_usd_per_mtok: 75.0
+      cache_write_usd_per_mtok: 18.75
+      cache_read_usd_per_mtok: 1.5
+```
+
+An overridden table **cannot borrow the shipped version label**: it identifies itself as
+`<version>+custom.<digest>` (e.g. `2026-07.1+custom.a1b2c3d4`), derived from the override itself —
+stable for the same prices, different for any other. So a reader can always tell whether the
+numbers came from this engine's own table.
+
+Pricing is **frozen with the rest of the run's config**: a run prices under the table it was
+created with, so editing `research.pricing` tomorrow cannot restate what last night cost. And it is
+**refused by the mandate overlay** by name, for the reason the fill-cost floor is: an experiment
+that could restate its own bill would make every cross-run cost comparison a claim it made about
+itself.
 
 ## Local backends (noctis-ollama)
 

@@ -10,20 +10,21 @@ that teach the contract — not a menu; the research agent authors new files bel
 
 The library is discovered from three tiers, **lowest precedence first** — a later tier
 overrides an earlier one for the same name. This directory holds only the committed input
-tier; both output tiers live under the workspace:
+tier; both output tiers live under the run that authored them (`workspace/runs/<run_id>/`):
 
 | Tier | Path | Committed? | Holds |
 |---|---|---|---|
 | seeds | `strategies/*.py` | **yes** | `TEMPLATE.py` + the three worked examples — the only files in the public repo (read-only input) |
-| working | `workspace/strategies/__tmp/` | no (workspace) | the agent's scratch area: drafts, candidates, and rejected files — **local only** |
-| champions | `workspace/strategies/champions/` | no (workspace) | locally-promoted champions — never reach the public repo |
+| working | `<run>/strategies/__tmp/` | no (workspace) | the agent's scratch area: drafts, candidates, and rejected files — **local only** |
+| champions | `<run>/strategies/champions/` | no (workspace) | locally-promoted champions — never reach the public repo |
 
 So a fresh clone ships only the template and three seeds; `__tmp/` and `champions/` are created at
-runtime inside the gitignored `workspace/` and never leave your machine through git. A champion
+runtime inside the gitignored `workspace/` — under the run that wrote them, so one run's drafts are
+invisible to another — and never leave your machine through git. A champion
 always wins over a seed of the same name, and a live working copy in `__tmp/` shadows the seed it
 derives from. Committed seeds are **never mutated in place**: a mechanical rewrite of a seed (a
 status stamp, tuned defaults) is redirected into `__tmp/`, so the public seed files stay pristine.
-Corollary: deleting a shadowing copy (`rm workspace/strategies/__tmp/<name>.py`) silently
+Corollary: deleting a shadowing copy (`rm <run>/strategies/__tmp/<name>.py`) silently
 resurrects the pristine seed underneath it on the next load — that is the shadowing model working
 as designed, not a lost verdict (the rejection stays recorded in the journal and memory).
 
@@ -300,7 +301,7 @@ What authors must know:
 
 FORMULATE (author the file into `__tmp/`, `write_strategy`) → MATCH (pick symbols that fit the
 thesis, `ensure_data`) → OPTIMIZE (`run_backtest` / `run_sweep`; every trial journals to
-`workspace/state/experiments/<name>.jsonl`) → DECIDE (`evaluate_vs_champion` or `reject_strategy` —
+the run's `state/experiments/<name>.jsonl`) → DECIDE (`evaluate_vs_champion` or `reject_strategy` —
 both refuse until the parameter space has actually been explored).
 
 On promotion the file is **moved** out of `__tmp/` into `champions/`, the tuned params are written
@@ -317,7 +318,7 @@ judgment: the bytes are **moved verbatim — never deleted, never re-stamped** (
 rejected`, no gate, no verdict), so a session never inherits a stale draft it abandoned days ago.
 The archive is capped (50 files, oldest sequence evicted first) with the same collision-safe
 `{seq}-{name}.py` naming the coder-failure store uses, and the experiment journals under
-`workspace/state/experiments/` stay the ground truth for what was tried — archiving a file never
+the run's `state/experiments/` stay the ground truth for what was tried — archiving a file never
 touches them.
 
 Start a new strategy from `TEMPLATE.py` (the loader skips it).

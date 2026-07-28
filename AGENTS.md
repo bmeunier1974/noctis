@@ -10,13 +10,14 @@ it directly).
 **researches strategies while the market is closed**, **trades champions on (live or replayed)
 bars while it is open**, and **reports at the close** — looping day after day. With an
 `ANTHROPIC_API_KEY`, RESEARCH *is* an agent session: Claude authors one-file Python strategies
-into the library's working tier (`workspace/strategies/__tmp/`; the committed `strategies/`
+into the run's working tier (`<run_dir>/strategies/__tmp/`; the committed `strategies/`
 seeds are read-only input) and drives `formulate → match → optimize → decide` through a curated tool
 registry. Without a key it falls back to a legacy Optuna/proposer loop over the same library.
 
 `README.md` is a short landing page; the authoritative narrative lives in `docs/`
-(architecture, research, configuration, data, cli, safety, development). This file is the
-operating contract — read it first, then the relevant `docs/` page for depth.
+(architecture, research, validation, run-record, configuration, data, cli, safety, development,
+parity). This file is the operating contract — read it first, then the relevant `docs/` page for
+depth.
 
 ## The rules that don't bend
 
@@ -70,14 +71,22 @@ pytest tests/test_champions.py::test_name -q     # a single test
 ruff check . && ruff format --check .   # lint + format (line-length 100; rules E,F,I,W,UP,B)
 mypy                       # type-check src/noctis (config in pyproject.toml)
 pre-commit run --all-files # every quality gate (install once: pre-commit install)
+python scripts/engine_fingerprint.py [--write]   # the engine fingerprint ratchet: check, or
+                           # regenerate engine_fingerprint.json after moving a behavioural file
+                           # (--write refuses arbiter drift with no ENGINE_VERSION bump: declare it)
 
 python -m noctis setup [--check]   # guided first-run wizard: files, extras, keys, LLM verify
 python -m noctis init              # scaffold local config/.env/mandate + workspace (idempotent)
-python -m noctis migrate [--dry-run]   # move a pre-workspace layout into workspace/
+python -m noctis migrate [--dry-run]   # move a legacy layout in; adopt workspace state into `legacy`
 python -m noctis run -v            # the day/night loop (stops at time_limit_hours)
 python -m noctis research -v       # ONE observable agent research session (needs ANTHROPIC_API_KEY)
+python -m noctis runs [--all]      # the run board: id, label, status, segments, headline numbers
+python -m noctis run-record <id>   # print one run's whole self-contained run.json
+python -m noctis run-prune <id> [--dry-run]   # retention: delete a COMPLETED run's state/,
+                           # strategies/ and reports/; never its run.json, never a resumable run
 python -m noctis status            # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>    # preflight a mandate: provenance + the effective settings diff
+python -m noctis engine            # engine identity: version, component fingerprint, comparable key
 python -m noctis backtest <name>   # replay a library strategy on its shipped Params defaults
 python -m noctis champions [--reset]   # list champions; --reset re-fills slots under current gates
 python -m noctis report [--as-of DATE]
@@ -117,8 +126,8 @@ written, while the episodic driver's FORMULATE-authored fixed oracle (a structur
 (`src/noctis/strategies/library.py`,
 `LibraryPaths`), discovered lowest-precedence first: committed **seeds** in `strategies/`
 (`TEMPLATE.py` + the three worked examples, the *only* files in the public repo — read-only input)
-→ the `workspace/strategies/__tmp/` working area (drafts/candidates/rejects, local-only) → the
-`workspace/strategies/champions/` folder (locally-promoted). A later tier
+→ the run's `strategies/__tmp/` working area (drafts/candidates/rejects, local-only) → the run's
+`strategies/champions/` folder (locally-promoted; both under `workspace/runs/<run_id>/`). A later tier
 overrides an earlier one, so a champion beats a seed of the same name and committed seeds are never
 mutated in place (a seed rewrite is redirected into `__tmp/`). `write_strategy` authors into `__tmp/`;
 on promotion the file is **moved** into `champions/`, tuned params are written back as defaults, and
@@ -132,7 +141,7 @@ conversation transcript or the episodic driver; `auto` flips to episodic when th
 `context_window` is ≤ 32,768 (#76 — evidence-gated by the parity harness, decided in one place:
 `bootstrap.resolve_research_loop`). The agent's discipline is entirely structural: the exhaustion
 gate refuses a verdict until ≥ `research.min_trials` distinct param sets are journaled to
-`workspace/state/experiments/<name>.jsonl`, backtests return aggregate scorecards only, previews never cross
+the run's `state/experiments/<name>.jsonl`, backtests return aggregate scorecards only, previews never cross
 into holdout bars, and data spend sits behind a budget preflight. `run_sweep`'s execution engine —
 the seeded sampler, the fork pool, the OOM/stall guard — is its own `SweepRunner` seam
 (`src/noctis/research/sweep.py`); the toolbox keeps the accounting (budget, journal, ranking). The legacy `StrategySpec` engine
@@ -146,12 +155,49 @@ scorecards (see rule 2 for the gate order); `src/noctis/champions/registry.py` p
 the state dir's `champions.json`. Promotion compares on a scale-free footing and treats a champion scored
 under a *different* metric as "stale" (displaceable), because cross-metric numbers aren't comparable.
 
+**The run is an entity, and it writes one file.** Every `noctis run` mints a run id
+(`observability/debug/runid.py` — identity is minted, never derived from the config) and opens
+`workspace/runs/<run_id>/`: `run.json` (the record) + `run.lock` (liveness). The I/O boundary is the
+design: `reporting/run_store.py` is the **only** module that touches that tree — it collects, locks,
+appends the process's segment and writes atomically behind a fail-safe latch — while
+`reporting/run_record.py` (`build(artifacts) -> dict`) and `reporting/schema.py` (`validate`) are
+**pure**, which is what makes the golden-record snapshot cheap. Wired in the composition root
+(`bootstrap.open_run_store`), rewritten at each CLOSE via the runtime's `on_cycle_close` seam. Two
+honesty rules: a killed segment is marked `interrupted` on the **next** open, never guessed at write
+time, and a live lock is a hard refusal (two engines on one run is corruption) while everything else
+latches off with one warning rather than raising into the engine. **Retention is opt-in and
+completed-only**: `run_store.prune_run_state` (`noctis run-prune <address> [--dry-run]`) is the one
+code path in Noctis that deletes a run's files — the heavy `state/`, `strategies/` and `reports/`
+directories, never `run.json`/`index.json` (they *are* the progress history), and never for a run
+that could still be resumed, since prunable and resumable are the same constant's two sides. The
+record's own contract — every field and when it is `null`, the additive-only versioning promise,
+the caps, engine identity and `comparable_key`, and a worked example — is
+[`docs/run-record.md`](docs/run-record.md); `noctis run-record <address> --validate` checks a
+record against it.
+
+**A run outlives its process, so it carries its own config.** `noctis run --resume <address>` appends
+a segment to an existing run and keeps accumulating into the same record — the run, not the process,
+is the unit progress is tracked on. One resolver (`run_store.resolve_run_dir`, shared with
+`run-record`) understands four address forms in a fixed order — a `run.json` path, `@label`,
+the reserved word `latest`, a run id — and a bare address is *always* the id; `--label` is a
+nickname the record stores, so an ambiguous `@label` refuses naming both ids rather than pick one. Every cumulative number in the record is **derived, never
+incremented** (recomputed at write time from the durable artifacts + the append-only `segments[]`),
+which is why three short segments total exactly what one long one does and a crash mid-write cannot
+double-count. Config is **frozen at creation** and rehydrated by the pure
+`src/noctis/config/rehydrate.py` (`(record, live_settings) -> Settings`): frozen = what the results
+*mean*, live = secrets + every path knob + the per-process budgets, refused = `mode`/`allow_live`,
+which are never recorded and never restored — the safety gate re-resolves fresh every start, and a
+frozen mode disagreeing with the resolved one is a hard error (rule 1). The mandate is frozen as
+**resolved text**, not as a selector, so editing a profile tomorrow cannot change what a running
+experiment was told to do. Drift is normal and frozen wins.
+
 **Config + mandate overlay.** `config.yaml` + `.env` → typed `src/noctis/config/settings.py` (env vars
 override YAML; `NOCTIS_CONFIG` points at an alternate file). The active mandate's front-matter
 `config:` block may overlay **only** the run-shaping tier `src/noctis/config/overlay.py` classifies
 as allowed — the arena (safety mode, fill costs, promotion thresholds, holdout geometry, paths,
 secrets) is refused there by name; a `--metric` CLI flag wins over the overlay,
-and `--mandate`/`--directive` (mutually exclusive) override the config selector for one session.
+and `--mandate`/`--directive` (mutually exclusive) override the config selector for one session
+(all three are refused on a `--resume`, whose steering is frozen).
 That precedence chain, and the collaborator builders the entrypoints share (lake, memory, console,
 the strategy-family registry, the agent research session), live in one composition root —
 `src/noctis/bootstrap.py`. Assemble sessions there, not by hand in a command body.
@@ -161,10 +207,30 @@ the strategy-family registry, the agent research session), live in one compositi
 - **Where state lives — the input/output contract:** committed files are input the engine treats
   as read-only (`strategies/` seeds + `TEMPLATE.py` + `strategies/README.md`, the `mandate/`
   scaffold, `config.example.yaml`, `MEMORY.seed.md`); **everything the engine writes lands under
-  the gitignored `workspace/`** (state, data lake, reports, agent memory, and the strategy
-  `__tmp`/`champions` tiers), one knob (`workspace_dir`, env `NOCTIS_WORKSPACE`) all derived paths
-  follow. `noctis init` scaffolds the local input copies; `noctis migrate` moves a pre-workspace
-  layout in; a startup guard refuses to run beside un-migrated legacy data (`status` only warns).
+  the gitignored `workspace/`**, and inside it **a run owns its state**:
+
+  ```
+  workspace/
+    data_lake/            ← SHARED by every run. Vendor data is expensive and run-neutral.
+    runs/index.json       ← the DERIVED listing roll-up over every record (never authoritative)
+    runs/<run_id>/        ← run.json + run.lock, and everything that run produced:
+      state/  strategies/{__tmp,champions}/  memory/MEMORY.md  reports/  qa/
+  ```
+
+  Two runs in one workspace therefore cannot crown champions onto one board or trade one paper
+  account — and `assumptions.state_scope: "run"` on every record says so, so a comparison between
+  two runs is a comparison of two experiments (the record's own contract:
+  [`docs/run-record.md`](docs/run-record.md)). `workspace_dir` (env `NOCTIS_WORKSPACE`) is still
+  the one output root; the four
+  per-run paths (`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from **`run_dir`**,
+  which defaults to the reserved `runs/legacy/` run — what an invocation that never opened a run
+  reads (`status`, `champions`, `account`, `report`, a bare `research`) — and is rebound to the
+  run's own tree by `bootstrap.open_run_store` the moment `noctis run` mints an id. Derive paths
+  in `config/settings.py` and rebind them in the composition root, never in a command body.
+  `noctis init` scaffolds the local input copies; `noctis migrate` moves a pre-workspace layout
+  in **and** adopts a pre-run-scoped `workspace/state/` into the `legacy` run; one startup guard
+  covers both — it refuses beside abandoned pre-workspace data (`status` only warns) and warns
+  beside un-adopted workspace state, since that state is not abandoned, only unclaimed.
   A public clone ships templates/seeds/scaffold only, and no operator's champions or rejects
   reach git.
   The `mandate/` folder is the same shape: only the scaffold is committed (`MANDATE.md.example`,
@@ -178,8 +244,8 @@ the strategy-family registry, the agent research session), live in one compositi
   A `.pyc`-staleness gotcha bit `_load_module` before; prefer fresh-subprocess
   validation over trusting import caches.
 - **Agent memory follows the seed pattern**: the committed `MEMORY.seed.md` carries curated
-  starting lessons every fresh install begins with; the live, agent-maintained file is
-  `workspace/memory/MEMORY.md` (gitignored), seeded from the seed on first run by
+  starting lessons every *run* begins with; the live, agent-maintained file is
+  `workspace/runs/<run_id>/memory/MEMORY.md` (gitignored), seeded from the seed at run creation by
   `bootstrap.build_memory` — the copy happens *before* `MemoryStore` constructs, because its
   `load()` auto-creates a blank template for a missing file. Skim the live file when something
   behaves unexpectedly; promote a lesson into the seed only when it should ship to every user.

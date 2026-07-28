@@ -17,11 +17,20 @@ working area and drives the whole loop through curated tools —
 `preview_bars`, `screen_symbols`, `get_champions`, `get_experiment_log`, `ensure_data`,
 `write_strategy`, `run_backtest`, `run_sweep`, `evaluate_vs_champion`, `reject_strategy`.
 
+**A session always belongs to a run.** Whether it comes from the night loop or from a standalone
+`noctis research`, the session reads and writes *one run's* tree — its champions, paper account,
+experiment journals, strategy `__tmp/`/`champions/` tiers and per-run `MEMORY.md`. A bare
+`noctis research` mints its own run; `noctis research --resume <address>` appends a research-only
+segment to an existing one, under that run's frozen config, so a night of standalone research
+accumulates into the same record (and the same research hours and trial count) as a night of
+`noctis run` — [cli.md](cli.md#a-research-session-belongs-to-a-run--research---resume-address).
+None of the discipline below changes with the verb: the gates are the run's, not the command's.
+
 The structural gates:
 
 - **Validation-on-write.** `write_strategy` validates in an isolated interpreter (import +
   smoke replay + scenario replay + signals/on_bar parity) — a broken file can never land.
-- **Exhaustion.** Every trial auto-journals to `workspace/state/experiments/<name>.jsonl`; the verdict
+- **Exhaustion.** Every trial auto-journals to the run's `state/experiments/<name>.jsonl`; the verdict
   tools refuse until ≥ `research.min_trials` distinct parameter sets (or one completed sweep)
   have been journaled.
 - **Aggregates only.** Backtests return scorecards, not bar-level results; previews never cross
@@ -49,7 +58,7 @@ every still-undecided top-level `__tmp/` file whose mtime predates `research.dra
 (AGENTS.md rule 2) — capped at 50 with the oldest evicted, so a fresh session never inherits a
 stale draft it abandoned days ago. When anything is archived, the count and names log at INFO
 (`pruned N stale working-tier draft(s) …`). The experiment journals under
-`workspace/state/experiments/` are untouched and stay the ground truth for what was tried.
+the run's `state/experiments/` are untouched and stay the ground truth for what was tried.
 
 **Session-end honesty.** However a loop exits, any strategy authored but never carried to a verdict
 is left undecided. The session names them in a WARNING (`… will be archived after the TTL`) and
@@ -222,9 +231,12 @@ are constructed, and how every champion is made reproducible — is written up i
 
 The agent talks to one neutral seam, so the model is a config line: `research.model` takes a
 LiteLLM `provider/model` string — any hosted provider, or a local / self-hosted backend
-(`ollama/…`, `vllm/…`, or any endpoint speaking the standard chat-completions protocol via
-`research.base_url`). Hosted keys resolve per prefix from `.env` (the matching `*_API_KEY`); a
-**local backend needs no key and costs $0/token**.
+(`ollama_chat/…` — what `noctis setup` writes — `ollama/…`, `vllm/…`, or any endpoint speaking the
+standard chat-completions protocol via `research.base_url`). Hosted keys resolve per prefix from
+`.env` (the matching `*_API_KEY`); a **local backend needs no key and costs $0/token**, and the
+price table states that zero for each of those prefixes, so a free run publishes `0.0` rather than
+"unknown" (see
+[configuration.md → Pricing the spend estimate](configuration.md#pricing-the-spend-estimate)).
 
 Provider-specific levers capability-gate to clean no-ops: prompt-cache breakpoints, reasoning
 effort, and thinking apply only where supported, and server-side `web_search` auto-disables on
@@ -242,6 +254,39 @@ hardcoded lower anywhere else. `balanced` (the default) is exactly the standard 
 `economy` reduces spend; `full` restores the maximums and is the automatic choice on a
 free/local provider. The knob binds *resource ceilings only*: it can never lower the
 `min_trials` exhaustion floor or touch a promotion gate — those are quality, not cost.
+
+## What a session spent, and what it bought
+
+Both loops end a session by reporting what it burned: `ResearchSummary.tokens_total`, the same
+tokens **split** the four ways they are billed (`usage`: input / output / cache-write / cache-read),
+and `usd_estimate` — those tokens priced through the versioned table in
+`src/noctis/research/pricing.py`. Neither loop is instrumented twice for it: the conversation loop
+fills the split from the per-round usage it already accumulates, and the episodic driver *sums the
+ledger it already wrote* (one `episode` line per judgment, carrying its own stage, model and
+split). That is what lets the run record re-derive the same numbers from the same lines at write
+time instead of trusting a counter to survive a restart.
+
+The run record turns those lines into an attribution — spend **by model, by stage and by segment** —
+plus the efficiency numbers a run is actually compared on: USD per champion, USD per trial, trials
+per hour, research hours per champion. Every ratio is `null` when its denominator is zero or
+unknown; a run that has crowned no champion yet has no cost per champion, and that is the normal
+state of a young run, not an error.
+
+Two honesty rules apply throughout, and they are the reason the block is worth reading at all:
+
+- **`null`, never zero.** A model the price table does not carry costs `null`, and so does any
+  total it belongs to. A run with no LLM key journals no ledger and reports `null` spend — never a
+  `$0` bill it did not earn. A ledger written before the split existed reports its token *total*
+  and `null` for the four fields, because tokens without their split cannot be priced.
+- **Every dollar figure says `estimate`** — in the record's field names and in the CLI line — since
+  the prices are list prices, not receipts. See
+  [configuration.md → Pricing the spend estimate](configuration.md#pricing-the-spend-estimate) for
+  the table, the config override, and how an overridden table identifies itself.
+
+Note what is *not* in the figure: authoring runs on a separate coder client whose completions are
+not token-metered, so the estimate covers the **judgment/driver model** only — the same boundary
+`tokens_total` has always drawn. Vendor data spend is tracked separately by the data preflight
+(`data.budget_usd`).
 
 ## Mandates + a growing universe
 

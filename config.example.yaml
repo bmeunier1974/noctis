@@ -72,13 +72,30 @@ data:
   history_days: 720 # lookback window for that one-time backfill
   budget_usd: 125.0 # DataBento spend cap, enforced by the cost preflight
 
-# Mandate: may override the two wall-clock ceilings; champion_count is REFUSED (board size
+# Mandate: may override the wall-clock ceilings; champion_count is REFUSED (board size
 # changes how easy it is to beat the weakest champion).
 research_time_budget_minutes: 60 # wall-clock cap on one nightly research session
 champion_count: 3 # champion board size
-time_limit_hours: null # overall run limit (null = run until stopped)
+time_limit_hours: null # cap on ONE process — how long tonight lasts (null = until stopped)
+# Cap on the whole RUN, in hours of cumulative runtime across every stop/resume. Frozen at run
+# creation (`noctis run --run-limit-hours 100`), so editing it here never changes a run already
+# under way. At the cap the run stops between phases and is marked `completed` — terminal, so it
+# refuses resume. That is what makes two runs comparable on equal compute. null = uncapped.
+run_limit_hours: null
+# Archive the run whole: embed EVERY candidate's strategy source in the run record, not just the
+# champions'. Frozen at run creation (`noctis run --embed-all-sources`), so editing it here never
+# changes a run already under way. Off by default — champions are embedded in full and every other
+# candidate is named by a run-relative path plus a content hash, which holds a fortnight's record
+# to a couple of hundred kilobytes. Turn it on for an experiment worth keeping after its workspace
+# is not. Mandate: REFUSED — steering says what to look for, never what the record contains.
+embed_all_sources: false
 
 # Everything Noctis writes lands under this one gitignored folder (env: NOCTIS_WORKSPACE).
+# Inside it, a RUN owns its state: workspace/runs/<run_id>/{state,strategies,memory,reports,qa},
+# while workspace/data_lake/ is shared by every run (vendor data is expensive and run-neutral).
+# state_dir / reports_dir / qa_dir / memory_path all derive from run_dir, which every `noctis run`
+# rebinds to the run it mints; unset, it is the reserved workspace/runs/legacy/ run that the
+# read-only commands (status, champions, account, report) read.
 # Mandate: REFUSED — moving an output root moves the experiment journal the exhaustion gate
 # counts from and the champion tier itself; that is structural, not a setting.
 workspace_dir: workspace/

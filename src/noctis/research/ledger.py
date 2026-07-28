@@ -26,6 +26,7 @@ resumed driver replays the append-only tail it already knows how to read.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,7 +132,11 @@ class Episode:
     the classifier note (validation reason included) with a capped excerpt of the rejected
     payload/reply/exception, in attempt order — and ``note`` the episode's last misfire/error
     text. All three stay empty for the episodes that carried none, so a reader never branches
-    on presence."""
+    on presence.
+
+    ``usage`` is the four-field token split behind ``tokens`` (#140), or ``None`` on a line that
+    recorded none — *unknown*, never zero. :func:`episode_usage` is the one place that tells an
+    unknown split apart from an episode that honestly spent nothing."""
 
     at: str
     stage: str
@@ -143,9 +148,11 @@ class Episode:
     checks: list[dict[str, Any]] = field(default_factory=list)
     misfire_details: list[dict[str, Any]] = field(default_factory=list)
     note: str | None = None
+    usage: dict[str, int] | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Episode:
+        usage = record.get("usage")
         return cls(
             at=str(record.get("at", "")),
             stage=str(record.get("stage", "")),
@@ -159,7 +166,50 @@ class Episode:
                 dict(d) for d in (record.get("misfire_details") or []) if isinstance(d, dict)
             ],
             note=_opt_str(record.get("note")),
+            usage=_read_usage(usage),
         )
+
+
+# The four neutral usage fields a completion reports, in the order they are billed. Named here
+# because the ledger is what *persists* them; the price table (:mod:`noctis.research.pricing`)
+# names the same four as the rates it bills at.
+USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _read_usage(value: Any) -> dict[str, int] | None:
+    """One journaled usage split, or ``None`` when the line carries none (or an unreadable one).
+
+    All four fields or nothing: a half-recorded split cannot be priced, and filling the gaps with
+    zeros would turn missing evidence into a cheaper bill.
+    """
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, int] = {}
+    for field_name in USAGE_FIELDS:
+        count = value.get(field_name)
+        if isinstance(count, bool) or not isinstance(count, int | float):
+            return None
+        out[field_name] = int(count)
+    return out
+
+
+def episode_usage(episode: Episode) -> dict[str, int] | None:
+    """One episode's token split for accounting — ``None`` only when it is genuinely unknown.
+
+    Two things look alike in a ledger and are not: a line that recorded no split, and a line that
+    recorded no *tokens* (a coder-escalation marker, an episode that never reached a completion).
+    The second is an honest four zeros — it spent nothing, and calling it unknown would poison
+    every total it belongs to. Only a line that *spent* tokens without journaling their split is
+    unknown, which is exactly what a ledger written before #140 looks like.
+    """
+    if episode.usage is not None:
+        return dict(episode.usage)
+    return dict.fromkeys(USAGE_FIELDS, 0) if episode.tokens == 0 else None
 
 
 @dataclass(frozen=True)
@@ -422,6 +472,28 @@ class SessionLedger:
             note=end.note if end else None,
         )
 
+    def usage_totals(self) -> dict[str, int] | None:
+        """This session's token split, summed off its own episode lines — or ``None`` (story #140).
+
+        The accounting twin of :meth:`rollup`: derived from what the ledger already holds, never a
+        counter the driver carries. ``None`` when the session journaled no episodes at all, and
+        when **any** episode that spent tokens journaled no split — a partial sum presented as the
+        session's usage would understate it, and the price table would then bill a number nobody
+        measured. The totals it *can* report (``tokens_by_stage``/``tokens_by_model`` on the
+        rollup) are unaffected: an unknown split is not an unknown total.
+        """
+        episodes = self.episodes()
+        if not episodes:
+            return None
+        totals = dict.fromkeys(USAGE_FIELDS, 0)
+        for episode in episodes:
+            usage = episode_usage(episode)
+            if usage is None:
+                return None
+            for name in USAGE_FIELDS:
+                totals[name] += usage[name]
+        return totals
+
     def candidate_trails(self) -> list[CandidateTrail]:
         """One :class:`CandidateTrail` per formulated thesis, in ledger (formulate) order — the
         per-candidate stage trail the CLOSE report renders so a post-mortem walks structured
@@ -537,6 +609,7 @@ class SessionLedger:
         checks: list[dict[str, Any]] | None = None,
         misfire_details: list[dict[str, Any]] | None = None,
         note: str | None = None,
+        usage: Mapping[str, int] | None = None,
     ) -> None:
         """One episode line. ``checks`` is the optional driver-side sanity-check payload (story
         #71) — a list of ``{"check", "result"}`` entries for the checks that fired on this
@@ -544,9 +617,11 @@ class SessionLedger:
         (#102) — the runner's ``{"note", "raw"}`` entries pairing each rejected attempt's
         classifier note with a capped excerpt of what came back, so an exhausted episode is
         diagnosable from the ledger — and ``note`` the episode's last misfire/error text (the
-        API-error reason when no misfire detail exists). Every absent/empty optional is omitted
-        from the record rather than written as an empty field, so a tolerant read distinguishes
-        "nothing carried" from a stored empty one."""
+        API-error reason when no misfire detail exists). ``usage`` is the optional four-field token
+        split behind ``tokens`` (#140) — the shape a price table can bill, journaled here so the
+        run record derives spend from the ledger instead of from a counter. Every absent/empty
+        optional is omitted from the record rather than written as an empty field, so a tolerant
+        read distinguishes "nothing carried" from a stored empty one."""
         record: dict[str, Any] = {
             "event": "episode",
             "at": _now_iso(),
@@ -563,6 +638,8 @@ class SessionLedger:
             record["misfire_details"] = [dict(d) for d in misfire_details]
         if note:
             record["note"] = note
+        if usage is not None:
+            record["usage"] = {name: int(usage.get(name, 0) or 0) for name in USAGE_FIELDS}
         self._append(record)
 
     def record_verdict(

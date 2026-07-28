@@ -51,6 +51,10 @@ data = [
 # fastapi/orjson: not ours — litellm's gpt-5.x Responses-API bridge (stream + tools +
 # reasoning_effort) imports both at runtime without declaring them ("No module named …" otherwise).
 llm = ["anthropic>=0.120.0", "litellm>=1.93.0", "fastapi>=0.140.0", "orjson>=3.11.9"]
+# Richer per-segment hardware facts for the run record (CPU model, physical cores, RAM).
+# Deliberately an extra and never a core dependency: the environment block degrades to the
+# stdlib subset (platform + os.cpu_count) with `psutil` listed as a degraded seam.
+hardware = ["psutil>=7.0.0"]
 
 # Dev tooling lives in a PEP 735 dependency-group (not an optional extra) so a bare
 # `uv sync` installs the test-suite-ready environment by default. The runtime seams

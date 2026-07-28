@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from noctis.champions.promotion import Decision, PromotionRules, decide
+from noctis.champions.promotion import Decision, GateResult, PromotionRules, decide
 from noctis.champions.registry import ChampionEntry, ChampionRegistry
 
 __all__ = [
     "Decision",
+    "GateResult",
     "PromotionRules",
     "decide",
     "ChampionEntry",

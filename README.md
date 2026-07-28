@@ -160,9 +160,9 @@ the local copies; editing them never shows in `git status`.
 | `config.example.yaml` → `config.yaml` | Config: committed template → your local copy (gitignored; optional — defaults apply without it) |
 | `strategies/` | The strategy library's committed seeds (read-only input); your agent's working files and locally-promoted champions live in the workspace |
 | `mandate/` | Operator mandates: shipped risk profiles + a copy-me template (committed); your own `MANDATE.md` stays local (gitignored) |
-| `MEMORY.seed.md` | Curated starting lessons — copied into your agent's live memory on first run |
+| `MEMORY.seed.md` | Curated starting lessons — copied into each run's own live memory when that run is created |
 | `docs/` | The documentation below |
-| `workspace/` | The one output root (gitignored; env `NOCTIS_WORKSPACE`): run state, data lake, reports, agent memory, strategy work |
+| `workspace/` | The one output root (gitignored; env `NOCTIS_WORKSPACE`): the shared data lake, plus one tree per run holding its record, state, reports, memory and strategy work |
 
 ## Documentation
 
@@ -171,6 +171,7 @@ the local copies; editing them never shows in `git status`.
 | [Architecture](docs/architecture.md) | The phase loop, module map, seams, the trading day, where state lives |
 | [Research](docs/research.md) | How a strategy earns its slot: panel validation, holdouts, mandates, promotion |
 | [Validation](docs/validation.md) | The methodology: promotion gate order, two-axis out-of-sample, reproducibility |
+| [Run record](docs/run-record.md) | `run.json` field by field: the schema, the resume model, engine identity, a worked example |
 | [Configuration](docs/configuration.md) | Every `config.yaml` knob, env overrides, secrets |
 | [Data](docs/data.md) | The fetch-once lake, the cost model, the live feed |
 | [CLI](docs/cli.md) | Every `python -m noctis` command |

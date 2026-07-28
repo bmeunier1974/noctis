@@ -119,6 +119,38 @@ def resolve_mandate(settings, *, cli_directive=None, cli_mandate=None) -> Mandat
     return _resolve_selector(mandate_dir, str(selector))
 
 
+def mandate_from_frozen(frozen) -> Mandate | None:
+    """Rebuild the mandate a run **froze at creation**, from its record's ``inputs.mandate``.
+
+    The counterpart of :func:`resolve_mandate`, and deliberately not a second resolver: it reads
+    no file, consults no selector and applies no overlay. A run freezes its mandate as *resolved
+    text* precisely so that resuming it re-uses those bytes rather than whatever
+    ``mandate/profiles/aggressive.md`` says tonight — a selector would freeze a name, and the file
+    behind a name is free to change. ``None`` (a run steered by nothing, or a record that froze no
+    mandate) stays ``None``, which is the same unconstrained session it always was.
+
+    Tolerant by construction: a record must stay readable by the Noctis that resumes it, so a
+    missing optional field degrades to its empty value instead of stranding a multi-week run.
+    """
+    if not isinstance(frozen, dict):
+        return None
+    text = str(frozen.get("text", ""))
+    return Mandate(
+        text=text,
+        source=str(frozen.get("source", "")),
+        summary=str(frozen.get("summary", "")),
+        references=[
+            Reference(path=str(ref.get("path", "")), text=str(ref.get("text", "")))
+            for ref in frozen.get("references") or []
+            if isinstance(ref, dict)
+        ],
+        # Carried for provenance, never re-applied: the frozen settings are already post-overlay,
+        # so re-running the patch on resume would be a second application of the same steering.
+        config_overrides=dict(frozen.get("config_overrides") or {}),
+        symbols=[str(symbol) for symbol in frozen.get("symbols") or []],
+    )
+
+
 def _resolve_selector(mandate_dir: Path, selector: str) -> Mandate | None:
     """Map a selector name to a resolved :class:`Mandate` (or ``None`` for empty MANDATE)."""
     if selector == "auto":

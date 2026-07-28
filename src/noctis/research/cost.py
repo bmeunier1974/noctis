@@ -84,7 +84,13 @@ def is_free_local(provider: str) -> bool:
     """Whether the provider is a ``$0``/token local/self-hosted backend (no paid cloud key).
 
     The same signal #11 uses to build a keyless client: anything that is not one of the two paid
-    clouds — ``ollama/…``, ``vllm/…``, ``lm_studio/…``, any OpenAI-compatible custom prefix."""
+    clouds — ``ollama/…``, ``vllm/…``, ``lm_studio/…``, any OpenAI-compatible custom prefix.
+
+    Allow-by-default on purpose, and **never to be reused for billing**: being wrong here loosens a
+    resource ceiling, while being wrong in :mod:`noctis.research.pricing` publishes a false dollar
+    figure — so that module keeps its own explicit ``LOCAL_PREFIXES`` allowlist (story #146), and a
+    paid third-party cloud arriving tomorrow gets ``full`` budgets here and a ``null`` bill there,
+    which is the honest pairing."""
     return provider not in ("anthropic", "openai")
 
 

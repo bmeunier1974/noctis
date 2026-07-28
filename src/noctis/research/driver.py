@@ -181,6 +181,8 @@ from noctis.observability.events import Event, stage_event, tool_event
 from noctis.research import digests
 from noctis.research.briefings import decide_briefing, discover_briefing, formulate_briefing
 from noctis.research.episode import EmitContract, EpisodeResult
+from noctis.research.ledger import episode_usage
+from noctis.research.pricing import PriceTable, default_table
 from noctis.strategies import library
 from noctis.strategies.scenario_spec import (
     Behavior,
@@ -1810,6 +1812,7 @@ def run_episodic_research(
     sweep_trials: int | None = None,
     market_digest: Callable[[], str] | None = None,
     on_event: Callable[[Event | str], None] | None = None,
+    price_table: PriceTable | None = None,
 ) -> ResearchSummary:
     """Run one episodic research session; returns the same summary shape as the conversation loop.
 
@@ -1847,6 +1850,10 @@ def run_episodic_research(
     same ``tool`` lines the loop does, and the injected episodes (via the episode runner's own
     ``on_event``) tee the think/say/usage the model returned — so the whole arc interleaves on one
     sink. ``None`` (a bare run) ⇒ no emission, byte-identical to before.
+
+    ``price_table`` prices the session's journaled tokens into ``summary.usd_estimate`` (story
+    #140) — the run's own table, handed in as a value like everything else here, so a config price
+    override reaches the summary the same way it reaches the record. ``None`` ⇒ the shipped table.
     """
     stop_event = stop_event or _NeverStop()
     digest_source = market_digest or (lambda: digests.market_digest(toolbox))
@@ -1914,6 +1921,10 @@ def run_episodic_research(
             checks=checks,
             misfire_details=[dict(d) for d in result.misfire_details],
             note=result.note or None,
+            # The four-field split behind those tokens (story #140), straight from the runner —
+            # the shape the price table bills, journaled so spend is derived from the ledger and
+            # never from a counter.
+            usage=result.usage,
         )
 
     while True:
@@ -2067,6 +2078,15 @@ def run_episodic_research(
     # totals), so the parity harness reads tokens/verdict off both loops honestly. Escalated
     # coder-authoring runs on a separate client and is excluded, as in the conversation loop.
     summary.tokens_total = sum(rollup.tokens_by_stage.values())
+    # The same tokens, split the four ways they are billed, and priced (story #140). Both numbers
+    # are **summed off the ledger this session already wrote** — one per episode, model and stage
+    # included — so nothing new is instrumented and the run record can re-derive exactly this from
+    # the same lines. ``None`` for a ledger that journaled no split (one written before #140) and
+    # for any model the price table does not carry: an unknown bill is stated, never estimated.
+    summary.usage = ledger.usage_totals()
+    summary.usd_estimate = (price_table or default_table()).total_usd(
+        (episode.model, episode_usage(episode)) for episode in ledger.episodes()
+    )
     logger.info("session rollup — %s", rollup.log_line())
     if summary.undecided:
         logger.warning(

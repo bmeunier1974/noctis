@@ -117,6 +117,65 @@ startup, with the reason printed
 > independent out-of-sample axes, the gap guard, scale-free comparison) binds regardless of how
 > aggressive the numeric thresholds are set.
 
+### Every verdict carries its evidence
+
+`decide()` returns the one-line rationale it always has **and** `gates`: one
+`GateResult(gate, passed, observed, threshold, note)` per gate, in the order above. The champion
+board journals it beside each decision, and the run record publishes it per candidate — so *"47 of
+66 candidates died at the symbol-holdout gate"* is computed from stored numbers rather than parsed
+out of prose. That is the point: the rejections are the product, and a funnel nobody can count is
+a claim, not evidence.
+
+Three properties make it trustworthy:
+
+- **It changed no decision.** The evidence is appended as each gate evaluates; the early returns,
+  their order and their outcomes are exactly what they were. A committed decision corpus
+  (`tests/fixtures/promotion_decisions_golden.json`, captured before the change) pins every
+  branch and both sides of every threshold, and regenerating it means a *judgment* moved — which
+  is an engine change with an `ENGINE_VERSION` bump, never a test fix.
+- **A rejection short-circuits, and says so.** `gates` holds the gates *reached* plus the one that
+  failed: a candidate stopped at the gap guard was never measured against the holdouts, and the
+  record must not imply it was. An absent gate means "not reached", never "passed".
+- **Evidence, never a gate.** Nothing computed for the record is read by a decision: the promotion
+  path imports nothing from `noctis.reporting`, asserted in a fresh subprocess by the test suite.
+
+## The realised record is not the backtest, and says so
+
+A backtest number and a traded number are different claims, and the most common way a results page
+misleads is by letting a reader mistake one for the other. So they live in different sections of
+the run record and neither is computed by the other's code:
+
+- **Backtest numbers** are `Scorecard`s — panel means, per-symbol splits, the two holdout metrics —
+  produced by `backtest/scorecard.py`, which feeds the gates. What of them reaches the run record
+  does so under `strategies[]`, as the `observed` value of each gate beside the `threshold` it was
+  measured against ([run-record.md](run-record.md#strategiesgates)); the whole card lives in the
+  run's own state, not in the record.
+- **Realised numbers** are the paper account's, under `performance` (labelled
+  `source: "paper_account"`) and derived from the run's own daily equity marks and fills by
+  `reporting/metrics.py`, a **pure** module that no gate can import. Adding a reporting metric can
+  therefore never move a promotion, which is why the module exists separately at all; the two are
+  even allowed to disagree on convention (the reporting Sortino divides by the full-sample downside
+  deviation, the scorecard's by the negative observations only) precisely because neither is
+  allowed to borrow the other's number.
+
+**The deflated Sharpe is the honest headline.** A Sharpe computed after searching thousands of
+parameter sets is not the Sharpe of a strategy someone thought of once, and this engine knows
+exactly how much searching it did — the exhaustion gate counts every distinct param set into the
+experiment journals. The record publishes the Deflated Sharpe Ratio (Bailey & López de Prado 2014)
+deflated by that **cumulative** count, with `n_trials_used` beside it so the correction can be
+audited, and the Probabilistic Sharpe Ratio (Bailey & López de Prado 2012) next to it. Both are
+checked in the test suite against their published closed forms *and* against independent published
+results that must agree with them (Lo's 2002 standard error of the Sharpe ratio; the exact expected
+maximum of two standard normals). More trials always deflate further — a run cannot search its way
+to a better DSR.
+
+**The benchmark costs nothing and admits when it cannot be computed.** `equal_weight_universe_bh`
+is buy-and-hold over the names the run actually traded, priced only from bars the shared lake
+already holds. It answers the fair question ("did this beat simply holding what it traded?") and
+never triggers a vendor fetch; a name the lake does not hold leaves the block `null` with a note.
+Only statistics are published — no bar series, no holdout preview, nothing a price could be
+reconstructed from (AGENTS.md rule 3).
+
 ## A failing strategy is a signal, not a bug
 
 This is the load-bearing cultural rule, and it is defended in code. When a candidate can't clear

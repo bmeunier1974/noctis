@@ -19,10 +19,15 @@ stateDiagram-v2
 ```
 
 The state machine (`src/noctis/engine/machine.py`) researches while the market is closed, trades
-while it is open, and reports at the close — looping until a configured `time_limit_hours` is
-reached. The runtime (`src/noctis/engine/runtime.py`) paces ticks in wall-clock time, waits out
-weekends, and routes `SIGINT`/`SIGTERM` and the time limit through one clean between-phases
-shutdown that flushes state.
+while it is open, and reports at the close — looping until a ceiling is reached. There are two,
+and they stop through the *same* move: `time_limit_hours` bounds **this process** (how long
+tonight lasts, leaving the run resumable), and `run_limit_hours` bounds the **whole run** across
+every stop/resume, marking it `completed` at the cap so two runs can be compared on equal compute
+([cli.md](cli.md#bounding-a-run----run-limit-hours-and---finish)). The runtime
+(`src/noctis/engine/runtime.py`) paces ticks in wall-clock time, waits out weekends, and routes
+`SIGINT`/`SIGTERM` and both ceilings through one clean between-phases shutdown that flushes
+state — deliberately one route, so a new way to stop can never behave differently from the one an
+operator already trusts.
 
 ## The full pipeline
 
@@ -58,7 +63,7 @@ warning (see [development.md](development.md)).
 | 🔐 Config + safety gate | `src/noctis/config` | Typed settings (`config.yaml` + `.env`); the paper/live double gate |
 | 🧩 Composition root | `src/noctis/bootstrap.py` | One session-assembly seam: the settings → gate → mandate → CLI-flag precedence chain, plus the shared builders (lake, memory, console, the agent research session) every entrypoint uses instead of hand-wiring |
 | 🗄️ Fetch-once data lake | `src/noctis/data` | Parquet catalog + coverage registry + coverage-diffed ingest + tail-only sync + integrity check + cost preflight |
-| 📚 Strategy library | `strategies/` + `src/noctis/strategies/library.py` | One `.py` per strategy — thesis, code, tuned params, and research provenance in a docstring header; `write_strategy` validates in a subprocess so a broken file can never land. Three tiers: committed seeds in `strategies/`, plus the workspace's `__tmp/` working files and `champions/` (a later tier overrides an earlier one) |
+| 📚 Strategy library | `strategies/` + `src/noctis/strategies/library.py` | One `.py` per strategy — thesis, code, tuned params, and research provenance in a docstring header; `write_strategy` validates in a subprocess so a broken file can never land. Three tiers: committed seeds in `strategies/`, plus the run's `__tmp/` working files and `champions/` (a later tier overrides an earlier one) |
 | 📐 Strategies | `src/noctis/strategies` | `TraderStrategy` base: event-driven `on_bar()` plus a default `signals()` that replays it (parity by construction; a vectorised override stays possible); indicator helpers; SMA / RSI / Donchian worked examples; the candidate proposer |
 | 🤖 Agent research | `src/noctis/research` | The agent loop: an LLM drives formulate → match → optimize → decide through a curated tool registry with per-strategy experiment journals and an exhaustion gate on verdicts |
 | 🧬 StrategySpec engine | `src/noctis/strategies/spec` | Strategy-as-data (legacy ideation): a JSON graph compiles to a registerable family whose `signals()`/`on_bar()` share one rule evaluator; persists to the state dir's `specs.json` and re-registers at startup |
@@ -67,8 +72,8 @@ warning (see [development.md](development.md)).
 | 🏆 Champions | `src/noctis/champions` | Persistent registry + pure promotion rules (OOS metric, train−test gap guard) |
 | ⚙️ Engine | `src/noctis/engine` | Market clock, state machine, research loop, close orchestration, runtime |
 | 📡 Live | `src/noctis/live` | Trading loop + risk manager |
-| 📊 Reporting | `src/noctis/reporting` | Close-of-day report, Markdown + structured JSON (`workspace/reports/<date>.md` / `.json`) |
-| 🧠 Memory | `src/noctis/memory` | The agent-memory store (load / append / reorganize; lives at `workspace/memory/MEMORY.md`) |
+| 📊 Reporting | `src/noctis/reporting` | Close-of-day report, Markdown + structured JSON (`<run>/reports/<date>.md` / `.json`) + the run record/store |
+| 🧠 Memory | `src/noctis/memory` | The agent-memory store (load / append / reorganize; lives at `<run>/memory/MEMORY.md`) |
 
 ## Two research paths, one contract
 
@@ -263,7 +268,7 @@ report.
 
 ## At the close
 
-Noctis writes a report (`workspace/reports/<date>.md` + `.json`), syncs its data catalog
+Noctis writes a report (`<run>/reports/<date>.md` + `.json`), syncs its data catalog
 (tail-only), reconciles live-built bars against the authoritative catalog (see
 [data.md](data.md)), reorganizes its own memory, and loops back to research.
 
@@ -271,8 +276,37 @@ Noctis writes a report (`workspace/reports/<date>.md` + `.json`), syncs its data
 
 One contract: **the operator surface is committed templates/scaffold plus local, gitignored
 copies; everything the engine writes lands under `workspace/`** (one knob, `workspace_dir`,
-env `NOCTIS_WORKSPACE`). `noctis init` scaffolds the local copies; `noctis migrate` moves a
-pre-workspace layout in; a startup guard refuses to run beside un-migrated legacy data.
+env `NOCTIS_WORKSPACE`) — and inside it, **a run owns its state**. `noctis init` scaffolds the
+local copies; `noctis migrate` moves a pre-workspace layout in and adopts pre-run-scoped
+workspace state into the reserved `legacy` run; a startup guard refuses to run beside abandoned
+pre-workspace data and warns beside un-adopted workspace state.
+
+```
+workspace/
+  data_lake/                  ← SHARED across runs. Vendor data is expensive and run-neutral.
+  runs/
+    index.json                ← the derived listing roll-up
+    <run_id>/
+      run.json  run.lock      ← the record and the liveness lock
+      state/                  ← champions.json, paper_account.json, forward_ledger.json,
+                                 specs.json, sessions/, experiments/
+      strategies/             ← this run's __tmp/ and champions/ tiers
+      memory/MEMORY.md        ← seeded from the committed MEMORY.seed.md at run creation
+      reports/                ← this run's per-day close reports
+      qa/                     ← the --debug tree
+```
+
+Two runs in one workspace therefore cannot crown champions onto one board or trade one paper
+account, and a run's numbers describe only what that run produced — which is why every record
+states `assumptions.state_scope: "run"`, so a comparison between two runs is a comparison of two
+experiments rather than of two views of one board. The four per-run paths
+(`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from `run_dir` in
+`config/settings.py`; `bootstrap.open_run_store` rebinds `run_dir` to the run it just minted, so
+no command body does path arithmetic. `run_dir` defaults to the reserved `runs/legacy/` run —
+what an invocation that never opened a run reads (`status`, `champions`, `account`, `report`, a
+bare `research`), and the run `noctis migrate` adopts existing state into. The **committed
+`strategies/` seeds stay read-only input for every run**: the three-tier discovery contract
+(seeds → `__tmp/` → `champions/`) is unchanged; only the two writable tiers moved under the run.
 
 **The operator surface (input — the engine treats all of it as read-only):**
 
@@ -283,19 +317,134 @@ pre-workspace layout in; a startup guard refuses to run beside un-migrated legac
 | `strategies/*.py` | The seed library — `TEMPLATE.py` + three worked examples, one reviewable `.py` per strategy with its research record in the header (see `strategies/README.md`) | **committed** |
 | `mandate/` | Operator mandate scaffold — `MANDATE.md.example` (a balanced Sortino swing brief), five shipped profiles, `tune-first`, `references/` (see `mandate/README.md`) | **committed** (scaffold only) |
 | `mandate/MANDATE.md` + custom personalities + personal `references/` | The operator's own steering input | ignored |
-| `MEMORY.seed.md` | Curated starting lessons — copied into the live memory on first run | **committed** |
+| `MEMORY.seed.md` | Curated starting lessons — copied into `<run>/memory/MEMORY.md` at **every** run's creation, so each run starts from the same lessons and grows its own | **committed** |
 
 **The workspace (output — git never sees inside it):**
 
 | Path | What |
 |---|---|
-| `workspace/state/champions.json` | The champion registry |
-| `workspace/state/paper_account.json` | The continuous paper account |
-| `workspace/state/trading_sessions.json` | The replay high-water mark |
-| `workspace/state/experiments/<strategy>.jsonl` | Per-strategy experiment journals, one line per backtest/sweep trial |
-| `workspace/state/specs.json` | LLM-minted `StrategySpec` definitions, re-registered at startup |
-| `workspace/data_lake/` | Parquet catalog + `coverage.db` + `manifest.json` |
-| `workspace/reports/YYYY-MM-DD.md` + `.json` | Close-of-day reports, human- and machine-readable |
-| `workspace/memory/MEMORY.md` | The agent's own live long-term memory (the agent maintains it) |
-| `workspace/strategies/__tmp/` | The research agent's working files (drafts, candidates, rejects) |
-| `workspace/strategies/champions/` | Locally-promoted champions (never reach the public repo) |
+| `workspace/data_lake/` | Parquet catalog + `coverage.db` + `manifest.json` — **shared by every run** |
+| `workspace/runs/index.json` | The derived listing roll-up over every run record |
+| `<run>/run.json` + `run.lock` | One run's self-describing record and its liveness lock |
+| `<run>/state/champions.json` | That run's champion registry |
+| `<run>/state/paper_account.json` | That run's continuous paper account |
+| `<run>/state/equity_curve.jsonl` | That run's daily equity marks + per-session trade log (append-only; the run record's curve is re-derived from it) |
+| `<run>/state/trading_sessions.json` | That run's replay high-water mark |
+| `<run>/state/experiments/<strategy>.jsonl` | Per-strategy experiment journals, one line per backtest/sweep trial |
+| `<run>/state/specs.json` | LLM-minted `StrategySpec` definitions, re-registered at startup |
+| `<run>/reports/YYYY-MM-DD.md` + `.json` | Close-of-day reports, human- and machine-readable |
+| `<run>/memory/MEMORY.md` | That run's live long-term memory, seeded from `MEMORY.seed.md` |
+| `<run>/strategies/__tmp/` | The research agent's working files (drafts, candidates, rejects) |
+| `<run>/strategies/champions/` | Locally-promoted champions (never reach the public repo) |
+
+(`<run>` is `workspace/runs/<run_id>/`.)
+
+## What the record says about a run's machine and its inputs
+
+`run.json` is written by three modules with one boundary between them: `reporting/run_store.py`
+does every read and the one write, `reporting/run_record.py` is a **pure** builder over what was
+collected, and `reporting/schema.py` is a pure validator. This section is *why* those sections
+exist and how they are produced; the field-by-field contract — every key, when it is `null`, the
+versioning promise, the caps, and a worked example — is [run-record.md](run-record.md).
+
+**`segments[].environment` — per segment, never per run.** Each process invocation records the
+machine it actually ran on: hardware (CPU model, physical/logical cores, max frequency, total RAM,
+free disk), OS (system, release, arch, container), python and noctis versions, git state (commit,
+branch, dirty, describe), the `uv.lock` digest, the optional extras present, and the seams that
+degraded. It is per segment because a run is stopped each morning and resumed each night and may
+migrate machines in between — and research throughput is CPU-bound (the sweep fork pool, the
+walk-forward splits), so trials-per-hour and USD-per-champion only compare across runs when the
+hardware behind each is on the record. `environment_latest` is **derived** from the segments, so a
+consumer showing "the machine this run is on" reads one key that cannot disagree with them.
+
+`observability/environment.py` shapes the block and nothing else: every probe is **injected**
+(hostname, OS facts, hardware, versions, git, lockfile, extras), and the real ones are wired once
+in `bootstrap.build_environment_probes`. So the module reads no hardware, shells out to no `git`
+and imports no optional package — and the test suite needs none of them either.
+
+Degradation is the ordinary case, and it is explicit. **`psutil` is an optional extra
+(`hardware`), never a core dependency**: without it the stdlib subset answers what it can and the
+rest is `null`. Git degrades to `null` outside a repository, and so does the lockfile digest. Every
+absent value is an explicit `null` **and** the missing capability is named in `degraded_seams`, so
+a reader can tell "this machine had no `psutil`" from "this schema version had no such field". The
+extra names are exactly the ones `noctis setup` probes for, so a missing extra and a degraded seam
+are one notion — and the remedy (`uv sync --extra <name>`) is one an operator can type. The
+hostname is stored **hashed** (`sha256[:12]`, the same digest `run.lock` writes, through the same
+function): two segments on one machine are provably the same host, without publishing a name.
+
+**`inputs` — the frozen provenance block.** The run's own configuration, pinned at creation and
+restored on every resume (`config/rehydrate.py`): the mandate as **resolved text** plus its applied
+overlay and digest, the secret-excluded settings dump with its digest and the three tier lists, the
+gate's verdict, and `config_epoch`/`config_changes`. Beside them sit two derived views —
+`inputs.models` (which model researches, authors, escalates and ideates; the resolved research
+loop; the declared context window; the cost profile) and `inputs.data` (provider, dataset, and the
+shared workspace-level lake directory) — stated once, resolved, so nothing downstream rebuilds a
+fallback chain to know what produced a run's numbers. No credential is reachable from any of it: a
+model name is public, and the keys are secret tier and excluded from the record entirely, which is
+why a resumed run takes its keys from the live `.env` (see [safety.md](safety.md)).
+
+**`strategies[]` — everything considered, and the gate that stopped it.** One entry per candidate,
+not per champion: *"47 of 66 candidates died at the symbol-holdout gate"* is the sentence that
+makes these results credible where an equity curve does not, and it is computable only when the
+rejections are on the record in the same shape as the promotions. Each entry carries its name,
+outcome (`promoted` / `rejected` / `undecided`), library tier, decision stamp, journaled trials,
+the prose rationale — and `gates[]`, the structured evidence `champions/promotion.py` produced.
+
+- **`gates[]` is `(gate, passed, observed, threshold, note)` per gate, in gate order.** It is
+  carried *beside* the decision and read by nothing in it: `decide()`'s early returns, order and
+  outcomes are exactly what they were before the evidence existed (a committed decision corpus
+  proves it case by case), and the promotion path imports nothing from `noctis.reporting` — a test
+  asserts that in a fresh subprocess. Evidence, never a gate (AGENTS.md rule 2).
+- **A rejection short-circuits, so the list is the gates *reached* plus the one that failed.** An
+  absent gate means "never reached", never "passed"; a gate that could not bite — switched off by
+  a zero threshold, or handed a metric the scorecard never carried — is still listed, with a note
+  saying which, so the funnel's denominators are honest.
+- **Champion sources are embedded in full; everyone else is a reference.** `source_path` (relative
+  to the run directory, so it stays portable) plus `source_sha256`, with `source: null`. That is
+  what holds a two-week run's record to a couple of hundred kilobytes
+  (`schema.RECORD_SIZE_BUDGET_BYTES`, held by a test on a synthetic fortnight) instead of
+  megabytes. The cost is stated rather than hidden: a rejected candidate's code is readable while
+  the run's own `strategies/__tmp/` tier survives, and `run.state_pruned` says when it no longer
+  does — what the record *embeds* survives a prune. `noctis run --embed-all-sources` archives a run
+  whole, frozen at creation like every other knob that says what a run is.
+- **Derived at every write**, from the run's own champion board (which journals each decision's
+  gates), its experiment journals and its strategy tiers — never a list carried across a restart,
+  so three short segments report exactly what one long one does.
+
+**`sessions[]` and `performance` — the realised paper account, kept apart from the backtest.**
+Two sections, one rule: what the paper account actually did is never blended with what a backtest
+said it would do. `sessions[]` is the evidence — one entry per closed session, carrying the
+account's equity mark for that date, its own start/end equity, orders submitted, closing positions
+and its **trade log**, where every fill states its timestamp, fees, modelled slippage and the
+**champion** the symbol was assigned when it filled. `performance` is what that evidence computes
+to, and it names itself `source: "paper_account"` so no consumer can present it as a scorecard. The
+backtest numbers stay in the other section entirely: a candidate's are the `observed` values inside
+`strategies[].gates[]`, beside the `threshold` each was measured against, and nothing from a
+scorecard is ever mixed into the realised block.
+
+- **The curve is derived, never appended to.** At each CLOSE the engine writes one dated mark to
+  the run's own account ledger (`<run>/state/equity_curve.jsonl`, append-only, one mark per date
+  with the last write winning), and the record re-reads the whole ledger at every write. Nothing
+  about the curve survives a restart in memory, which is why a run stopped and resumed three times
+  publishes exactly the curve one long night would — the epic's D4 rule, at its sharpest.
+- **`reporting/metrics.py` is a new pure module, deliberately not part of `scorecard.py`.**
+  CAGR, annualised volatility, Sortino, Calmar, drawdown depth *and* duration, recovery factor,
+  profit factor, expectancy, payoff ratio, win/loss rates, exposure, turnover, monthly returns,
+  skew, kurtosis, PSR and DSR. `scorecard.py` feeds the promotion gates, so nothing computed for
+  reporting may drift into gate math (AGENTS.md rule 2) — the two are allowed to differ (this
+  Sortino uses the full-sample downside deviation, the scorecard's the negative-only one) and a
+  test proves the promotion path cannot reach `noctis.reporting` at all.
+- **The Deflated Sharpe Ratio, beside the count that deflated it.** DSR corrects the headline
+  Sharpe for selection under multiple testing, and the multiple-testing count is the run's **own
+  cumulative trial count** — the very lines the exhaustion gate reads off the experiment journals.
+  It is published with `n_trials_used` next to it, so the deflation is auditable from the record
+  alone. This is the number this project is uniquely able to compute honestly.
+- **A benchmark that costs nothing.** `equal_weight_universe_bh` — named so nobody mistakes it for
+  an index — is equal-weight buy-and-hold over the symbols the run actually traded, priced from
+  bars **already in the shared lake** over the run's own session window, with alpha, beta,
+  information ratio, tracking error and correlation. No vendor call and no new spend: a symbol the
+  lake does not hold is not benchmarked, and the block carries `null`s with a note saying why.
+  Only statistics reach the record — the benchmark's own price series never does.
+- **A run that never traded reports `traded: false` and `performance: null`** — not zeros
+  (epic D10), so a website renders "researching" rather than a flat 0% curve it was handed as a
+  result. The schema enforces the pairing.

@@ -1,0 +1,157 @@
+{
+  "activity_below_floor": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: only 0.2500 of test splits traded, below 0.50 (activity floor)"
+  },
+  "activity_exactly_on_floor": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 1.0000 clears bar 0.0000 into a free slot (gap 0.0000)"
+  },
+  "activity_floor_disabled": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 1.0000 clears bar 0.0000 into a free slot (gap 0.0000)"
+  },
+  "beats_weakest": {
+    "demote_index": 1,
+    "promote": true,
+    "rationale": "promoted: test metric 0.9000 beats weakest champion 0.5000; demoting the weakest (gap 0.0000)"
+  },
+  "consistency_below_bar": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: only 0.33 of fit symbols positive, below 0.60 (symbol-consistency gate)"
+  },
+  "consistency_disabled": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 0.3333 clears bar 0.0000 into a free slot (gap 0.6667)"
+  },
+  "consistency_exactly_bar": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 0.8667 clears bar 0.0000 into a free slot (gap 0.1333)"
+  },
+  "does_not_beat_weakest": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: test metric 0.4000 does not beat weakest champion 0.5000"
+  },
+  "free_slot_above_bar": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 1.5000 clears bar 0.0000 into a free slot (gap 0.0000)"
+  },
+  "free_slot_below_bar": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: test metric -0.2000 below minimum bar 0.0000"
+  },
+  "free_slot_beside_one_champion": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 0.2000 clears bar 0.0000 into a free slot (gap 0.0000)"
+  },
+  "free_slot_exactly_on_bar": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: test metric 0.0000 below minimum bar 0.0000"
+  },
+  "gap_exactly_max": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 1.0000 clears bar 0.0000 into a free slot (gap 1.0000)"
+  },
+  "gap_over_max": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: train\u2212test gap 1.5000 exceeds max 1.0000 (overfit)"
+  },
+  "holdout_absent": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 1.0000 clears bar 0.0000 into a free slot (gap 0.0000)"
+  },
+  "holdout_below_bar": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: holdout metric -0.5000 below bar 0.0000 (forward-holdout gate)"
+  },
+  "holdout_exactly_bar": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 1.0000 clears bar 0.0000 into a free slot (gap 0.0000)"
+  },
+  "magnitude_cap_disabled": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 74601.0000 clears bar 0.0000 into a free slot (gap 0.5000)"
+  },
+  "magnitude_exactly_cap": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 50.0000 clears bar 0.0000 into a free slot (gap 0.0000)"
+  },
+  "magnitude_over_cap": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: |test metric| 74601.0000 exceeds sane ceiling 50.0000 (degenerate metric)"
+  },
+  "no_panel": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: challenger was not validated (no out-of-sample splits)"
+  },
+  "not_validated": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: challenger was not validated (no out-of-sample splits)"
+  },
+  "reverse_gap_disabled": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 9.0000 clears bar 0.0000 into a free slot (gap -8.0000)"
+  },
+  "reverse_gap_exactly_max": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 2.0000 clears bar 0.0000 into a free slot (gap -1.0000)"
+  },
+  "reverse_gap_over_max": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: test exceeds train by 2.0000, over max 1.0000 (degenerate \u2014 likely noise, not a robust edge)"
+  },
+  "stale_champion_but_below_bar": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: test metric -0.1000 below minimum bar 0.0000 (stale champion present, but the bar still applies)"
+  },
+  "stale_champion_displaced": {
+    "demote_index": 0,
+    "promote": true,
+    "rationale": "promoted: test metric 0.3000 clears bar 0.0000; displacing stale champion scored on 'sortino' (current metric 'sharpe')"
+  },
+  "symbol_holdout_absent": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 1.0000 clears bar 0.0000 into a free slot (gap 0.0000)"
+  },
+  "symbol_holdout_below_bar": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: symbol-holdout metric -0.2000 below bar 0.0000 (symbol-holdout gate)"
+  },
+  "symbol_holdout_exactly_bar": {
+    "demote_index": null,
+    "promote": true,
+    "rationale": "promoted: test metric 1.0000 clears bar 0.0000 into a free slot (gap 0.0000)"
+  },
+  "ties_weakest": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: test metric 0.5000 does not beat weakest champion 0.5000"
+  }
+}

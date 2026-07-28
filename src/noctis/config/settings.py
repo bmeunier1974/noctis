@@ -291,6 +291,21 @@ class AgentResearchConfig(BaseModel):
     episode_retries: int = 2
 
 
+class ModelPriceConfig(BaseModel):
+    """One model prefix's four ``$/Mtok`` rates — the shape ``research.pricing`` entries take.
+
+    All four are required on purpose: input, output, cache-write and cache-read bill separately,
+    and a half-stated price would silently value the unstated fields at nothing. The record calls
+    everything derived from these an *estimate* (see ``noctis/research/pricing.py``), because list
+    prices ignore discounts, batch tiers and mid-month changes.
+    """
+
+    input_usd_per_mtok: float
+    output_usd_per_mtok: float
+    cache_write_usd_per_mtok: float
+    cache_read_usd_per_mtok: float
+
+
 class ResearchConfig(BaseModel):
     """Cross-sectional (panel) research configuration.
 
@@ -359,6 +374,15 @@ class ResearchConfig(BaseModel):
     # 0 = off (the default). Degrades to the always-on code-side consolidation without a
     # client; never runs inside a research session's own loop.
     memory_distill_every: int = 0
+    # Price overrides for the run record's spend estimate (story #140), keyed by **model prefix**
+    # — ``{"anthropic/claude-opus-4": {input_usd_per_mtok: 5.0, …}}``. Empty (the default) means
+    # the shipped table in ``noctis/research/pricing.py`` under its own version. An override adds
+    # a model the table never heard of or restates one it did; the resulting table identifies
+    # itself as ``<version>+custom.<digest>`` in the record, so a reader can always tell whether
+    # the numbers came from the engine's own prices. Pure accounting: nothing here is read by a
+    # gate, a budget or a research decision — it only changes what the record *reports* a run
+    # cost, which is why the mandate overlay refuses it (an experiment may not restate its bill).
+    pricing: dict[str, ModelPriceConfig] = Field(default_factory=dict)
 
 
 class ObservabilityConfig(BaseModel):
@@ -488,6 +512,69 @@ def _workspace_subpath(workspace: object, *parts: str) -> str:
     return str(Path(str(workspace)).joinpath(*parts))
 
 
+# The credential fields, named once. Everything that must keep a secret out of an artifact reads
+# this set: the ``--debug`` manifest's config digest (``bootstrap._digest_excluded_fields``) and the
+# run record's frozen inputs (``config.rehydrate``), which is also why a resumed run takes its keys
+# from the live ``.env`` rather than from the record (AGENTS.md rule 6). Kept beside the fields
+# themselves so adding a credential is one edit; the overlay's refusal table declares the same three
+# under :data:`~noctis.config.overlay.SECRETS`, and a test pins the two together.
+SECRET_FIELDS: frozenset[str] = frozenset(
+    {"databento_api_key", "anthropic_api_key", "openai_api_key"}
+)
+
+# The reserved run id every invocation that has **not** opened a run reads: the read-only verbs
+# (``status``, ``champions``, ``account``, ``report``, ``backtest``). It is also the run
+# ``noctis migrate`` adopts a pre-run-scoped ``workspace/state/`` into, and that coincidence is the
+# point: an operator who migrates finds their champions, account and reports exactly where those
+# verbs already look, instead of a silently-empty board beside abandoned state. The two verbs that
+# *work* a run — ``noctis run`` and ``noctis research`` (story #137) — never use it: each opens a
+# run, mints or addresses its id, and binds it here through :func:`bind_run_dir`.
+DEFAULT_RUN_ID = "legacy"
+
+# The per-artifact paths one run OWNS, and the subpath each takes under the run dir. Champions,
+# the paper account, the forward ledger, specs, sessions and experiment journals (``state``), the
+# per-day close reports, the ``--debug`` QA tree and the agent's live memory all belong to the run
+# that produced them — two runs sharing them would crown champions onto one board and trade one
+# paper account, so neither run's numbers would mean anything (epic #126, D5). The data lake is
+# deliberately NOT here: vendor data is expensive, reproducible and run-neutral, so it stays
+# workspace-level and shared by every run.
+_RUN_SCOPED_SUBPATHS: dict[str, tuple[str, ...]] = {
+    "state_dir": ("state",),
+    "reports_dir": ("reports",),
+    "memory_path": ("memory", "MEMORY.md"),
+    "qa_dir": ("qa",),
+}
+
+
+def run_scoped_paths(run_dir: object) -> dict[str, str]:
+    """The four per-artifact paths ``run_dir`` implies — the one derivation, stated once."""
+    return {
+        field: _workspace_subpath(run_dir, *parts) for field, parts in _RUN_SCOPED_SUBPATHS.items()
+    }
+
+
+def bind_run_dir(settings: Settings, run_dir: str | os.PathLike[str]) -> Settings:
+    """Re-point ``settings`` at one run's tree, in place. Called once a run's id is minted.
+
+    The composition root's half of the run-scoping change (:func:`noctis.bootstrap.open_run_store`
+    is its only production caller): settings are assembled before a run exists, so the run dir
+    they derived from is the reserved default, and opening a run rebinds them onto that run's own
+    tree — every collaborator built afterwards then reads the run's state with no path arithmetic
+    in any command body.
+
+    A path an operator set **explicitly** (YAML, env, or constructor) is left exactly where they
+    pointed it: only a path still equal to what the *current* run dir derives is re-derived, so an
+    explicit override stays the absolute override this module has always promised. Idempotent, and
+    it never touches ``data.lake_dir`` — the lake is shared across runs by design.
+    """
+    derived = run_scoped_paths(settings.run_dir)
+    for field, value in run_scoped_paths(run_dir).items():
+        if getattr(settings, field) == derived[field]:
+            setattr(settings, field, value)
+    settings.run_dir = str(run_dir)
+    return settings
+
+
 class Settings(BaseSettings):
     """Root application settings.
 
@@ -520,7 +607,25 @@ class Settings(BaseSettings):
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     ideation: IdeationConfig = Field(default_factory=IdeationConfig)
     champion_count: int = 3
+    # The wall-clock ceiling on ONE process — how long tonight lasts. Live tier: a run is stopped
+    # each morning and resumed each night, so this is the operator's call every time, never a
+    # decision the run made weeks ago.
     time_limit_hours: float | None = None
+    # The compute ceiling on the whole RUN, across every segment (story #136). Frozen at creation
+    # like everything else that decides what the accumulated results mean: it is what makes two
+    # runs comparable on **equal compute** — a mandate given 100 research hours and one given 30
+    # are not the same experiment. Once the run's cumulative runtime breaches it the loop stops
+    # between phases (the same shutdown path ``time_limit_hours`` uses) and the run is `completed`:
+    # terminal, so a published result can never quietly gain another segment. ``null`` = uncapped.
+    run_limit_hours: float | None = None
+    # Archive this run whole: embed **every** candidate's strategy source in the run record, not
+    # just its champions' (story #141, `noctis run --embed-all-sources`). Off by default, because
+    # the champions-only policy is what holds a fortnight's record to a couple of hundred
+    # kilobytes instead of megabytes — every other candidate is still named there, by a
+    # run-relative path plus a content hash. Frozen at run creation like the compute cap above: it
+    # says what the run's artifact *is*, and a record whose contents depended on how the last
+    # segment happened to be invoked would quietly lose what an earlier one embedded.
+    embed_all_sources: bool = False
     # ── The one output root. Everything the engine writes lands under this directory
     # (gitignored): run state, the data lake, reports, agent memory. The per-artifact knobs
     # below derive from it when not explicitly set (see ``_derive_workspace_paths``); an
@@ -528,14 +633,25 @@ class Settings(BaseSettings):
     # ``NOCTIS_WORKSPACE`` (the plain pydantic-derived name is deliberately unsupported,
     # mirroring ``ALLOW_LIVE``).
     workspace_dir: str = Field(default="workspace/", alias="NOCTIS_WORKSPACE")
-    # Directory for run state (champion registry, ledgers, journals, specs); gitignored.
-    state_dir: str = "workspace/state"
-    # Daily reports (YYYY-MM-DD.md/.json + archive/); gitignored.
-    reports_dir: str = "workspace/reports"
-    # The agent's long-term memory file (seeded from the committed MEMORY.seed.md).
-    memory_path: str = "workspace/memory/MEMORY.md"
+    # The run tree: one ``<run_id>/`` folder per run, each holding that run's ``run.json`` record
+    # and its liveness lock. Every ``noctis run`` mints a new run here (identity is minted, never
+    # derived from the config), so this directory is the run history of the whole workspace.
+    runs_dir: str = "workspace/runs"
+    # ── The ONE run root. A run owns its state (epic #126, D5), so the four knobs below derive
+    # from this directory rather than from the workspace: two runs in one workspace can no longer
+    # crown champions onto one board or trade one paper account. Defaults to the reserved
+    # ``runs/<DEFAULT_RUN_ID>/`` run — what an invocation that has not opened a run reads — and
+    # ``noctis run`` rebinds it to its own minted run through :func:`bind_run_dir`.
+    run_dir: str = "workspace/runs/legacy"
+    # Directory for this run's state (champion registry, ledgers, journals, specs); gitignored.
+    state_dir: str = "workspace/runs/legacy/state"
+    # This run's daily reports (YYYY-MM-DD.md/.json + archive/); gitignored.
+    reports_dir: str = "workspace/runs/legacy/reports"
+    # This run's long-term agent memory file (seeded from the committed MEMORY.seed.md at run
+    # creation, so one run's lessons never leak into another's trajectory).
+    memory_path: str = "workspace/runs/legacy/memory/MEMORY.md"
     # Hour-segmented QA run reports (the --debug tree); gitignored like everything under workspace/.
-    qa_dir: str = "workspace/qa"
+    qa_dir: str = "workspace/runs/legacy/qa"
     # The one-file strategy library root: committed seeds + TEMPLATE.py, plus the gitignored
     # __tmp/ (working files) and champions/ (local champions) tiers. See strategies/README.md.
     strategies_dir: str = "strategies/"
@@ -555,12 +671,15 @@ class Settings(BaseSettings):
     @model_validator(mode="before")
     @classmethod
     def _derive_workspace_paths(cls, data):
-        """Inject workspace-derived defaults for the per-artifact paths when absent.
+        """Inject the derived defaults for the per-artifact paths when absent.
 
-        Runs in mode ``"before"`` on the merged raw data (init > env > .env > YAML), so an
-        absent knob is distinguishable from an explicit one and every public path field
-        stays a plain ``str`` — no ``Optional`` ripple through consumers. The nested
-        ``data.lake_dir`` is normalized here too.
+        Two roots, one chain: the **workspace** owns the run tree and the shared data lake, and
+        the **run dir** (``runs/<run_id>/``, the reserved default until a run is opened) owns the
+        four paths a run's own artifacts live under. Runs in mode ``"before"`` on the merged raw
+        data (init > env > .env > YAML), so an absent knob is distinguishable from an explicit one
+        and every public path field stays a plain ``str`` — no ``Optional`` ripple through
+        consumers. The nested ``data.lake_dir`` is normalized here too, and stays workspace-level:
+        vendor data is run-neutral and shared.
         """
         if not isinstance(data, dict):
             return data
@@ -568,10 +687,12 @@ class Settings(BaseSettings):
         # The alias (env) key wins over the field name when both are present, matching the
         # env > YAML source order pydantic resolves the field itself with.
         workspace = lowered.get("noctis_workspace") or lowered.get("workspace_dir") or "workspace/"
-        data.setdefault("state_dir", _workspace_subpath(workspace, "state"))
-        data.setdefault("reports_dir", _workspace_subpath(workspace, "reports"))
-        data.setdefault("memory_path", _workspace_subpath(workspace, "memory", "MEMORY.md"))
-        data.setdefault("qa_dir", _workspace_subpath(workspace, "qa"))
+        runs_dir = lowered.get("runs_dir") or _workspace_subpath(workspace, "runs")
+        data.setdefault("runs_dir", runs_dir)
+        run_dir = lowered.get("run_dir") or _workspace_subpath(runs_dir, DEFAULT_RUN_ID)
+        data.setdefault("run_dir", run_dir)
+        for field, value in run_scoped_paths(run_dir).items():
+            data.setdefault(field, value)
         derived_lake = _workspace_subpath(workspace, "data_lake")
         raw_data = data.get("data")
         if raw_data is None:

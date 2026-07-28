@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -65,6 +65,19 @@ def _fill_rationale(fill: Fill, orphaned: set[str]) -> str:
     if fill.reason != "target":
         return f"protective exit ({fill.reason})"
     return "champion signal"
+
+
+def _fill_stamp(fill: Fill) -> str | None:
+    """The fill's event time in the record's one timestamp shape, or ``None`` when it has none.
+
+    ``ts_event`` is UTC nanoseconds — the bar the fill happened on (replay) or the minute the live
+    feed closed. A zero is "the broker was never marked with a time", which no real fill carries,
+    and it is reported as unknown rather than as the epoch.
+    """
+    if not fill.ts_event:
+        return None
+    moment = datetime.fromtimestamp(fill.ts_event / 1_000_000_000, tz=UTC)
+    return f"{moment:%Y-%m-%dT%H:%M:%S}.{moment.microsecond // 1000:03d}Z"
 
 
 def _default_feed_factory(*, symbols):
@@ -312,6 +325,15 @@ class TradingPhase:
                     fill.quantity,
                     fill.price,
                     _fill_rationale(fill, orphaned),
+                    # The enrichment story #142 needs to make a trade log worth reading: when it
+                    # filled, what it cost, and which champion held the symbol. The fee is the
+                    # fill's own charge; the slippage is the *modelled* cost it was filled under
+                    # (a per-side bps assumption, not a measurement), stated per trade so a
+                    # results page can show its fill assumptions beside its returns.
+                    ts=_fill_stamp(fill),
+                    fees=fill.fee,
+                    slippage_bps=self.settings.backtest.slippage_bps,
+                    champion=settled.assignment.get(fill.symbol),
                 )
             )
         # The summary carries its own report lines (feed transitions, refusal/halt) in

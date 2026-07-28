@@ -148,7 +148,8 @@ def test_status_trading_driver_reflects_execution(tmp_path):
 
 def test_report_sweep_stale_dry_run_lists_without_moving(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    reports = tmp_path / "workspace" / "reports"  # the workspace-derived default
+    # The reports of the reserved run every unaddressed command reads (story #131).
+    reports = tmp_path / "workspace" / "runs" / "legacy" / "reports"
     reports.mkdir(parents=True)
     (reports / "2099-01-01.md").write_text("future")
     (reports / "2020-01-01.md").write_text("past")
@@ -164,7 +165,8 @@ def test_report_sweep_stale_dry_run_lists_without_moving(tmp_path, monkeypatch):
 
 def test_report_sweep_stale_apply_moves_future_reports(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    reports = tmp_path / "workspace" / "reports"  # the workspace-derived default
+    # The reports of the reserved run every unaddressed command reads (story #131).
+    reports = tmp_path / "workspace" / "runs" / "legacy" / "reports"
     reports.mkdir(parents=True)
     (reports / "2099-01-01.md").write_text("future")
     (reports / "2020-01-01.md").write_text("past")
@@ -542,8 +544,13 @@ def _one_qa_run(tmp_path) -> Path:
 
 
 def _strip_qa_lines(output: str) -> str:
-    """Drop the additive ``QA …`` framing lines so the event/console feed can be compared."""
-    return "".join(line + "\n" for line in output.splitlines() if not line.startswith("QA "))
+    """Drop the additive ``QA …``/``Run …`` framing lines so the event/console feed can be
+    compared. Both carry the minted run id, which differs by construction between invocations."""
+    return "".join(
+        line + "\n"
+        for line in output.splitlines()
+        if not line.startswith(("QA ", "Run: ", "Run record: "))
+    )
 
 
 def test_run_debug_creates_report_tree_and_echoes_start_and_stop(tmp_path):
@@ -595,7 +602,7 @@ def test_run_debug_v_output_is_byte_identical_to_v_alone(tmp_path):
     assert "QA report:" in debug.output  # the framing IS present under --debug
     assert "QA report:" not in plain.output
     # ...and stripped of that framing, the two feeds are byte-for-byte the same.
-    assert _strip_qa_lines(debug.output) == plain.output
+    assert _strip_qa_lines(debug.output) == _strip_qa_lines(plain.output)
 
 
 def test_run_debug_prunes_qa_area_on_start(tmp_path):
@@ -677,7 +684,10 @@ class _FakeSession:
     def __init__(self, on_event):
         from types import SimpleNamespace
 
+        from noctis.research.pricing import default_table
+
         self.model = "anthropic/claude-fake"
+        self.price_table = default_table()
         self.budgets = SimpleNamespace(name="balanced", max_iterations=5)
         self.toolbox = SimpleNamespace(author_calls=0, backtests_run=1)
         self._on_event = on_event
@@ -739,6 +749,62 @@ def test_research_debug_records_and_echoes(tmp_path, monkeypatch):
     assert "QA funnel: written=1" in result.output
     # --debug without -v stays silent: the emitted feed events never hit stdout
     assert "write_strategy(alpha)" not in result.output
+
+
+def test_research_reports_what_the_session_spent_and_calls_the_dollars_an_estimate(
+    tmp_path, monkeypatch
+):
+    """Story #140: an operator sees the bill, and sees that it is priced from a table rather than
+    charged — the CLI is held to the same labelling rule as the record."""
+    _patch_research_agent(monkeypatch)
+    monkeypatch.setattr(
+        _FakeSession,
+        "run",
+        lambda self, *, max_iterations=None: _summary(tokens=1500, usd=0.0123),
+    )
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg)])
+
+    assert result.exit_code == 0, result.output
+    assert "1,500 tokens" in result.output
+    assert "$0.0123" in result.output
+    assert "estimate" in result.output
+
+
+def test_research_says_so_when_the_price_table_cannot_bill_the_model(tmp_path, monkeypatch):
+    """Never a zero, never a guess: an unpriced model is named as unpriced."""
+    _patch_research_agent(monkeypatch)
+    monkeypatch.setattr(
+        _FakeSession, "run", lambda self, *, max_iterations=None: _summary(tokens=900, usd=None)
+    )
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg)])
+
+    assert result.exit_code == 0, result.output
+    assert "900 tokens" in result.output
+    assert "$" not in result.output.split("900 tokens")[1]
+    assert "no price" in result.output
+
+
+def _summary(*, tokens: int, usd: float | None):
+    from noctis.engine import ResearchSummary
+
+    return ResearchSummary(
+        iterations=1,
+        stopped_reason="done",
+        tokens_total=tokens,
+        usage={
+            "input_tokens": tokens,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+        usd_estimate=usd,
+    )
 
 
 def test_research_debug_without_session_writes_no_run_tree(tmp_path):

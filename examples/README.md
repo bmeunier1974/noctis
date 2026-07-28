@@ -17,6 +17,7 @@ uv sync            # core + dev, reproducible from uv.lock
 | [`replay_scenarios.py`](replay_scenarios.py) | **Runnable.** Replays a shipped strategy's known-outcome `scenarios()` — the write-gate oracle — with no keys or data. |
 | [`strategy_walkthrough.md`](strategy_walkthrough.md) | An annotated read of `strategies/sma_crossover.py`: header/thesis, `Params`, `on_bar`, `param_space`, and `scenarios`. |
 | [`example_mandate.md`](example_mandate.md) | A minimal operator mandate you can adapt into `mandate/MANDATE.md`. |
+| [`run_record.json`](run_record.json) | A complete, schema-valid `run.json` — the artifact a website renders. Field-by-field contract: [`docs/run-record.md`](../docs/run-record.md). |
 
 ## See the system move in 30 seconds
 

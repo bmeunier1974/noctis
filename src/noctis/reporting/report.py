@@ -13,14 +13,50 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+# The four fields story #142 added to a trade, listed once. Every one is **optional and absent by
+# default**: a report that carries none serialises to exactly the five keys it always did, so every
+# per-day report already on disk is reproduced byte for byte and this story changes no operator's
+# artifact. A value that *is* known is written; ``None`` is not written at all (which is the one
+# place the record's explicit-null convention is deliberately inverted — here, absence is what
+# proves the report did not change).
+ENRICHED_TRADE_FIELDS = ("ts", "fees", "slippage_bps", "champion")
+
 
 @dataclass(frozen=True)
 class Trade:
+    """One paper fill as the day's report states it.
+
+    The first five fields are the report as it has always been. The four after them are the
+    enrichment the run record needs (story #142): when the fill happened, what it cost, and —
+    the one that makes a trade log worth reading — **which champion** the symbol was assigned
+    when it filled, so realised P&L can be read per champion instead of as one blended blob.
+    """
+
     symbol: str
     side: str
     quantity: float
     price: float
     rationale: str = ""
+    # UTC ISO-8601 with a ``Z``, the record's one timestamp shape.
+    ts: str | None = None
+    fees: float | None = None
+    slippage_bps: float | None = None
+    champion: str | None = None
+
+    def as_dict(self) -> dict:
+        """The trade as JSON: the original five keys, plus whichever enrichment it carries."""
+        entry: dict = {
+            "symbol": self.symbol,
+            "side": self.side,
+            "quantity": self.quantity,
+            "price": self.price,
+            "rationale": self.rationale,
+        }
+        for name in ENRICHED_TRADE_FIELDS:
+            value = getattr(self, name)
+            if value is not None:
+                entry[name] = value
+        return entry
 
 
 @dataclass
@@ -264,19 +300,33 @@ def write_report(data: ReportData, reports_dir: str | Path) -> Path:
     return path
 
 
+def report_dict(data: ReportData) -> dict:
+    """The structured report as JSON-ready data — the one place a report becomes a document.
+
+    ``dataclasses.asdict`` recurses into the nested :class:`Trade` dataclasses, which would write
+    the story #142 enrichment as four explicit ``null``s on every un-enriched trade and change the
+    bytes of every per-day report ever written. So the trades are re-rendered through
+    :meth:`Trade.as_dict`, which omits what it does not have: an un-enriched report is byte
+    identical to the one this engine produced before the fields existed.
+    """
+    document = asdict(data)
+    document["trades"] = [trade.as_dict() for trade in data.trades]
+    return document
+
+
 def write_report_json(data: ReportData, reports_dir: str | Path) -> Path:
     """Write the structured report to ``<reports_dir>/<as_of>.json`` alongside the Markdown so a
-    frontend can consume it later. ``dataclasses.asdict`` recurses into the nested ``Trade``
-    dataclasses; the ``research`` dict (minted/promoted specs, findings) is already JSON-safe.
+    frontend can consume it later. The ``research`` dict (minted/promoted specs, findings) is
+    already JSON-safe; the trades are rendered by :func:`report_dict`.
 
     Like :func:`write_report`, a differing prior for the date is archived, not clobbered. The
     overwrite event is not added here — :func:`write_report` runs first in CLOSE and already
-    stamped ``data.events``, which ``asdict`` carries into this JSON.
+    stamped ``data.events``, which the document carries into this JSON.
     """
     directory = Path(reports_dir)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{data.as_of}.json"
-    content = json.dumps(asdict(data), indent=2, sort_keys=True)
+    content = json.dumps(report_dict(data), indent=2, sort_keys=True)
     _archive_if_differs(path, content)
     path.write_text(content, encoding="utf-8")
     return path

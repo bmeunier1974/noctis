@@ -484,6 +484,63 @@ def test_summary_carries_the_session_ledger_path(tmp_path):
     assert summary.ledger_path == str(ledger.path)
 
 
+def _split(**over) -> dict[str, int]:
+    fields = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
+    fields.update(over)
+    return fields
+
+
+def test_the_summary_sums_the_ledgers_per_episode_usage_rather_than_re_instrumenting(tmp_path):
+    """Story #140: the episodic path already journals every episode's tokens, so its summary is
+    *summed off the ledger* — the same rule that makes the run record derivable."""
+    from dataclasses import replace as _replace
+
+    from noctis.research.pricing import default_table
+
+    model = "anthropic/claude-opus-4-8"
+    formulate = _replace(
+        formulate_ok(),
+        model=model,
+        tokens=30,
+        usage=_split(input_tokens=20, output_tokens=10),
+    )
+    decide = _replace(
+        decide_ok("reject"),
+        model=model,
+        tokens=9,
+        usage=_split(input_tokens=5, output_tokens=2, cache_read_input_tokens=2),
+    )
+    ledger = SessionLedger(tmp_path, "usage1")
+
+    summary = _drive(Episodes([formulate], [decide]), FakeToolbox(), max_episodes=2, ledger=ledger)
+
+    assert summary.usage == _split(input_tokens=25, output_tokens=12, cache_read_input_tokens=2)
+    assert summary.usage == ledger.usage_totals()
+    assert summary.tokens_total == 39
+    assert summary.usd_estimate == default_table().estimate_usd(model, summary.usage)
+
+
+def test_a_session_whose_episodes_recorded_no_split_reports_a_null_estimate(tmp_path):
+    """Tokens without a split cannot be priced — the summary says so instead of guessing."""
+    ledger = SessionLedger(tmp_path, "usage2")
+
+    summary = _drive(
+        Episodes([formulate_ok()], [decide_ok("reject")]),
+        FakeToolbox(),
+        max_episodes=2,
+        ledger=ledger,
+    )
+
+    assert summary.tokens_total == 20  # the totals the ledger does carry
+    assert summary.usage is None
+    assert summary.usd_estimate is None
+
+
 def test_session_end_logs_the_rollup_with_every_field(tmp_path, caplog):
     # At session end the driver logs a legible rollup line derived from the ledger — theses, files
     # authored, validation failures, trials, verdicts by kind, undecided, escalations, and tokens

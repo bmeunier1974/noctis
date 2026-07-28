@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -109,6 +110,11 @@ class RuntimeResult:
     reports: list[str] = field(default_factory=list)
     stopped_reason: str = ""
     final_equity: float = 0.0
+    # Seconds this process spent **working** in each phase (``{"RESEARCH": …, "TRADING": …}``) —
+    # the measurement the run record turns into the run's cumulative research/trading seconds.
+    # Waiting is not working: the bounded waits between phases (out a weekend, to a session close)
+    # belong to the segment's wall-clock duration and to no phase.
+    phase_seconds: dict[str, float] = field(default_factory=dict)
 
 
 class Runtime:
@@ -132,6 +138,8 @@ class Runtime:
         ideator=None,
         mandate=None,
         on_event=None,
+        on_cycle_close=None,
+        prior_runtime_s: float = 0.0,
     ):
         self.settings = settings
         self.clock = clock
@@ -139,6 +147,12 @@ class Runtime:
         # bare run byte-identical: the research feed falls back to its own logger, and the phase
         # hooks below emit nothing. The CLI builds this from ``run``'s ``-v``/``--show-reasoning``.
         self._on_event = on_event
+        # The run-record checkpoint seam: called once at the end of every CLOSE with the current
+        # :class:`RuntimeResult`, so the run's durable record is current after each day-cycle
+        # rather than only when the process finally stops. ``None`` on a bare run. The hook is
+        # expected not to raise — the run store it is wired to latches its own failures off — so
+        # a reporting artifact can never take down a multi-week run.
+        self._on_cycle_close = on_cycle_close
         self.market_lake = market_lake
         self.registry = registry
         self.families = families
@@ -164,10 +178,17 @@ class Runtime:
         # Wire the machine's phase seam so each RESEARCH→TRADING→CLOSE transition announces itself
         # inline (guarded on ``_on_event`` — a quiet run emits nothing). This frames the interleaved
         # research/trading feeds; entry is the only hook, so each transition is exactly one event.
+        # Two ceilings, one stop. ``time_limit_hours`` bounds this process (how long tonight lasts);
+        # ``run_limit_hours`` bounds the whole run across every stop/resume, measured against the
+        # runtime its earlier segments already spent (``prior_runtime_s``, read off the run record
+        # by the composition root). Both stop cleanly between phases through the machine's own
+        # terminal move — the run-level cap deliberately adds no second shutdown route.
         self.machine = TradingMachine(
             clock,
             on_enter=self._on_phase_enter,
             time_limit_hours=settings.time_limit_hours,
+            run_limit_hours=settings.run_limit_hours,
+            prior_runtime_s=prior_runtime_s,
         )
         self._stop = False
         # The event-protocol view (``is_set()``) of ``_stop`` the research/trading loops poll.
@@ -401,9 +422,49 @@ class Runtime:
         mean_drift = weighted_mean / n if n else 0.0
         return ReconciliationReport(n, max_drift, mean_drift, threshold, flagged=flagged)
 
+    def _mark_equity(self, as_of: str) -> None:
+        """Append this CLOSE's daily equity mark to the run's own account ledger (story #142).
+
+        The mark is the **account's** mark-to-market — read back off ``paper_account.json``, the
+        cumulative paper account — not the session's own end equity, so the curve is the account's
+        and a resumed run continues the same line. The session's fills, orders and closing
+        positions ride with it, which is what makes the run record's trade log derivable from one
+        durable artifact instead of from a report that a later ``noctis report`` could overwrite.
+
+        No account file means no mark: a night that never traded has no equity to state, and an
+        invented flat 100 000 would be a claim about trading that never happened (epic D10).
+
+        Never fatal, like every other reporting step at CLOSE: a ledger that cannot be written
+        costs the record a day, never the run.
+        """
+        from noctis.broker.persistence import EQUITY_CURVE_NAME, AccountStore, EquityLedger
+
+        try:
+            state_dir = Path(self.settings.state_dir)
+            summary = AccountStore(state_dir / "paper_account.json").summary()
+            if summary is None:
+                return
+            EquityLedger(state_dir / EQUITY_CURVE_NAME).mark(
+                date=as_of,
+                equity=summary.equity,
+                start_equity=self._cycle.start_equity,
+                end_equity=self._cycle.end_equity,
+                realized_pnl=self._cycle.end_equity - self._cycle.start_equity,
+                orders_submitted=len(self._cycle.trades),
+                positions_end=dict(self._cycle.positions),
+                trades=[trade.as_dict() for trade in self._cycle.trades],
+            )
+        except Exception:  # noqa: BLE001 — the record is evidence, never a gate
+            logger.exception("close: equity mark failed for %s; continuing", as_of)
+
     def _run_close(self, t: datetime) -> None:
+        as_of = t.astimezone(UTC).date().isoformat()
+        # Before the report and before the cycle accumulator is reset: the mark belongs to the
+        # session that just closed, and the run record re-derives the whole curve from the ledger
+        # at its next write.
+        self._mark_equity(as_of)
         data = assemble_report(
-            as_of=t.astimezone(UTC).date().isoformat(),
+            as_of=as_of,
             mode=self.mode,
             registry=self.registry,
             memory=self.memory,
@@ -428,6 +489,8 @@ class Runtime:
             self.result.reports.append(result.report_path)
         self.result.cycles_completed += 1
         self._reset_cycle()
+        if self._on_cycle_close is not None:
+            self._on_cycle_close(self.result)
 
     # --- main loop ---
     def run(self, start: datetime | None = None, max_cycles: int | None = None) -> RuntimeResult:
@@ -464,6 +527,7 @@ class Runtime:
             if phase is Phase.RESEARCH:
                 research_start = sleeper.now()
                 self._run_research()
+                self._count_phase_time(phase, research_start, sleeper.now())
                 # If research overran into an open session, fall through so the machine can
                 # trade the remaining hours instead of skipping the day. While the market is
                 # still closed:
@@ -484,7 +548,9 @@ class Runtime:
                 # reach here after sleeping to the open, so this normally holds; the guard is
                 # what keeps a start-while-closed (e.g. a Saturday) from ever emitting orders.
                 if self.clock.is_open(sleeper.now()):
-                    self._run_trading(sleeper.now(), sleeper)
+                    trading_start = sleeper.now()
+                    self._run_trading(trading_start, sleeper)
+                    self._count_phase_time(phase, trading_start, sleeper.now())
                     # Advance to the session close. The live driver already ran the clock to
                     # the close; the instant replay driver has not, so pace to it here —
                     # bounded, like every between-work wait, so a short time limit stops the
@@ -495,7 +561,9 @@ class Runtime:
                     logger.info("trading skipped: market closed at %s", sleeper.now().isoformat())
                     self._cycle.events.append("Trading phase skipped — market closed")
             elif phase is Phase.CLOSE:
-                self._run_close(sleeper.now())
+                close_start = sleeper.now()
+                self._run_close(close_start)
+                self._count_phase_time(phase, close_start, sleeper.now())
                 if max_cycles is not None and self.result.cycles_completed >= max_cycles:
                     self.machine.stop()
                     self.result.stopped_reason = "max_cycles"
@@ -504,9 +572,9 @@ class Runtime:
             self.machine.tick(sleeper.now())
 
         if not self.result.stopped_reason:
-            self.result.stopped_reason = (
-                "time_limit" if self.machine.time_up(sleeper.now()) else "stopped"
-            )
+            # Which ceiling ended it — the per-process time limit or the run-level cap — decided in
+            # the one place both live, so the reason on the segment always names the real cause.
+            self.result.stopped_reason = self.machine.limit_hit(sleeper.now()) or "stopped"
         self.result.history = list(self.machine.history)
         logger.info(
             "runtime stopped: %s after %d cycle(s)",
@@ -515,14 +583,22 @@ class Runtime:
         )
         return self.result
 
+    def _count_phase_time(self, phase: Phase, started, ended) -> None:
+        """Add one phase body's wall-clock seconds to this segment's tally.
+
+        Measured on the pacing seam's clock (the loop's only clock) and around the *work* alone —
+        the waits that follow a phase are pacing, not research or trading, and a total that folded
+        them in would make "100 research hours" mean "100 hours of having been switched on"."""
+        elapsed = (ended - started).total_seconds()
+        current = self.result.phase_seconds.get(phase.value, 0.0)
+        self.result.phase_seconds[phase.value] = round(current + max(0.0, elapsed), 3)
+
     def _make_waiter(self, sleeper) -> BoundedWaiter:
         """Every between-phase wait goes through one :class:`BoundedWaiter`: it clamps to the
-        run's time-limit deadline and wakes promptly on a stop request, so the loop never
-        parks against the clock (a weekend, a session close) past the point it should halt."""
-        deadline = None
-        if self.machine.time_limit_hours is not None and self.machine.start_time is not None:
-            deadline = self.machine.start_time + timedelta(hours=self.machine.time_limit_hours)
-        return BoundedWaiter(sleeper, stop=lambda: self._stop, deadline=deadline)
+        run's deadline — the earlier of the per-process time limit and the run-level cap — and
+        wakes promptly on a stop request, so the loop never parks against the clock (a weekend, a
+        session close) past the point it should halt."""
+        return BoundedWaiter(sleeper, stop=lambda: self._stop, deadline=self.machine.deadline())
 
 
 def build_runtime(
@@ -541,8 +617,15 @@ def build_runtime(
     sleeper_factory=None,
     mandate=None,
     on_event=None,
+    on_cycle_close=None,
+    prior_runtime_s: float = 0.0,
 ) -> Runtime:
-    """Construct a :class:`Runtime` from settings and the collaborators it needs."""
+    """Construct a :class:`Runtime` from settings and the collaborators it needs.
+
+    ``prior_runtime_s`` is the runtime the run's **earlier segments** already spent, which the
+    run-level cap (``settings.run_limit_hours``) is measured against. It defaults to 0 — a fresh
+    run, and every caller that has no run record in hand.
+    """
     from noctis.bootstrap import build_families
     from noctis.champions import build_registry
 
@@ -580,4 +663,6 @@ def build_runtime(
         ideator=ideator,
         mandate=mandate,
         on_event=on_event,
+        on_cycle_close=on_cycle_close,
+        prior_runtime_s=prior_runtime_s,
     )

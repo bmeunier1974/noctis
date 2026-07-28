@@ -1,0 +1,87 @@
+{
+  "components": {
+    "backtest": {
+      "digest": "3ba3e0bf1c97134f",
+      "files": {
+        "src/noctis/backtest/candidate.py": "0d1caeeb448c084e",
+        "src/noctis/backtest/pipeline.py": "c3d24df4f19b181e",
+        "src/noctis/backtest/prefilter.py": "eb7cee74439b8f92",
+        "src/noctis/backtest/validate.py": "d8d50c9f22675597",
+        "src/noctis/broker/paper.py": "91fc9955a359bb2b",
+        "src/noctis/broker/seam.py": "7a7560204b21f563"
+      },
+      "note": null
+    },
+    "gates": {
+      "digest": "0fb6148041c95608",
+      "files": {
+        "src/noctis/backtest/scorecard.py": "4d4ae86c6d4c4531",
+        "src/noctis/backtest/splits.py": "1e0d5162d148eb4b",
+        "src/noctis/champions/promotion.py": "2d6206e2dcf4ef5a"
+      },
+      "note": null
+    },
+    "memory_seed": {
+      "digest": "3337fa2cbf896932",
+      "files": {
+        "MEMORY.seed.md": "232654bd28f47a3a"
+      },
+      "note": null
+    },
+    "profiles": {
+      "digest": "6b0e047bd1dafb6d",
+      "files": {
+        "mandate/MANDATE.md.example": "032375f397521686",
+        "mandate/profiles/aggressive.md": "434077567e2c4bbb",
+        "mandate/profiles/conservative.md": "40d593753bd39962",
+        "mandate/profiles/long-term.md": "8aa17408c2bc6b4c",
+        "mandate/profiles/sector-specialist.md": "54d8d0c22e91f50d",
+        "mandate/profiles/short-term.md": "b18d47157de04a64",
+        "mandate/tune-first.md": "78dab37010ceeec7"
+      },
+      "note": null
+    },
+    "prompts": {
+      "digest": "14eb169506a6b5aa",
+      "files": {
+        "src/noctis/research/briefings.py": "e30b8d6f2f4bac2e",
+        "src/noctis/research/contract_sheet.py": "10cc92dd4c7516f0",
+        "src/noctis/research/digests.py": "f9015cd66e862356",
+        "src/noctis/research/ideation.py": "4369b45a31a4b04c",
+        "src/noctis/research/prompt.py": "c4b5f82b108b2602"
+      },
+      "note": null
+    },
+    "research": {
+      "digest": "67528310408eeefc",
+      "files": {
+        "src/noctis/research/agent.py": "2898ef78eed287cb",
+        "src/noctis/research/driver.py": "b868288571f5e94d",
+        "src/noctis/research/episode.py": "b685179992b76e14",
+        "src/noctis/research/sweep.py": "71c77c8174080c43",
+        "src/noctis/research/tools.py": "ba23b40f4af19ca2"
+      },
+      "note": null
+    },
+    "schema": {
+      "digest": "8ff21a89b4298a42",
+      "files": {
+        "src/noctis/reporting/schema.py": "2eb5ff78a5fc79c5"
+      },
+      "note": null
+    },
+    "seeds": {
+      "digest": "4826fe7224641eb4",
+      "files": {
+        "strategies/TEMPLATE.py": "260ef65c69379dbf",
+        "strategies/donchian_breakout.py": "3e3d926f84def50d",
+        "strategies/rsi_meanrev.py": "f1dca131fb1d7c42",
+        "strategies/sma_crossover.py": "661ec396d1083aff"
+      },
+      "note": null
+    }
+  },
+  "engine_version": 2,
+  "kind": "noctis.engine_fingerprint",
+  "regenerate_with": "uv run python scripts/engine_fingerprint.py --write"
+}

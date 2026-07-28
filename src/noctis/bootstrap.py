@@ -21,12 +21,13 @@ and keeping test monkeypatching on the owning modules effective.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from noctis.config import Settings, load_settings, resolve_execution_mode
+from noctis.config.settings import SECRET_FIELDS
 
 logger = logging.getLogger("noctis.bootstrap")
 
@@ -79,6 +80,22 @@ class SessionInputs:
     # mandate` renders as the effective settings diff. Same paths as ``overrides`` by
     # construction (both come from the one applied patch); empty when nothing was overlaid.
     changes: list[OverrideChange] = field(default_factory=list)
+    # The run's frozen ``inputs`` re-frozen on the current files, when this session is a
+    # ``--rebase-config`` resume that found something to adopt (story #134): epoch already bumped,
+    # before/after entry already appended, built once by ``config.rehydrate.rebase_inputs``. The
+    # entrypoint hands it to :func:`open_run_store`, which lets it replace what the record carried.
+    # ``None`` on every other session — including a rebase of a run nothing changed under, which is
+    # a no-op by design rather than a cosmetic epoch bump.
+    rebase: Mapping[str, Any] | None = None
+    # What the engine-change resume policy found (story #135), for the entrypoint to *say and
+    # record* once the run is open: one event text per tier that moved. Empty on a fresh run and on
+    # a resume that found no drift — silence is the signal that the engine held still.
+    engine_notes: list[str] = field(default_factory=list)
+    # The ``engine_changes`` entry a deliberately accepted engine change produced
+    # (``--allow-engine-upgrade``): epoch already bumped, moved components already named. Handed to
+    # :func:`open_run_store`, which re-freezes the run onto this engine. ``None`` everywhere else,
+    # including an upgrade of a run whose arbiter never moved — a documented no-op.
+    engine_upgrade: Mapping[str, Any] | None = None
 
 
 def resolve_session(
@@ -88,7 +105,12 @@ def resolve_session(
     mandate: str | None = None,
     metric: str | None = None,
     time_limit_hours: float | None = None,
+    run_limit_hours: float | None = None,
+    embed_all_sources: bool = False,
     require_gate: bool = False,
+    resume: str | None = None,
+    rebase_config: bool = False,
+    allow_engine_upgrade: bool = False,
 ) -> SessionInputs:
     """Resolve one session's settings by the one precedence order (docs/configuration.md).
 
@@ -101,6 +123,13 @@ def resolve_session(
     selector, :class:`~noctis.config.SafetyGateError` when the gate refuses, and
     :class:`~noctis.config.OverlayError` if an overlay moved a refused setting — all before
     any long-running work starts.
+
+    ``resume`` continues an existing run (:func:`resume_session`): the middle of the chain —
+    reading ``mandate/``, applying its overlay — is replaced by the run's **frozen** config, while
+    the ends are untouched. ``load_settings`` still runs (the live tier: paths, secrets,
+    per-process budgets), the safety gate still resolves first and fresh, and the explicit CLI
+    flags still land last. ``rebase_config`` (story #134) puts that middle back for one session:
+    the current files are read, resolved and **adopted** onto the run.
     """
     from noctis.backtest.scorecard import Metric
     from noctis.config.overlay import patch_snapshot
@@ -113,6 +142,56 @@ def resolve_session(
             Metric.parse(metric)
         except ValueError as exc:  # the one diagnosis, re-typed as a usage error
             raise UsageError(str(exc)) from None
+
+    if resume is not None:
+        if directive is not None or mandate is not None:
+            raise UsageError(
+                "A resumed run's mandate is frozen at creation, so --directive/--mandate cannot "
+                "steer it: its accumulated results mean what the original mandate asked for. "
+                "Start a new run to research something else."
+            )
+        if metric is not None:
+            raise UsageError(
+                "A resumed run's election metric is frozen at creation, so --metric cannot move "
+                "it: champions crowned under two metrics were never comparable, and the metric "
+                "is part of the run's comparability key. Start a new run to score differently."
+            )
+        if embed_all_sources:
+            raise UsageError(
+                "A run's source-embedding choice is frozen at creation, so --embed-all-sources "
+                "cannot move it: the record is rewritten whole at every write, and a flag that "
+                "could be passed on some nights and not others would make what the record "
+                "contains depend on how it was last invoked. Every candidate is already named in "
+                "the record by path and content hash — read them from the run's own "
+                "strategies/__tmp/ tier, which survives as long as the run does."
+            )
+        if run_limit_hours is not None:
+            raise UsageError(
+                "A run's compute cap is frozen at creation, so --run-limit-hours cannot move it: "
+                "the cap is what makes two runs comparable on equal compute, and a cap that could "
+                "be raised each night would bound nothing at all. Use --time-limit-hours to bound "
+                "tonight, or start a new run to give a fresh experiment a different budget."
+            )
+        return resume_session(
+            config_path,
+            run_id=resume,
+            time_limit_hours=time_limit_hours,
+            require_gate=require_gate,
+            rebase_config=rebase_config,
+            allow_engine_upgrade=allow_engine_upgrade,
+        )
+    if rebase_config:
+        raise UsageError(
+            "--rebase-config adopts the current config.yaml and mandate/ onto an existing run, so "
+            "it only means something with --resume: a run being minted right now is already being "
+            "frozen on exactly those files."
+        )
+    if allow_engine_upgrade:
+        raise UsageError(
+            "--allow-engine-upgrade accepts an engine change on an existing run, so it only means "
+            "something with --resume: a run being minted right now is being frozen on exactly the "
+            "engine this process is."
+        )
 
     settings = load_settings(config_path=config_path)
     mode = resolve_execution_mode(settings) if require_gate else None
@@ -134,9 +213,240 @@ def resolve_session(
         settings.promotion.metric = metric
     if time_limit_hours is not None:
         settings.time_limit_hours = time_limit_hours
+    if run_limit_hours is not None:
+        # Frozen tier, and this is the one moment it may be set: a run is being minted right now,
+        # so the flag is part of what this experiment *is*. Every later segment restores it.
+        settings.run_limit_hours = run_limit_hours
+    if embed_all_sources:
+        # The same rule for the same reason (story #141): what the run's record archives is part
+        # of what the run is, decided once, here.
+        settings.embed_all_sources = True
     return SessionInputs(
         settings=settings, mode=mode, mandate=active, overrides=overrides, changes=changes
     )
+
+
+def resume_session(
+    config_path: str | None = None,
+    *,
+    run_id: str,
+    time_limit_hours: float | None = None,
+    require_gate: bool = False,
+    rebase_config: bool = False,
+    allow_engine_upgrade: bool = False,
+) -> SessionInputs:
+    """Resolve the session that **continues** an existing run, under that run's frozen config.
+
+    The whole point of the run record (epic #126): a run is stopped each morning and resumed each
+    night, and its numbers only mean something if the configuration that produced them held still
+    in between. So the current ``config.yaml`` and ``mandate/`` are read for the *live* tier only —
+    paths, secrets, per-process budgets — and everything that decides what the results mean comes
+    back from the record (:mod:`noctis.config.rehydrate`).
+
+    Four refusals, all before any long-running work starts and all from somewhere else: the
+    address must name a run (:class:`~noctis.reporting.run_store.RunNotFoundError`), the run must
+    not be ``completed`` (:class:`~noctis.reporting.run_store.RunCompletedError`), the freshly
+    resolved execution mode must match the one the run's earlier segments ran under
+    (:class:`~noctis.config.rehydrate.RehydrationError`), and the **arbiter** of the engine — what
+    passes, and what a number means — must still be the one the run was created under
+    (:class:`~noctis.observability.engine_change.EngineChangeError`, story #135). The safety gate
+    itself is re-resolved here exactly as at a first start — never rehydrated, never restored
+    (AGENTS.md rule 1).
+
+    An engine change in the *searcher* tier is not a refusal at all: it is warned about, handed
+    back for the entrypoint to record against the run, and the resume proceeds.
+    ``allow_engine_upgrade`` is the operator accepting an arbiter change deliberately, which lifts
+    that one refusal and produces the record entry that makes the acceptance permanent.
+
+    Drift between the record and the current files is normal and silently fine: frozen wins.
+    ``rebase_config`` (story #134) is how an operator adopts it instead — deliberately, once, and
+    on the record: the current ``config.yaml`` and ``mandate/`` are resolved exactly as on a first
+    start and re-frozen onto the run with the epoch bumped and a before/after entry appended
+    (:func:`~noctis.config.rehydrate.rebase_inputs`). With nothing to adopt it is a **no-op**: this
+    falls through to the ordinary resume rather than bumping an epoch for a change that never
+    happened. It never reaches the refused tier — ``mode``/``allow_live`` are checked before it and
+    refused with a message that says no flag lifts them.
+    """
+    from noctis.config.rehydrate import assert_mode_unchanged, has_frozen_inputs, rehydrate
+    from noctis.reporting.run_store import assert_resumable, read_run_record
+    from noctis.research import mandate_from_frozen
+
+    settings = load_settings(config_path=config_path)
+    mode = resolve_execution_mode(settings) if require_gate else None
+    record = read_run_record(settings.runs_dir, run_id)
+    # ``run_id`` is the *address* an operator typed (an id, `latest`, a path, `@label`); the run's
+    # own id is what the record it resolved to says. Every refusal and warning below names that,
+    # so a refusal is always about a run an operator can go and look at.
+    addressed = _addressed_id(record, run_id)
+    assert_resumable(record, addressed)
+    if mode is not None:
+        assert_mode_unchanged(record, mode, rebasing=rebase_config)
+    notes, upgrade = _engine_change_on_resume(
+        record, run_id=addressed, upgrading=allow_engine_upgrade
+    )
+    if rebase_config:
+        adopted = _adopt_current_config(
+            settings, record, mode=mode, time_limit_hours=time_limit_hours, run_id=addressed
+        )
+        if adopted is not None:
+            # The engine verdict rides along whichever way the config went: a rebase adopts new
+            # *settings*, and says nothing about the code that will run them.
+            return replace(adopted, engine_notes=notes, engine_upgrade=upgrade)
+    if not has_frozen_inputs(record):
+        logger.warning(
+            "run %s froze no configuration (it predates config freezing, or it is history adopted "
+            "by `noctis migrate`), so this segment runs under the current config.yaml and "
+            "mandate/ — and freezes them onto the run for every segment after it.",
+            addressed,
+        )
+    settings = rehydrate(record, settings)
+    frozen = record.get("inputs") if has_frozen_inputs(record) else None
+    frozen_mandate = frozen.get("mandate") if frozen else None
+    active = mandate_from_frozen(frozen_mandate)
+    overrides = list(frozen_mandate.get("overrides_applied") or []) if frozen_mandate else []
+    # The live tier's last word, exactly as on a first start: an explicit flag beats the file it
+    # would have come from. Only live-tier flags reach here — the frozen ones were refused by
+    # ``resolve_session`` with a reason, rather than silently ignored.
+    if time_limit_hours is not None:
+        settings.time_limit_hours = time_limit_hours
+    return SessionInputs(
+        settings=settings,
+        mode=mode,
+        mandate=active,
+        overrides=overrides,
+        engine_notes=notes,
+        engine_upgrade=upgrade,
+    )
+
+
+def _engine_change_on_resume(
+    record: Mapping[str, Any], *, run_id: str, upgrading: bool
+) -> tuple[list[str], dict[str, Any] | None]:
+    """Apply the engine-change resume policy to one record, before anything opens (story #135).
+
+    The policy itself is pure and lives in :mod:`noctis.observability.engine_change`; this is the
+    one place that gives it the two things it cannot compute — the engine **this** checkout is
+    (:func:`~noctis.observability.engine_id.fingerprint`) and the clock — and turns its verdict into
+    the three outcomes an operator sees:
+
+    * arbiter drift **raises** here, so a refused resume opens no segment and takes no lock;
+    * searcher drift is logged now and handed back as event text, because a run that ran two
+      engines must say so *in the record*, not only in a terminal nobody kept;
+    * ``upgrading`` produces the ``engine_changes`` entry — stamped with the index of the segment
+      about to be appended, which is exactly the number of segments the record already carries.
+
+    No drift returns ``([], None)``: nothing logged, nothing recorded, nothing said.
+    """
+    from datetime import UTC, datetime
+
+    from noctis.observability.engine_change import (
+        assert_arbiter_held,
+        engine_change,
+        engine_notes,
+        upgrade_entry,
+    )
+    from noctis.observability.engine_id import fingerprint
+    from noctis.reporting.run_record import utc_iso
+
+    change = engine_change(record, fingerprint())
+    assert_arbiter_held(change, run_id=run_id, upgrading=upgrading)
+    notes = list(engine_notes(change, upgrading=upgrading))
+    for note in notes:
+        logger.warning("run %s: %s", run_id, note)
+    if not upgrading:
+        return notes, None
+    return notes, upgrade_entry(
+        change,
+        at=utc_iso(datetime.now(UTC)),
+        segment=len(record.get("segments") or []),
+    )
+
+
+def _adopt_current_config(
+    settings: Settings,
+    record: dict,
+    *,
+    mode: Literal["paper", "live"] | None,
+    time_limit_hours: float | None,
+    run_id: str,
+) -> SessionInputs | None:
+    """``--rebase-config``: run this segment on the current files and re-freeze them onto the run.
+
+    The middle of the ordinary precedence chain, put back for one session — ``resolve_mandate`` →
+    :func:`overlay_mandate` → the CLI's live-tier flags — and then the whole thing re-frozen, so the
+    session that adopts a configuration and the record that documents the adoption can never
+    describe two different configurations.
+
+    ``None`` means **nothing to adopt**: the current files and the run's frozen config already
+    agree, so the caller falls through to an ordinary resume and the epoch stays where it is. A
+    bump for a change that never happened would mark the run mixed-config forever, and every
+    consumer rendering ``config_epoch > 1`` as "this run changed mid-flight" would be lying.
+
+    That no-op is the reason the candidate configuration is assembled on a **copy**: a mandate may
+    bind per-process budgets, which are live tier and therefore never drift, so resolving the
+    current mandate to look for drift would otherwise leave its overlay applied to a session that
+    adopted nothing — and the same command would run under two different budgets depending on
+    whether some unrelated key happened to move. The copy is committed only by adopting it.
+
+    The stamp and the segment index are computed here, at the one point that knows both: the
+    appending segment's index is the number of segments the record already carries.
+    """
+    from datetime import UTC, datetime
+
+    from noctis.config.rehydrate import rebase_inputs
+    from noctis.reporting.run_record import utc_iso
+    from noctis.research import resolve_mandate
+
+    candidate = settings.model_copy(deep=True)
+    active = resolve_mandate(candidate, cli_directive=None, cli_mandate=None)
+    overrides = overlay_mandate(candidate, active)
+    warn_if_auto_overlay_is_inert(candidate, active)
+    rebase = rebase_inputs(
+        record,
+        candidate,
+        mandate=active,
+        overrides=overrides,
+        execution_mode=mode,
+        research_loop=resolve_research_loop(candidate),
+        at=utc_iso(datetime.now(UTC)),
+        segment=len(record.get("segments") or []),
+    )
+    if rebase is None:
+        logger.info(
+            "run %s: --rebase-config found no drift — the current config.yaml and mandate/ still "
+            "match what this run froze, so its config_epoch stays at %s",
+            run_id,
+            _frozen_epoch(record),
+        )
+        return None
+    logger.warning(
+        "run %s: adopting the current config.yaml and mandate/ (--rebase-config) — config_epoch "
+        "%s → %s, recorded with a before/after entry in the run record",
+        run_id,
+        _frozen_epoch(record),
+        rebase.get("config_epoch"),
+    )
+    if time_limit_hours is not None:
+        candidate.time_limit_hours = time_limit_hours
+    return SessionInputs(
+        settings=candidate, mode=mode, mandate=active, overrides=overrides, rebase=rebase
+    )
+
+
+def _frozen_epoch(record: Mapping[str, Any]) -> object:
+    """The config epoch a record carries, for a message — never re-decided, only read."""
+    inputs = record.get("inputs")
+    return inputs.get("config_epoch") if isinstance(inputs, Mapping) else None
+
+
+def _addressed_id(record: dict, address: str) -> str:
+    """The id of the run an address resolved to, falling back to the address itself.
+
+    One line, but it is the difference between "cannot resume @nightly-momo" and a message naming
+    the run that actually refused — and after a label is reassigned those are not the same run.
+    """
+    run = record.get("run")
+    return str(run.get("run_id") or address) if isinstance(run, dict) else address
 
 
 def overlay_mandate(settings: Settings, mandate: Mandate | None) -> list[str]:
@@ -218,27 +528,71 @@ class LegacyArtifact:
     configured: Path  # where settings now point
 
 
-def detect_legacy_layout(settings) -> list[LegacyArtifact]:
-    """Find legacy (pre-workspace) artifacts the configured layout would orphan.
+def _guarded_pre_workspace_pairs(settings) -> tuple[tuple[Path, Path], ...]:
+    """(legacy, configured) for the four **pre-workspace** artifacts the startup guard checks.
 
-    Legacy artifacts are looked for next to the config file — the project root in the
-    run-in-place model (``_yaml_path().parent``, so ``NOCTIS_CONFIG`` moves the search
-    with it). An artifact is flagged when the old default path exists, the configured
-    location differs, and the configured location does not exist: exactly the naive-
-    upgrade case where a run would start against a silently-empty champion board while
-    the real data sits abandoned. Explicitly pointing a knob at the legacy path is
-    honored (nothing flagged). Callers map a non-empty result to a refusal that names
-    ``noctis migrate``; ``status`` only warns.
+    Anchored next to the config file, the project root in the run-in-place model
+    (``_yaml_path().parent``, so ``NOCTIS_CONFIG`` moves the search with it). The configured side
+    is read off ``settings``, so each one names where the engine reads that artifact *now* — for
+    the three a run owns that is the run's own tree, and the lake stays workspace-level.
     """
     from noctis.config.settings import _yaml_path
 
     root = _yaml_path().parent
-    pairs = (
+    return (
         (root / "state", Path(settings.state_dir)),
         (root / "data_lake", Path(settings.data.lake_dir)),
         (root / "reports", Path(settings.reports_dir)),
         (root / "MEMORY.md", Path(settings.memory_path)),
     )
+
+
+def _pre_workspace_pairs(settings) -> tuple[tuple[Path, Path], ...]:
+    """Every pre-workspace pair ``migrate`` moves: the four guarded ones plus the strategy tiers.
+
+    The tiers are moved but never guarded — an orphaned ``strategies/__tmp/`` was never a reason
+    to refuse a run, since nothing silently reads as empty because of it.
+    """
+    from noctis.config.settings import _yaml_path
+    from noctis.strategies.library import CHAMPIONS_SUBDIR, TMP_SUBDIR, LibraryPaths
+
+    root = _yaml_path().parent
+    tiers = LibraryPaths.from_settings(settings)
+    return (
+        *_guarded_pre_workspace_pairs(settings),
+        (root / "strategies" / TMP_SUBDIR, tiers.tmp),
+        (root / "strategies" / CHAMPIONS_SUBDIR, tiers.champions),
+    )
+
+
+def _pre_run_scoped_pairs(settings) -> tuple[tuple[Path, Path], ...]:
+    """(legacy, configured) for every **pre-run-scoped** artifact — the workspace-level ones.
+
+    Before story #131 the workspace held one ``state/``, one ``reports/``, one ``memory/`` and one
+    pair of strategy tiers, shared by every invocation. They are now owned by the run that
+    produced them, so an existing operator's copies are adopted into the reserved ``legacy`` run.
+    The data lake is deliberately absent: it stays workspace-level and shared by every run.
+    """
+    from noctis.strategies.library import CHAMPIONS_SUBDIR, TMP_SUBDIR, LibraryPaths
+
+    workspace = Path(settings.workspace_dir)
+    tiers = LibraryPaths.from_settings(settings)
+    return (
+        (workspace / "state", Path(settings.state_dir)),
+        (workspace / "reports", Path(settings.reports_dir)),
+        (workspace / "memory" / "MEMORY.md", Path(settings.memory_path)),
+        (workspace / "qa", Path(settings.qa_dir)),
+        (workspace / "strategies" / TMP_SUBDIR, tiers.tmp),
+        (workspace / "strategies" / CHAMPIONS_SUBDIR, tiers.champions),
+    )
+
+
+def _orphaned(pairs: tuple[tuple[Path, Path], ...]) -> list[LegacyArtifact]:
+    """The pairs whose legacy side exists while the configured side does not — one shared rule.
+
+    Explicitly pointing a knob at the legacy path is honored (the pair is skipped): that is a
+    deliberate configuration, not an orphan.
+    """
     found: list[LegacyArtifact] = []
     for legacy, configured in pairs:
         if legacy.resolve() == configured.resolve():
@@ -246,6 +600,32 @@ def detect_legacy_layout(settings) -> list[LegacyArtifact]:
         if legacy.exists() and not configured.exists():
             found.append(LegacyArtifact(legacy=legacy, configured=configured))
     return found
+
+
+def detect_legacy_layout(settings) -> list[LegacyArtifact]:
+    """Find legacy (pre-workspace) artifacts the configured layout would orphan.
+
+    An artifact is flagged when the old default path beside ``config.yaml`` exists, the configured
+    location differs, and the configured location does not exist: exactly the naive-upgrade case
+    where a run would start against a silently-empty champion board while the real data sits
+    abandoned. Callers map a non-empty result to a **refusal** that names ``noctis migrate``;
+    ``status`` only warns.
+    """
+    return _orphaned(_guarded_pre_workspace_pairs(settings))
+
+
+def detect_unadopted_state(settings) -> list[LegacyArtifact]:
+    """Find pre-run-scoped ``workspace/`` state that no run has adopted yet (story #131).
+
+    The younger sibling of :func:`detect_legacy_layout`, and deliberately a **warning** rather
+    than a refusal. The difference is what continuing would cost: a pre-workspace artifact is
+    genuinely abandoned — nothing else looks there ever again — while un-adopted workspace state
+    is sitting safely in the same workspace, and the run that starts beside it is a *new* run with
+    its own board, which is correct by design. So the honest instruction is "adopt your history
+    into a run when you want it", not "you may not start". One command answers both:
+    ``noctis migrate``.
+    """
+    return _orphaned(_pre_run_scoped_pairs(settings))
 
 
 def scaffold_init(settings) -> list[str]:
@@ -284,46 +664,67 @@ def scaffold_init(settings) -> list[str]:
 
 
 @dataclass(frozen=True)
+class MigrationConflict:
+    """A legacy artifact only a human can place: two candidate histories, one destination."""
+
+    legacy: Path
+    configured: Path
+    reason: str
+
+
+@dataclass(frozen=True)
 class MigrationPlan:
     """What `noctis migrate` would do: clean moves, blocking conflicts, pinned skips."""
 
     moves: list[LegacyArtifact]
-    conflicts: list[LegacyArtifact]  # legacy AND workspace copy both exist — refuse
+    conflicts: list[MigrationConflict]  # the destination is already taken — refuse
     pinned: list[Path]  # a knob explicitly points at the legacy path — left in place
 
 
 def plan_migration(settings) -> MigrationPlan:
-    """Plan the one-shot move of every legacy artifact into the workspace.
+    """Plan the one-shot move of every legacy artifact to where the engine reads it now.
 
-    Covers the six legacy artifacts (state, lake, reports, root memory file, and the two
-    strategy tiers beside the seeds), anchored next to the config file like
-    :func:`detect_legacy_layout`. The local config never moves — it stays at the root,
-    merely untracked. Pure planning: nothing on disk changes here.
+    Two generations, one plan, because they are one question for the operator ("where did my
+    history go?") and deserve one instruction: the **pre-workspace** artifacts beside
+    ``config.yaml`` (:func:`_pre_workspace_pairs`) and the **pre-run-scoped** workspace artifacts
+    (:func:`_pre_run_scoped_pairs`), which are adopted into the reserved ``legacy`` run. The local
+    config never moves — it stays at the root, merely untracked.
+
+    A destination that already exists, or that two legacy copies both claim, is a **conflict**: it
+    is refused with a reason rather than resolved by guessing, because the two candidates are two
+    different histories and only a human knows which one is theirs. Pure planning: nothing on disk
+    changes here.
     """
-    from noctis.config.settings import _yaml_path
-    from noctis.strategies.library import CHAMPIONS_SUBDIR, TMP_SUBDIR, LibraryPaths
-
-    root = _yaml_path().parent
-    tiers = LibraryPaths.from_settings(settings)
-    pairs = (
-        (root / "state", Path(settings.state_dir)),
-        (root / "data_lake", Path(settings.data.lake_dir)),
-        (root / "reports", Path(settings.reports_dir)),
-        (root / "MEMORY.md", Path(settings.memory_path)),
-        (root / "strategies" / TMP_SUBDIR, tiers.tmp),
-        (root / "strategies" / CHAMPIONS_SUBDIR, tiers.champions),
-    )
+    pairs = (*_pre_workspace_pairs(settings), *_pre_run_scoped_pairs(settings))
     moves: list[LegacyArtifact] = []
-    conflicts: list[LegacyArtifact] = []
+    conflicts: list[MigrationConflict] = []
     pinned: list[Path] = []
+    claimed: dict[Path, Path] = {}
     for legacy, configured in pairs:
         if not legacy.exists():
             continue
-        if legacy.resolve() == configured.resolve():
+        target = configured.resolve()
+        if legacy.resolve() == target:
             pinned.append(legacy)
         elif configured.exists():
-            conflicts.append(LegacyArtifact(legacy=legacy, configured=configured))
+            conflicts.append(
+                MigrationConflict(
+                    legacy=legacy,
+                    configured=configured,
+                    reason="both exist — keep one and remove the other, then re-run",
+                )
+            )
+        elif target in claimed:
+            conflicts.append(
+                MigrationConflict(
+                    legacy=legacy,
+                    configured=configured,
+                    reason=f"two legacy copies claim it ({claimed[target]} is the other) — keep "
+                    "one and remove the other, then re-run",
+                )
+            )
         else:
+            claimed[target] = legacy
             moves.append(LegacyArtifact(legacy=legacy, configured=configured))
     return MigrationPlan(moves=moves, conflicts=conflicts, pinned=pinned)
 
@@ -335,6 +736,55 @@ def execute_migration(plan: MigrationPlan) -> None:
     for artifact in plan.moves:
         artifact.configured.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(artifact.legacy), str(artifact.configured))
+
+
+def adopt_run_record(
+    settings, *, adopted: int, clock: Callable[[], Any] | None = None
+) -> Path | None:
+    """Give the run that just adopted legacy state a ``run.json``, so it is a run like any other.
+
+    Adoption produces a run nobody ever *ran*: its champions, account and reports were earned
+    before runs existed. It still needs a record — that is what makes it listable by
+    ``noctis runs`` and resumable later — so this writes one with **zero segments**, which is the
+    honest shape: no process has ever worked this run, and inventing a segment would put a
+    fabricated night in the history. The record carries an event saying where its contents came
+    from, so the provenance is in the artifact rather than in the operator's memory.
+
+    Idempotent, and never destructive: a run dir that already has a record is left exactly as it
+    is, so migrating twice cannot overwrite a real run's history with an adoption stub.
+    """
+    from datetime import UTC, datetime
+
+    from noctis.reporting.run_record import RecordEvent, RunArtifacts, build, utc_iso
+    from noctis.reporting.run_store import read_engine_identity, read_record, update_index, write
+
+    run_dir = Path(settings.run_dir)
+    if not run_dir.is_dir():
+        return None
+    record, _ = read_record(run_dir)
+    if record is not None:
+        return None
+    now = (clock or (lambda: datetime.now(UTC)))()
+    stamp = utc_iso(now)
+    artifacts = RunArtifacts(
+        run_id=run_dir.name,
+        created_utc=stamp,
+        last_active_utc=stamp,
+        engine=read_engine_identity(settings.promotion.metric),
+        label="default",
+        complete=True,
+        events=(
+            RecordEvent(
+                t=stamp,
+                kind="info",
+                text=f"adopted {adopted} pre-run-scoped artifact(s) into this run by "
+                f"`noctis migrate`; its state predates run-scoped state",
+            ),
+        ),
+    )
+    write(run_dir, build(artifacts))
+    update_index(run_dir.parent, run_dir.name)
+    return run_dir / "run.json"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,47 +907,470 @@ def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | No
 # The --debug QA recorder
 # ─────────────────────────────────────────────────────────────────────────────
 # API keys the config digest must never fold in: the manifest lands under workspace/qa (gitignored),
-# but digesting a vendor/LLM credential would still be leaking a secret (AGENTS.md rule 6).
-_DIGEST_SECRET_FIELDS = frozenset({"databento_api_key", "anthropic_api_key", "openai_api_key"})
+# but digesting a vendor/LLM credential would still be leaking a secret (AGENTS.md rule 6). The set
+# itself lives beside the fields it names (``config.settings.SECRET_FIELDS``) — the run record's
+# frozen inputs exclude the same three, and one list is the only way the two can agree forever.
+_DIGEST_SECRET_FIELDS = SECRET_FIELDS
 
 
-def build_recorder(settings, *, argv: list[str], mode: str | None):
+def _digest_excluded_fields() -> set[str]:
+    """Settings fields the config digest leaves out: the secrets, plus the run's own tree.
+
+    The digest is a **label for grouping runs that share a configuration** (epic #126, D2), so
+    anything carrying the run's *identity* has to stay out of it: once a run is opened, the
+    run-scoped paths hold its minted id, and folding those in would give every run a unique digest
+    and make the label useless for the one job it has. Both halves are named once elsewhere — the
+    credentials beside the fields themselves, the run's tree beside the freezing tiers that also
+    keep it out of the record — so a path added to either is excluded here with no edit.
+    """
+    from noctis.config.rehydrate import RUN_IDENTITY
+
+    return set(_DIGEST_SECRET_FIELDS) | set(RUN_IDENTITY)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The per-segment environment probes (story #139)
+# ─────────────────────────────────────────────────────────────────────────────
+# How long the git probe may block. A reporting fact is never worth a stalled startup: a hung
+# `git` on a network filesystem degrades to a null git block with the seam named, exactly like a
+# wheel install with no checkout.
+_GIT_TIMEOUT_S = 5.0
+
+
+def build_environment_probes(root: Path | None = None):
+    """The real environment probes — the **only** place hardware, git and extras are read.
+
+    ``noctis.observability.environment`` is deliberately free of ``platform``, ``os``, ``socket``
+    and ``subprocess``: it shapes what these callables return and nothing more, so a test needs no
+    machine, no repository and no subprocess. The reading itself belongs here, beside every other
+    collaborator this root assembles.
+
+    ``root`` is the checkout the git state and the lockfile are read from; it defaults to this
+    installation's repo root (:func:`~noctis.observability.engine_id.default_root`, the same one
+    the engine fingerprint resolves its component paths against, so the record's two identities
+    describe the same tree). Injectable so a test can point it at a directory that is not a
+    repository and watch both degrade honestly.
+
+    Every probe returns data or ``None`` and none of them raises for an ordinary absence: no
+    ``psutil`` (an optional extra by design — the stdlib subset answers what it can), no git
+    checkout, no lockfile, none of the optional stacks. ``environment.capture`` turns each absence
+    into an explicit ``null`` plus a named degraded seam.
+    """
+    from noctis.observability.engine_id import default_root
+    from noctis.observability.environment import EnvironmentProbes
+
+    base = default_root() if root is None else Path(root)
+    return EnvironmentProbes(
+        hostname=_probe_hostname,
+        os_facts=_probe_os_facts,
+        hardware=_probe_hardware,
+        versions=_probe_versions,
+        git=lambda: _probe_git(base),
+        lockfile=lambda: _probe_lockfile(base),
+        extras=_probe_extras,
+    )
+
+
+def capture_environment(root: Path | None = None) -> dict:
+    """This machine's environment block, ready to ride on the segment this process opens.
+
+    One line of wiring — probes here, shaping there — so the record's per-segment environment has
+    exactly one production source and the run store never learns how to read a CPU.
+    """
+    from noctis.observability.environment import capture
+
+    return capture(build_environment_probes(root)).as_dict()
+
+
+def _probe_hostname() -> str | None:
+    """The raw machine name. Hashed by ``environment.capture`` and never recorded as-is — story
+    #129 made the same choice for ``run.lock``, and the two read one hashing function."""
+    import socket
+
+    try:
+        return socket.gethostname()
+    except OSError:  # pragma: no cover - a host that will not name itself
+        return None
+
+
+def _probe_os_facts() -> dict:
+    import os
+    import platform
+    from pathlib import Path
+
+    # Containerisation matters because it bounds the CPU and memory the numbers beside it were
+    # produced under. Marker files first (cheap, definitive when present), then the cgroup line a
+    # container runtime rewrites; a platform that offers neither answers ``None`` rather than a
+    # confident "no".
+    container: bool | None = None
+    if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
+        container = True
+    elif os.environ.get("container"):
+        container = True
+    else:
+        try:
+            cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            cgroup = ""
+        if cgroup:
+            container = any(marker in cgroup for marker in ("docker", "kubepods", "containerd"))
+    return {
+        "system": platform.system() or None,
+        "release": platform.release() or None,
+        "arch": platform.machine() or None,
+        "container": container,
+    }
+
+
+def _probe_hardware() -> dict:
+    """CPU, memory and free disk — ``psutil`` when the ``hardware`` extra is installed, the
+    stdlib subset otherwise.
+
+    The seam discipline AGENTS.md already applies to ``vectorbt`` and ``databento``: richer
+    hardware facts are a nicety, so they may not become a core dependency. Without the extra the
+    logical core count and free disk still land, and the rest is honest ``null`` with ``hardware``
+    named in ``degraded_seams``.
+    """
+    import os
+    import platform
+    import shutil
+
+    facts: dict[str, object] = {
+        "model": _stdlib_cpu_model() or platform.processor() or None,
+        "cores_physical": None,
+        "cores_logical": os.cpu_count(),
+        "freq_max_mhz": None,
+        "memory_total_bytes": _stdlib_memory_total_bytes(),
+        "disk_free_bytes": None,
+    }
+    try:
+        facts["disk_free_bytes"] = shutil.disk_usage(os.getcwd()).free
+    except OSError:  # pragma: no cover - a working directory that vanished
+        pass
+    try:
+        # The optional extra, imported only where it is used — never at module scope.
+        import psutil
+
+        facts["cores_physical"] = psutil.cpu_count(logical=False)
+        facts["cores_logical"] = psutil.cpu_count(logical=True) or facts["cores_logical"]
+        facts["memory_total_bytes"] = psutil.virtual_memory().total
+        facts["freq_max_mhz"] = getattr(psutil.cpu_freq(), "max", None) or None
+    except Exception:
+        # An absent extra and a psutil that cannot answer on this kernel are the same event here:
+        # the enrichment did not happen. Swallowed rather than raised so the stdlib facts already
+        # in hand survive — degrading the whole block to nulls would lose more than it reports.
+        return facts
+    return facts
+
+
+def _stdlib_cpu_model() -> str | None:
+    """The CPU's marketing name from ``/proc/cpuinfo``, or ``None`` off Linux.
+
+    ``platform.processor()`` is empty on most Linux builds, and the CPU model is the single most
+    useful hardware fact for reading two runs' trials-per-hour against each other — so it is worth
+    one file read that ``psutil`` does not offer at all.
+    """
+    from pathlib import Path
+
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip() or None
+    except (OSError, IndexError):
+        return None
+    return None
+
+
+def _stdlib_memory_total_bytes() -> int | None:
+    """Total RAM without ``psutil``: ``/proc/meminfo`` on Linux, ``None`` anywhere else."""
+    from pathlib import Path
+
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, IndexError, ValueError):
+        return None
+    return None
+
+
+def _probe_versions() -> dict:
+    import platform
+
+    return {"python": platform.python_version(), "noctis": _noctis_version()}
+
+
+def _probe_git(root: Path) -> dict | None:
+    """This checkout's commit, branch, dirty flag and describe — or ``None`` outside a repository.
+
+    Degrading to ``None`` rather than to a block of nulls is deliberate: "there is no git state
+    here" (a wheel install, a copied tree) is a different fact from "there is a repository that
+    could not answer", and only the first is an ordinary Noctis install.
+    """
+    commit = _git(root, "rev-parse", "HEAD")
+    if commit is None:
+        return None
+    status = _git(root, "status", "--porcelain")
+    return {
+        "commit": commit,
+        "branch": _git(root, "rev-parse", "--abbrev-ref", "HEAD"),
+        "dirty": None if status is None else bool(status),
+        "describe": _git(root, "describe", "--tags", "--always", "--dirty"),
+    }
+
+
+def _git(root: Path, *args: str) -> str | None:
+    """One git command, bounded and never fatal. ``None`` for anything that did not answer."""
+    import subprocess
+
+    try:
+        # A fixed argv (never an operator string), bounded, and never checked into a raise.
+        done = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def _probe_lockfile(root: Path) -> bytes | None:
+    """``uv.lock``'s bytes — the whole dependency resolution, pinned by one digest downstream."""
+    try:
+        return (root / "uv.lock").read_bytes()
+    except OSError:
+        return None
+
+
+def _probe_extras() -> dict:
+    """``{extra name: version or None}`` over the optional extras the installer knows.
+
+    One list, not two: :data:`noctis.onboarding.EXTRA_MODULES` is what ``noctis setup`` probes and
+    what this reports, so "missing extra" and "degraded seam" stay a single notion and the remedy
+    the record implies (``uv sync --extra <name>``) is one an operator can type.
+    """
+    from importlib import metadata
+    from importlib.util import find_spec
+
+    from noctis.onboarding import EXTRA_MODULES
+
+    present: dict[str, str | None] = {}
+    for extra, module in EXTRA_MODULES.items():
+        try:
+            installed = find_spec(module) is not None
+        except (ImportError, ValueError):  # pragma: no cover - a broken meta path entry
+            installed = False
+        if not installed:
+            present[extra] = None
+            continue
+        try:
+            present[extra] = metadata.version(module.replace("_", "-"))
+        except Exception:  # importable but not distribution-installed (a vendored/local module)
+            present[extra] = "unknown"
+    return present
+
+
+def _noctis_version() -> str | None:
+    """The package literal — informational, never a comparison key (that is the engine version)."""
+    from importlib import metadata
+
+    try:
+        return metadata.version("noctis")
+    except Exception:  # not pip-installed (editable/source tree)
+        from noctis import __version__
+
+        return __version__
+
+
+def open_run_store(
+    settings,
+    *,
+    argv: list[str],
+    command: str = "run",
+    run_id: str | None = None,
+    clock: Callable[[], Any] | None = None,
+    label: str | None = None,
+    resume: bool = False,
+    mandate: Mandate | None = None,
+    mode: str | None = None,
+    overrides: list[str] | None = None,
+    rebase: Mapping[str, Any] | None = None,
+    engine_upgrade: Mapping[str, Any] | None = None,
+):
+    """Open this invocation's run — the always-on run identity, minted here and nowhere else.
+
+    Every ``noctis run`` gets a run id, a tree under ``settings.runs_dir``
+    (``workspace/runs/<run_id>/``), a liveness lock and one self-describing ``run.json``, whether
+    or not ``--debug`` is on. Identity is **minted**, never derived from the configuration: two
+    byte-identical configs are two runs unless one explicitly resumes the other (story #131), so
+    nothing here hashes settings into an id.
+
+    The id minted here is also the ``--debug`` QA tree's id (``build_recorder`` takes it as an
+    argument), so a run has exactly one identity and one tree per artifact instead of two ids
+    nobody can correlate.
+
+    **Opening a run also binds its state** (story #131): the run's tree owns its champions, paper
+    account, forward ledger, journals, strategy tiers, memory and reports, so this rebinds
+    ``settings`` onto that tree (:func:`~noctis.config.settings.bind_run_dir`) the moment the id is
+    known. Every collaborator assembled afterwards — ``build_memory``, ``build_families``,
+    ``build_registry``, ``build_recorder``, the runtime — therefore reads the *run's* state without
+    a single path edit in a command body, and two runs in one workspace cannot contaminate each
+    other. The shared data lake is untouched: vendor data is expensive and run-neutral.
+
+    **Opening a run also records what it ran on and under** (story #139): the appending segment
+    carries this machine's environment block — hardware, OS, python, git state, lockfile digest,
+    extras present and degraded seams — captured through :func:`build_environment_probes`. It is
+    per segment, never per run, because a stopped-and-resumed experiment may migrate machines and
+    research throughput is CPU-bound: one night's trials-per-hour must not be attributed to
+    another night's cores.
+
+    **Opening a run also freezes its config** (story #132): the settings this invocation assembled,
+    the mandate as resolved *text* plus the overlay it applied, the resolved models and the data
+    provider/dataset, and the gate's verdict are pinned onto the record at creation — and only at
+    creation, so every later segment restores them instead of
+    re-reading files that may have changed since. ``resume=True`` says this invocation
+    is continuing an existing run rather than minting one, which turns an unknown id and a
+    ``completed`` run into refusals rather than a surprise new run.
+
+    ``rebase`` is the deliberate re-freeze a ``--rebase-config`` resume built (story #134): already
+    epoch-bumped and change-stamped by :func:`resume_session`, it **replaces** the inputs the record
+    carried instead of being ignored like a fresh freeze would be. Absent (the normal case) nothing
+    about freezing changes at all.
+
+    ``engine_upgrade`` is its twin one layer down (story #135): the ``engine_changes`` entry an
+    accepted ``--allow-engine-upgrade`` produced. Given one, the run's engine identity is re-frozen
+    onto this process's engine with that entry appended; absent, the run keeps the engine it was
+    created under, which is what every resume is compared against.
+
+    Raises :class:`~noctis.reporting.run_store.RunLockedError` when another engine already holds
+    the addressed run — the one failure in this subsystem that is fatal rather than latched.
+    """
+    from datetime import UTC, datetime
+
+    from noctis.config.rehydrate import freeze_inputs
+    from noctis.config.settings import bind_run_dir
+    from noctis.reporting.run_record import utc_iso
+    from noctis.reporting.run_store import open_run
+
+    tick = clock or (lambda: datetime.now(UTC))
+    store = open_run(
+        Path(settings.runs_dir),
+        clock=tick,
+        argv=list(argv),
+        election_metric=settings.promotion.metric,
+        run_id=run_id,
+        command=command,
+        label=label,
+        resume=resume,
+        inputs=rebase
+        if rebase is not None
+        else freeze_inputs(
+            settings,
+            mandate=mandate,
+            overrides=overrides or [],
+            execution_mode=mode,
+            research_loop=resolve_research_loop(settings),
+            frozen_at=utc_iso(tick()),
+        ),
+        rebase_config=rebase is not None,
+        engine_upgrade=engine_upgrade,
+        # The machine this process is on (story #139), captured through the injected probes above
+        # and stamped on THIS segment only: a run that migrates boxes mid-experiment keeps each
+        # night's throughput attributed to the hardware that produced it.
+        environment=capture_environment(),
+    )
+    bind_run_dir(settings, store.run_dir)
+    return store
+
+
+def segment_phase_seconds(result) -> dict[str, float]:
+    """This segment's per-phase working seconds, read off a ``RuntimeResult`` (story #136).
+
+    The measurement the record turns into the run's cumulative research/trading seconds — summed
+    across ``segments[]`` at write time, never carried in memory across a restart. Empty for a
+    process that never entered a phase (a startup failure), which the record then reports as "this
+    segment measured nothing" rather than as a run that spent zero seconds researching. Duck-typed
+    like :func:`segment_counters`: the run store never imports the engine.
+    """
+    measured = getattr(result, "phase_seconds", None) or {}
+    return {str(phase): float(seconds) for phase, seconds in measured.items()}
+
+
+def segment_counters(result) -> dict[str, int]:
+    """This segment's own counters, read off a ``RuntimeResult``.
+
+    Per-segment rather than per-run because throughput is only comparable when it is attributed
+    to the process that produced it — a run resumed on another machine, or after a code change,
+    must not have one segment's work credited to another's conditions. Duck-typed on purpose: the
+    run store never imports the engine.
+    """
+    return {
+        "cycles": int(getattr(result, "cycles_completed", 0) or 0),
+        "research_iterations": int(getattr(result, "research_iterations", 0) or 0),
+        "research_promotions": int(getattr(result, "research_promotions", 0) or 0),
+        "trades": int(getattr(result, "trades", 0) or 0),
+    }
+
+
+def research_segment_counters(summary) -> dict[str, int]:
+    """A **research-only** segment's counters, read off one ``ResearchSummary`` (story #137).
+
+    The standalone-session twin of :func:`segment_counters`, and deliberately spelled in the same
+    words where it means the same thing (``research_iterations`` / ``research_promotions`` are what
+    the loop accumulates from these very fields), so per-segment throughput compares across the two
+    verbs. ``sessions`` is the one thing only this path knows: a ``noctis research`` invocation *is*
+    one session, where a loop segment holds as many as the night had cycles.
+
+    There is deliberately **no ``trades`` key**: a research session cannot place an order, and the
+    record derives ``run.traded`` from that counter — a zero written here would be a claim about
+    trading made by a process that never traded. Duck-typed like its twin.
+    """
+    return {
+        "sessions": 1,
+        "research_iterations": int(getattr(summary, "iterations", 0) or 0),
+        "research_promotions": int(getattr(summary, "promotions", 0) or 0),
+    }
+
+
+def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str | None = None):
     """Assemble the ``--debug`` QA recorder — the one place the run tree is minted (story #45).
 
-    Prune-on-start first (retention per ``qa.keep_last_runs``), then mint a fresh run id and
+    Prune-on-start first (retention per ``qa.keep_last_runs``), then take the run's id and
     construct a :class:`~noctis.observability.debug.Recorder` under ``settings.qa_dir`` with a UTC
     wall-clock and the manifest fields the recorder cannot know itself: the CLI ``argv``, the run
     ``mode``, a deterministic config digest, and the noctis/python versions. The recorder owns run
     id and the started/stopped/duration stamps; everything else is injected here. The digest is
-    taken over the *resolved* settings with API keys excluded (:data:`_DIGEST_SECRET_FIELDS`) so a
-    credential can never ride into the report tree.
+    taken over the *resolved* settings, minus the fields :func:`_digest_excluded_fields` names —
+    the API keys, so a credential can never ride into the report tree, and the run's own tree, so
+    the digest stays a label two runs on one configuration share.
+
+    ``run_id`` is the run's own id (:func:`open_run_store`), so the QA tree and the run record
+    describe the same run under one name; it defaults to a freshly minted id for callers that
+    have no run store, which keeps this function usable on its own.
     """
     import hashlib
     import platform
     from datetime import UTC, datetime
-    from importlib import metadata
 
     from noctis.observability.debug import Recorder, new_run_id, prune_qa_dir
 
     prune_qa_dir(settings.qa_dir, settings.qa.keep_last_runs)
 
-    dump = settings.model_dump_json(exclude=set(_DIGEST_SECRET_FIELDS))
+    dump = settings.model_dump_json(exclude=_digest_excluded_fields())
     config_digest = hashlib.sha256(dump.encode("utf-8")).hexdigest()[:12]
-
-    try:
-        noctis_version = metadata.version("noctis")
-    except Exception:  # not pip-installed (editable/source tree) — fall back to the package literal
-        from noctis import __version__ as noctis_version
 
     manifest = {
         "argv": list(argv),
         "mode": mode,
         "config_digest": config_digest,
-        "versions": {"noctis": noctis_version, "python": platform.python_version()},
+        "versions": {"noctis": _noctis_version(), "python": platform.python_version()},
     }
     return Recorder(
         settings.qa_dir,
-        run_id=new_run_id(),
+        run_id=run_id or new_run_id(),
         clock=lambda: datetime.now(UTC),
         manifest=manifest,
     )
@@ -599,6 +1472,18 @@ class ResearchSession:
     on_event: Callable | None
 
     @property
+    def price_table(self):
+        """The ``$/Mtok`` table this session's spend is estimated with (story #140).
+
+        Assembled here, from this run's own ``research.pricing`` — one resolution both loops are
+        handed, so the session line an operator reads and the run record's spend block can never be
+        priced from two different tables.
+        """
+        from noctis.research.pricing import table_from_config
+
+        return table_from_config(self.settings.research.pricing)
+
+    @property
     def model(self) -> str:
         """The resolved provider/model string this session will drive — the one resolution the
         research seam owns, so the session, the client probe, and the CLI's status line all name
@@ -639,6 +1524,7 @@ class ResearchSession:
             prefix_trim=self.budgets.prefix_trim,
             on_event=self.on_event,
             mandate=self.mandate,
+            price_table=self.price_table,
         )
 
     def _run_episodic(self, *, max_iterations: int | None, stop_event) -> ResearchSummary:
@@ -697,6 +1583,7 @@ class ResearchSession:
             models={"driver": self.model, "coder": agent_cfg.coder_model},
             sweep_trials=self.toolbox.default_sweep_trials,
             on_event=self.on_event,
+            price_table=self.price_table,
         )
 
 

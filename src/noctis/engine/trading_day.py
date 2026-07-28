@@ -64,6 +64,12 @@ class SessionOutcome:
     summary: TradingSummary
     fills: list[Fill] = field(default_factory=list)  # only this session's, never carried ones
     live_bars: dict[str, pd.DataFrame] = field(default_factory=dict)  # {} unless record_bars
+    # Symbol → the champion family that held it **this session** (story #142): the assignment the
+    # driver traded under, plus the recorded holder for a symbol no current champion is assigned
+    # (its orphaned position was flattened, and that fill belongs to whoever opened it). The same
+    # inputs the forward attribution reads, taken once, so a trade's champion label and the
+    # per-champion P&L beside it can never name two different champions for one symbol.
+    assignment: dict[str, str] = field(default_factory=dict)
 
 
 class TradingDay:
@@ -136,6 +142,10 @@ class TradingDay:
         """Trade session ``day`` from ``feed``, then settle (attribute → account → mark)."""
         fills_before = len(self.broker.fills)
         realized_before = dict(self.broker.realized_pnl_by_symbol)
+        # Who held what *coming into* this session — read before the settle rewrites it, because a
+        # flatten drops the holder of the position it just closed and that closing fill still
+        # belongs to the champion that opened it.
+        holders_before = {sym: entry["family"] for sym, entry in self.forward.holders.items()}
         result = run_trading_day(
             self.config,
             feed,
@@ -161,7 +171,31 @@ class TradingDay:
         # that session (safe) rather than silently skipping it.
         self.store.save(self.broker, day)
         self.ledger.save(day)
-        return SessionOutcome(result.summary, self.broker.fills[fills_before:], result.live_bars)
+        return SessionOutcome(
+            result.summary,
+            self.broker.fills[fills_before:],
+            result.live_bars,
+            self._assignment(feed.symbols, holders_before),
+        )
+
+    def _assignment(
+        self, traded_symbols: list[str], holders_before: dict[str, str]
+    ) -> dict[str, str]:
+        """Symbol → the champion family that held it this session — the trade log's attribution.
+
+        The same ``assign_indices`` call the P&L attribution makes, over the same eligibility and
+        score inputs, so "which champion made this trade" and "which champion earned this P&L"
+        are one answer rather than two that could drift. A symbol no current champion is assigned
+        falls back to the holder recorded before the session: its position was orphaned and
+        flattened, and that fill is the *displaced* champion's, not nobody's.
+        """
+        idx = assign_indices(
+            len(self.entries), sorted(traded_symbols), self.config.live_symbols, self.config.scores
+        )
+        attributed = {sym: self.entries[j].family for sym, j in idx.items()}
+        for sym, family in holders_before.items():
+            attributed.setdefault(sym, family)
+        return attributed
 
     def _attribute(
         self, traded_symbols: list[str], realized_before: dict[str, float], day: date
