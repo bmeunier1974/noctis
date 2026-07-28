@@ -426,15 +426,65 @@ def test_the_performance_block_carries_the_benchmark_it_was_handed():
 def test_no_bar_series_or_holdout_preview_ever_reaches_the_record():
     """AGENTS.md rule 3, at the record's edge: holdout *metrics* may appear, holdout bars and
     anything a bar could be reconstructed from may not. The benchmark contributes statistics
-    only — its own price series never lands in the document."""
+    only — its own price series never lands in the document.
+
+    Checked over the **fullest** record this engine builds — every section the epic has grown,
+    including the gate evidence that quotes holdout numbers and the honesty block that states the
+    holdout *geometry*. Stating "a forward holdout of one test window is reserved" is exactly the
+    disclosure rule 3 wants; shipping the bars in it would be the violation.
+    """
+    from noctis.reporting.run_record import StrategyArtifact
+
     bench = Benchmark(
         symbols=("NVDA",),
         points=(("2026-07-28", 100.0), ("2026-07-29", 101.0), ("2026-07-30", 99.0)),
     )
+    candidate = StrategyArtifact(
+        name="momo_1",
+        outcome="rejected",
+        tier="__tmp",
+        decided_utc="2026-07-29T02:00:00.000Z",
+        trials=42,
+        gates=(
+            {
+                "gate": "forward_holdout",
+                "passed": True,
+                "observed": 0.71,
+                "threshold": 0.0,
+                "note": None,
+            },
+            {
+                "gate": "symbol_holdout",
+                "passed": False,
+                "observed": -0.2,
+                "threshold": 0.0,
+                "note": None,
+            },
+        ),
+        rationale="rejected: symbol-holdout metric -0.2000 below bar 0.0000",
+    )
 
-    serialized = json.dumps(build(_artifacts(benchmark=bench)))
+    record = build(_artifacts(benchmark=bench, strategies=(candidate,)))
+    serialized = json.dumps(record)
 
-    for forbidden in ("points", "bars", "ts_event", "open", "high", "low", "close", "volume"):
+    # The holdout METRICS are published — that is the evidence the funnel is judged on …
+    assert record["strategies"][0]["gates"][0]["observed"] == 0.71
+    assert record["assumptions"]["forward_holdout"]["reserved"] is True
+    # … and nothing a bar, a preview or a reconstructable series could come out of is.
+    for forbidden in (
+        "points",
+        "bars",
+        "ts_event",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "preview",
+        "holdout_bars",
+        "equity_series",
+        "prices",
+    ):
         assert f'"{forbidden}"' not in serialized, forbidden
 
 

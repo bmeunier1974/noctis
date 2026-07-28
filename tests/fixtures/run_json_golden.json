@@ -230,6 +230,50 @@
   "spend": null,
   "sessions": [],
   "performance": null,
+  "assumptions": {
+    "paper_only": null,
+    "live_gate": {
+      "execution_mode": null,
+      "real_orders_reachable": null,
+      "re_resolved_each_segment": true,
+      "note": "real-money orders need BOTH config mode: live and ALLOW_LIVE=true; the pair is re-resolved from the config file and the environment at every process start, is never written to this record and is never restored from one, and a resume whose verdict differs from the frozen one is refused rather than reconciled"
+    },
+    "fill_model": "next_bar_open",
+    "lookahead": "none \u2014 a decision taken on bar t is filled at bar t+1's open, and every walk-forward test window sits strictly after its train window",
+    "fee_bps": null,
+    "slippage_bps": null,
+    "round_trip_cost_bps": null,
+    "costs_charged": "per side \u2014 a round trip pays both legs",
+    "walk_forward": {
+      "sizing": "auto",
+      "min_train_bars": 40,
+      "max_train_bars": 120,
+      "min_test_bars": 20,
+      "max_test_bars": 40,
+      "step_bars": null,
+      "embargo_bars": 0,
+      "test_after_train": true
+    },
+    "forward_holdout": {
+      "min_bars": 20,
+      "max_bars": 40,
+      "reserved": true,
+      "note": "one test window of the most-recent bars, reserved from the pre-filter, the walk-forward and the optimizer alike; a panel too short to leave a full split behind degrades to no forward-holdout gate rather than starving the search"
+    },
+    "symbol_holdout": {
+      "size": null,
+      "fit_set_size": null,
+      "symbols": null
+    },
+    "min_trials": null,
+    "promotion_thresholds": null,
+    "benchmark": {
+      "name": "equal_weight_universe_bh",
+      "method": "equal-weight buy-and-hold over the symbols this run actually traded, priced from bars already in the shared lake over the run's own session window; weights are set at the first session mark and never rebalanced",
+      "rebalancing": "none \u2014 weights are set at the first session mark this run can price and are never rebalanced; each name's contribution drifts with its own return thereafter"
+    },
+    "state_scope": "run"
+  },
   "events": [
     {
       "t": "2026-07-28T02:22:33.418Z",

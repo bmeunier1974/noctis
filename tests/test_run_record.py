@@ -1042,4 +1042,4 @@ def test_build_reaches_no_io_no_clock_and_no_config():
 
 
 def test_the_schema_module_is_pure_stdlib():
-    assert _imports(SCHEMA_SOURCE) <= {"__future__", "collections", "typing"}
+    assert _imports(SCHEMA_SOURCE) <= {"__future__", "collections", "dataclasses", "typing"}

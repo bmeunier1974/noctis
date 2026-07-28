@@ -358,7 +358,7 @@ plus `jq` one-liners over `events.jsonl` — see
 
 ```bash
 python -m noctis runs [--all]              # the run board: id, label, status, segments, headline numbers
-python -m noctis run-record <address>      # print one run's whole record (pipe it into jq)
+python -m noctis run-record <address> [--validate]   # print one run's whole record, or schema-check it
 python -m noctis run-prune <address> [--dry-run]   # reclaim a completed run's heavy directories
 python -m noctis status                    # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>            # preflight a mandate: provenance + the effective settings diff
@@ -417,6 +417,24 @@ sidecars**: one file holds everything about the run, which is exactly what a web
 and what `jq` reads here. It exits non-zero when no run answers the address (or when more than
 one does), or when that one run's record cannot be read (the listing tolerates a broken record
 because it has others to show; a command asked for exactly one does not).
+
+`run-record <address> --validate` **schema-checks** the record instead of printing it, so an
+artifact can be verified before it is published:
+
+```bash
+python -m noctis run-record latest --validate
+# workspace/runs/20260714T031102Z-4d9c1a/run.json: valid against run-record schema version 1 …
+```
+
+It checks the whole contract in `reporting/schema.py` — every section present, every absent value
+an explicit `null` rather than a dropped key, every timestamp UTC ISO-8601 with a `Z`, every
+dimensioned number naming its unit the one canonical way (`_usd`, `_pct`, `_bps`, `_s`, `_bytes`,
+`_bars`), every cost field calling itself an estimate, and neither live-money gate anywhere in the
+document. It prints **every** problem at once (an operator asking "is this record readable?" wants
+the whole list, not the first line of it) and exits non-zero when there is one. Unknown keys are
+never a problem: the schema is additive-only, so a record written by a newer Noctis validates here
+and a record written by an older one is upgraded in place — with an event saying so — the next time
+the run gains a segment.
 
 Beside the run trees, `workspace/runs/index.json` is a **derived** roll-up of the same entries —
 one `fetch()` for a listing page. Derived, never authoritative: the engine refreshes it after

@@ -30,12 +30,13 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TypeVar
 
+from noctis.reporting import schema
+from noctis.reporting.assumptions import assumptions
 from noctis.reporting.metrics import Benchmark, DailySession, TradeFill, performance
 from noctis.reporting.schema import (
     EVENT_CAP,
     KIND,
     PROMOTED_OUTCOME,
-    SCHEMA_VERSION,
     STRATEGY_CAP,
     TRADE_CAP,
 )
@@ -485,7 +486,11 @@ def build(artifacts: RunArtifacts) -> dict:
     limit_hours = _run_limit_hours(artifacts.inputs)
     completed_utc = artifacts.completed_utc or _capped_at(segments, limit_hours)
     return {
-        "schema_version": SCHEMA_VERSION,
+        # Read off the module rather than bound at import, so a record written by an engine whose
+        # schema has moved carries the version that engine actually writes (see
+        # ``schema.upgrade``): the upgrade path is exercised end to end instead of only the day
+        # someone bumps the constant.
+        "schema_version": schema.SCHEMA_VERSION,
         "kind": KIND,
         "run": {
             "run_id": artifacts.run_id,
@@ -533,6 +538,13 @@ def build(artifacts: RunArtifacts) -> dict:
         # **whole** session history, not from the capped log above: a truncated trade log must not
         # be able to move a metric.
         "performance": _performance(artifacts, segments),
+        # The arena every number above was produced in (story #143): the fill model, the fee and
+        # slippage the run was charged, the walk-forward geometry, both holdouts, the exhaustion
+        # gate, every promotion threshold, the benchmark's rebalancing convention — and the live
+        # gate's own verdict, measured rather than claimed. Derived from the run's frozen inputs,
+        # so it states what this run was actually configured with and not what the current
+        # ``config.yaml`` happens to say.
+        "assumptions": assumptions(artifacts.inputs),
         "events": [event.as_dict() for event in events],
         "errors": [error.as_dict() for error in errors],
     }

@@ -9,6 +9,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The run record's `assumptions` block, a versioned schema with an upgrade path, and
+  `noctis run-record --validate`.** The arena a run's numbers were produced in, published as data
+  so a website renders it as a table and two runs' blocks subtract.
+  - **New: `reporting/assumptions.py` (pure).** The fill model (`next_bar_open`) and the
+    no-lookahead rule, the fee and slippage the run was charged **per side** plus the round-trip
+    cost, the walk-forward geometry and both holdouts, the exhaustion gate's `min_trials`, every
+    promotion threshold, and the benchmark's rebalancing convention (none — weights are set at the
+    first session mark and drift thereafter). Everything the run *configured* is read out of its
+    own frozen `inputs`, so a promotion knob added tomorrow appears with no edit; the three values
+    that are engine constants rather than settings are each held to the code that implements them
+    by a test (a real fill lands on bar *t+1*'s open, `PipelineConfig.auto` sizes every split
+    inside the stated bounds at both ends, the equal-weight basket really does drift).
+  - **`paper_only` is a measurement.** It and `live_gate.real_orders_reachable` are derived from
+    the safety gate's own resolved verdict (frozen as `inputs.execution_mode`), never written as
+    constants: a test opens both live-money gates and watches the block flip. A run that froze no
+    verdict reports `null` rather than claiming paper, and the validator refuses a record carrying
+    `mode` or `allow_live` anywhere — the pair keeps exactly two independent sources.
+  - **The schema is a promise, not an accident.** `schema.upgrade(record)` walks a record up one
+    version at a time through a reviewable registry of steps, restamps it, and returns the sentence
+    the run files as an event; the run store applies it on every open, so a record written under an
+    older schema is **upgraded in place** by the next ordinary write and says so. Exercised against
+    a synthetic version 2 — the real `SCHEMA_VERSION` stays 1, because a bump nothing needed would
+    be a version number spent on a test.
+  - **Two contract-wide conventions are now checked structurally**, over the whole document rather
+    than section by section, so a section added later inherits both: every timestamp key
+    (`*_utc`, `t`, `at`, `ts`) must be UTC ISO-8601 with a `Z`, and every dimensioned number must
+    spell its unit the one canonical way (`_s`, not `_seconds`; `_bps`, not `_bp`). The verbatim
+    quotations inside `inputs` — the operator's own resolved settings and mandate front-matter —
+    are exempt by name: renaming a key there would make the record disagree with the file it quotes.
+  - **`noctis run-record <address> --validate`** schema-checks a record instead of printing it,
+    naming every problem at once and exiting non-zero when there is one.
+  - Redaction and no-lookahead are re-pinned over the sections the epic has grown since: no
+    credential's *value or name* survives anywhere in a record once `inputs.settings`' tier lists
+    (where naming one is the point) are removed, and the fullest record this engine builds carries
+    holdout **metrics** and holdout geometry while carrying nothing a bar could be reconstructed
+    from.
+
 - **The run record's realised performance: trades, the equity curve, a metrics module, a benchmark
   and the Deflated Sharpe Ratio.** The profitability picture, published beside the funnel — and
   kept structurally apart from the backtest numbers that decide promotions, so no website can

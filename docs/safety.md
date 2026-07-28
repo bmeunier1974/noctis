@@ -28,6 +28,14 @@ that must have exactly two independent ones. The record does carry the gate's *v
 run, and a resume whose freshly resolved mode disagrees with it refuses to continue — a paper run's
 results can never acquire live segments.
 
+**`paper_only` on a run record is a measurement, not a claim.** The record's `assumptions` block
+publishes `paper_only` and `live_gate.real_orders_reachable`, and both are derived from that frozen
+*verdict* — the one `resolve_execution_mode` reached for this run — rather than written as
+constants beside it. A run that froze no verdict (an adopted history) reports `null` on both:
+"nobody measured" and "paper" are different facts, and only one of them is a claim the record is
+entitled to make. The block never carries `mode` or `allow_live` themselves; the schema validator
+refuses a record that does, wherever in the document they appear.
+
 ## No lookahead
 
 - Both backtest stages execute a bar-*t* decision at bar *t+1*'s open — asserted by tests, not

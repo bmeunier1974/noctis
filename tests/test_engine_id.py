@@ -228,6 +228,25 @@ def test_editing_a_promotion_threshold_moves_gates(tmp_path):
     assert compare(before, fingerprint(root)) == {"gates"}
 
 
+def test_the_schema_component_tracks_the_run_records_schema_version(tmp_path):
+    """Bumping :data:`SCHEMA_VERSION` moves the ``schema`` digest and **only** it (story #143).
+
+    That mapping is the whole reason ``schema`` is a fingerprint component: a run whose record
+    changed shape mid-flight has to be identifiable as such, and a version bump that left every
+    digest where it was would make the change invisible to a reader pooling two runs. It moves no
+    arbiter component, so a schema change never invalidates a champion comparison.
+    """
+    root = _build_tree(tmp_path)
+    schema_source = root / "src" / "noctis" / "reporting" / "schema.py"
+    schema_source.write_text("SCHEMA_VERSION = 1\n")
+    before = fingerprint(root)
+    schema_source.write_text("SCHEMA_VERSION = 2\n")
+
+    assert COMPONENT_PATHS["schema"] == ("src/noctis/reporting/schema.py",)
+    assert compare(before, fingerprint(root)) == {"schema"}
+    assert not {"schema"} & ARBITER_COMPONENTS  # a recording change is not an arbiter change
+
+
 def test_editing_the_memory_seed_moves_memory_seed(tmp_path):
     root = _build_tree(tmp_path)
     before = fingerprint(root)

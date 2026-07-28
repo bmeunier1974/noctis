@@ -8,14 +8,20 @@ tracks as the ``schema`` component (``observability/engine_id.py``): changing wh
 should move a digest, and only that.
 
 **Versioning is additive-only.** :data:`SCHEMA_VERSION` is 1. New fields may be added at any time;
-an existing field never changes meaning or type, and a reader ignores keys it does not know. That
-is what lets a record written tonight still be read by the Noctis that resumes the run in a month.
-A breaking change bumps the version and upgrades on read — it never silently repurposes a key.
+an existing field never changes meaning or type, and a reader ignores keys it does not know (a
+record carrying keys this Noctis has never heard of validates — story #143 pins that). That is what
+lets a record written tonight still be read by the Noctis that resumes the run in a month. A
+breaking change bumps the version and :func:`upgrade` rewrites the record **in place** on the next
+open, recording what it did — a version is never silently repurposed and a key is never quietly
+reinterpreted.
 
 **Two conventions are part of the contract, not style.** Units are explicit in the field name
-(``_usd``, ``_pct``, ``_bps``, ``_s``, ``_bytes``), and a known-absent value is an explicit
-``null`` rather than an omitted key — so a consumer can tell "not applicable" from "this schema
-version did not have it". :func:`validate` enforces both where it can.
+(``_usd``, ``_pct``, ``_bps``, ``_s``, ``_bytes``, ``_bars``, ``_hours``), and a known-absent value
+is an explicit ``null`` rather than an omitted key — so a consumer can tell "not applicable" from
+"this schema version did not have it". :func:`validate` enforces both structurally: every section's
+keys must be *present* whatever their values, every dimensioned number must spell its unit the one
+canonical way (:data:`UNIT_ALIASES`), and every timestamp key anywhere in the document — not only
+in the sections with a hand-written rule — must be UTC ISO-8601 with a ``Z``.
 
 **Caps are honest.** Bulky lists are bounded (:data:`TRADE_CAP`, :data:`EVENT_CAP`) and every cap
 that bites writes a ``truncated`` note carrying kept/total counts. Silent truncation is forbidden:
@@ -25,7 +31,8 @@ uncapped — they are the run's spine, and losing one would make every derived t
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 
 __all__ = [
     "EVENT_CAP",
@@ -40,11 +47,16 @@ __all__ = [
     "SCHEMA_VERSION",
     "SEGMENT_COMMANDS",
     "SEGMENT_STATUSES",
+    "STAMP_KEYS",
     "STRATEGY_CAP",
     "STRATEGY_OUTCOMES",
     "STRATEGY_TIERS",
     "TRADE_CAP",
     "UNDECIDED_OUTCOME",
+    "UNIT_ALIASES",
+    "UPGRADES",
+    "Upgrade",
+    "upgrade",
     "validate",
 ]
 
@@ -81,6 +93,12 @@ REQUIRED_SECTIONS = (
     # fact, and the section is where the realised evidence behind ``performance`` is readable.
     "sessions",
     "performance",
+    # The arena every number above was produced in (story #143). Mandatory and machine-readable:
+    # a results page without its fill, holdout and promotion assumptions is not taken seriously,
+    # and a page that states them in prose cannot be diffed between two runs. Never ``null`` —
+    # the engine-fixed half (the fill model, the split geometry, the benchmark convention) is
+    # true of every run, and the configured half is ``null`` key by key on a run that froze none.
+    "assumptions",
     "events",
     "errors",
 )
@@ -454,11 +472,199 @@ PERFORMANCE_SOURCE = "paper_account"
 USD_MARKER = "usd"
 ESTIMATE_MARKER = "estimate"
 
+# The honesty block (story #143) — the arena, as data. Every key present on every record: the
+# engine-fixed half is true of any run, and the configured half is an explicit ``null`` on a run
+# that froze no configuration, because "this run never recorded its arena" and "this run charged
+# no fees" are very different statements about a result.
+_ASSUMPTIONS_KEYS = (
+    # Measured off the safety gate's own resolved verdict, never asserted (AGENTS.md rule 1).
+    "paper_only",
+    "live_gate",
+    "fill_model",
+    "lookahead",
+    "fee_bps",
+    "slippage_bps",
+    "round_trip_cost_bps",
+    "costs_charged",
+    "walk_forward",
+    "forward_holdout",
+    "symbol_holdout",
+    # The exhaustion gate's floor: the distinct param sets a verdict may not be reached without.
+    "min_trials",
+    # The whole promotion subtree, verbatim — see ``reporting/assumptions.py`` for why the block
+    # publishes the settings rather than a curated list of them.
+    "promotion_thresholds",
+    "benchmark",
+    "state_scope",
+)
+_LIVE_GATE_KEYS = (
+    # The gate's verdict for this run. The two settings behind it (``mode``, ``allow_live``) are
+    # never recorded — see :data:`UNRECORDABLE_SETTINGS`.
+    "execution_mode",
+    "real_orders_reachable",
+    "re_resolved_each_segment",
+    "note",
+)
+_WALK_FORWARD_KEYS = (
+    "sizing",
+    "min_train_bars",
+    "max_train_bars",
+    "min_test_bars",
+    "max_test_bars",
+    # ``null`` means one test window: consecutive splits advance by exactly the test size.
+    "step_bars",
+    "embargo_bars",
+    "test_after_train",
+)
+_FORWARD_HOLDOUT_KEYS = ("min_bars", "max_bars", "reserved", "note")
+_SYMBOL_HOLDOUT_KEYS = ("size", "fit_set_size", "symbols")
+_BENCHMARK_ASSUMPTION_KEYS = ("name", "method", "rebalancing")
+
 # The two settings a record may never carry, whatever else it grows: the live-money double gate.
 # The safety gate re-resolves from the config file and the ALLOW_LIVE environment variable at every
 # process start, so a record that carried either one could offer a second source for a decision
 # that must have exactly two independent ones (AGENTS.md rule 1).
 UNRECORDABLE_SETTINGS = ("mode", "allow_live")
+
+# The contract's unit vocabulary, as a **refusal table**: the long or ambiguous spelling of a
+# dimension, mapped to the one suffix the record uses for it. A number whose key ends in a key of
+# this table is a schema violation, wherever in the document it sits — which is what makes "units
+# are explicit and canonical" a check rather than a convention. The rule deliberately bites on
+# *numbers only*: a section named for what its values measure (``phase_seconds``, a mapping of
+# phase → seconds) is a name, while ``cumulative_runtime_seconds`` would be a number lying about
+# which spelling this record uses, and only one of those confuses a consumer indexing by key.
+UNIT_ALIASES: Mapping[str, str] = {
+    "seconds": "_s",
+    "secs": "_s",
+    "sec": "_s",
+    "millis": "_s",
+    "milliseconds": "_s",
+    "ms": "_s",
+    "percent": "_pct",
+    "percentage": "_pct",
+    "dollars": "_usd",
+    "dollar": "_usd",
+    "cents": "_usd",
+    "bp": "_bps",
+    "basispoints": "_bps",
+    "points": "_bps",
+    "kb": "_bytes",
+    "mb": "_bytes",
+    "gb": "_bytes",
+    "kib": "_bytes",
+    "mib": "_bytes",
+}
+
+# The subtrees the unit rule does **not** reach, because they are not the record's vocabulary:
+# they are foreign documents quoted verbatim. ``inputs.settings.resolved`` is the operator's own
+# configuration as the run froze it (``research_time_budget_minutes`` is a config key, not a
+# record field), and ``inputs.mandate`` carries the mandate's front-matter overlay as written.
+# Renaming a key inside either would make the record disagree with the file it claims to quote —
+# a worse failure than a second spelling of a unit, and one nobody could debug.
+_VERBATIM_SUBTREES = ("inputs.settings.resolved", "inputs.mandate")
+
+# Every key in the record that carries a moment. Checked **structurally**, over the whole
+# document, so a section added later inherits the rule instead of needing its own line here: a
+# stamp that lost its ``Z`` is ambiguous by timezone, and a website plotting it would be wrong by
+# hours without anything looking broken.
+STAMP_KEYS = ("t", "at", "ts")
+_STAMP_SUFFIX = "_utc"
+
+
+@dataclass(frozen=True)
+class Upgrade:
+    """What reading an older record under this engine did to it (:func:`upgrade`).
+
+    ``record`` is a **new** document — nothing here mutates its input — carrying the target
+    version and whatever the registered steps rewrote. ``applied`` names each step that ran, and
+    is empty for the ordinary additive bump, where the record is simply restamped: an
+    additive-only change adds keys, and the record is rebuilt from the run's own artifacts at
+    every write anyway, so the new keys arrive with the next flush rather than through a
+    translation. A step exists for the one case additive-only does not cover — a value that has
+    to be *carried* into a new shape — and the registry is where such a case is reviewed.
+    """
+
+    record: dict
+    from_version: int | None
+    to_version: int
+    applied: tuple[str, ...] = ()
+
+    @property
+    def upgraded(self) -> bool:
+        """Whether this reading moved the record's version at all."""
+        return self.from_version != self.to_version
+
+    def note(self) -> str | None:
+        """The one sentence the run record files as an event, or ``None`` when nothing moved.
+
+        A schema upgrade is exactly the kind of thing that must never happen quietly: a consumer
+        comparing two of this run's segments has to be able to see that the document changed shape
+        under them, and the run's own event stream is where the run says what happened to it.
+        """
+        if not self.upgraded:
+            return None
+        origin = "no version" if self.from_version is None else f"version {self.from_version}"
+        detail = f" ({'; '.join(self.applied)})" if self.applied else ""
+        return (
+            f"this run's record was written under schema {origin} and was upgraded in place to "
+            f"version {self.to_version} by this engine{detail}"
+        )
+
+
+# The registered translations, keyed by the version each one upgrades **from**. Empty at
+# :data:`SCHEMA_VERSION` 1 — there is no earlier version to come from — and deliberately kept as a
+# registry rather than an ``if`` ladder, so a version that needs to carry a value into a new shape
+# is one reviewable entry and the walk over intermediate versions never has to change.
+UPGRADES: Mapping[int, Callable[[Mapping[str, object]], dict]] = {}
+
+
+def upgrade(
+    record: Mapping[str, object],
+    *,
+    upgrades: Mapping[int, Callable[[Mapping[str, object]], dict]] | None = None,
+    target: int | None = None,
+) -> Upgrade:
+    """Bring one record up to this engine's schema version. Pure: a new document is returned.
+
+    The promise this implements is the one the epic makes to a multi-week run: **today's run must
+    still be resumable by tomorrow's engine**. A record below :data:`SCHEMA_VERSION` is walked up
+    one version at a time — each registered step in :data:`UPGRADES` applied in order, so a record
+    two versions behind is not special-cased — and restamped. The result is written back by the
+    ordinary record write, which is what makes the upgrade happen *in place*, and the returned
+    :meth:`Upgrade.note` is what puts it on the run's own event stream.
+
+    A record from the **future** is never touched: additive-only means a newer document is
+    readable by ignoring what this engine does not know, and rewriting its version down would
+    destroy exactly the information a later reader needs. A record with no version at all is
+    treated as predating versioning and upgraded from nothing.
+
+    Both seams are injectable so the mechanism can be exercised against a synthetic later version
+    without bumping the real one — a versioning path first tested on the day it is first needed is
+    a versioning path nobody has tested.
+    """
+    steps = UPGRADES if upgrades is None else upgrades
+    to_version = SCHEMA_VERSION if target is None else target
+    found = record.get("schema_version")
+    from_version = found if isinstance(found, int) and not isinstance(found, bool) else None
+    if from_version is not None and from_version >= to_version:
+        return Upgrade(record=dict(record), from_version=from_version, to_version=from_version)
+    document = dict(record)
+    applied: list[str] = []
+    version = from_version
+    while version is not None and version < to_version:
+        step = steps.get(version)
+        if step is None:
+            break
+        document = dict(step(document))
+        applied.append(f"{version}→{version + 1}")
+        version += 1
+    document["schema_version"] = to_version
+    return Upgrade(
+        record=document,
+        from_version=from_version,
+        to_version=to_version,
+        applied=tuple(applied),
+    )
 
 
 def validate(record: Mapping[str, object]) -> list[str]:
@@ -484,9 +690,6 @@ def validate(record: Mapping[str, object]) -> list[str]:
     if isinstance(run, Mapping):
         problems += _check_keys("run", run, _RUN_KEYS)
         problems += _check_status("run.status", run.get("status"), RUN_STATUSES)
-        problems += _check_stamp("run.created_utc", run.get("created_utc"))
-        problems += _check_stamp("run.last_active_utc", run.get("last_active_utc"))
-        problems += _check_stamp("run.completed_utc", run.get("completed_utc"))
     elif "run" in record:
         problems.append("run: section must be an object")
 
@@ -507,9 +710,103 @@ def validate(record: Mapping[str, object]) -> list[str]:
     problems += _check_spend(record.get("spend"))
     problems += _check_sessions(record.get("sessions"))
     problems += _check_performance(record.get("performance"), run=run)
+    problems += _check_assumptions(record.get("assumptions"))
 
     for name in ("events", "errors"):
         problems += _check_events(name, record.get(name))
+    # The two contract-wide conventions, checked over the whole document rather than section by
+    # section — so a section added tomorrow inherits both rules instead of needing its own line.
+    problems += _check_units("", record)
+    problems += _check_stamps("", record)
+    return problems
+
+
+def _check_assumptions(assumptions: object) -> list[str]:
+    """The honesty block: present, complete, and never a second source for the live-money gates.
+
+    Presence is the whole check on the *values*, deliberately. What the arena was is a fact about
+    the run, not something this module can second-guess — but a **missing** key is different in
+    kind: a website rendering the honesty table would silently drop the row, and a reader diffing
+    two runs would see "not stated" where the schema promises "stated, possibly null".
+    """
+    if assumptions is None:
+        return ["assumptions: section must be an object — an arena is stated on every record"]
+    if not isinstance(assumptions, Mapping):
+        return ["assumptions: section must be an object"]
+    problems = _check_keys("assumptions", assumptions, _ASSUMPTIONS_KEYS)
+    problems += _check_block("assumptions.live_gate", assumptions.get("live_gate"), _LIVE_GATE_KEYS)
+    problems += _check_block(
+        "assumptions.walk_forward", assumptions.get("walk_forward"), _WALK_FORWARD_KEYS
+    )
+    problems += _check_block(
+        "assumptions.forward_holdout", assumptions.get("forward_holdout"), _FORWARD_HOLDOUT_KEYS
+    )
+    problems += _check_block(
+        "assumptions.symbol_holdout", assumptions.get("symbol_holdout"), _SYMBOL_HOLDOUT_KEYS
+    )
+    problems += _check_block(
+        "assumptions.benchmark", assumptions.get("benchmark"), _BENCHMARK_ASSUMPTION_KEYS
+    )
+    gate = assumptions.get("live_gate")
+    section: Mapping[str, object] = gate if isinstance(gate, Mapping) else {}
+    return problems + [
+        f"{label}.{key}: the live-money gates are never recorded — this block carries the gate's "
+        "verdict, and the pair behind it has exactly two independent sources, neither of them a "
+        "record"
+        for label, block in (("assumptions", assumptions), ("assumptions.live_gate", section))
+        for key in UNRECORDABLE_SETTINGS
+        if key in block
+    ]
+
+
+def _check_units(label: str, node: object) -> list[str]:
+    """Every dimensioned number in the document spells its unit the one canonical way.
+
+    Walks the whole record except the subtrees it *quotes* (:data:`_VERBATIM_SUBTREES`). A
+    *number* whose key ends in a non-canonical spelling of a unit (:data:`UNIT_ALIASES`) is a
+    violation: a consumer indexing by key — a website's honesty table, a diff between two runs, a
+    ``jq`` filter — has to be able to rely on ``_s`` meaning seconds everywhere, and one field
+    spelled ``_seconds`` is exactly the drift that makes it stop.
+    """
+    if label in _VERBATIM_SUBTREES:
+        return []
+    problems: list[str] = []
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            name = str(key)
+            path = f"{label}.{name}" if label else name
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                canonical = UNIT_ALIASES.get(name.rsplit("_", 1)[-1].lower())
+                if canonical is not None:
+                    problems.append(
+                        f"{path}: a dimensioned number names its unit canonically — use the "
+                        f"{canonical!r} suffix, not {name.rsplit('_', 1)[-1]!r}"
+                    )
+            problems += _check_units(path, value)
+    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
+        for position, item in enumerate(node):
+            problems += _check_units(f"{label}[{position}]", item)
+    return problems
+
+
+def _check_stamps(label: str, node: object) -> list[str]:
+    """Every timestamp anywhere in the document is UTC ISO-8601 with a ``Z``.
+
+    The structural twin of the per-section stamp checks above, and the reason a new section needs
+    no new rule: a key named ``…_utc`` (or one of :data:`STAMP_KEYS`) carrying a string must carry
+    a stamp a reader can place on a timeline without guessing a timezone.
+    """
+    problems: list[str] = []
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            name = str(key)
+            path = f"{label}.{name}" if label else name
+            if isinstance(value, str) and (name.endswith(_STAMP_SUFFIX) or name in STAMP_KEYS):
+                problems += _check_stamp(path, value)
+            problems += _check_stamps(path, value)
+    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
+        for position, item in enumerate(node):
+            problems += _check_stamps(f"{label}[{position}]", item)
     return problems
 
 
@@ -608,7 +905,6 @@ def _check_strategies(strategies: object) -> list[str]:
             continue
         problems += _check_keys(label, strategy, _STRATEGY_KEYS)
         problems += _check_status(f"{label}.outcome", strategy.get("outcome"), STRATEGY_OUTCOMES)
-        problems += _check_stamp(f"{label}.decided_utc", strategy.get("decided_utc"))
         tier = strategy.get("tier")
         if tier is not None:
             problems += _check_status(f"{label}.tier", tier, STRATEGY_TIERS)
@@ -681,7 +977,6 @@ def _check_inputs(inputs: object) -> list[str]:
     if not isinstance(inputs, Mapping):
         return ["inputs: section must be an object or null"]
     problems = _check_keys("inputs", inputs, _INPUTS_KEYS)
-    problems += _check_stamp("inputs.frozen_at_utc", inputs.get("frozen_at_utc"))
     problems += _check_config_changes(inputs.get("config_changes"))
     problems += _check_block("inputs.models", inputs.get("models"), _INPUT_MODEL_KEYS)
     problems += _check_block("inputs.data", inputs.get("data"), _INPUT_DATA_KEYS)
@@ -727,7 +1022,6 @@ def _check_changes(label: str, changes: object, keys: Sequence[str]) -> list[str
             problems.append(f"{entry}: must be an object")
             continue
         problems += _check_keys(entry, change, keys)
-        problems += _check_stamp(f"{entry}.at", change.get("at"))
     return problems
 
 
@@ -751,8 +1045,6 @@ def _check_segments(segments: object) -> list[str]:
             )
         problems += _check_status(f"{label}.status", segment.get("status"), SEGMENT_STATUSES)
         problems += _check_status(f"{label}.command", segment.get("command"), SEGMENT_COMMANDS)
-        problems += _check_stamp(f"{label}.started_utc", segment.get("started_utc"))
-        problems += _check_stamp(f"{label}.stopped_utc", segment.get("stopped_utc"))
         problems += _check_environment(f"{label}.environment", segment.get("environment"))
     return problems
 
@@ -795,7 +1087,6 @@ def _check_events(label: str, events: object) -> list[str]:
             problems.append(f"{label}[{position}]: must be an object")
             continue
         problems += _check_keys(f"{label}[{position}]", event, _EVENT_KEYS)
-        problems += _check_stamp(f"{label}[{position}].t", event.get("t"))
     return problems
 
 

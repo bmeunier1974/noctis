@@ -1031,6 +1031,12 @@ def run_record(
         help="Run address: an id as `noctis runs` lists it, a path to a run.json, @LABEL, or "
         "`latest`. The same four forms `run --resume` takes, resolved by the same rules.",
     ),
+    validate: bool = typer.Option(
+        False,
+        "--validate",
+        help="Schema-check the record instead of printing it; exits non-zero, naming every "
+        "problem, when it is not valid.",
+    ),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
 ) -> None:
     """Print one run's record — the whole self-contained ``run.json``, straight to stdout.
@@ -1039,10 +1045,18 @@ def run_record(
     is exactly what a website would `fetch()` and is safe to pipe into ``jq``. Exits non-zero
     when no run answers the id, or when its record cannot be read — the listing tolerates a
     broken record because it has others to show; a command asked for exactly one does not.
+
+    ``--validate`` checks the document against the schema contract (``reporting/schema.py``) and
+    prints the verdict rather than the record, so an artifact can be **verified before it is
+    published**: every section present, every absent value an explicit ``null``, every stamp UTC
+    with a ``Z``, every dimensioned number naming its unit. It names every problem at once — an
+    operator asking "is this record readable?" wants the whole list, not the first line of it —
+    and exits non-zero when there is one.
     """
     import json
     from pathlib import Path
 
+    from noctis.reporting import schema
     from noctis.reporting.run_store import RunNotFoundError, read_record, resolve_run_dir
 
     settings = load_settings(config_path=config)
@@ -1053,7 +1067,21 @@ def run_record(
     record, note = read_record(run_dir)
     if record is None:
         _exit_red(RuntimeError(f"{run_dir / 'run.json'}: {note}"))
-    typer.echo(json.dumps(record, indent=2))
+    if not validate:
+        typer.echo(json.dumps(record, indent=2))
+        return
+    problems = schema.validate(record)
+    path = run_dir / "run.json"
+    if not problems:
+        typer.echo(
+            f"{path}: valid against run-record schema version "
+            f"{record.get('schema_version')} ({len(schema.REQUIRED_SECTIONS)} sections checked)."
+        )
+        return
+    typer.echo(f"{path}: {len(problems)} schema problem(s):")
+    for problem in problems:
+        typer.echo(f"  - {problem}")
+    raise typer.Exit(code=1)
 
 
 @app.command("run-prune")

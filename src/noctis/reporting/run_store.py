@@ -57,6 +57,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from noctis.reporting import schema as schema_module
 from noctis.reporting.metrics import Benchmark, DailySession, TradeFill
 from noctis.reporting.run_record import (
     EMBED_ALL_SOURCES_SETTING,
@@ -76,7 +77,6 @@ from noctis.reporting.run_record import (
 from noctis.reporting.schema import (
     PROMOTED_OUTCOME,
     REJECTED_OUTCOME,
-    SCHEMA_VERSION,
     UNDECIDED_OUTCOME,
 )
 
@@ -593,6 +593,7 @@ def collect(
     engine = read_engine_identity(election_metric, root=engine_root)
     trials = read_trials(run_dir)
     prior, note = _read_record(path)
+    prior, upgrade_note = _upgraded_schema(prior)
     # Spend is derived here, beside the trial count and for the same reason, and it is priced
     # under the run's **own** frozen configuration — so resuming tomorrow under different prices
     # cannot restate what last night cost.
@@ -610,7 +611,7 @@ def collect(
     benchmark = read_benchmark(sessions, _frozen_inputs(prior.get("inputs")) if prior else None)
     if prior is not None:
         try:
-            return _artifacts_from(
+            artifacts = _artifacts_from(
                 prior,
                 run_dir=Path(run_dir),
                 current=engine,
@@ -622,6 +623,12 @@ def collect(
                 sessions=sessions,
                 benchmark=benchmark,
             )
+            if upgrade_note is None:
+                return artifacts
+            # The schema upgrade goes on the run's own event stream, where the run says what
+            # happened to it: the next write puts the upgraded document on disk, and this is the
+            # line that says the shape changed under a consumer comparing two of its segments.
+            return replace(artifacts, events=(*artifacts.events, upgrade_note))
         except Exception as exc:  # a hand-edited or foreign file, still valid JSON
             note = RecordEvent(
                 t=None,
@@ -644,6 +651,41 @@ def collect(
         sessions=sessions,
         benchmark=benchmark,
     )
+
+
+def _upgraded_schema(prior: dict | None) -> tuple[dict | None, RecordEvent | None]:
+    """Bring a record written under an older schema up to this engine's, and say so (story #143).
+
+    The epic's promise to a multi-week run is that **today's run is still resumable by tomorrow's
+    engine**, and this is where that promise is kept: the version walk itself is pure and lives in
+    ``schema.upgrade``; the upgrade lands *in place* because the next ordinary write puts the
+    upgraded document on disk, and the event returned beside it is what stops the change being
+    silent. A record already at this version is returned untouched and produces no event, so a
+    run that is simply resumed does not accumulate a note per night.
+
+    The event carries no segment for the same reason the unreadable-record note next to it does
+    not: the observation is made while the run is being *opened*, before this process's segment
+    exists.
+
+    Never fatal, like everything else in this module except the lock: an upgrade step that raises
+    leaves the record exactly as it was found and files the reason, because a reporting artifact
+    must not be what stops a multi-week run from opening.
+    """
+    if prior is None:
+        return None, None
+    try:
+        upgrade = schema_module.upgrade(prior)
+    except Exception as exc:  # pragma: no cover - unreachable while no step is registered
+        return prior, RecordEvent(
+            t=None,
+            kind="warn",
+            text=f"this run's record could not be upgraded to schema version "
+            f"{schema_module.SCHEMA_VERSION} ({type(exc).__name__}); it is being read as written",
+        )
+    note = upgrade.note()
+    if note is None:
+        return prior, None
+    return upgrade.record, RecordEvent(t=None, kind="info", text=note)
 
 
 def read_trials(run_dir: Path | str) -> int | None:
@@ -1654,7 +1696,9 @@ def _index_of(entries: Iterable[Mapping[str, object]]) -> dict:
     only thing keeping the two paths honest.
     """
     return {
-        "schema_version": SCHEMA_VERSION,
+        # The listing shares the record's contract version, read off the module for the same
+        # reason the record does: an engine whose schema has moved writes both at its own version.
+        "schema_version": schema_module.SCHEMA_VERSION,
         "kind": RUN_INDEX_KIND,
         "runs": sorted(entries, key=lambda entry: str(entry.get("run_id") or ""), reverse=True),
     }
@@ -1719,7 +1763,7 @@ def _read_index(runs_dir: Path) -> dict | None:
         return None
     if not isinstance(index, dict) or index.get("kind") != RUN_INDEX_KIND:
         return None
-    if index.get("schema_version") != SCHEMA_VERSION:
+    if index.get("schema_version") != schema_module.SCHEMA_VERSION:
         return None
     entries = index.get("runs")
     if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):

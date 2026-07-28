@@ -1378,7 +1378,15 @@ def test_the_debug_qa_tree_reuses_the_runs_own_id(tmp_path):
 
 def test_no_secret_reaches_the_record(tmp_path, monkeypatch):
     """A record is meant to be shared. Nothing the settings digest excludes may appear in one —
-    not in the frozen settings, not in the resolved models, not in the environment block."""
+    not a value, and not a credential's *name*, in any section of the document.
+
+    The value check is over the serialized file, so it covers every section the epic has grown
+    since — the frozen settings, the resolved models, the environment, the strategies, the
+    sessions and the honesty block. The **name** check is stronger than "not in these two
+    sections": a credential may appear in exactly one place, ``inputs.settings``' tier lists,
+    where naming it is the point (it says the key is live tier and therefore never restored).
+    Remove those three lists and no section may mention it at all.
+    """
     from noctis.bootstrap import _DIGEST_SECRET_FIELDS
 
     secrets = {field: f"sk-{field}-do-not-leak" for field in _DIGEST_SECRET_FIELDS}
@@ -1394,9 +1402,12 @@ def test_no_secret_reaches_the_record(tmp_path, monkeypatch):
         assert value not in text
     record = json.loads(text)
     assert record["inputs"]["models"]["research"] is not None  # the block IS populated
+    assert record["assumptions"]["paper_only"] is True  # so is the honesty block
+    for tier in ("frozen_keys", "live_keys", "refused_keys"):
+        record["inputs"]["settings"].pop(tier)
+    serialized = json.dumps(record)
     for field in _DIGEST_SECRET_FIELDS:
-        assert field not in json.dumps(record["inputs"]["models"])
-        assert field not in json.dumps(record["environment_latest"])
+        assert field not in serialized, field
 
 
 def test_a_real_run_records_the_machine_it_ran_on(tmp_path):
