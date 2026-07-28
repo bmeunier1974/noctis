@@ -89,7 +89,7 @@ python -m noctis mandate <name>    # preflight a mandate: provenance + the effec
 python -m noctis engine            # engine identity: version, component fingerprint, comparable key
 python -m noctis backtest <name>   # replay a library strategy on its shipped Params defaults
 python -m noctis champions [--reset]   # list champions; --reset re-fills slots under current gates
-python -m noctis report [--as-of DATE]
+python -m noctis report [<address>] [--as-of DATE]   # one run's close-of-day report ('legacy' by default)
 python -m noctis data status|sync|ingest <SYM> --start ... --end ... [--dry-run]
 ```
 

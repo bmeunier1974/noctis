@@ -364,7 +364,7 @@ python -m noctis run-prune <address> [--dry-run]   # reclaim a completed run's h
 python -m noctis status                    # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>            # preflight a mandate: provenance + the effective settings diff
 python -m noctis engine                    # engine identity: version, component fingerprint, comparable key
-python -m noctis report [--as-of DATE]     # generate / print the close-of-day report
+python -m noctis report [<address>] [--as-of DATE]   # generate / print one run's close-of-day report
 python -m noctis account [--reset]         # the continuous paper account; --reset archives + starts fresh
 python -m noctis champions [--reset]       # the champion board; --reset re-fills slots under current gates
 ```
@@ -477,6 +477,39 @@ removes three directories and rewrites one flag — while any reference *out* of
 those directories (a path plus a hash, rather than the content itself) no longer resolves. It is
 also why the strategy sources that matter are meant to be embedded in the record rather than
 pointed at: an embedded champion is readable a year after its run's tree was reclaimed.
+
+### The close-of-day report — `report [address]`
+
+```bash
+python -m noctis report                              # the reserved `legacy` run, as always
+python -m noctis report latest                       # the run that just finished
+python -m noctis report @nightly-momo --as-of 2026-07-27   # a named run, on a named day
+```
+
+A run owns its `reports/` ([run-scoped state](configuration.md#the-workspace)), so the report of
+the run `noctis run` just minted lives under *that* run's tree. `report <address>` reads it,
+taking the same four [address forms](#the-four-address-forms-and-how-they-are-told-apart) as
+`--resume`, `run-record` and `run-prune`, resolved by the same rules — an address form invented
+twice would eventually resolve two different runs from one string. It exits non-zero when no run
+answers the address, or when more than one does.
+
+**With no address nothing changes**: it reads the reserved `legacy` run, which is what an
+invocation that never opened a run should read. `--as-of` and `--sweep-stale` compose with an
+address exactly as they always have, on the addressed run's own reports.
+
+An addressed run's tree is **authoritative**, and that is the whole rule:
+
+- Its `reports/` are what is printed, its `state/` is what a missing one is assembled from, and
+  its `reports/` is where that one is written — no report is ever assembled from, or written
+  into, another run's tree.
+- The un-migrated-layout guard ([the workspace](configuration.md#the-workspace)) does not run:
+  that guard answers *"which tree does an unaddressed command read?"*, and an address answers it.
+  A bare `report` beside a pre-workspace layout still refuses and names `noctis migrate`.
+- A run whose state [`run-prune`](#reclaiming-disk--run-prune-address) removed is **refused**
+  rather than reported on. Its `reports/` and `state/` were deleted on purpose and the record
+  says so (`run.state_pruned`), so the only report left to give would be one assembled from
+  nothing — an empty champion board attributed to a run that had one. Everything that run
+  accumulated is still in `noctis run-record <address>`, which is the refusal's own advice.
 
 ### What `status` reports about steering
 

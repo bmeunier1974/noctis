@@ -1286,6 +1286,29 @@ def open_run_store(
     return store
 
 
+def bind_addressed_run(settings, address: str) -> Path:
+    """Point ``settings`` at one **existing** run's tree, named by an operator address (#148).
+
+    The read-only twin of :func:`open_run_store`: the same resolver every verb that names a run
+    already shares (:func:`~noctis.reporting.run_store.resolve_run_dir` — four forms, one fixed
+    order, so an address form is never invented twice) and the same binding
+    (:func:`~noctis.config.settings.bind_run_dir`), but no minted id, no liveness lock and no
+    record write, because *reading* a finished experiment is not working it. Every collaborator
+    assembled afterwards — the champion registry, the memory store, the reports directory — reads
+    the addressed run's own tree, with no path arithmetic in a command body.
+
+    Raises :class:`~noctis.reporting.run_store.RunNotFoundError` when no run answers the address,
+    and its :class:`~noctis.reporting.run_store.RunAmbiguousError` subclass when more than one
+    does; the caller maps both to red text and a non-zero exit.
+    """
+    from noctis.config.settings import bind_run_dir
+    from noctis.reporting.run_store import resolve_run_dir
+
+    run_dir = resolve_run_dir(Path(settings.runs_dir), address)
+    bind_run_dir(settings, run_dir)
+    return run_dir
+
+
 def segment_phase_seconds(result) -> dict[str, float]:
     """This segment's per-phase working seconds, read off a ``RuntimeResult`` (story #136).
 
