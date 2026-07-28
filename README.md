@@ -177,10 +177,14 @@ the local copies; editing them never shows in `git status`.
 | [CLI](docs/cli.md) | Every `python -m noctis` command |
 | [Safety](docs/safety.md) | The paper-only safety model in full |
 | [Development](docs/development.md) | Full installation, optional extras, quality gates |
+| [Parity harness](docs/parity.md) | The evidence gate behind the `auto` research loop: conversation vs episodic, measured |
 
 In-tree contracts: [`strategies/README.md`](strategies/README.md) (the strategy-file
 format) · [`mandate/README.md`](mandate/README.md) (authoring mandates) ·
 [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) (workflow and governance).
+
+Design plans for work not yet shipped are internal working documents, kept apart from the
+narrative above in [`docs/plans/`](docs/plans/).
 
 Project: [Changelog](CHANGELOG.md) · [Roadmap](ROADMAP.md) · [Validation methodology](docs/validation.md)
 

@@ -139,7 +139,7 @@ declarative: the strategy states the rules, the engine enforces them, and the st
 observes whether one fired. A strategy remains a pure function of the bars it has seen, so
 `signals()`/`on_bar` parity stays about the *target* series and the write gate's replay
 semantics are untouched. The four decisions below are **resolved**; the implementation phases
-in [protective-exits-plan.md](protective-exits-plan.md) build on them and do not re-litigate
+in [protective-exits-plan.md](plans/protective-exits-plan.md) build on them and do not re-litigate
 them.
 
 **1. Author API (resolved).** `Context.set_target` grows exactly one keyword-only, defaulted

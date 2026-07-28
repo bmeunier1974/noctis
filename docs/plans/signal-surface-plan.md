@@ -6,7 +6,7 @@ gates, or the no-lookahead fill contract. Three phases, independent and shippabl
 order of increasing risk. Each phase is purely **additive** to the author surface:
 no existing strategy, seed, or champion changes behavior.
 
-**Companion plan:** `docs/protective-exits-plan.md` covers the order-type gap
+**Companion plan:** `docs/plans/protective-exits-plan.md` covers the order-type gap
 (stop/limit/trailing). It is deliberately separate because it changes the fill
 contract; this plan deliberately does not.
 

@@ -7,7 +7,7 @@ decisions locked *before* code, because the current contract ("decide on bar *t*
 at bar *t+1*'s open, nothing else can create a fill") is what makes the no-lookahead
 guarantee checkable today (`src/noctis/broker/simulator.py:1-7`).
 
-**Companion plan:** `docs/signal-surface-plan.md` (indicators/session/MTF) is purely
+**Companion plan:** `docs/plans/signal-surface-plan.md` (indicators/session/MTF) is purely
 additive and independent; land it first — it needs none of this.
 
 ---
