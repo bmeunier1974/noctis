@@ -218,27 +218,71 @@ class LegacyArtifact:
     configured: Path  # where settings now point
 
 
-def detect_legacy_layout(settings) -> list[LegacyArtifact]:
-    """Find legacy (pre-workspace) artifacts the configured layout would orphan.
+def _guarded_pre_workspace_pairs(settings) -> tuple[tuple[Path, Path], ...]:
+    """(legacy, configured) for the four **pre-workspace** artifacts the startup guard checks.
 
-    Legacy artifacts are looked for next to the config file — the project root in the
-    run-in-place model (``_yaml_path().parent``, so ``NOCTIS_CONFIG`` moves the search
-    with it). An artifact is flagged when the old default path exists, the configured
-    location differs, and the configured location does not exist: exactly the naive-
-    upgrade case where a run would start against a silently-empty champion board while
-    the real data sits abandoned. Explicitly pointing a knob at the legacy path is
-    honored (nothing flagged). Callers map a non-empty result to a refusal that names
-    ``noctis migrate``; ``status`` only warns.
+    Anchored next to the config file, the project root in the run-in-place model
+    (``_yaml_path().parent``, so ``NOCTIS_CONFIG`` moves the search with it). The configured side
+    is read off ``settings``, so each one names where the engine reads that artifact *now* — for
+    the three a run owns that is the run's own tree, and the lake stays workspace-level.
     """
     from noctis.config.settings import _yaml_path
 
     root = _yaml_path().parent
-    pairs = (
+    return (
         (root / "state", Path(settings.state_dir)),
         (root / "data_lake", Path(settings.data.lake_dir)),
         (root / "reports", Path(settings.reports_dir)),
         (root / "MEMORY.md", Path(settings.memory_path)),
     )
+
+
+def _pre_workspace_pairs(settings) -> tuple[tuple[Path, Path], ...]:
+    """Every pre-workspace pair ``migrate`` moves: the four guarded ones plus the strategy tiers.
+
+    The tiers are moved but never guarded — an orphaned ``strategies/__tmp/`` was never a reason
+    to refuse a run, since nothing silently reads as empty because of it.
+    """
+    from noctis.config.settings import _yaml_path
+    from noctis.strategies.library import CHAMPIONS_SUBDIR, TMP_SUBDIR, LibraryPaths
+
+    root = _yaml_path().parent
+    tiers = LibraryPaths.from_settings(settings)
+    return (
+        *_guarded_pre_workspace_pairs(settings),
+        (root / "strategies" / TMP_SUBDIR, tiers.tmp),
+        (root / "strategies" / CHAMPIONS_SUBDIR, tiers.champions),
+    )
+
+
+def _pre_run_scoped_pairs(settings) -> tuple[tuple[Path, Path], ...]:
+    """(legacy, configured) for every **pre-run-scoped** artifact — the workspace-level ones.
+
+    Before story #131 the workspace held one ``state/``, one ``reports/``, one ``memory/`` and one
+    pair of strategy tiers, shared by every invocation. They are now owned by the run that
+    produced them, so an existing operator's copies are adopted into the reserved ``legacy`` run.
+    The data lake is deliberately absent: it stays workspace-level and shared by every run.
+    """
+    from noctis.strategies.library import CHAMPIONS_SUBDIR, TMP_SUBDIR, LibraryPaths
+
+    workspace = Path(settings.workspace_dir)
+    tiers = LibraryPaths.from_settings(settings)
+    return (
+        (workspace / "state", Path(settings.state_dir)),
+        (workspace / "reports", Path(settings.reports_dir)),
+        (workspace / "memory" / "MEMORY.md", Path(settings.memory_path)),
+        (workspace / "qa", Path(settings.qa_dir)),
+        (workspace / "strategies" / TMP_SUBDIR, tiers.tmp),
+        (workspace / "strategies" / CHAMPIONS_SUBDIR, tiers.champions),
+    )
+
+
+def _orphaned(pairs: tuple[tuple[Path, Path], ...]) -> list[LegacyArtifact]:
+    """The pairs whose legacy side exists while the configured side does not — one shared rule.
+
+    Explicitly pointing a knob at the legacy path is honored (the pair is skipped): that is a
+    deliberate configuration, not an orphan.
+    """
     found: list[LegacyArtifact] = []
     for legacy, configured in pairs:
         if legacy.resolve() == configured.resolve():
@@ -246,6 +290,32 @@ def detect_legacy_layout(settings) -> list[LegacyArtifact]:
         if legacy.exists() and not configured.exists():
             found.append(LegacyArtifact(legacy=legacy, configured=configured))
     return found
+
+
+def detect_legacy_layout(settings) -> list[LegacyArtifact]:
+    """Find legacy (pre-workspace) artifacts the configured layout would orphan.
+
+    An artifact is flagged when the old default path beside ``config.yaml`` exists, the configured
+    location differs, and the configured location does not exist: exactly the naive-upgrade case
+    where a run would start against a silently-empty champion board while the real data sits
+    abandoned. Callers map a non-empty result to a **refusal** that names ``noctis migrate``;
+    ``status`` only warns.
+    """
+    return _orphaned(_guarded_pre_workspace_pairs(settings))
+
+
+def detect_unadopted_state(settings) -> list[LegacyArtifact]:
+    """Find pre-run-scoped ``workspace/`` state that no run has adopted yet (story #131).
+
+    The younger sibling of :func:`detect_legacy_layout`, and deliberately a **warning** rather
+    than a refusal. The difference is what continuing would cost: a pre-workspace artifact is
+    genuinely abandoned — nothing else looks there ever again — while un-adopted workspace state
+    is sitting safely in the same workspace, and the run that starts beside it is a *new* run with
+    its own board, which is correct by design. So the honest instruction is "adopt your history
+    into a run when you want it", not "you may not start". One command answers both:
+    ``noctis migrate``.
+    """
+    return _orphaned(_pre_run_scoped_pairs(settings))
 
 
 def scaffold_init(settings) -> list[str]:
@@ -284,46 +354,67 @@ def scaffold_init(settings) -> list[str]:
 
 
 @dataclass(frozen=True)
+class MigrationConflict:
+    """A legacy artifact only a human can place: two candidate histories, one destination."""
+
+    legacy: Path
+    configured: Path
+    reason: str
+
+
+@dataclass(frozen=True)
 class MigrationPlan:
     """What `noctis migrate` would do: clean moves, blocking conflicts, pinned skips."""
 
     moves: list[LegacyArtifact]
-    conflicts: list[LegacyArtifact]  # legacy AND workspace copy both exist — refuse
+    conflicts: list[MigrationConflict]  # the destination is already taken — refuse
     pinned: list[Path]  # a knob explicitly points at the legacy path — left in place
 
 
 def plan_migration(settings) -> MigrationPlan:
-    """Plan the one-shot move of every legacy artifact into the workspace.
+    """Plan the one-shot move of every legacy artifact to where the engine reads it now.
 
-    Covers the six legacy artifacts (state, lake, reports, root memory file, and the two
-    strategy tiers beside the seeds), anchored next to the config file like
-    :func:`detect_legacy_layout`. The local config never moves — it stays at the root,
-    merely untracked. Pure planning: nothing on disk changes here.
+    Two generations, one plan, because they are one question for the operator ("where did my
+    history go?") and deserve one instruction: the **pre-workspace** artifacts beside
+    ``config.yaml`` (:func:`_pre_workspace_pairs`) and the **pre-run-scoped** workspace artifacts
+    (:func:`_pre_run_scoped_pairs`), which are adopted into the reserved ``legacy`` run. The local
+    config never moves — it stays at the root, merely untracked.
+
+    A destination that already exists, or that two legacy copies both claim, is a **conflict**: it
+    is refused with a reason rather than resolved by guessing, because the two candidates are two
+    different histories and only a human knows which one is theirs. Pure planning: nothing on disk
+    changes here.
     """
-    from noctis.config.settings import _yaml_path
-    from noctis.strategies.library import CHAMPIONS_SUBDIR, TMP_SUBDIR, LibraryPaths
-
-    root = _yaml_path().parent
-    tiers = LibraryPaths.from_settings(settings)
-    pairs = (
-        (root / "state", Path(settings.state_dir)),
-        (root / "data_lake", Path(settings.data.lake_dir)),
-        (root / "reports", Path(settings.reports_dir)),
-        (root / "MEMORY.md", Path(settings.memory_path)),
-        (root / "strategies" / TMP_SUBDIR, tiers.tmp),
-        (root / "strategies" / CHAMPIONS_SUBDIR, tiers.champions),
-    )
+    pairs = (*_pre_workspace_pairs(settings), *_pre_run_scoped_pairs(settings))
     moves: list[LegacyArtifact] = []
-    conflicts: list[LegacyArtifact] = []
+    conflicts: list[MigrationConflict] = []
     pinned: list[Path] = []
+    claimed: dict[Path, Path] = {}
     for legacy, configured in pairs:
         if not legacy.exists():
             continue
-        if legacy.resolve() == configured.resolve():
+        target = configured.resolve()
+        if legacy.resolve() == target:
             pinned.append(legacy)
         elif configured.exists():
-            conflicts.append(LegacyArtifact(legacy=legacy, configured=configured))
+            conflicts.append(
+                MigrationConflict(
+                    legacy=legacy,
+                    configured=configured,
+                    reason="both exist — keep one and remove the other, then re-run",
+                )
+            )
+        elif target in claimed:
+            conflicts.append(
+                MigrationConflict(
+                    legacy=legacy,
+                    configured=configured,
+                    reason=f"two legacy copies claim it ({claimed[target]} is the other) — keep "
+                    "one and remove the other, then re-run",
+                )
+            )
         else:
+            claimed[target] = legacy
             moves.append(LegacyArtifact(legacy=legacy, configured=configured))
     return MigrationPlan(moves=moves, conflicts=conflicts, pinned=pinned)
 
@@ -335,6 +426,55 @@ def execute_migration(plan: MigrationPlan) -> None:
     for artifact in plan.moves:
         artifact.configured.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(artifact.legacy), str(artifact.configured))
+
+
+def adopt_run_record(
+    settings, *, adopted: int, clock: Callable[[], Any] | None = None
+) -> Path | None:
+    """Give the run that just adopted legacy state a ``run.json``, so it is a run like any other.
+
+    Adoption produces a run nobody ever *ran*: its champions, account and reports were earned
+    before runs existed. It still needs a record — that is what makes it listable by
+    ``noctis runs`` and resumable later — so this writes one with **zero segments**, which is the
+    honest shape: no process has ever worked this run, and inventing a segment would put a
+    fabricated night in the history. The record carries an event saying where its contents came
+    from, so the provenance is in the artifact rather than in the operator's memory.
+
+    Idempotent, and never destructive: a run dir that already has a record is left exactly as it
+    is, so migrating twice cannot overwrite a real run's history with an adoption stub.
+    """
+    from datetime import UTC, datetime
+
+    from noctis.reporting.run_record import RecordEvent, RunArtifacts, build, utc_iso
+    from noctis.reporting.run_store import read_engine_identity, read_record, update_index, write
+
+    run_dir = Path(settings.run_dir)
+    if not run_dir.is_dir():
+        return None
+    record, _ = read_record(run_dir)
+    if record is not None:
+        return None
+    now = (clock or (lambda: datetime.now(UTC)))()
+    stamp = utc_iso(now)
+    artifacts = RunArtifacts(
+        run_id=run_dir.name,
+        created_utc=stamp,
+        last_active_utc=stamp,
+        engine=read_engine_identity(settings.promotion.metric),
+        label="default",
+        complete=True,
+        events=(
+            RecordEvent(
+                t=stamp,
+                kind="info",
+                text=f"adopted {adopted} pre-run-scoped artifact(s) into this run by "
+                f"`noctis migrate`; its state predates run-scoped state",
+            ),
+        ),
+    )
+    write(run_dir, build(artifacts))
+    update_index(run_dir.parent, run_dir.name)
+    return run_dir / "run.json"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -461,6 +601,20 @@ def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | No
 _DIGEST_SECRET_FIELDS = frozenset({"databento_api_key", "anthropic_api_key", "openai_api_key"})
 
 
+def _digest_excluded_fields() -> set[str]:
+    """Settings fields the config digest leaves out: the secrets, plus the run's own tree.
+
+    The digest is a **label for grouping runs that share a configuration** (epic #126, D2), so
+    anything carrying the run's *identity* has to stay out of it: once a run is opened, the
+    run-scoped paths hold its minted id, and folding those in would give every run a unique digest
+    and make the label useless for the one job it has. Derived from the settings module's own
+    run-scoped path table, so a path added there is excluded here with no edit.
+    """
+    from noctis.config.settings import _RUN_SCOPED_SUBPATHS
+
+    return set(_DIGEST_SECRET_FIELDS) | set(_RUN_SCOPED_SUBPATHS) | {"run_dir"}
+
+
 def open_run_store(
     settings,
     *,
@@ -482,14 +636,23 @@ def open_run_store(
     argument), so a run has exactly one identity and one tree per artifact instead of two ids
     nobody can correlate.
 
+    **Opening a run also binds its state** (story #131): the run's tree owns its champions, paper
+    account, forward ledger, journals, strategy tiers, memory and reports, so this rebinds
+    ``settings`` onto that tree (:func:`~noctis.config.settings.bind_run_dir`) the moment the id is
+    known. Every collaborator assembled afterwards — ``build_memory``, ``build_families``,
+    ``build_registry``, ``build_recorder``, the runtime — therefore reads the *run's* state without
+    a single path edit in a command body, and two runs in one workspace cannot contaminate each
+    other. The shared data lake is untouched: vendor data is expensive and run-neutral.
+
     Raises :class:`~noctis.reporting.run_store.RunLockedError` when another engine already holds
     the addressed run — the one failure in this subsystem that is fatal rather than latched.
     """
     from datetime import UTC, datetime
 
+    from noctis.config.settings import bind_run_dir
     from noctis.reporting.run_store import open_run
 
-    return open_run(
+    store = open_run(
         Path(settings.runs_dir),
         clock=clock or (lambda: datetime.now(UTC)),
         argv=list(argv),
@@ -498,6 +661,8 @@ def open_run_store(
         command=command,
         label=label,
     )
+    bind_run_dir(settings, store.run_dir)
+    return store
 
 
 def segment_counters(result) -> dict[str, int]:
@@ -524,8 +689,9 @@ def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str |
     wall-clock and the manifest fields the recorder cannot know itself: the CLI ``argv``, the run
     ``mode``, a deterministic config digest, and the noctis/python versions. The recorder owns run
     id and the started/stopped/duration stamps; everything else is injected here. The digest is
-    taken over the *resolved* settings with API keys excluded (:data:`_DIGEST_SECRET_FIELDS`) so a
-    credential can never ride into the report tree.
+    taken over the *resolved* settings, minus the fields :func:`_digest_excluded_fields` names —
+    the API keys, so a credential can never ride into the report tree, and the run's own tree, so
+    the digest stays a label two runs on one configuration share.
 
     ``run_id`` is the run's own id (:func:`open_run_store`), so the QA tree and the run record
     describe the same run under one name; it defaults to a freshly minted id for callers that
@@ -540,7 +706,7 @@ def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str |
 
     prune_qa_dir(settings.qa_dir, settings.qa.keep_last_runs)
 
-    dump = settings.model_dump_json(exclude=set(_DIGEST_SECRET_FIELDS))
+    dump = settings.model_dump_json(exclude=_digest_excluded_fields())
     config_digest = hashlib.sha256(dump.encode("utf-8")).hexdigest()[:12]
 
     try:

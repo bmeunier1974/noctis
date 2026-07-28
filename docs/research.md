@@ -21,7 +21,7 @@ The structural gates:
 
 - **Validation-on-write.** `write_strategy` validates in an isolated interpreter (import +
   smoke replay + scenario replay + signals/on_bar parity) — a broken file can never land.
-- **Exhaustion.** Every trial auto-journals to `workspace/state/experiments/<name>.jsonl`; the verdict
+- **Exhaustion.** Every trial auto-journals to the run's `state/experiments/<name>.jsonl`; the verdict
   tools refuse until ≥ `research.min_trials` distinct parameter sets (or one completed sweep)
   have been journaled.
 - **Aggregates only.** Backtests return scorecards, not bar-level results; previews never cross
@@ -49,7 +49,7 @@ every still-undecided top-level `__tmp/` file whose mtime predates `research.dra
 (AGENTS.md rule 2) — capped at 50 with the oldest evicted, so a fresh session never inherits a
 stale draft it abandoned days ago. When anything is archived, the count and names log at INFO
 (`pruned N stale working-tier draft(s) …`). The experiment journals under
-`workspace/state/experiments/` are untouched and stay the ground truth for what was tried.
+the run's `state/experiments/` are untouched and stay the ground truth for what was tried.
 
 **Session-end honesty.** However a loop exits, any strategy authored but never carried to a verdict
 is left undecided. The session names them in a WARNING (`… will be archived after the TTL`) and

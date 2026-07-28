@@ -79,6 +79,11 @@ champion_count: 3 # champion board size
 time_limit_hours: null # overall run limit (null = run until stopped)
 
 # Everything Noctis writes lands under this one gitignored folder (env: NOCTIS_WORKSPACE).
+# Inside it, a RUN owns its state: workspace/runs/<run_id>/{state,strategies,memory,reports,qa},
+# while workspace/data_lake/ is shared by every run (vendor data is expensive and run-neutral).
+# state_dir / reports_dir / qa_dir / memory_path all derive from run_dir, which every `noctis run`
+# rebinds to the run it mints; unset, it is the reserved workspace/runs/legacy/ run that the
+# read-only commands (status, champions, account, report) read.
 # Mandate: REFUSED — moving an output root moves the experiment journal the exhaustion gate
 # counts from and the champion tier itself; that is structural, not a setting.
 workspace_dir: workspace/

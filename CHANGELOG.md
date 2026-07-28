@@ -73,6 +73,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A run owns its state; the data lake stays shared.** `workspace/state/` used to be shared by
+  every invocation in the workspace, so two runs with different mandates crowned champions onto
+  one board and traded one paper account and neither run's numbers meant anything. Champions, the
+  paper account, the forward ledger, specs, sessions, experiment journals, the strategy
+  `__tmp`/`champions` tiers, agent memory and the per-day close reports now live under
+  `workspace/runs/<run_id>/`, beside that run's `run.json`. `workspace/data_lake/` is deliberately
+  **not** run-scoped — vendor data is expensive, reproducible and run-neutral, so every run reads
+  and writes the one lake.
+  - The mechanism is the one that already existed: `state_dir` / `reports_dir` / `qa_dir` /
+    `memory_path` derive from a new **`run_dir`** knob (refused by the mandate overlay, like every
+    other path) instead of from `workspace_dir`, and `bootstrap.open_run_store` rebinds `run_dir`
+    to the run it just minted — one settings change plus one composition-root change, no path
+    arithmetic in any command body. An explicitly configured path still wins over the derivation.
+  - `run_dir` defaults to the reserved `workspace/runs/legacy/` run: what an invocation that never
+    opened a run reads (`status`, `champions`, `account`, `report`, `backtest`, a bare `research`),
+    and the run `noctis migrate` adopts existing state into — so an upgrading operator finds their
+    history exactly where those commands already look.
+  - **Per-run agent memory**: each run's `memory/MEMORY.md` is seeded from the committed
+    `MEMORY.seed.md` at run creation (before the store constructs, as before), so one run's
+    lessons never leak into another's trajectory and the seed itself is never mutated. The
+    committed `strategies/` seeds stay read-only input for every run and the three-tier discovery
+    contract is unchanged; only the two writable tiers moved under the run.
+- **`noctis migrate` adopts pre-run-scoped state into the reserved `legacy` run.** One command
+  still covers both legacy generations — the pre-workspace artifacts beside `config.yaml` and now
+  a pre-run-scoped `workspace/state|reports|memory|qa|strategies` — with one plan, one `--dry-run`
+  and one conflict refusal (a destination that already exists, or that two legacy copies claim, is
+  refused with the reason rather than resolved by guessing). The adopted run gets a real `run.json`
+  with **zero segments** (no process ever worked it: inventing a segment would fabricate a night)
+  and an event recording where its contents came from, so it lists in `noctis runs` and is
+  resumable later. Running it twice is a no-op. The startup guard now covers both generations in
+  one message with one instruction: abandoned pre-workspace data still **refuses** (`status`
+  warns), while un-adopted workspace state **warns** — that state is not abandoned, only unclaimed,
+  and the run starting beside it is a new run with its own board, which is the point.
 - **The mandate is the sole run input.** A mandate's `config:` block now overlays the whole
   run-shaping tier — the model seam, the spend ceilings, the search shape, the data window,
   housekeeping, and the seed `universe` — rather than the single `promotion.metric` knob of

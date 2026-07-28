@@ -113,7 +113,11 @@ class LibraryPaths:
 
     @classmethod
     def from_settings(cls, settings) -> LibraryPaths:
-        work = Path(settings.workspace_dir) / "strategies"
+        # The two writable tiers belong to the RUN that authored them (epic #126, D5), so they
+        # live under ``settings.run_dir`` beside that run's champion board — a draft or a locally
+        # promoted champion is exactly as run-scoped as the board that judged it. The committed
+        # ``seeds`` tier is unchanged: read-only input every run starts from.
+        work = Path(settings.run_dir) / "strategies"
         return cls(
             seeds=Path(settings.strategies_dir),
             tmp=work / TMP_SUBDIR,

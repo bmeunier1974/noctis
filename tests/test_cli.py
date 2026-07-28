@@ -148,7 +148,8 @@ def test_status_trading_driver_reflects_execution(tmp_path):
 
 def test_report_sweep_stale_dry_run_lists_without_moving(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    reports = tmp_path / "workspace" / "reports"  # the workspace-derived default
+    # The reports of the reserved run every unaddressed command reads (story #131).
+    reports = tmp_path / "workspace" / "runs" / "legacy" / "reports"
     reports.mkdir(parents=True)
     (reports / "2099-01-01.md").write_text("future")
     (reports / "2020-01-01.md").write_text("past")
@@ -164,7 +165,8 @@ def test_report_sweep_stale_dry_run_lists_without_moving(tmp_path, monkeypatch):
 
 def test_report_sweep_stale_apply_moves_future_reports(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    reports = tmp_path / "workspace" / "reports"  # the workspace-derived default
+    # The reports of the reserved run every unaddressed command reads (story #131).
+    reports = tmp_path / "workspace" / "runs" / "legacy" / "reports"
     reports.mkdir(parents=True)
     (reports / "2099-01-01.md").write_text("future")
     (reports / "2020-01-01.md").write_text("past")

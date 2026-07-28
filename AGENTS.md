@@ -10,7 +10,7 @@ it directly).
 **researches strategies while the market is closed**, **trades champions on (live or replayed)
 bars while it is open**, and **reports at the close** — looping day after day. With an
 `ANTHROPIC_API_KEY`, RESEARCH *is* an agent session: Claude authors one-file Python strategies
-into the library's working tier (`workspace/strategies/__tmp/`; the committed `strategies/`
+into the run's working tier (`<run_dir>/strategies/__tmp/`; the committed `strategies/`
 seeds are read-only input) and drives `formulate → match → optimize → decide` through a curated tool
 registry. Without a key it falls back to a legacy Optuna/proposer loop over the same library.
 
@@ -75,7 +75,7 @@ python scripts/engine_fingerprint.py [--write]   # the engine fingerprint ratche
 
 python -m noctis setup [--check]   # guided first-run wizard: files, extras, keys, LLM verify
 python -m noctis init              # scaffold local config/.env/mandate + workspace (idempotent)
-python -m noctis migrate [--dry-run]   # move a pre-workspace layout into workspace/
+python -m noctis migrate [--dry-run]   # move a legacy layout in; adopt workspace state into `legacy`
 python -m noctis run -v            # the day/night loop (stops at time_limit_hours)
 python -m noctis research -v       # ONE observable agent research session (needs ANTHROPIC_API_KEY)
 python -m noctis runs [--all]      # the run board: id, label, status, segments, headline numbers
@@ -122,8 +122,8 @@ written, while the episodic driver's FORMULATE-authored fixed oracle (a structur
 (`src/noctis/strategies/library.py`,
 `LibraryPaths`), discovered lowest-precedence first: committed **seeds** in `strategies/`
 (`TEMPLATE.py` + the three worked examples, the *only* files in the public repo — read-only input)
-→ the `workspace/strategies/__tmp/` working area (drafts/candidates/rejects, local-only) → the
-`workspace/strategies/champions/` folder (locally-promoted). A later tier
+→ the run's `strategies/__tmp/` working area (drafts/candidates/rejects, local-only) → the run's
+`strategies/champions/` folder (locally-promoted; both under `workspace/runs/<run_id>/`). A later tier
 overrides an earlier one, so a champion beats a seed of the same name and committed seeds are never
 mutated in place (a seed rewrite is redirected into `__tmp/`). `write_strategy` authors into `__tmp/`;
 on promotion the file is **moved** into `champions/`, tuned params are written back as defaults, and
@@ -137,7 +137,7 @@ conversation transcript or the episodic driver; `auto` flips to episodic when th
 `context_window` is ≤ 32,768 (#76 — evidence-gated by the parity harness, decided in one place:
 `bootstrap.resolve_research_loop`). The agent's discipline is entirely structural: the exhaustion
 gate refuses a verdict until ≥ `research.min_trials` distinct param sets are journaled to
-`workspace/state/experiments/<name>.jsonl`, backtests return aggregate scorecards only, previews never cross
+the run's `state/experiments/<name>.jsonl`, backtests return aggregate scorecards only, previews never cross
 into holdout bars, and data spend sits behind a budget preflight. `run_sweep`'s execution engine —
 the seeded sampler, the fork pool, the OOM/stall guard — is its own `SweepRunner` seam
 (`src/noctis/research/sweep.py`); the toolbox keeps the accounting (budget, journal, ranking). The legacy `StrategySpec` engine
@@ -178,11 +178,26 @@ the strategy-family registry, the agent research session), live in one compositi
 - **Where state lives — the input/output contract:** committed files are input the engine treats
   as read-only (`strategies/` seeds + `TEMPLATE.py` + `strategies/README.md`, the `mandate/`
   scaffold, `config.example.yaml`, `MEMORY.seed.md`); **everything the engine writes lands under
-  the gitignored `workspace/`** (state, data lake, reports, agent memory, the strategy
-  `__tmp`/`champions` tiers, and one `runs/<run_id>/` folder per run — its `run.json` record and
-  liveness lock), one knob (`workspace_dir`, env `NOCTIS_WORKSPACE`) all derived paths
-  follow. `noctis init` scaffolds the local input copies; `noctis migrate` moves a pre-workspace
-  layout in; a startup guard refuses to run beside un-migrated legacy data (`status` only warns).
+  the gitignored `workspace/`**, and inside it **a run owns its state**:
+
+  ```
+  workspace/
+    data_lake/            ← SHARED by every run. Vendor data is expensive and run-neutral.
+    runs/<run_id>/        ← run.json + run.lock, and everything that run produced:
+      state/  strategies/{__tmp,champions}/  memory/MEMORY.md  reports/  qa/
+  ```
+
+  Two runs in one workspace therefore cannot crown champions onto one board or trade one paper
+  account. `workspace_dir` (env `NOCTIS_WORKSPACE`) is still the one output root; the four
+  per-run paths (`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from **`run_dir`**,
+  which defaults to the reserved `runs/legacy/` run — what an invocation that never opened a run
+  reads (`status`, `champions`, `account`, `report`, a bare `research`) — and is rebound to the
+  run's own tree by `bootstrap.open_run_store` the moment `noctis run` mints an id. Derive paths
+  in `config/settings.py` and rebind them in the composition root, never in a command body.
+  `noctis init` scaffolds the local input copies; `noctis migrate` moves a pre-workspace layout
+  in **and** adopts a pre-run-scoped `workspace/state/` into the `legacy` run; one startup guard
+  covers both — it refuses beside abandoned pre-workspace data (`status` only warns) and warns
+  beside un-adopted workspace state, since that state is not abandoned, only unclaimed.
   A public clone ships templates/seeds/scaffold only, and no operator's champions or rejects
   reach git.
   The `mandate/` folder is the same shape: only the scaffold is committed (`MANDATE.md.example`,
@@ -196,8 +211,8 @@ the strategy-family registry, the agent research session), live in one compositi
   A `.pyc`-staleness gotcha bit `_load_module` before; prefer fresh-subprocess
   validation over trusting import caches.
 - **Agent memory follows the seed pattern**: the committed `MEMORY.seed.md` carries curated
-  starting lessons every fresh install begins with; the live, agent-maintained file is
-  `workspace/memory/MEMORY.md` (gitignored), seeded from the seed on first run by
+  starting lessons every *run* begins with; the live, agent-maintained file is
+  `workspace/runs/<run_id>/memory/MEMORY.md` (gitignored), seeded from the seed at run creation by
   `bootstrap.build_memory` — the copy happens *before* `MemoryStore` constructs, because its
   `load()` auto-creates a blank template for a missing file. Skim the live file when something
   behaves unexpectedly; promote a lesson into the seed only when it should ship to every user.

@@ -58,7 +58,7 @@ warning (see [development.md](development.md)).
 | 🔐 Config + safety gate | `src/noctis/config` | Typed settings (`config.yaml` + `.env`); the paper/live double gate |
 | 🧩 Composition root | `src/noctis/bootstrap.py` | One session-assembly seam: the settings → gate → mandate → CLI-flag precedence chain, plus the shared builders (lake, memory, console, the agent research session) every entrypoint uses instead of hand-wiring |
 | 🗄️ Fetch-once data lake | `src/noctis/data` | Parquet catalog + coverage registry + coverage-diffed ingest + tail-only sync + integrity check + cost preflight |
-| 📚 Strategy library | `strategies/` + `src/noctis/strategies/library.py` | One `.py` per strategy — thesis, code, tuned params, and research provenance in a docstring header; `write_strategy` validates in a subprocess so a broken file can never land. Three tiers: committed seeds in `strategies/`, plus the workspace's `__tmp/` working files and `champions/` (a later tier overrides an earlier one) |
+| 📚 Strategy library | `strategies/` + `src/noctis/strategies/library.py` | One `.py` per strategy — thesis, code, tuned params, and research provenance in a docstring header; `write_strategy` validates in a subprocess so a broken file can never land. Three tiers: committed seeds in `strategies/`, plus the run's `__tmp/` working files and `champions/` (a later tier overrides an earlier one) |
 | 📐 Strategies | `src/noctis/strategies` | `TraderStrategy` base: event-driven `on_bar()` plus a default `signals()` that replays it (parity by construction; a vectorised override stays possible); indicator helpers; SMA / RSI / Donchian worked examples; the candidate proposer |
 | 🤖 Agent research | `src/noctis/research` | The agent loop: an LLM drives formulate → match → optimize → decide through a curated tool registry with per-strategy experiment journals and an exhaustion gate on verdicts |
 | 🧬 StrategySpec engine | `src/noctis/strategies/spec` | Strategy-as-data (legacy ideation): a JSON graph compiles to a registerable family whose `signals()`/`on_bar()` share one rule evaluator; persists to the state dir's `specs.json` and re-registers at startup |
@@ -67,8 +67,8 @@ warning (see [development.md](development.md)).
 | 🏆 Champions | `src/noctis/champions` | Persistent registry + pure promotion rules (OOS metric, train−test gap guard) |
 | ⚙️ Engine | `src/noctis/engine` | Market clock, state machine, research loop, close orchestration, runtime |
 | 📡 Live | `src/noctis/live` | Trading loop + risk manager |
-| 📊 Reporting | `src/noctis/reporting` | Close-of-day report, Markdown + structured JSON (`workspace/reports/<date>.md` / `.json`) |
-| 🧠 Memory | `src/noctis/memory` | The agent-memory store (load / append / reorganize; lives at `workspace/memory/MEMORY.md`) |
+| 📊 Reporting | `src/noctis/reporting` | Close-of-day report, Markdown + structured JSON (`<run>/reports/<date>.md` / `.json`) + the run record/store |
+| 🧠 Memory | `src/noctis/memory` | The agent-memory store (load / append / reorganize; lives at `<run>/memory/MEMORY.md`) |
 
 ## Two research paths, one contract
 
@@ -263,7 +263,7 @@ report.
 
 ## At the close
 
-Noctis writes a report (`workspace/reports/<date>.md` + `.json`), syncs its data catalog
+Noctis writes a report (`<run>/reports/<date>.md` + `.json`), syncs its data catalog
 (tail-only), reconciles live-built bars against the authoritative catalog (see
 [data.md](data.md)), reorganizes its own memory, and loops back to research.
 
@@ -271,8 +271,35 @@ Noctis writes a report (`workspace/reports/<date>.md` + `.json`), syncs its data
 
 One contract: **the operator surface is committed templates/scaffold plus local, gitignored
 copies; everything the engine writes lands under `workspace/`** (one knob, `workspace_dir`,
-env `NOCTIS_WORKSPACE`). `noctis init` scaffolds the local copies; `noctis migrate` moves a
-pre-workspace layout in; a startup guard refuses to run beside un-migrated legacy data.
+env `NOCTIS_WORKSPACE`) — and inside it, **a run owns its state**. `noctis init` scaffolds the
+local copies; `noctis migrate` moves a pre-workspace layout in and adopts pre-run-scoped
+workspace state into the reserved `legacy` run; a startup guard refuses to run beside abandoned
+pre-workspace data and warns beside un-adopted workspace state.
+
+```
+workspace/
+  data_lake/                  ← SHARED across runs. Vendor data is expensive and run-neutral.
+  runs/
+    index.json                ← the derived listing roll-up
+    <run_id>/
+      run.json  run.lock      ← the record and the liveness lock
+      state/                  ← champions.json, paper_account.json, forward_ledger.json,
+                                 specs.json, sessions/, experiments/
+      strategies/             ← this run's __tmp/ and champions/ tiers
+      memory/MEMORY.md        ← seeded from the committed MEMORY.seed.md at run creation
+      reports/                ← this run's per-day close reports
+      qa/                     ← the --debug tree
+```
+
+Two runs in one workspace therefore cannot crown champions onto one board or trade one paper
+account, and a run's numbers describe only what that run produced. The four per-run paths
+(`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from `run_dir` in
+`config/settings.py`; `bootstrap.open_run_store` rebinds `run_dir` to the run it just minted, so
+no command body does path arithmetic. `run_dir` defaults to the reserved `runs/legacy/` run —
+what an invocation that never opened a run reads (`status`, `champions`, `account`, `report`, a
+bare `research`), and the run `noctis migrate` adopts existing state into. The **committed
+`strategies/` seeds stay read-only input for every run**: the three-tier discovery contract
+(seeds → `__tmp/` → `champions/`) is unchanged; only the two writable tiers moved under the run.
 
 **The operator surface (input — the engine treats all of it as read-only):**
 
@@ -289,13 +316,17 @@ pre-workspace layout in; a startup guard refuses to run beside un-migrated legac
 
 | Path | What |
 |---|---|
-| `workspace/state/champions.json` | The champion registry |
-| `workspace/state/paper_account.json` | The continuous paper account |
-| `workspace/state/trading_sessions.json` | The replay high-water mark |
-| `workspace/state/experiments/<strategy>.jsonl` | Per-strategy experiment journals, one line per backtest/sweep trial |
-| `workspace/state/specs.json` | LLM-minted `StrategySpec` definitions, re-registered at startup |
-| `workspace/data_lake/` | Parquet catalog + `coverage.db` + `manifest.json` |
-| `workspace/reports/YYYY-MM-DD.md` + `.json` | Close-of-day reports, human- and machine-readable |
-| `workspace/memory/MEMORY.md` | The agent's own live long-term memory (the agent maintains it) |
-| `workspace/strategies/__tmp/` | The research agent's working files (drafts, candidates, rejects) |
-| `workspace/strategies/champions/` | Locally-promoted champions (never reach the public repo) |
+| `workspace/data_lake/` | Parquet catalog + `coverage.db` + `manifest.json` — **shared by every run** |
+| `workspace/runs/index.json` | The derived listing roll-up over every run record |
+| `<run>/run.json` + `run.lock` | One run's self-describing record and its liveness lock |
+| `<run>/state/champions.json` | That run's champion registry |
+| `<run>/state/paper_account.json` | That run's continuous paper account |
+| `<run>/state/trading_sessions.json` | That run's replay high-water mark |
+| `<run>/state/experiments/<strategy>.jsonl` | Per-strategy experiment journals, one line per backtest/sweep trial |
+| `<run>/state/specs.json` | LLM-minted `StrategySpec` definitions, re-registered at startup |
+| `<run>/reports/YYYY-MM-DD.md` + `.json` | Close-of-day reports, human- and machine-readable |
+| `<run>/memory/MEMORY.md` | That run's live long-term memory, seeded from `MEMORY.seed.md` |
+| `<run>/strategies/__tmp/` | The research agent's working files (drafts, candidates, rejects) |
+| `<run>/strategies/champions/` | Locally-promoted champions (never reach the public repo) |
+
+(`<run>` is `workspace/runs/<run_id>/`.)

@@ -107,31 +107,54 @@ def _resolve_status_session(config: str | None) -> tuple[SessionInputs, str | No
 
 
 def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
-    """Refuse to run (exit 2) beside an un-migrated legacy layout; ``status`` only warns.
+    """One guard over both legacy generations, with one instruction: ``noctis migrate``.
 
-    A silently-empty champion board next to abandoned data is worse than a hard stop, so
-    every state/lake/report-touching command refuses until ``noctis migrate`` has moved the
-    legacy artifacts (or the knobs explicitly point at them).
+    Two things can be un-migrated, and they differ in what *continuing* would cost — so they
+    differ in severity, never in the remedy:
+
+    * **Pre-workspace artifacts** beside ``config.yaml`` would be genuinely abandoned: nothing
+      looks there again, so a run would start against a silently-empty champion board while the
+      real data rots at the old path. That is a **refusal** (exit 2); ``status`` only warns,
+      because it is the diagnostic an operator runs *because* something is wrong.
+    * **Pre-run-scoped ``workspace/`` state** is not abandoned at all — it sits in the same
+      workspace, and the run starting beside it is a new run with its own board, which is exactly
+      what run-scoped state means. That is a **warning**, always, on every command.
+
+    Both are reported in one message so an operator is never handed two competing instructions.
     """
-    from noctis.bootstrap import detect_legacy_layout
+    from noctis.bootstrap import detect_legacy_layout, detect_unadopted_state
 
-    found = detect_legacy_layout(settings)
-    if not found:
+    abandoned = detect_legacy_layout(settings)
+    unadopted = detect_unadopted_state(settings)
+    blocks: list[str] = []
+    if abandoned:
+        blocks.append(
+            "Legacy (pre-workspace) layout detected — running now would abandon:\n"
+            + "\n".join(
+                f"  {a.legacy}  (configured location {a.configured} does not exist)"
+                for a in abandoned
+            )
+        )
+    if unadopted:
+        blocks.append(
+            "Pre-run-scoped state detected — a run's champions, account, memory and reports now "
+            "live under its own run, and this state belongs to no run yet:\n"
+            + "\n".join(f"  {a.legacy}  →  {a.configured}" for a in unadopted)
+        )
+    if not blocks:
         return
-    lines = "\n".join(
-        f"  {a.legacy}  (configured location {a.configured} does not exist)" for a in found
+    message = "\n".join(
+        [
+            *blocks,
+            "Run `noctis migrate` to move them where the engine now reads them (adopting the "
+            "workspace state into the reserved `legacy` run), or point the knobs at them "
+            "explicitly in config.yaml.",
+        ]
     )
-    message = (
-        "Legacy (pre-workspace) layout detected — running now would abandon:\n"
-        f"{lines}\n"
-        "Run `noctis migrate` to move them into the workspace, or point the knobs at them "
-        "explicitly in config.yaml."
-    )
-    if warn_only:
-        typer.secho(f"WARNING: {message}", fg=typer.colors.YELLOW, err=True)
-        return
-    typer.secho(message, fg=typer.colors.RED, err=True)
-    raise typer.Exit(code=2)
+    if abandoned and not warn_only:
+        typer.secho(message, fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    typer.secho(f"WARNING: {message}", fg=typer.colors.YELLOW, err=True)
 
 
 def _echo_mandate(mandate, override_lines: list[str]) -> None:
@@ -1161,21 +1184,29 @@ def migrate(
         False, "--dry-run", help="Print the migration plan without moving anything."
     ),
 ) -> None:
-    """Move a legacy (pre-workspace) layout into the workspace, one artifact at a time.
+    """Move a legacy layout to where the engine reads it now, one artifact at a time.
 
-    Covers state/, data_lake/, reports/, MEMORY.md, and the strategies/__tmp|champions
-    tiers. Refuses (with a list) when a legacy artifact and its workspace counterpart
-    both exist — resolve by hand, then re-run. config.yaml never moves.
+    Two generations, one command. The **pre-workspace** artifacts beside `config.yaml` (state/,
+    data_lake/, reports/, MEMORY.md, the strategies/__tmp|champions tiers) move into the
+    workspace; the **pre-run-scoped** workspace artifacts (workspace/state/, reports/, memory/,
+    qa/ and the two tiers) are adopted into the reserved `legacy` run, so an existing operator's
+    champions, account and reports survive and become their first resumable run. The lake never
+    moves under a run — vendor data is shared by every run.
+
+    Refuses (with a list) when a destination is already taken or two legacy copies claim it —
+    those are two different histories, so resolve by hand and re-run. config.yaml never moves,
+    and running twice is a no-op.
     """
-    from noctis.bootstrap import execute_migration, plan_migration
+    from pathlib import Path
+
+    from noctis.bootstrap import adopt_run_record, execute_migration, plan_migration
 
     settings = load_settings(config_path=config)
     plan = plan_migration(settings)
     if plan.conflicts:
-        lines = "\n".join(f"  {a.legacy}  AND  {a.configured}  both exist" for a in plan.conflicts)
+        lines = "\n".join(f"  {c.legacy}  →  {c.configured}: {c.reason}" for c in plan.conflicts)
         typer.secho(
-            f"Refusing to migrate — resolve these by hand first (keep one, remove the other):\n"
-            f"{lines}\nNothing was moved.",
+            f"Refusing to migrate — resolve these by hand first:\n{lines}\nNothing was moved.",
             fg=typer.colors.RED,
             err=True,
         )
@@ -1194,10 +1225,23 @@ def migrate(
         execute_migration(plan)
     for artifact in plan.moves:
         typer.echo(f"{verb}  {artifact.legacy}  →  {artifact.configured}")
+    adopted = sum(1 for a in plan.moves if a.configured.is_relative_to(Path(settings.run_dir)))
     if dry_run:
+        if adopted:
+            typer.echo(
+                f"\nwould adopt  {adopted} artifact(s) into run {Path(settings.run_dir).name} "
+                f"(a run record would be written to {Path(settings.run_dir) / 'run.json'})"
+            )
         typer.echo("\n(dry run — re-run without --dry-run to perform these moves)")
-    else:
-        typer.echo(f"\nMigrated {len(plan.moves)} artifact(s) into the workspace.")
+        return
+    typer.echo(f"\nMigrated {len(plan.moves)} artifact(s).")
+    if adopted:
+        record = adopt_run_record(settings, adopted=adopted)
+        run_id = Path(settings.run_dir).name
+        typer.echo(
+            f"Adopted {adopted} of them into run {run_id}"
+            + (f" ({record})" if record is not None else " (its record was already there)")
+        )
 
 
 # --- data sub-app -----------------------------------------------------------------------

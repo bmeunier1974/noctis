@@ -334,6 +334,10 @@ REFUSED: dict[str, str] = {
     "champion_count": _BOARD_SIZE,
     # State / IO redirection.
     "workspace_dir": _STATE_IO,
+    # The run's own root — the four run-scoped paths below derive from it, so an overlay that
+    # could move it would move a run's champion board and experiment journal wholesale. A run's
+    # identity is minted by the engine, never chosen by the mandate it is steered with.
+    "run_dir": _STATE_IO,
     "state_dir": _STATE_IO,
     "reports_dir": _STATE_IO,
     "memory_path": _STATE_IO,

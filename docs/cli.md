@@ -10,7 +10,7 @@ configured LLM (see [research.md](research.md)).
 python -m noctis setup                # guided first-run wizard: files, components, keys, LLM
 python -m noctis setup --check        # read-only install audit; exit 1 on gaps
 python -m noctis init                 # scaffold local config.yaml/.env/mandate + the workspace
-python -m noctis migrate [--dry-run]  # move a pre-workspace layout into workspace/
+python -m noctis migrate [--dry-run]  # move a legacy layout in; adopt state into run `legacy`
 ```
 
 `setup` is the one command a fresh machine needs after `uv sync --all-extras`: it scaffolds
@@ -28,12 +28,19 @@ scriptable "is this install healthy?").
 (`config.example.yaml`, `.env.example`,
 `mandate/MANDATE.md.example`) to its local, gitignored name and creates `workspace/` — the one
 output root everything the engine writes lands under. It is idempotent and never overwrites:
-re-running after edits is always safe. `migrate` moves the six legacy artifacts (`state/`,
-`data_lake/`, `reports/`, root `MEMORY.md`, `strategies/__tmp|champions`) into the workspace;
-it refuses with a list when a legacy artifact and its workspace counterpart both exist, notes
-knobs explicitly pinned at legacy paths, and never touches `config.yaml`. Until a legacy
-layout is migrated, every state-touching command refuses and names `migrate`; `status` warns
-but still prints.
+re-running after edits is always safe.
+
+`migrate` handles both legacy generations in one pass. It moves the six pre-workspace artifacts
+(`state/`, `data_lake/`, `reports/`, root `MEMORY.md`, `strategies/__tmp|champions`) to where the
+engine reads them now, and **adopts** a pre-run-scoped `workspace/state|reports|memory|qa|
+strategies` into the reserved `legacy` run — so an existing operator's champions, account and
+reports survive and become their first resumable run, with its own `run.json` listed by
+`noctis runs`. It refuses with a list (and moves nothing) when a destination already exists or
+two legacy copies claim one, notes knobs explicitly pinned at legacy paths, never touches
+`config.yaml`, and is a no-op when run twice. `--dry-run` prints the whole plan, adoption
+included, without moving a byte. Until a **pre-workspace** layout is migrated every
+state-touching command refuses and names `migrate` (`status` warns but still prints); un-adopted
+workspace state only warns, on every command.
 
 ## The loop
 
@@ -43,7 +50,7 @@ python -m noctis run -vv --show-reasoning  # narrate each research session's rea
 python -m noctis run --time-limit-hours 8  # override the time limit
 python -m noctis run --mandate aggressive  # one-session mandate override
 python -m noctis run --directive "..."     # one-session inline directive (excludes --mandate)
-python -m noctis run --debug               # also record an hour-segmented QA report under workspace/qa/
+python -m noctis run --debug               # also record an hour-segmented QA report under the run's qa/
 ```
 
 `run` loads config + memory, resolves the safety gate, enters the correct phase for the current
@@ -77,7 +84,7 @@ transition announces itself inline.
 ### QA report (`--debug`)
 
 `run` and `research` both accept `--debug`, which records an hour-segmented QA report of the whole
-run under `qa_dir` (default `workspace/qa/<run-id>/`): a stamped manifest, funnel counts,
+run under `qa_dir` (default `workspace/runs/<run_id>/qa/<run-id>/`): a stamped manifest, funnel counts,
 per-strategy fates, phase timing, and a raw `events.jsonl`. It is a diagnostic, not a verbosity
 level — it **records silently** and never turns on the `-v` console feed, so `-v --debug` prints
 byte-for-byte what `-v` alone prints (just the additive `QA …` framing lines on top). Off by
@@ -299,7 +306,7 @@ crash.
 ```bash
 python -m noctis research -v               # one observable agent research session (needs a configured LLM)
 python -m noctis research --metric total_return   # override the promotion metric for this session
-python -m noctis research --debug          # record this session's QA report under workspace/qa/
+python -m noctis research --debug          # record this session's QA report under the run's qa/
 python -m noctis strategies                # the strategy library: status / style / thesis / tuned
 python -m noctis backtest <name>           # replay a library strategy on its shipped Params defaults
 ```

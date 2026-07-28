@@ -125,14 +125,14 @@ without an API key and prints its spend first; the deterministic metric math it 
 
 `--debug` (on both `noctis run` and `noctis research`, see
 [cli.md](cli.md#qa-report---debug)) records everything a session did to a per-run report tree
-under `qa_dir` — default `workspace/qa/<run-id>/`, so it follows `workspace_dir` /
-`NOCTIS_WORKSPACE` relocation and, like the rest of the workspace, never enters git. The run id
+under `qa_dir` — default `<run_dir>/qa/<run-id>/`, so it follows the run (and `workspace_dir` /
+`NOCTIS_WORKSPACE` relocation) and, like the rest of the workspace, never enters git. The run id
 (`20260720T144233Z-a3f9c1`) is a sortable UTC-stamped, greppable name, so a plain `ls` of the QA
 area is already chronological. Retention is prune-on-start: the newest `qa.keep_last_runs` runs
 survive (default `20`; see [configuration.md](configuration.md)).
 
 ```text
-workspace/qa/20260720T144233Z-a3f9c1/
+workspace/runs/<run_id>/qa/20260720T144233Z-a3f9c1/
 ├── run.json        # the manifest: argv, mode, config digest, versions, started/stopped/duration
 ├── summary.md      # cumulative whole-run rollup (funnel + per-strategy fates + phase timing)
 ├── h00/            # elapsed-hour segment 0 — the first hour since the run started

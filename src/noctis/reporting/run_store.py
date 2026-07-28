@@ -372,9 +372,12 @@ def visible_runs(
     a mistyped command or a config typo — and a board full of those hides the experiments an
     operator came to compare. ``include_all`` (the CLI's ``--all``) widens to everything.
 
-    Two kinds are **never** hidden, whatever their runtime: a run that is still ``running`` (the
-    one you are most likely looking for), and a run whose record could not be read (breakage is
-    exactly what a listing exists to surface, so tidiness must not swallow it).
+    Three kinds are **never** hidden, whatever their runtime: a run that is still ``running`` (the
+    one you are most likely looking for), a run whose record could not be read (breakage is
+    exactly what a listing exists to surface, so tidiness must not swallow it), and a run with no
+    segments at all — the adopted-history shape (story #131), which is the opposite of noise: a
+    failed start still writes the segment it failed in, so zero segments means the run's contents
+    predate runs entirely rather than that nothing happened.
     """
     if include_all:
         return list(entries)
@@ -383,6 +386,8 @@ def visible_runs(
 
 def _is_noise(entry: Mapping[str, object]) -> bool:
     if not entry.get("readable", True) or entry.get("status") == "running":
+        return False
+    if entry.get("segments") == 0:  # adopted history, never a startup failure
         return False
     runtime = entry.get("cumulative_runtime_s")
     return isinstance(runtime, int | float) and float(runtime) < SHORT_RUN_S
