@@ -18,6 +18,16 @@ than silently downgrading, so a misconfiguration is always visible.
 And even with both gates open, the live execution adapter is a **stub that refuses** — no
 real-order path exists in the codebase.
 
+**The gate is never restored from a file that is not `config.yaml`.** A run freezes its
+configuration so it can be resumed weeks later ([configuration.md](configuration.md#config-freezing-what-a-resumed-run-reads)),
+and `mode`/`allow_live` are the one pair excluded from that: never written to a run record (the
+record schema refuses one that carries either) and never rehydrated. `resolve_execution_mode` runs
+fresh at **every** process start, so `noctis run --resume <run_id>` faces exactly the same hard
+startup error as a first start. A record could otherwise have become a third source for a decision
+that must have exactly two independent ones. The record does carry the gate's *verdict* for the
+run, and a resume whose freshly resolved mode disagrees with it refuses to continue — a paper run's
+results can never acquire live segments.
+
 ## No lookahead
 
 - Both backtest stages execute a bar-*t* decision at bar *t+1*'s open — asserted by tests, not

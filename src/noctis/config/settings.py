@@ -488,6 +488,16 @@ def _workspace_subpath(workspace: object, *parts: str) -> str:
     return str(Path(str(workspace)).joinpath(*parts))
 
 
+# The credential fields, named once. Everything that must keep a secret out of an artifact reads
+# this set: the ``--debug`` manifest's config digest (``bootstrap._digest_excluded_fields``) and the
+# run record's frozen inputs (``config.rehydrate``), which is also why a resumed run takes its keys
+# from the live ``.env`` rather than from the record (AGENTS.md rule 6). Kept beside the fields
+# themselves so adding a credential is one edit; the overlay's refusal table declares the same three
+# under :data:`~noctis.config.overlay.SECRETS`, and a test pins the two together.
+SECRET_FIELDS: frozenset[str] = frozenset(
+    {"databento_api_key", "anthropic_api_key", "openai_api_key"}
+)
+
 # The reserved run id every invocation that has **not** opened a run reads and writes: the
 # read-only verbs (``status``, ``champions``, ``account``, ``report``, ``backtest``) and a bare
 # ``noctis research``. It is also the run ``noctis migrate`` adopts a pre-run-scoped

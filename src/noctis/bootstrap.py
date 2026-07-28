@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from noctis.config import Settings, load_settings, resolve_execution_mode
+from noctis.config.settings import SECRET_FIELDS
 
 logger = logging.getLogger("noctis.bootstrap")
 
@@ -89,6 +90,7 @@ def resolve_session(
     metric: str | None = None,
     time_limit_hours: float | None = None,
     require_gate: bool = False,
+    resume: str | None = None,
 ) -> SessionInputs:
     """Resolve one session's settings by the one precedence order (docs/configuration.md).
 
@@ -101,6 +103,12 @@ def resolve_session(
     selector, :class:`~noctis.config.SafetyGateError` when the gate refuses, and
     :class:`~noctis.config.OverlayError` if an overlay moved a refused setting — all before
     any long-running work starts.
+
+    ``resume`` continues an existing run (:func:`resume_session`): the middle of the chain —
+    reading ``mandate/``, applying its overlay — is replaced by the run's **frozen** config, while
+    the ends are untouched. ``load_settings`` still runs (the live tier: paths, secrets,
+    per-process budgets), the safety gate still resolves first and fresh, and the explicit CLI
+    flags still land last.
     """
     from noctis.backtest.scorecard import Metric
     from noctis.config.overlay import patch_snapshot
@@ -113,6 +121,26 @@ def resolve_session(
             Metric.parse(metric)
         except ValueError as exc:  # the one diagnosis, re-typed as a usage error
             raise UsageError(str(exc)) from None
+
+    if resume is not None:
+        if directive is not None or mandate is not None:
+            raise UsageError(
+                "A resumed run's mandate is frozen at creation, so --directive/--mandate cannot "
+                "steer it: its accumulated results mean what the original mandate asked for. "
+                "Start a new run to research something else."
+            )
+        if metric is not None:
+            raise UsageError(
+                "A resumed run's election metric is frozen at creation, so --metric cannot move "
+                "it: champions crowned under two metrics were never comparable, and the metric "
+                "is part of the run's comparability key. Start a new run to score differently."
+            )
+        return resume_session(
+            config_path,
+            run_id=resume,
+            time_limit_hours=time_limit_hours,
+            require_gate=require_gate,
+        )
 
     settings = load_settings(config_path=config_path)
     mode = resolve_execution_mode(settings) if require_gate else None
@@ -137,6 +165,61 @@ def resolve_session(
     return SessionInputs(
         settings=settings, mode=mode, mandate=active, overrides=overrides, changes=changes
     )
+
+
+def resume_session(
+    config_path: str | None = None,
+    *,
+    run_id: str,
+    time_limit_hours: float | None = None,
+    require_gate: bool = False,
+) -> SessionInputs:
+    """Resolve the session that **continues** an existing run, under that run's frozen config.
+
+    The whole point of the run record (epic #126): a run is stopped each morning and resumed each
+    night, and its numbers only mean something if the configuration that produced them held still
+    in between. So the current ``config.yaml`` and ``mandate/`` are read for the *live* tier only —
+    paths, secrets, per-process budgets — and everything that decides what the results mean comes
+    back from the record (:mod:`noctis.config.rehydrate`).
+
+    Three refusals, all before any long-running work starts and all from somewhere else: the
+    address must name a run (:class:`~noctis.reporting.run_store.RunNotFoundError`), the run must
+    not be ``completed`` (:class:`~noctis.reporting.run_store.RunCompletedError`), and the freshly
+    resolved execution mode must match the one the run's earlier segments ran under
+    (:class:`~noctis.config.rehydrate.RehydrationError`). The safety gate itself is re-resolved
+    here exactly as at a first start — never rehydrated, never restored (AGENTS.md rule 1).
+
+    Drift between the record and the current files is normal and silently fine: frozen wins.
+    Inspecting it, and deliberately adopting it, is story #134.
+    """
+    from noctis.config.rehydrate import assert_mode_unchanged, has_frozen_inputs, rehydrate
+    from noctis.reporting.run_store import assert_resumable, read_run_record
+    from noctis.research import mandate_from_frozen
+
+    settings = load_settings(config_path=config_path)
+    mode = resolve_execution_mode(settings) if require_gate else None
+    record = read_run_record(settings.runs_dir, run_id)
+    assert_resumable(record, run_id)
+    if mode is not None:
+        assert_mode_unchanged(record, mode)
+    if not has_frozen_inputs(record):
+        logger.warning(
+            "run %s froze no configuration (it predates config freezing, or it is history adopted "
+            "by `noctis migrate`), so this segment runs under the current config.yaml and "
+            "mandate/ — and freezes them onto the run for every segment after it.",
+            run_id,
+        )
+    settings = rehydrate(record, settings)
+    frozen = record.get("inputs") if has_frozen_inputs(record) else None
+    frozen_mandate = frozen.get("mandate") if frozen else None
+    active = mandate_from_frozen(frozen_mandate)
+    overrides = list(frozen_mandate.get("overrides_applied") or []) if frozen_mandate else []
+    # The live tier's last word, exactly as on a first start: an explicit flag beats the file it
+    # would have come from. Only live-tier flags reach here — the frozen ones were refused by
+    # ``resolve_session`` with a reason, rather than silently ignored.
+    if time_limit_hours is not None:
+        settings.time_limit_hours = time_limit_hours
+    return SessionInputs(settings=settings, mode=mode, mandate=active, overrides=overrides)
 
 
 def overlay_mandate(settings: Settings, mandate: Mandate | None) -> list[str]:
@@ -597,8 +680,10 @@ def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | No
 # The --debug QA recorder
 # ─────────────────────────────────────────────────────────────────────────────
 # API keys the config digest must never fold in: the manifest lands under workspace/qa (gitignored),
-# but digesting a vendor/LLM credential would still be leaking a secret (AGENTS.md rule 6).
-_DIGEST_SECRET_FIELDS = frozenset({"databento_api_key", "anthropic_api_key", "openai_api_key"})
+# but digesting a vendor/LLM credential would still be leaking a secret (AGENTS.md rule 6). The set
+# itself lives beside the fields it names (``config.settings.SECRET_FIELDS``) — the run record's
+# frozen inputs exclude the same three, and one list is the only way the two can agree forever.
+_DIGEST_SECRET_FIELDS = SECRET_FIELDS
 
 
 def _digest_excluded_fields() -> set[str]:
@@ -607,12 +692,13 @@ def _digest_excluded_fields() -> set[str]:
     The digest is a **label for grouping runs that share a configuration** (epic #126, D2), so
     anything carrying the run's *identity* has to stay out of it: once a run is opened, the
     run-scoped paths hold its minted id, and folding those in would give every run a unique digest
-    and make the label useless for the one job it has. Derived from the settings module's own
-    run-scoped path table, so a path added there is excluded here with no edit.
+    and make the label useless for the one job it has. Both halves are named once elsewhere — the
+    credentials beside the fields themselves, the run's tree beside the freezing tiers that also
+    keep it out of the record — so a path added to either is excluded here with no edit.
     """
-    from noctis.config.settings import _RUN_SCOPED_SUBPATHS
+    from noctis.config.rehydrate import RUN_IDENTITY
 
-    return set(_DIGEST_SECRET_FIELDS) | set(_RUN_SCOPED_SUBPATHS) | {"run_dir"}
+    return set(_DIGEST_SECRET_FIELDS) | set(RUN_IDENTITY)
 
 
 def open_run_store(
@@ -623,6 +709,10 @@ def open_run_store(
     run_id: str | None = None,
     clock: Callable[[], Any] | None = None,
     label: str | None = None,
+    resume: bool = False,
+    mandate: Mandate | None = None,
+    mode: str | None = None,
+    overrides: list[str] | None = None,
 ):
     """Open this invocation's run — the always-on run identity, minted here and nowhere else.
 
@@ -644,22 +734,40 @@ def open_run_store(
     a single path edit in a command body, and two runs in one workspace cannot contaminate each
     other. The shared data lake is untouched: vendor data is expensive and run-neutral.
 
+    **Opening a run also freezes its config** (story #132): the settings this invocation assembled,
+    the mandate as resolved *text* plus the overlay it applied, and the gate's verdict are pinned
+    onto the record at creation — and only at creation, so every later segment restores them
+    instead of re-reading files that may have changed since. ``resume=True`` says this invocation
+    is continuing an existing run rather than minting one, which turns an unknown id and a
+    ``completed`` run into refusals rather than a surprise new run.
+
     Raises :class:`~noctis.reporting.run_store.RunLockedError` when another engine already holds
     the addressed run — the one failure in this subsystem that is fatal rather than latched.
     """
     from datetime import UTC, datetime
 
+    from noctis.config.rehydrate import freeze_inputs
     from noctis.config.settings import bind_run_dir
+    from noctis.reporting.run_record import utc_iso
     from noctis.reporting.run_store import open_run
 
+    tick = clock or (lambda: datetime.now(UTC))
     store = open_run(
         Path(settings.runs_dir),
-        clock=clock or (lambda: datetime.now(UTC)),
+        clock=tick,
         argv=list(argv),
         election_metric=settings.promotion.metric,
         run_id=run_id,
         command=command,
         label=label,
+        resume=resume,
+        inputs=freeze_inputs(
+            settings,
+            mandate=mandate,
+            overrides=overrides or [],
+            execution_mode=mode,
+            frozen_at=utc_iso(tick()),
+        ),
     )
     bind_run_dir(settings, store.run_dir)
     return store

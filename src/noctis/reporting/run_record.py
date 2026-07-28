@@ -32,14 +32,23 @@ from datetime import UTC, datetime
 from noctis.reporting.schema import EVENT_CAP, KIND, SCHEMA_VERSION
 
 __all__ = [
+    "TERMINAL_STATUSES",
     "EngineIdentity",
     "RecordEvent",
     "RunArtifacts",
     "SegmentArtifact",
     "build",
     "mark_interrupted",
+    "resume_refusal",
     "utc_iso",
 ]
+
+# The states a run never leaves. Everything else may gain another segment — including ``running``,
+# which is the shape a *crash* leaves behind (the kill never got to write a stop stamp) as well as
+# the shape a live engine writes. Telling those two apart is the liveness lock's job, not a status
+# field's, so refusing ``running`` here would make every crashed run need manual cleanup before it
+# could be resumed.
+TERMINAL_STATUSES = ("completed",)
 
 
 def utc_iso(moment: datetime) -> str:
@@ -126,6 +135,14 @@ class RunArtifacts:
     complete: bool = False
     events: Sequence[RecordEvent] = ()
     errors: Sequence[RecordEvent] = ()
+    # The run's own configuration, frozen at creation and carried verbatim ever after: the
+    # resolved settings the frozen tier is restored from, the mandate as resolved *text* plus its
+    # applied overlay, and the tier lists that say which is which. Shaped by
+    # ``noctis.config.rehydrate.freeze_inputs`` and round-tripped through here untouched — this
+    # module stays free of configuration, so the freezing policy lives in exactly one place and
+    # the builder cannot quietly reinterpret it. ``None`` for a run that never froze one (an
+    # adopted history, story #131).
+    inputs: Mapping[str, object] | None = None
 
 
 def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
@@ -150,6 +167,29 @@ def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
         complete=artifacts.complete,
         events=tuple(artifacts.events),
         errors=tuple(artifacts.errors),
+        inputs=artifacts.inputs,
+    )
+
+
+def resume_refusal(record: Mapping[str, object]) -> str | None:
+    """Why this record may not gain another segment, or ``None`` when it may.
+
+    Pure, and read off the record's own **derived** status rather than a second stored flag, so
+    the refusal can never disagree with what the record says about itself. ``completed`` is the
+    one terminal state (:data:`TERMINAL_STATUSES`): a run sealed deliberately (or by a run-level
+    cap, story #136) is a published result, and a published result that could silently gain
+    segments would make every number quoted from it provisional. ``stopped``, ``interrupted`` and
+    ``running`` all resume — see :data:`TERMINAL_STATUSES` for why the last one is not this
+    function's business.
+    """
+    run = record.get("run")
+    status = run.get("status") if isinstance(run, Mapping) else None
+    if status not in TERMINAL_STATUSES:
+        return None
+    return (
+        "this run is completed — a terminal state, so it can never gain another segment. "
+        "Start a new run instead (identity is minted, never derived, so a fresh run under "
+        "the same configuration is one command away)."
     )
 
 
@@ -180,6 +220,7 @@ def build(artifacts: RunArtifacts) -> dict:
         },
         "segments": segments,
         "engine": _engine(artifacts),
+        "inputs": dict(artifacts.inputs) if artifacts.inputs is not None else None,
         "events": [event.as_dict() for event in events],
         "errors": [error.as_dict() for error in errors],
     }

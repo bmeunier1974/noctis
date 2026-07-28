@@ -66,8 +66,13 @@ def _resolve_session_or_exit(config: str | None, **kwargs):
     """Resolve the session inputs (the composition root's precedence chain), mapping each
     typed startup error to red text + a non-zero exit. Errors are loud at startup by design:
     a typo'd selector or a closed safety gate must never silently un-steer a multi-day run.
+
+    The three resume refusals map here too, for the same reason: an unresumable run must be said
+    out loud at the start rather than turned into a *new* run nobody asked for.
     """
     from noctis.bootstrap import UsageError, resolve_session
+    from noctis.config.rehydrate import RehydrationError
+    from noctis.reporting.run_store import RunCompletedError, RunNotFoundError
     from noctis.research import MandateError
 
     try:
@@ -78,6 +83,10 @@ def _resolve_session_or_exit(config: str | None, **kwargs):
         _exit_red(exc, prefix="MANDATE: ")
     except SafetyGateError as exc:
         _exit_red(exc, prefix="SAFETY GATE: ")
+    except (RunNotFoundError, RunCompletedError) as exc:
+        _exit_red(exc, prefix="RESUME: ")
+    except RehydrationError as exc:
+        _exit_red(exc, prefix="RESUME: ")
 
 
 def _resolve_status_session(config: str | None) -> tuple[SessionInputs, str | None]:
@@ -266,6 +275,13 @@ def run(
     time_limit_hours: float = typer.Option(
         None, "--time-limit-hours", help="Stop after this many hours (overrides config)."
     ),
+    resume: str = typer.Option(
+        None,
+        "--resume",
+        help="Continue an existing run by id instead of minting a new one: it appends a segment "
+        "and keeps accumulating research hours, trials, champions and P&L into the same record, "
+        "under the config that run froze at creation. `noctis runs` lists the ids.",
+    ),
     directive: str = typer.Option(
         None,
         "--directive",
@@ -332,6 +348,7 @@ def run(
         mandate=mandate,
         time_limit_hours=time_limit_hours,
         require_gate=True,
+        resume=resume,
     )
     settings, mode, active_mandate = inputs.settings, inputs.mode, inputs.mandate
     assert mode is not None  # require_gate=True always resolves it
@@ -350,11 +367,23 @@ def run(
     # workspace/runs/<run_id>/, takes the liveness lock, and writes one self-describing run.json.
     # A live lock is the one fatal failure in this subsystem — two engines writing one run would
     # corrupt it — so it exits non-zero here instead of degrading to a shared write.
+    # …and `--resume <run_id>` continues one instead: the same tree, the same record, one more
+    # segment, under the configuration that run froze at creation (story #132). The run — not this
+    # process — is the unit progress accumulates on.
     try:
-        store = open_run_store(settings, argv=sys.argv[1:], command="run")
+        store = open_run_store(
+            settings,
+            argv=sys.argv[1:],
+            command="run",
+            run_id=resume,
+            resume=resume is not None,
+            mandate=active_mandate,
+            mode=mode,
+            overrides=inputs.overrides,
+        )
     except RunLockedError as exc:
         _exit_red(exc, prefix="RUN LOCKED: ")
-    typer.echo(f"Run: {store.run_id}")
+    typer.echo(f"{'Resumed run' if resume else 'Run'}: {store.run_id}")
     typer.echo(f"Run record: {store.record_path}")
 
     # --debug assembles the QA recorder in the composition root (prune-on-start → run tree →

@@ -89,6 +89,55 @@ it has (`status` only warns), so a stale layout can never silently present an em
 board; un-adopted workspace state only **warns**, because that state is not abandoned — it is
 sitting in the same workspace waiting to be claimed by a run.
 
+## Config freezing — what a resumed run reads
+
+A run outlives the process that started it: `noctis run --resume <run_id>`
+([cli.md](cli.md#resuming-a-run----resume-run_id)) appends a segment and keeps accumulating into
+the same record. That only *means* something if the configuration held still in between — so a
+run's config is **frozen at creation**, stored in its own `run.json`, and restored on every later
+segment. Editing `config.yaml` or a mandate profile tomorrow cannot retroactively change what a
+running experiment was told to do. Drift is normal and silently fine: frozen wins.
+
+Every leaf setting belongs to exactly one of three tiers, classified in
+`src/noctis/config/rehydrate.py` and ratcheted by the test suite the same way the overlay's table
+is. Today: **69 frozen, 17 live, 2 refused**.
+
+| Tier | Count | What | Where it comes from on a resume |
+|---|---|---|---|
+| **Frozen** | 69 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `live_feed.*` — **plus the whole mandate** | the record |
+| **Live** | 17 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | the current process |
+| **Refused** | 2 | `mode`, `allow_live` | neither — see below |
+
+**Frozen includes the mandate, as resolved text.** The record stores the mandate's body verbatim
+(with a digest), its summary, symbols, references and the overlay it applied — not the selector.
+Freezing `profile:aggressive` would freeze nothing at all, because the file behind that name is
+free to change tonight.
+
+**Live is not a gap, it is the design.** Secrets are redacted out of the record, so a record is
+shareable and resuming it needs *your own* keys from `.env`. Paths are live so a run can resume on
+a machine whose absolute paths differ. And the per-process budgets bound one *night*, not one
+experiment — `--time-limit-hours` is how you decide how long tonight lasts, weeks after the run
+started.
+
+**Refused means never recorded and never restored.** The safety gate re-resolves from
+`config.yaml` + `ALLOW_LIVE` at every process start (see [safety.md](safety.md)); a record can
+never resurrect a mode, so `mode: live` without `ALLOW_LIVE` is the same hard startup error on a
+resume as on a first start. The record does carry the gate's *verdict* for the run
+(`inputs.execution_mode`) as evidence — and a resume whose freshly resolved mode disagrees with it
+is a **hard error**, so a paper run's results can never acquire live segments.
+
+Two of the three tiers are **derived, not re-listed**: the refused pair is exactly the overlay's
+live-money refusals, the path knobs are exactly its state/IO refusals, and the secrets are the one
+set `Settings` names — so classifying a new knob in the overlay's table (which you must do anyway)
+puts it in the right freezing tier with no second edit. Frozen is then the complement, which means
+a knob added tomorrow freezes by default: the safe direction, because it keeps meaning attached to
+results.
+
+Because the mandate and the metric are frozen, `--mandate` / `--directive` / `--metric` are
+**refused with a reason** on a resume rather than silently ignored. Start a new run to research
+something else — identity is minted, never derived, so a fresh run under any configuration is one
+command away.
+
 ## The mandate overlay
 
 The active mandate's front-matter `config:` block overlays the **run-shaping** knobs of this

@@ -90,6 +90,7 @@
     "comparable_key": "1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe",
     "mixed_engine": false
   },
+  "inputs": null,
   "events": [
     {
       "t": "2026-07-28T01:10:04.002Z",

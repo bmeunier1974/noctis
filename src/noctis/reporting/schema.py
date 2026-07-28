@@ -45,9 +45,9 @@ SCHEMA_VERSION = 1
 KIND = "noctis.run"
 
 # The top-level sections every record carries. Later stories in the epic add sections
-# (``inputs``, ``research``, ``strategies``, ``sessions``, ``performance``, ``assumptions``);
-# additive-only means this set may grow, never shrink.
-REQUIRED_SECTIONS = ("run", "segments", "engine", "events", "errors")
+# (``research``, ``strategies``, ``sessions``, ``performance``, ``assumptions``); additive-only
+# means this set may grow, never shrink.
+REQUIRED_SECTIONS = ("run", "segments", "engine", "inputs", "events", "errors")
 
 # The run's lifecycle. ``interrupted`` is observed on the next open (a segment with a start stamp
 # and no stop stamp), never guessed at write time. ``completed`` is terminal.
@@ -100,6 +100,18 @@ _ENGINE_KEYS = (
 
 _EVENT_KEYS = ("t", "segment", "kind", "text")
 
+# The run's frozen configuration (story #132). Present as an explicit ``null`` on a run that never
+# froze one — an adopted history — and otherwise carrying the rehydration source plus the tier
+# lists that say which keys a resume restores and which it takes from the live process.
+_INPUTS_KEYS = ("config_epoch", "frozen_at_utc", "execution_mode", "mandate", "settings")
+_INPUT_SETTINGS_KEYS = ("digest", "resolved", "frozen_keys", "live_keys", "refused_keys")
+
+# The two settings a record may never carry, whatever else it grows: the live-money double gate.
+# The safety gate re-resolves from the config file and the ALLOW_LIVE environment variable at every
+# process start, so a record that carried either one could offer a second source for a decision
+# that must have exactly two independent ones (AGENTS.md rule 1).
+UNRECORDABLE_SETTINGS = ("mode", "allow_live")
+
 
 def validate(record: Mapping[str, object]) -> list[str]:
     """Check one record against the schema; return the problems, one line each (``[]`` = valid).
@@ -138,8 +150,32 @@ def validate(record: Mapping[str, object]) -> list[str]:
     elif "engine" in record:
         problems.append("engine: section must be an object")
 
+    problems += _check_inputs(record.get("inputs"))
+
     for name in ("events", "errors"):
         problems += _check_events(name, record.get(name))
+    return problems
+
+
+def _check_inputs(inputs: object) -> list[str]:
+    """The frozen inputs: absent as an explicit ``null``, and never carrying the two gates."""
+    if inputs is None:
+        return []
+    if not isinstance(inputs, Mapping):
+        return ["inputs: section must be an object or null"]
+    problems = _check_keys("inputs", inputs, _INPUTS_KEYS)
+    problems += _check_stamp("inputs.frozen_at_utc", inputs.get("frozen_at_utc"))
+    settings = inputs.get("settings")
+    if not isinstance(settings, Mapping):
+        return [*problems, "inputs.settings: must be an object"]
+    problems += _check_keys("inputs.settings", settings, _INPUT_SETTINGS_KEYS)
+    resolved = settings.get("resolved")
+    if isinstance(resolved, Mapping):
+        problems += [
+            f"inputs.settings.resolved.{key}: the live-money gates are never recorded"
+            for key in UNRECORDABLE_SETTINGS
+            if key in resolved
+        ]
     return problems
 
 

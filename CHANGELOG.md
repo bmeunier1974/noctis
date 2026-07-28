@@ -9,6 +9,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A run is stoppable and resumable: `noctis run --resume <run_id>`.** It opens an existing run,
+  rehydrates that run's settings from its record, appends a segment, and keeps accumulating
+  research hours, trials, champions and P&L into the same `run.json`. The **run**, not the
+  process, is now the unit progress is tracked on — stop the engine each morning and resume it
+  each night without losing a multi-week experiment. A resumed run reads its own run-scoped state
+  (champions, paper account, memory, strategy tiers, reports) and shares the workspace-level data
+  lake, exactly as its earlier segments did.
+  - **Config is frozen at run creation**, in the record's new `inputs` section, and restored on
+    every later segment by a new **pure** module, `config/rehydrate.py`
+    (`(record, live_settings) -> Settings`, no I/O). Three tiers, each leaf classified exactly
+    once and ratcheted by the suite: **frozen** (69 — everything that decides what the accumulated
+    results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `universe`,
+    `session.*`, `champion_count`, the data provider/dataset, the research time budget), **live**
+    (17 — the three secrets, every path/workspace knob so a run can resume on a machine with
+    different absolute paths, and the per-process budgets `time_limit_hours`, `data.budget_usd`,
+    `qa.keep_last_runs`, `observability.heartbeat_polls`) and **refused** (2). Editing
+    `config.yaml` between segments does not move a frozen key or the run's frozen digest; drift is
+    normal and silently fine, and frozen wins. Two of the three tiers are *derived* from
+    `config/overlay.py`'s own refusal table rather than re-listed, so classifying a new knob there
+    puts it in the right freezing tier with no second edit — and frozen, being the complement,
+    is what a knob added tomorrow defaults to.
+  - **The mandate is frozen as resolved text** — body, digest, summary, symbols, references and
+    the overlay it applied — not as a selector, so editing `mandate/profiles/aggressive.md`
+    tonight cannot retroactively change what a running experiment was told to do. Consequently
+    `--mandate` / `--directive` / `--metric` are **refused with a reason** on a resume rather than
+    silently ignored.
+  - **The safety gate is never rehydrated** (AGENTS.md rule 1). `mode` and `allow_live` are never
+    written to a record (the schema validator refuses one that carries either) and never restored;
+    `resolve_execution_mode` re-resolves from `config.yaml` + `ALLOW_LIVE` at every process start,
+    so `mode: live` without `ALLOW_LIVE` is the same hard startup error on a resume as on a first
+    start. The record carries the gate's *verdict* for the run as evidence, and a resume whose
+    freshly resolved mode disagrees with it is a **hard error** — a paper run's results can never
+    acquire live segments.
+  - **Derived, never incremented**, proved by test: one three-hour segment and three one-hour
+    segments over the same work leave records with **identical** derived totals. A crash between
+    phases marks the segment `interrupted` on the next open, contributes no runtime (an unclosed
+    segment has no honest duration), never double-counts, and a third segment resumes cleanly.
+  - Refusals, all before any work starts: an id that names no run, a `completed` run (terminal by
+    design — a published result never quietly gains segments), and a mode that disagrees.
 - **The run is now a real, always-on entity with its own record.** Every `noctis run` mints a
   fresh run id (identity is *minted*, never derived from the config — two byte-identical configs
   are two runs) and gets its own tree, `workspace/runs/<run_id>/`, holding one self-describing

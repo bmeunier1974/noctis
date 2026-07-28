@@ -163,12 +163,26 @@ honesty rules: a killed segment is marked `interrupted` on the **next** open, ne
 time, and a live lock is a hard refusal (two engines on one run is corruption) while everything else
 latches off with one warning rather than raising into the engine.
 
+**A run outlives its process, so it carries its own config.** `noctis run --resume <run_id>` appends
+a segment to an existing run and keeps accumulating into the same record — the run, not the process,
+is the unit progress is tracked on. Every cumulative number in the record is **derived, never
+incremented** (recomputed at write time from the durable artifacts + the append-only `segments[]`),
+which is why three short segments total exactly what one long one does and a crash mid-write cannot
+double-count. Config is **frozen at creation** and rehydrated by the pure
+`src/noctis/config/rehydrate.py` (`(record, live_settings) -> Settings`): frozen = what the results
+*mean*, live = secrets + every path knob + the per-process budgets, refused = `mode`/`allow_live`,
+which are never recorded and never restored — the safety gate re-resolves fresh every start, and a
+frozen mode disagreeing with the resolved one is a hard error (rule 1). The mandate is frozen as
+**resolved text**, not as a selector, so editing a profile tomorrow cannot change what a running
+experiment was told to do. Drift is normal and frozen wins.
+
 **Config + mandate overlay.** `config.yaml` + `.env` → typed `src/noctis/config/settings.py` (env vars
 override YAML; `NOCTIS_CONFIG` points at an alternate file). The active mandate's front-matter
 `config:` block may overlay **only** the run-shaping tier `src/noctis/config/overlay.py` classifies
 as allowed — the arena (safety mode, fill costs, promotion thresholds, holdout geometry, paths,
 secrets) is refused there by name; a `--metric` CLI flag wins over the overlay,
-and `--mandate`/`--directive` (mutually exclusive) override the config selector for one session.
+and `--mandate`/`--directive` (mutually exclusive) override the config selector for one session
+(all three are refused on a `--resume`, whose steering is frozen).
 That precedence chain, and the collaborator builders the entrypoints share (lake, memory, console,
 the strategy-family registry, the agent research session), live in one composition root —
 `src/noctis/bootstrap.py`. Assemble sessions there, not by hand in a command body.

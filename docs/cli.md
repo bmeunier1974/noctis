@@ -48,6 +48,7 @@ workspace state only warns, on every command.
 python -m noctis run -v                    # start the day/night loop (stops at time_limit_hours)
 python -m noctis run -vv --show-reasoning  # narrate each research session's reasoning inline
 python -m noctis run --time-limit-hours 8  # override the time limit
+python -m noctis run --resume <run_id>     # continue an existing run under its frozen config
 python -m noctis run --mandate aggressive  # one-session mandate override
 python -m noctis run --directive "..."     # one-session inline directive (excludes --mandate)
 python -m noctis run --debug               # also record an hour-segmented QA report under the run's qa/
@@ -70,6 +71,51 @@ and leaves the record marked incomplete rather than taking the run down. A secon
 to open a run another engine already holds; a stale lock (a dead pid on this host, or a
 week-cold heartbeat) is stolen with a warning and a recorded event. A run killed mid-segment is
 marked `interrupted` the next time it is opened.
+
+### Resuming a run — `--resume <run_id>`
+
+```bash
+python -m noctis run                       # night 1: mints a run, echoes its id
+python -m noctis run --resume 20260727T142233Z-a1b2c3   # every night after
+```
+
+`--resume` continues an existing run instead of minting one: same id, same tree, one more entry in
+`segments[]`, and the same record keeps accumulating research hours, trials, champions and P&L. The
+**run**, not the process, is the unit progress is tracked on — stop the engine each morning, resume
+it each night, and a multi-week experiment survives every restart. `noctis runs` lists the ids;
+the kickoff echoes `Resumed run: <run_id>`.
+
+Every cumulative number in the record is **derived, never incremented**: recomputed at each write
+from the durable artifacts plus the append-only `segments[]` list, so three one-hour segments total
+exactly what one three-hour segment would, and a crash mid-write cannot double-count. A run killed
+between phases is marked `interrupted` on the next open and resumes from there; its unclosed
+segment contributes no runtime, because an unclosed segment has no honest duration.
+
+A resumed run reads its **own** state — champions, paper account, memory, strategy tiers, reports
+— out of its own tree, exactly as its earlier segments did, and shares the workspace-level data
+lake with every other run.
+
+Three things refuse a resume, all before any work starts:
+
+| refusal | why |
+|---|---|
+| the id names no run | an address an operator typed must not silently become a *new* run |
+| the run is `completed` | terminal by design: a published result can never quietly gain segments |
+| the resolved mode differs from the run's | a paper run's results may not acquire live segments (see below) |
+
+**Config is frozen at run creation** (the full contract:
+[configuration.md → Config freezing](configuration.md#config-freezing-what-a-resumed-run-reads)).
+Editing `config.yaml` or a mandate profile between segments does not change what a running
+experiment was told to do; the frozen keys and the run's frozen digest stay put. The current files
+still supply the *live* tier — secrets, paths, and the per-process budgets like
+`--time-limit-hours`. Because the mandate is frozen, `--mandate`/`--directive`/`--metric` are
+**refused** with a reason on a resume rather than silently ignored: start a new run to research
+something else.
+
+The safety gate is never rehydrated. It re-resolves from `config.yaml` + `ALLOW_LIVE` at every
+process start, so `mode: live` without `ALLOW_LIVE` is the same hard startup error on a resume as
+on a first start, and a run whose frozen mode disagrees with the freshly resolved one refuses to
+continue.
 
 ### Verbosity
 

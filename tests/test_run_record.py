@@ -27,6 +27,7 @@ from noctis.reporting.run_record import (
     SegmentArtifact,
     build,
     mark_interrupted,
+    resume_refusal,
     utc_iso,
 )
 
@@ -157,6 +158,81 @@ def test_every_record_carries_an_engine_identity_even_with_a_null_component():
     assert record["engine"]["fingerprint"]["schema"] is None  # explicit null, never omitted
     assert record["segments"][0]["engine_version"] == 1
     assert record["segments"][0]["engine_fingerprint"]["gates"] == "f63d47b7b9604ab1"
+
+
+# ── the frozen inputs (story #132) ─────────────────────────────────────────────────────────
+
+
+FROZEN_INPUTS = {
+    "config_epoch": 1,
+    "frozen_at_utc": "2026-07-27T14:22:33.418Z",
+    "execution_mode": "paper",
+    "mandate": {"source": "profile:aggressive", "text": "Trade volatility.", "text_sha256": "ab"},
+    "settings": {
+        "digest": "0f1e2d3c4b5a",
+        "resolved": {"promotion": {"metric": "sharpe"}},
+        "frozen_keys": ["promotion.metric"],
+        "live_keys": ["workspace_dir"],
+        "refused_keys": ["allow_live", "mode"],
+    },
+}
+
+
+def test_the_frozen_inputs_are_carried_verbatim_and_never_reinterpreted():
+    """The builder is free of configuration on purpose: freezing policy lives in
+    ``config.rehydrate``, and this module round-trips the block it is handed."""
+    record = build(_artifacts(inputs=FROZEN_INPUTS))
+
+    assert record["inputs"] == FROZEN_INPUTS
+    assert mark_interrupted(_artifacts(inputs=FROZEN_INPUTS)).inputs == FROZEN_INPUTS
+
+
+def test_a_run_that_froze_no_config_says_so_with_an_explicit_null():
+    assert build(_artifacts())["inputs"] is None
+    assert "inputs" in build(_artifacts())
+
+
+def test_the_validator_refuses_a_record_carrying_either_live_money_gate():
+    """A record may never offer a second source for a decision that must have two independent
+    ones (AGENTS.md rule 1) — so carrying one is a schema violation, not a detail."""
+    inputs = json.loads(json.dumps(FROZEN_INPUTS))
+    inputs["settings"]["resolved"]["mode"] = "live"
+    inputs["settings"]["resolved"]["allow_live"] = True
+
+    problems = schema.validate(build(_artifacts(inputs=inputs)))
+
+    assert any("mode" in problem for problem in problems)
+    assert any("allow_live" in problem for problem in problems)
+
+
+def test_the_validator_names_a_frozen_inputs_block_missing_a_key():
+    inputs = json.loads(json.dumps(FROZEN_INPUTS))
+    del inputs["settings"]["digest"]
+    del inputs["execution_mode"]
+
+    problems = schema.validate(build(_artifacts(inputs=inputs)))
+
+    assert any("inputs.settings.digest" in problem for problem in problems)
+    assert any("inputs.execution_mode" in problem for problem in problems)
+
+
+def test_validate_accepts_a_record_with_frozen_inputs():
+    assert schema.validate(build(_artifacts(inputs=FROZEN_INPUTS))) == []
+
+
+# ── resuming is refused only where it must be ──────────────────────────────────────────────
+
+
+def test_only_a_completed_run_refuses_another_segment():
+    """``running`` is the shape a *crash* leaves behind as well as the shape a live engine
+    writes; telling those apart is the liveness lock's job, not a status field's."""
+    for status in ("stopped", "interrupted", "running"):
+        assert resume_refusal({"run": {"status": status}}) is None
+    assert resume_refusal({}) is None
+
+    refusal = resume_refusal({"run": {"status": "completed"}})
+
+    assert refusal is not None and "completed" in refusal
 
 
 def test_absent_values_are_explicit_nulls_not_omitted_keys():

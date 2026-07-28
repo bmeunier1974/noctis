@@ -62,6 +62,7 @@ from noctis.reporting.run_record import (
     SegmentArtifact,
     build,
     mark_interrupted,
+    resume_refusal,
     utc_iso,
 )
 from noctis.reporting.schema import SCHEMA_VERSION
@@ -74,13 +75,16 @@ __all__ = [
     "RUN_RECORD_NAME",
     "SHORT_RUN_S",
     "STALE_HEARTBEAT_S",
+    "RunCompletedError",
     "RunLockedError",
     "RunNotFoundError",
     "RunStore",
+    "assert_resumable",
     "collect",
     "index_entry",
     "open_run",
     "read_record",
+    "read_run_record",
     "rebuild_index",
     "resolve_run_dir",
     "update_index",
@@ -120,6 +124,10 @@ class RunNotFoundError(LookupError):
     """No run answers this address. Raised by :func:`resolve_run_dir`, never by the listing."""
 
 
+class RunCompletedError(RuntimeError):
+    """A resume addressed a run that is ``completed`` — terminal, so it gains no more segments."""
+
+
 def open_run(
     runs_dir: Path | str,
     *,
@@ -132,18 +140,38 @@ def open_run(
     engine_root: Path | None = None,
     writer: Callable[[Path, dict], None] | None = None,
     stale_after_s: float = STALE_HEARTBEAT_S,
+    resume: bool = False,
+    inputs: Mapping[str, object] | None = None,
 ) -> RunStore:
     """Open a run for this process: mint or address it, lock it, append a segment, write.
 
     ``run_id`` defaults to a freshly minted id (identity is minted, never derived); passing one
     addresses that run — which is how a later invocation appends its own segment to the same
     record. Raises :class:`RunLockedError` when another engine holds the run.
+
+    ``resume=True`` says the caller means to *continue* an existing run rather than create one, so
+    the two failures that are silent under creation become loud: an address with no run tree raises
+    :class:`RunNotFoundError` (creating a run under an id an operator typed would answer the wrong
+    question), and a ``completed`` run raises :class:`RunCompletedError`. Both are checked before
+    the lock is taken, so a refused resume leaves nothing behind.
+
+    ``inputs`` is this process's frozen configuration, and it is used **only when the run has none
+    yet** — freezing happens once, at creation. Every later segment carries the record's own inputs
+    forward untouched, which is what makes "the current ``config.yaml`` is ignored" true of the
+    artifact and not just of the rehydration path.
     """
     from noctis.observability.debug import new_run_id
 
     now = clock()
-    resolved_id = run_id or new_run_id(now)
-    run_dir = Path(runs_dir) / resolved_id
+    if resume:
+        if run_id is None:
+            raise RunNotFoundError("a resume needs a run id — there is nothing to continue without")
+        run_dir = resolve_run_dir(runs_dir, run_id)
+        _assert_resumable(run_dir, run_id)
+        resolved_id = run_id
+    else:
+        resolved_id = run_id or new_run_id(now)
+        run_dir = Path(runs_dir) / resolved_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     steal_note = acquire_lock(run_dir, run_id=resolved_id, now=now, stale_after_s=stale_after_s)
@@ -159,7 +187,31 @@ def open_run(
         label=label if label is not None else artifacts.label,
         writer=writer or write,
         opening_note=steal_note,
+        inputs=inputs,
     )
+
+
+def assert_resumable(record: Mapping[str, object], run_id: str) -> None:
+    """Refuse a resume this record rules out, naming the run.
+
+    The refusal is derived from the record (:func:`~noctis.reporting.run_record.resume_refusal`),
+    never re-decided here, and both callers share this one function: the composition root checks it
+    the moment it reads the record — so an operator is told before a single line of kickoff banner
+    — and :func:`open_run` checks it again as the last thing between an address and a new segment,
+    so no future caller can reach the append without passing it.
+    """
+    refusal = resume_refusal(record)
+    if refusal is not None:
+        raise RunCompletedError(f"cannot resume {run_id}: {refusal}")
+
+
+def _assert_resumable(run_dir: Path, run_id: str) -> None:
+    """The on-disk half of the check. A run whose record cannot be read at all is *not* refused —
+    a corrupt reporting file must never strand the run it describes, and the opening path already
+    degrades it to a fresh record carrying an event that says so."""
+    record, _ = read_record(run_dir)
+    if record is not None:
+        assert_resumable(record, run_id)
 
 
 def collect(
@@ -215,7 +267,21 @@ def _artifacts_from(
         complete=bool(run.get("complete", False)),
         events=tuple(_event_from(raw) for raw in _listed(prior, "events")),
         errors=tuple(_event_from(raw) for raw in _listed(prior, "errors")),
+        # Read straight back and carried forward verbatim: the run's configuration was frozen at
+        # creation, so every later segment restores it rather than re-deriving it from files that
+        # may have changed in between.
+        inputs=_frozen_inputs(prior.get("inputs")),
     )
+
+
+def _frozen_inputs(inputs: object) -> Mapping[str, object] | None:
+    """The record's frozen ``inputs``, or ``None`` for a run that never froze a configuration.
+
+    Deliberately **not** parsed into a typed shape: the freezing policy lives in
+    ``config.rehydrate``, and a second reader here would be a second interpretation of it. This
+    only says whether there is a block to carry forward.
+    """
+    return inputs if isinstance(inputs, Mapping) else None
 
 
 def _listed(prior: Mapping[str, object], key: str) -> list[Mapping[str, object]]:
@@ -289,6 +355,24 @@ def resolve_run_dir(runs_dir: Path | str, address: str) -> Path:
     raise RunNotFoundError(
         f"no run {address!r} under {runs}. `noctis runs --all` lists every run this workspace has."
     )
+
+
+def read_run_record(runs_dir: Path | str, address: str) -> dict:
+    """One addressed run's record, or a raised error — the read a **resume** starts from.
+
+    Where :func:`read_record` reports "no readable record" as a value (a listing must survive one
+    broken file), this raises: a resume that cannot read the record has nothing to resume *under*,
+    and continuing would silently research under the current ``config.yaml`` instead of the run's
+    own frozen one — the exact substitution config freezing exists to prevent.
+    """
+    run_dir = resolve_run_dir(runs_dir, address)
+    record, reason = read_record(run_dir)
+    if record is None:
+        raise RunNotFoundError(
+            f"run {address} has {reason}, so there is no frozen configuration to resume it under. "
+            f"`noctis run-record {address} --validate` says what is wrong with it."
+        )
+    return record
 
 
 def _is_run_id(address: str) -> bool:
@@ -608,6 +692,7 @@ class RunStore:
         label: str | None = None,
         writer: Callable[[Path, dict], None] = write,
         opening_note: RecordEvent | None = None,
+        inputs: Mapping[str, object] | None = None,
     ) -> None:
         self._run_dir = Path(run_dir)
         self._clock = clock
@@ -639,6 +724,9 @@ class RunStore:
             complete=False,
             events=tuple(artifacts.events),
             errors=tuple(artifacts.errors),
+            # Frozen at creation: the record's own inputs win, and this process's are taken only
+            # by a run that has never frozen any (a fresh one, or an adopted history).
+            inputs=artifacts.inputs if artifacts.inputs is not None else inputs,
         )
         if opening_note is not None:
             self._append(
@@ -800,6 +888,7 @@ class RunStore:
             complete=self._complete,
             events=changes.get("events", current.events),  # type: ignore[arg-type]
             errors=changes.get("errors", current.errors),  # type: ignore[arg-type]
+            inputs=current.inputs,
         )
 
     def _flush(self) -> None:

@@ -87,6 +87,7 @@
     "comparable_key": "<comparable_key>",
     "mixed_engine": false
   },
+  "inputs": null,
   "events": [
     {
       "t": "2026-07-28T02:22:33.418Z",
