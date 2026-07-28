@@ -5,9 +5,10 @@ that the repo's committed statement of it — ``engine_fingerprint.json`` at the
 matches, and that a change to the **arbiter** came with a declared version bump.
 
 **The tier split, which is the whole design.** The line is the one
-:data:`~noctis.observability.engine_id.ARBITER_COMPONENTS` already draws — read from there, never
-restated here, because two copies of that set would eventually disagree and the disagreement
-would be silent.
+:data:`~noctis.observability.engine_id.ARBITER_COMPONENTS` already draws, and it is read through
+:func:`~noctis.observability.engine_id.tier_of` — the single classifier this check and the resume
+policy (:mod:`noctis.observability.engine_change`) both call. Never restated here: two copies of
+that set would eventually disagree, and the disagreement would be silent.
 
 * **Arbiter tier** (the components that decide what passes and what a number means): drift
   **fails**. This is the one change that invalidates every stored champion comparison, so it can
@@ -49,11 +50,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from noctis.observability.engine_id import (
-    ARBITER_COMPONENTS,
     COMPONENT_PATHS,
+    Tier,
     default_root,
     file_digest,
     fingerprint,
+    tier_of,
 )
 
 if TYPE_CHECKING:
@@ -73,7 +75,6 @@ RECORD_KIND = "noctis.engine_fingerprint"
 _VERSION_SOURCE = "src/noctis/observability/engine_id.py"
 
 Status = Literal["ok", "warn", "fail"]
-Tier = Literal["arbiter", "searcher"]
 
 
 @dataclass(frozen=True)
@@ -307,7 +308,7 @@ def _drifts(
         drifts.append(
             ComponentDrift(
                 component=name,
-                tier="arbiter" if name in ARBITER_COMPONENTS else "searcher",
+                tier=tier_of(name),
                 files=_moved_files(computed_component, committed_component),
                 recorded=recorded_digest,
                 computed=computed_digest,

@@ -73,6 +73,7 @@
   ],
   "engine": {
     "engine_version": "<engine_version>",
+    "engine_epoch": 1,
     "noctis_version": "<noctis_version>",
     "fingerprint": [
       "backtest",
@@ -85,7 +86,8 @@
       "seeds"
     ],
     "comparable_key": "<comparable_key>",
-    "mixed_engine": false
+    "mixed_engine": false,
+    "engine_changes": []
   },
   "inputs": null,
   "events": [

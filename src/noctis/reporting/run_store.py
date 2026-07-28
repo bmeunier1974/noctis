@@ -156,6 +156,7 @@ def open_run(
     resume: bool = False,
     inputs: Mapping[str, object] | None = None,
     rebase_config: bool = False,
+    engine_upgrade: Mapping[str, object] | None = None,
 ) -> RunStore:
     """Open a run for this process: mint or address it, lock it, append a segment, write.
 
@@ -181,6 +182,12 @@ def open_run(
     current configuration, so ``inputs`` **replaces** what the record carried. It arrives already
     re-frozen — epoch bumped, before/after entry appended — because what a config change *is* stays
     in ``config.rehydrate``; this only decides that a rebased block wins over a carried one.
+
+    ``engine_upgrade`` is the same deal one layer down (story #135): the ``engine_changes`` entry a
+    deliberately accepted engine change produced, built by ``observability.engine_change``. Given
+    one, the run is **re-frozen onto this process's engine** with the entry appended and the epoch
+    it names — so a run whose arbiter moved mid-flight says so, and says where. Absent (the normal
+    case) the run keeps the engine it was created under, whatever this process is.
     """
     from noctis.observability.debug import new_run_id
 
@@ -214,6 +221,7 @@ def open_run(
         opening_note=steal_note,
         inputs=inputs,
         rebase_config=rebase_config,
+        engine_upgrade=engine_upgrade,
     )
 
 
@@ -258,7 +266,7 @@ def collect(
     prior, note = _read_record(path)
     if prior is not None:
         try:
-            return _artifacts_from(prior, run_dir=Path(run_dir), engine=engine)
+            return _artifacts_from(prior, run_dir=Path(run_dir), current=engine)
         except Exception as exc:  # a hand-edited or foreign file, still valid JSON
             note = RecordEvent(
                 t=None,
@@ -271,12 +279,13 @@ def collect(
         created_utc=None,
         last_active_utc=None,
         engine=engine,
+        current_engine=engine,
         events=(note,) if note is not None else (),
     )
 
 
 def _artifacts_from(
-    prior: Mapping[str, object], *, run_dir: Path, engine: EngineIdentity
+    prior: Mapping[str, object], *, run_dir: Path, current: EngineIdentity
 ) -> RunArtifacts:
     """One prior record, parsed back into artifacts. Raises on a shape it cannot read."""
     run = prior.get("run")
@@ -286,7 +295,11 @@ def _artifacts_from(
         run_id=str(run.get("run_id") or run_dir.name),
         created_utc=_optional_str(run.get("created_utc")),
         last_active_utc=_optional_str(run.get("last_active_utc")),
-        engine=engine,
+        # Frozen at creation and carried forward verbatim, exactly like ``inputs``: the engine a
+        # run was created under is the side every later resume is compared against (story #135),
+        # so a write must never restamp it with whatever engine happens to be running now.
+        engine=_frozen_engine(prior.get("engine")) or current,
+        current_engine=current,
         segments=tuple(_segment_from(raw) for raw in _listed(prior, "segments")),
         label=_optional_str(run.get("label")),
         completed_utc=_optional_str(run.get("completed_utc")),
@@ -297,6 +310,35 @@ def _artifacts_from(
         # creation, so every later segment restores it rather than re-deriving it from files that
         # may have changed in between.
         inputs=_frozen_inputs(prior.get("inputs")),
+    )
+
+
+def _frozen_engine(engine: object) -> EngineIdentity | None:
+    """The engine identity a record froze at creation, or ``None`` when it carries none readable.
+
+    Tolerant on purpose: a record from before engine epochs (or one a hand-edit mangled) still
+    hands back everything it does have, and a section that cannot be read at all degrades to this
+    process's own identity rather than stranding the run. The digests are taken **verbatim**, not
+    re-validated against the component map — what the run froze is what it froze, even if this
+    Noctis names its components differently.
+    """
+    if not isinstance(engine, Mapping):
+        return None
+    fingerprint = engine.get("fingerprint")
+    version = engine.get("engine_version")
+    if not isinstance(fingerprint, Mapping) or not isinstance(version, int):
+        return None
+    epoch = engine.get("engine_epoch")
+    changes = engine.get("engine_changes")
+    return EngineIdentity(
+        engine_version=version,
+        fingerprint=dict(fingerprint),  # type: ignore[arg-type]
+        comparable_key=str(engine.get("comparable_key", "")),
+        noctis_version=str(engine.get("noctis_version", "")),
+        engine_epoch=epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else 1,
+        engine_changes=tuple(change for change in changes if isinstance(change, Mapping))
+        if isinstance(changes, list)
+        else (),
     )
 
 
@@ -333,6 +375,30 @@ def read_engine_identity(election_metric: str, root: Path | None = None) -> Engi
         fingerprint=fp.digests(),
         comparable_key=str(comparable_key(election_metric, fp)),
         noctis_version=_noctis_version(),
+    )
+
+
+def _upgraded(
+    frozen: EngineIdentity, current: EngineIdentity, entry: Mapping[str, object] | None
+) -> EngineIdentity:
+    """The run's engine identity after a deliberately accepted engine change (story #135).
+
+    Re-frozen onto **this process's** engine — its digests, and therefore its comparable key, which
+    is the honest consequence of accepting that the arbiter moved: the run's later numbers belong
+    to a different bucket than its earlier ones, and ``mixed_engine`` plus this entry are what say
+    so. The prior entries are carried forward, never rewritten, so a run upgraded twice keeps both
+    stories. Without an entry the frozen identity is returned untouched, which is every other open.
+    """
+    if entry is None:
+        return frozen
+    epoch = entry.get("to_epoch")
+    return EngineIdentity(
+        engine_version=current.engine_version,
+        fingerprint=dict(current.fingerprint),
+        comparable_key=current.comparable_key,
+        noctis_version=current.noctis_version,
+        engine_epoch=epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else 1,
+        engine_changes=(*frozen.engine_changes, dict(entry)),
     )
 
 
@@ -901,6 +967,7 @@ class RunStore:
         opening_note: RecordEvent | None = None,
         inputs: Mapping[str, object] | None = None,
         rebase_config: bool = False,
+        engine_upgrade: Mapping[str, object] | None = None,
     ) -> None:
         self._run_dir = Path(run_dir)
         self._clock = clock
@@ -911,10 +978,12 @@ class RunStore:
 
         now = clock()
         prior = tuple(artifacts.segments)
+        current = artifacts.current_engine or artifacts.engine
         self._segment = SegmentArtifact(
             index=len(prior),
             started_utc=utc_iso(now),
-            engine=artifacts.engine,
+            # This process's engine, not the run's: a segment records what actually produced it.
+            engine=current,
             status="running",
             argv=tuple(argv),
             command=command,
@@ -925,7 +994,9 @@ class RunStore:
             run_id=artifacts.run_id,
             created_utc=artifacts.created_utc or utc_iso(now),
             last_active_utc=utc_iso(now),
-            engine=artifacts.engine,
+            # Frozen at creation, unless an engine change was deliberately accepted.
+            engine=_upgraded(artifacts.engine, current, engine_upgrade),
+            current_engine=current,
             segments=prior + (self._segment,),
             label=label,
             completed_utc=artifacts.completed_utc,
@@ -1091,6 +1162,7 @@ class RunStore:
             created_utc=current.created_utc,
             last_active_utc=str(changes.get("last_active_utc", current.last_active_utc)),
             engine=current.engine,
+            current_engine=current.current_engine,
             segments=changes.get("segments", current.segments),  # type: ignore[arg-type]
             label=current.label,
             completed_utc=current.completed_utc,

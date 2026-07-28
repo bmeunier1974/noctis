@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from noctis.observability import engine_id, engine_ratchet
-from noctis.observability.engine_id import COMPONENT_PATHS, ENGINE_VERSION
+from noctis.observability import engine_change, engine_id, engine_ratchet
+from noctis.observability.engine_id import COMPONENT_PATHS, ENGINE_VERSION, fingerprint
 from noctis.observability.engine_ratchet import (
     RECORD_PATH,
     REGENERATE_COMMAND,
@@ -345,11 +345,39 @@ def test_the_check_is_the_default_action(tmp_path):
 # ── one arbiter line, drawn once ──────────────────────────────────────────────────────────
 
 
-def test_the_ratchet_and_the_resume_policy_read_one_arbiter_components_constant():
-    """Two copies of that set would eventually disagree, and the disagreement would be silent."""
-    assert engine_ratchet.ARBITER_COMPONENTS is engine_id.ARBITER_COMPONENTS
+def test_the_ratchet_and_the_resume_policy_read_one_arbiter_components_constant(tmp_path):
+    """Two copies of that set would eventually disagree, and the disagreement would be silent.
 
-    # No second literal anywhere a consumer (this ratchet, the future resume policy) could read.
+    The CI ratchet (a change may not land) and the resume policy (a run may not continue) are the
+    two enforcers of the one line, so this binds them **both ways**: they classify through the same
+    function object, that function reads the one constant the resume policy also quotes by name,
+    and — the part a refactor cannot fake — they return the same tier for every component when the
+    whole engine has moved underneath them.
+    """
+    assert engine_ratchet.tier_of is engine_id.tier_of
+    assert engine_change.tier_of is engine_id.tier_of
+    assert engine_change.ARBITER_COMPONENTS is engine_id.ARBITER_COMPONENTS
+
+    root = _build_tree(tmp_path)
+    frozen = {
+        "engine": {"engine_version": ENGINE_VERSION, "fingerprint": fingerprint(root).digests()}
+    }
+    committed = _record(root)
+    for paths in COMPONENT_PATHS.values():
+        _edit(root, paths[0])
+
+    result = compare_records(_record(root), committed)
+    ratchet = {
+        drift.component: drift.tier for drift in (*result.arbiter_drift, *result.searcher_drift)
+    }
+    policy = {
+        change.component: change.tier
+        for change in engine_change.engine_change(frozen, fingerprint(root)).components
+    }
+    assert policy == ratchet
+    assert set(policy) == set(COMPONENT_PATHS)
+
+    # No second literal anywhere a consumer (this ratchet, the resume policy) could read.
     sources = sorted((REPO_ROOT / "src").rglob("*.py")) + sorted((REPO_ROOT / "scripts").rglob("*"))
     literals = [
         f"{path.relative_to(REPO_ROOT)}:{lineno}"

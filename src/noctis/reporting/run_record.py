@@ -88,13 +88,22 @@ class EngineIdentity:
     """What produced these numbers: the declared version plus the computed per-component digests.
 
     Both, because neither works alone — see ``observability/engine_id.py``. Carried on the run
-    *and* on every segment, since a run resumed after a code change ran two engines.
+    *and* on every segment, since a run resumed after a code change ran two engines: the run's is
+    the engine it was **frozen at creation** under (what a resume compares against, and what its
+    comparable key names), each segment's is the engine that actually produced that segment.
+
+    ``engine_epoch`` and ``engine_changes`` are the engine's twins of ``inputs.config_epoch`` and
+    ``inputs.config_changes``: 1 and empty on every run, moved only by a deliberate
+    ``--allow-engine-upgrade`` (story #135), which re-freezes the identity and appends the entry
+    naming the components that moved.
     """
 
     engine_version: int
     fingerprint: Mapping[str, str | None]
     comparable_key: str
     noctis_version: str
+    engine_epoch: int = 1
+    engine_changes: Sequence[Mapping[str, object]] = ()
 
 
 @dataclass(frozen=True)
@@ -128,7 +137,13 @@ class RunArtifacts:
     run_id: str
     created_utc: str | None
     last_active_utc: str | None
+    # The run's own engine, frozen at creation and carried forward verbatim ever after — the side a
+    # resume compares against (story #135), exactly as ``inputs`` is for the configuration.
     engine: EngineIdentity
+    # The engine **this process** is: the one the appending segment records, and the one an
+    # accepted upgrade re-freezes the run onto. ``None`` on a fresh run, where the two are the same
+    # thing, and on any caller that only cares about the run's identity.
+    current_engine: EngineIdentity | None = None
     segments: Sequence[SegmentArtifact] = ()
     label: str | None = None
     completed_utc: str | None = None
@@ -161,6 +176,7 @@ def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
         created_utc=artifacts.created_utc,
         last_active_utc=artifacts.last_active_utc,
         engine=artifacts.engine,
+        current_engine=artifacts.current_engine,
         segments=segments,
         label=artifacts.label,
         completed_utc=artifacts.completed_utc,
@@ -260,20 +276,30 @@ def _segment(segment: SegmentArtifact) -> dict:
 
 
 def _engine(artifacts: RunArtifacts) -> dict:
-    """The run-level engine identity, plus whether any segment ran a different engine."""
+    """The run's engine identity — frozen at creation — plus whether it ever ran another engine.
+
+    ``mixed_engine`` is **derived**, from two independent facts that mean the same thing: a segment
+    whose digests differ from the run's, and an accepted engine change on the record. Either way
+    the run's numbers were produced by more than one engine, and a consumer must know before
+    pooling them; a flag stored beside the evidence could disagree with it.
+    """
     engine = artifacts.engine
     fingerprints = [
         dict(segment.engine.fingerprint)
         for segment in artifacts.segments
         if segment.engine is not None
     ]
-    mixed = any(digests != dict(engine.fingerprint) for digests in fingerprints)
+    mixed = bool(engine.engine_changes) or any(
+        digests != dict(engine.fingerprint) for digests in fingerprints
+    )
     return {
         "engine_version": engine.engine_version,
+        "engine_epoch": engine.engine_epoch,
         "noctis_version": engine.noctis_version,
         "fingerprint": dict(engine.fingerprint),
         "comparable_key": engine.comparable_key,
         "mixed_engine": mixed,
+        "engine_changes": [dict(change) for change in engine.engine_changes],
     }
 
 

@@ -67,11 +67,12 @@ def _resolve_session_or_exit(config: str | None, **kwargs):
     typed startup error to red text + a non-zero exit. Errors are loud at startup by design:
     a typo'd selector or a closed safety gate must never silently un-steer a multi-day run.
 
-    The three resume refusals map here too, for the same reason: an unresumable run must be said
+    The four resume refusals map here too, for the same reason: an unresumable run must be said
     out loud at the start rather than turned into a *new* run nobody asked for.
     """
     from noctis.bootstrap import UsageError, resolve_session
     from noctis.config.rehydrate import RehydrationError
+    from noctis.observability.engine_change import EngineChangeError
     from noctis.reporting.run_store import RunCompletedError, RunNotFoundError
     from noctis.research import MandateError
 
@@ -85,7 +86,7 @@ def _resolve_session_or_exit(config: str | None, **kwargs):
         _exit_red(exc, prefix="SAFETY GATE: ")
     except (RunNotFoundError, RunCompletedError) as exc:
         _exit_red(exc, prefix="RESUME: ")
-    except RehydrationError as exc:
+    except (RehydrationError, EngineChangeError) as exc:
         _exit_red(exc, prefix="RESUME: ")
 
 
@@ -376,6 +377,39 @@ def _echo_config_rebase(rebase: Mapping | None, *, rebased: bool) -> None:
     )
 
 
+def _echo_engine_change(store, inputs, *, upgrading: bool) -> None:
+    """Say — and **record** — that this run resumed under a different engine (story #135).
+
+    Both, always, and in that order of importance: the record is what an experiment is judged from
+    months later, so an engine change that only ever appeared in a terminal would be invisible
+    exactly when it mattered. The event lands against the segment it is true of, which is why it is
+    written per resume rather than once per run.
+
+    A refused resume never reaches here (the policy raises during session assembly), and a resume
+    that found no drift prints and records nothing at all — silence is the signal.
+    """
+    for note in inputs.engine_notes:
+        typer.secho(f"Engine change: {note}", fg=typer.colors.YELLOW)
+        store.note(note)
+    if not upgrading:
+        return
+    upgrade = inputs.engine_upgrade
+    if upgrade is None:
+        typer.echo(
+            "Engine upgrade: nothing to accept — the components that decide what passes and what "
+            "a number means still match what this run was created under, so engine_epoch is "
+            "unchanged."
+        )
+        return
+    moved = ", ".join(str(component["component"]) for component in upgrade["components"])
+    typer.secho(
+        f"Engine upgraded: engine_epoch {upgrade['from_epoch']} → {upgrade['to_epoch']} ({moved}), "
+        f"recorded in segment {upgrade['segment']}. This run is flagged mixed_engine and its "
+        "comparable key follows the new engine from here on.",
+        fg=typer.colors.YELLOW,
+    )
+
+
 def _echo_research_engine(settings) -> None:
     """Announce, up front, which research engine the loop will run — the agent (an LLM authoring
     strategies) or the legacy proposer/Optuna fallback — and the model behind it. The fallback is
@@ -437,6 +471,16 @@ def run(
         "naming the segment, so a run whose config changed mid-flight always says so. A NO-OP "
         "when there is no drift — the epoch never moves for nothing. `mode` and `allow_live` are "
         "never rebasable: the safety gate re-resolves from two independent sources every start.",
+    ),
+    allow_engine_upgrade: bool = typer.Option(
+        False,
+        "--allow-engine-upgrade",
+        help="With --resume: accept that this checkout's ENGINE has changed since the run was "
+        "created, in the components that decide what passes and what a number means. Without it "
+        "such a resume is REFUSED — champions crowned under two sets of gates must not accumulate "
+        "inside one experiment. Accepting bumps engine.engine_epoch, appends an engine_changes "
+        "entry naming every component that moved, and flags the run mixed_engine for good. A "
+        "no-op when only the searcher tier moved (that warns, records and proceeds anyway).",
     ),
     directive: str = typer.Option(
         None,
@@ -520,6 +564,7 @@ def run(
         require_gate=True,
         resume=resume,
         rebase_config=rebase_config,
+        allow_engine_upgrade=allow_engine_upgrade,
     )
     settings, mode, active_mandate = inputs.settings, inputs.mode, inputs.mandate
     assert mode is not None  # require_gate=True always resolves it
@@ -553,12 +598,14 @@ def run(
             mode=mode,
             overrides=inputs.overrides,
             rebase=inputs.rebase,
+            engine_upgrade=inputs.engine_upgrade,
         )
     except RunLockedError as exc:
         _exit_red(exc, prefix="RUN LOCKED: ")
     typer.echo(f"{'Resumed run' if resume else 'Run'}: {store.run_id}")
     typer.echo(f"Run record: {store.record_path}")
     _echo_config_rebase(inputs.rebase, rebased=rebase_config)
+    _echo_engine_change(store, inputs, upgrading=allow_engine_upgrade)
 
     # --debug assembles the QA recorder in the composition root (prune-on-start → run tree →
     # stamped manifest), echoes the run id + report path here at start, and — when the legacy
@@ -786,16 +833,22 @@ def _run_row(entry: Mapping[str, object]) -> tuple[str, str, str, str, str, str]
     The last column answers "may these numbers be pooled?" with the run's comparable key — or,
     for a run whose record could not be read, says why there is no answer. Either way the line
     explains itself without a second lookup.
+
+    A run that ran more than one engine carries ``mixed engine`` beside its key, because the key
+    alone would over-promise: it names the bucket the run's *latest* engine puts it in, while some
+    of its numbers were produced by another one. That is exactly the fact a leaderboard must not
+    have to be told twice.
     """
     readable = bool(entry.get("readable"))
     segments = entry.get("segments")
+    key = str(entry.get("comparable_key") or entry.get("note") or "-")
     return (
         str(entry.get("run_id") or "-"),
         str(entry.get("label") or "-"),
         str(entry.get("status") or "-") if readable else "unreadable",
         "-" if segments is None else str(segments),
         _runtime(entry.get("cumulative_runtime_s")),
-        str(entry.get("comparable_key") or entry.get("note") or "-"),
+        f"{key}  (mixed engine)" if entry.get("mixed_engine") else key,
     )
 
 

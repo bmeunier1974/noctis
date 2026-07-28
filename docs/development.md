@@ -93,6 +93,14 @@ it asserts a comparability that does not hold. The check is split on the arbiter
 | `gates`, `backtest` — the **arbiter**: what passes, and what a number means | **Fail.** Naming the component and the files that moved. This is the change that invalidates every stored champion comparison, so it can never land silently |
 | `research`, `prompts`, `profiles`, `seeds`, `memory_seed`, `schema` — the **searcher** | **Warn and pass.** Naming the component and the files. Improving the searcher must not invalidate an experiment whose arbiter held still, and a ratchet that fires on a docstring edit gets disabled |
 
+The **same line governs resuming a run** (`src/noctis/observability/engine_change.py`): arbiter
+drift between the engine a run froze at creation and this checkout **refuses the resume** unless
+`--allow-engine-upgrade` accepts it on the record, searcher drift **warns, records and proceeds**,
+and no drift is silent (see [cli.md → Engine change](cli.md#engine-change-resuming-after-the-code-moved)).
+Both enforcers classify through the one `tier_of` function over the one `ARBITER_COMPONENTS`
+constant in `engine_id.py`, and a test binds them to each other component by component — two copies
+of that set would eventually disagree, and the disagreement would be silent.
+
 The rule in full, in evaluation order: a missing or unreadable record fails; a record declaring
 another `ENGINE_VERSION` than the tree fails as **stale**; arbiter drift fails (with the version
 unchanged that is undeclared drift, with it bumped the record simply was not regenerated); drift

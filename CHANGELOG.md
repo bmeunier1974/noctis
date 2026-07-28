@@ -9,6 +9,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Engine-change resume policy, and `noctis run --resume … --allow-engine-upgrade`.** A run
+  resumed after a `git pull` may find a different engine, and the policy splits on **who changed:
+  the judge, or the searcher** — the same arbiter/searcher line the CI ratchet enforces, read
+  through the one classifier over the one `ARBITER_COMPONENTS` constant (a test binds both
+  enforcers to it, and to each other, component by component).
+  - **Arbiter drift (`gates`, `backtest`) refuses the resume**, naming the component and both
+    digests, before a segment is opened or a lock is taken. Champions crowned under two sets of
+    gates must never accumulate inside one experiment — inside a single run that is worse than
+    across two (AGENTS.md rule 2).
+  - **`--allow-engine-upgrade` overrides that refusal, and is never invisible**: it bumps
+    `engine.engine_epoch`, appends an `engine.engine_changes` entry naming every component that
+    moved with both digests and the **segment** it happened in, re-freezes the run onto the new
+    engine (so its comparable key honestly follows it), and flags the run `mixed_engine` for good.
+    With no arbiter drift it is a documented **no-op** — the epoch never moves for nothing.
+  - **Searcher-tier drift (`research`, `prompts`, `profiles`, `seeds`, `memory_seed`, `schema`)
+    warns, records and proceeds**: an event on the record naming the component, both digests and
+    the files to go and look at. Improving how candidates are *found* must not invalidate an
+    experiment whose arbiter held still.
+  - **No drift is silent** — nothing printed, nothing recorded. A policy that says something every
+    time is one operators learn to skip.
+  - `mixed_engine` is visible in the record, in `index.json` and in the `noctis runs` board (beside
+    the comparable key, which alone would over-promise for a run that ran two engines).
+  - **The engine identity is now frozen at run creation** and carried forward verbatim, exactly
+    like the frozen config: the run-level `engine` section is what the run was created under (and
+    what every resume is compared against), while each **segment** records the engine that actually
+    produced it. Previously every write restamped the run with whatever engine was running, so
+    there was nothing stable to compare a resume against.
 - **Config drift: `noctis run --resume … --show-config-drift` and `--rebase-config`.** A run's
   configuration is frozen at creation and drift is normal — frozen wins, silently. These are the
   two things an operator needs on top of that: *see* what the current `config.yaml` and `mandate/`

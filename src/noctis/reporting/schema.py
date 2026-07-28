@@ -92,10 +92,27 @@ _SEGMENT_KEYS = (
 
 _ENGINE_KEYS = (
     "engine_version",
+    "engine_epoch",
     "noctis_version",
     "fingerprint",
     "comparable_key",
     "mixed_engine",
+    "engine_changes",
+)
+
+# One deliberately accepted engine change (story #135, ``--allow-engine-upgrade``). The twin of
+# ``inputs.config_changes``, in the section whose epoch it bumps and with the same rule: a run
+# whose engine changed mid-flight says so *and says where*, naming every component that moved and
+# both its digests. Empty (never absent) on the runs that never upgraded.
+_ENGINE_CHANGE_KEYS = (
+    "at",
+    "segment",
+    "from_epoch",
+    "to_epoch",
+    "from_engine_version",
+    "to_engine_version",
+    "components",
+    "accepted_by",
 )
 
 _EVENT_KEYS = ("t", "segment", "kind", "text")
@@ -171,6 +188,9 @@ def validate(record: Mapping[str, object]) -> list[str]:
     engine = record.get("engine")
     if isinstance(engine, Mapping):
         problems += _check_keys("engine", engine, _ENGINE_KEYS)
+        problems += _check_changes(
+            "engine.engine_changes", engine.get("engine_changes"), _ENGINE_CHANGE_KEYS
+        )
     elif "engine" in record:
         problems.append("engine: section must be an object")
 
@@ -211,18 +231,28 @@ def _check_config_changes(changes: object) -> list[str]:
     say so *and say where*, or every comparison built on it is false. So the segment index is part
     of the contract, not an optional nicety.
     """
+    return _check_changes("inputs.config_changes", changes, _CONFIG_CHANGE_KEYS)
+
+
+def _check_changes(label: str, changes: object, keys: Sequence[str]) -> list[str]:
+    """One deliberate-mid-run-change list — the config's and the engine's, checked identically.
+
+    The two are the same contract at two levels (what the run was told, and what judged it), so
+    they get one implementation: a list of objects, each carrying its keys, its UTC stamp and the
+    segment it happened in. Absent lists are fine; a list of anything else is not.
+    """
     if changes is None:
         return []
     if not isinstance(changes, Sequence) or isinstance(changes, str | bytes):
-        return ["inputs.config_changes: must be a list"]
+        return [f"{label}: must be a list"]
     problems: list[str] = []
     for position, change in enumerate(changes):
-        label = f"inputs.config_changes[{position}]"
+        entry = f"{label}[{position}]"
         if not isinstance(change, Mapping):
-            problems.append(f"{label}: must be an object")
+            problems.append(f"{entry}: must be an object")
             continue
-        problems += _check_keys(label, change, _CONFIG_CHANGE_KEYS)
-        problems += _check_stamp(f"{label}.at", change.get("at"))
+        problems += _check_keys(entry, change, keys)
+        problems += _check_stamp(f"{entry}.at", change.get("at"))
     return problems
 
 

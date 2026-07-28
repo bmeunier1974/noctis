@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -87,6 +87,15 @@ class SessionInputs:
     # ``None`` on every other session — including a rebase of a run nothing changed under, which is
     # a no-op by design rather than a cosmetic epoch bump.
     rebase: Mapping[str, Any] | None = None
+    # What the engine-change resume policy found (story #135), for the entrypoint to *say and
+    # record* once the run is open: one event text per tier that moved. Empty on a fresh run and on
+    # a resume that found no drift — silence is the signal that the engine held still.
+    engine_notes: list[str] = field(default_factory=list)
+    # The ``engine_changes`` entry a deliberately accepted engine change produced
+    # (``--allow-engine-upgrade``): epoch already bumped, moved components already named. Handed to
+    # :func:`open_run_store`, which re-freezes the run onto this engine. ``None`` everywhere else,
+    # including an upgrade of a run whose arbiter never moved — a documented no-op.
+    engine_upgrade: Mapping[str, Any] | None = None
 
 
 def resolve_session(
@@ -99,6 +108,7 @@ def resolve_session(
     require_gate: bool = False,
     resume: str | None = None,
     rebase_config: bool = False,
+    allow_engine_upgrade: bool = False,
 ) -> SessionInputs:
     """Resolve one session's settings by the one precedence order (docs/configuration.md).
 
@@ -150,12 +160,19 @@ def resolve_session(
             time_limit_hours=time_limit_hours,
             require_gate=require_gate,
             rebase_config=rebase_config,
+            allow_engine_upgrade=allow_engine_upgrade,
         )
     if rebase_config:
         raise UsageError(
             "--rebase-config adopts the current config.yaml and mandate/ onto an existing run, so "
             "it only means something with --resume: a run being minted right now is already being "
             "frozen on exactly those files."
+        )
+    if allow_engine_upgrade:
+        raise UsageError(
+            "--allow-engine-upgrade accepts an engine change on an existing run, so it only means "
+            "something with --resume: a run being minted right now is being frozen on exactly the "
+            "engine this process is."
         )
 
     settings = load_settings(config_path=config_path)
@@ -190,6 +207,7 @@ def resume_session(
     time_limit_hours: float | None = None,
     require_gate: bool = False,
     rebase_config: bool = False,
+    allow_engine_upgrade: bool = False,
 ) -> SessionInputs:
     """Resolve the session that **continues** an existing run, under that run's frozen config.
 
@@ -199,12 +217,20 @@ def resume_session(
     paths, secrets, per-process budgets — and everything that decides what the results mean comes
     back from the record (:mod:`noctis.config.rehydrate`).
 
-    Three refusals, all before any long-running work starts and all from somewhere else: the
+    Four refusals, all before any long-running work starts and all from somewhere else: the
     address must name a run (:class:`~noctis.reporting.run_store.RunNotFoundError`), the run must
-    not be ``completed`` (:class:`~noctis.reporting.run_store.RunCompletedError`), and the freshly
+    not be ``completed`` (:class:`~noctis.reporting.run_store.RunCompletedError`), the freshly
     resolved execution mode must match the one the run's earlier segments ran under
-    (:class:`~noctis.config.rehydrate.RehydrationError`). The safety gate itself is re-resolved
-    here exactly as at a first start — never rehydrated, never restored (AGENTS.md rule 1).
+    (:class:`~noctis.config.rehydrate.RehydrationError`), and the **arbiter** of the engine — what
+    passes, and what a number means — must still be the one the run was created under
+    (:class:`~noctis.observability.engine_change.EngineChangeError`, story #135). The safety gate
+    itself is re-resolved here exactly as at a first start — never rehydrated, never restored
+    (AGENTS.md rule 1).
+
+    An engine change in the *searcher* tier is not a refusal at all: it is warned about, handed
+    back for the entrypoint to record against the run, and the resume proceeds.
+    ``allow_engine_upgrade`` is the operator accepting an arbiter change deliberately, which lifts
+    that one refusal and produces the record entry that makes the acceptance permanent.
 
     Drift between the record and the current files is normal and silently fine: frozen wins.
     ``rebase_config`` (story #134) is how an operator adopts it instead — deliberately, once, and
@@ -229,12 +255,17 @@ def resume_session(
     assert_resumable(record, addressed)
     if mode is not None:
         assert_mode_unchanged(record, mode, rebasing=rebase_config)
+    notes, upgrade = _engine_change_on_resume(
+        record, run_id=addressed, upgrading=allow_engine_upgrade
+    )
     if rebase_config:
         adopted = _adopt_current_config(
             settings, record, mode=mode, time_limit_hours=time_limit_hours, run_id=addressed
         )
         if adopted is not None:
-            return adopted
+            # The engine verdict rides along whichever way the config went: a rebase adopts new
+            # *settings*, and says nothing about the code that will run them.
+            return replace(adopted, engine_notes=notes, engine_upgrade=upgrade)
     if not has_frozen_inputs(record):
         logger.warning(
             "run %s froze no configuration (it predates config freezing, or it is history adopted "
@@ -252,7 +283,57 @@ def resume_session(
     # ``resolve_session`` with a reason, rather than silently ignored.
     if time_limit_hours is not None:
         settings.time_limit_hours = time_limit_hours
-    return SessionInputs(settings=settings, mode=mode, mandate=active, overrides=overrides)
+    return SessionInputs(
+        settings=settings,
+        mode=mode,
+        mandate=active,
+        overrides=overrides,
+        engine_notes=notes,
+        engine_upgrade=upgrade,
+    )
+
+
+def _engine_change_on_resume(
+    record: Mapping[str, Any], *, run_id: str, upgrading: bool
+) -> tuple[list[str], dict[str, Any] | None]:
+    """Apply the engine-change resume policy to one record, before anything opens (story #135).
+
+    The policy itself is pure and lives in :mod:`noctis.observability.engine_change`; this is the
+    one place that gives it the two things it cannot compute — the engine **this** checkout is
+    (:func:`~noctis.observability.engine_id.fingerprint`) and the clock — and turns its verdict into
+    the three outcomes an operator sees:
+
+    * arbiter drift **raises** here, so a refused resume opens no segment and takes no lock;
+    * searcher drift is logged now and handed back as event text, because a run that ran two
+      engines must say so *in the record*, not only in a terminal nobody kept;
+    * ``upgrading`` produces the ``engine_changes`` entry — stamped with the index of the segment
+      about to be appended, which is exactly the number of segments the record already carries.
+
+    No drift returns ``([], None)``: nothing logged, nothing recorded, nothing said.
+    """
+    from datetime import UTC, datetime
+
+    from noctis.observability.engine_change import (
+        assert_arbiter_held,
+        engine_change,
+        engine_notes,
+        upgrade_entry,
+    )
+    from noctis.observability.engine_id import fingerprint
+    from noctis.reporting.run_record import utc_iso
+
+    change = engine_change(record, fingerprint())
+    assert_arbiter_held(change, run_id=run_id, upgrading=upgrading)
+    notes = list(engine_notes(change, upgrading=upgrading))
+    for note in notes:
+        logger.warning("run %s: %s", run_id, note)
+    if not upgrading:
+        return notes, None
+    return notes, upgrade_entry(
+        change,
+        at=utc_iso(datetime.now(UTC)),
+        segment=len(record.get("segments") or []),
+    )
 
 
 def _adopt_current_config(
@@ -833,6 +914,7 @@ def open_run_store(
     mode: str | None = None,
     overrides: list[str] | None = None,
     rebase: Mapping[str, Any] | None = None,
+    engine_upgrade: Mapping[str, Any] | None = None,
 ):
     """Open this invocation's run — the always-on run identity, minted here and nowhere else.
 
@@ -866,6 +948,11 @@ def open_run_store(
     carried instead of being ignored like a fresh freeze would be. Absent (the normal case) nothing
     about freezing changes at all.
 
+    ``engine_upgrade`` is its twin one layer down (story #135): the ``engine_changes`` entry an
+    accepted ``--allow-engine-upgrade`` produced. Given one, the run's engine identity is re-frozen
+    onto this process's engine with that entry appended; absent, the run keeps the engine it was
+    created under, which is what every resume is compared against.
+
     Raises :class:`~noctis.reporting.run_store.RunLockedError` when another engine already holds
     the addressed run — the one failure in this subsystem that is fatal rather than latched.
     """
@@ -896,6 +983,7 @@ def open_run_store(
             frozen_at=utc_iso(tick()),
         ),
         rebase_config=rebase is not None,
+        engine_upgrade=engine_upgrade,
     )
     bind_run_dir(settings, store.run_dir)
     return store

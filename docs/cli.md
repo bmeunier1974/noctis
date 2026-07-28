@@ -224,6 +224,36 @@ settings — the record keeps only the gate's verdict — so the concrete attemp
 with a message saying no flag lifts it. The live-money double gate re-resolves from two independent
 sources at every process start (AGENTS.md rule 1); a record is neither of them.
 
+#### Engine change: resuming after the code moved
+
+The configuration is one half of "what these numbers mean"; the **engine** is the other. A run
+freezes its engine identity at creation — the declared `ENGINE_VERSION` plus one digest per
+behavioural component (see [Engine identity](#engine-identity--are-these-two-runs-comparable)) —
+and every resume compares that against this checkout, component by component. The policy splits on
+**who changed: the judge, or the searcher**, and it is deliberately the same line the CI ratchet
+draws (see [development.md → Engine fingerprint ratchet](development.md#engine-fingerprint-ratchet)).
+
+| what moved | on resume |
+|---|---|
+| `gates`, `backtest` — the **arbiter**: what passes, and what a number means | **Refused**, naming the component and both digests, before a segment is opened or a lock is taken. Champions crowned under two sets of gates must not accumulate inside one experiment — inside a *single* run that is worse than across two |
+| `research`, `prompts`, `profiles`, `seeds`, `memory_seed`, `schema` — the **searcher** | **Warn, record, proceed.** An event lands on the record naming the component, both digests and the files to look at. Improving how candidates are *found* must not invalidate a run whose arbiter held still |
+| nothing | Silence. Nothing printed, nothing recorded |
+
+```bash
+python -m noctis run --resume latest --allow-engine-upgrade   # accept an arbiter change, on the record
+```
+
+`--allow-engine-upgrade` is the escape hatch, and it is **never invisible**: it bumps
+`engine.engine_epoch`, appends an `engine.engine_changes` entry naming every component that moved
+(with both digests and the **segment** it happened in), re-freezes the run onto the new engine — so
+its comparable key honestly follows it into the new bucket — and flags the run `mixed_engine` for
+good, which `noctis runs` shows beside the key. With no arbiter drift it is a documented **no-op**:
+the epoch never moves for nothing, exactly like `--rebase-config`.
+
+The alternatives the refusal names are the honest ones: restore the engine the run was created
+under (its digests are in the record), or start a new run under the current engine — identity is
+minted, never derived, so a fresh run under the same configuration is one command away.
+
 ### Verbosity
 
 `run` and `research` share one ladder. A bare command is silent; `-v` streams phase banners and
@@ -280,6 +310,7 @@ without opening a file:
 run                      label              status      segments   runtime  comparable key
 20260730T025536Z-bc14eb  sector-specialist  stopped            1     1d01h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
 20260727T142233Z-7a8f9d  nightly-momo       running            4     2d12h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
+20260714T031102Z-4d9c1a  gate-rework        stopped            6     5d04h  2|8c1de5f0a2b34c77|3ba3e0bf1c97134f|sharpe  (mixed engine)
 20260101T000000Z-brokn0  -                  unreadable         -         -  an unreadable run.json (JSONDecodeError)
 
 1 short run(s) hidden; pass --all to list them.
@@ -289,7 +320,11 @@ The last column is the **comparable key** (see [Engine identity](#engine-identit
 runs may only be pooled or ranked against each other within one key, so the board is partitioned
 structurally rather than from memory. A run whose record is missing or unreadable is *listed as
 such*, with the reason where its key would be — a broken record is evidence, and hiding it would
-be the one thing a listing must never do.
+be the one thing a listing must never do. **`(mixed engine)`** marks a run that ran more than one
+engine — an accepted `--allow-engine-upgrade`, or a segment whose digests differ from the ones the
+run was created under. Its key names the bucket its *latest* engine puts it in, while some of its
+numbers were produced by another one, so the marker is the part a leaderboard must not be told
+twice.
 
 **The default listing hides noise**: a run that finished with under 60 seconds of cumulative
 runtime produced nothing to compare (a startup failure, a mistyped command, a config typo). The

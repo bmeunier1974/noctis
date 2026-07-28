@@ -42,7 +42,7 @@ import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 # The behavioural contract version. Plain, incrementing, not semantic, and NOT
 # ``noctis.__version__`` (see the module docstring). Bump it in the PR that changes behaviour.
@@ -115,6 +115,11 @@ COMPONENT_PATHS: Mapping[str, tuple[str, ...]] = {
     # Changes what is recorded: the run record's version, its caps and its validator.
     "schema": ("src/noctis/reporting/schema.py",),
 }
+
+# The two sides of that one line, named. The alias lives here — beside the set it describes and
+# below it, so the declaration above stays the single literal every consumer greps for — because
+# both readers of the split (the CI ratchet, the resume policy) speak in these words.
+Tier = Literal["arbiter", "searcher"]
 
 # A truncated SHA-256 (64 bits of it): long enough that two distinct engines colliding is not a
 # realistic concern, short enough to read in a terminal and paste into an issue.
@@ -230,6 +235,17 @@ def compare(a: EngineFingerprint, b: EngineFingerprint) -> set[str]:
     """
     names = set(a.components) | set(b.components)
     return {name for name in names if _digest_of(a, name) != _digest_of(b, name)}
+
+
+def tier_of(component: str) -> Tier:
+    """Which side of the line one component sits on: the judge, or the searcher.
+
+    The **one implementation** of the split, so the CI ratchet (a change may not land) and the
+    resume policy (a run may not continue) can never answer it differently. It reads
+    :data:`ARBITER_COMPONENTS` and nothing else; a component nobody has heard of is searcher tier,
+    because only the two named ones bind comparability.
+    """
+    return "arbiter" if component in ARBITER_COMPONENTS else "searcher"
 
 
 def default_root() -> Path:

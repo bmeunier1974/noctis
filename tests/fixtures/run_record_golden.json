@@ -76,6 +76,7 @@
   ],
   "engine": {
     "engine_version": 1,
+    "engine_epoch": 1,
     "noctis_version": "0.1.0",
     "fingerprint": {
       "gates": "f63d47b7b9604ab1",
@@ -88,7 +89,8 @@
       "schema": null
     },
     "comparable_key": "1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe",
-    "mixed_engine": false
+    "mixed_engine": false,
+    "engine_changes": []
   },
   "inputs": null,
   "events": [
