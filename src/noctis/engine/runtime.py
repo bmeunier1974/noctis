@@ -109,6 +109,11 @@ class RuntimeResult:
     reports: list[str] = field(default_factory=list)
     stopped_reason: str = ""
     final_equity: float = 0.0
+    # Seconds this process spent **working** in each phase (``{"RESEARCH": …, "TRADING": …}``) —
+    # the measurement the run record turns into the run's cumulative research/trading seconds.
+    # Waiting is not working: the bounded waits between phases (out a weekend, to a session close)
+    # belong to the segment's wall-clock duration and to no phase.
+    phase_seconds: dict[str, float] = field(default_factory=dict)
 
 
 class Runtime:
@@ -133,6 +138,7 @@ class Runtime:
         mandate=None,
         on_event=None,
         on_cycle_close=None,
+        prior_runtime_s: float = 0.0,
     ):
         self.settings = settings
         self.clock = clock
@@ -171,10 +177,17 @@ class Runtime:
         # Wire the machine's phase seam so each RESEARCH→TRADING→CLOSE transition announces itself
         # inline (guarded on ``_on_event`` — a quiet run emits nothing). This frames the interleaved
         # research/trading feeds; entry is the only hook, so each transition is exactly one event.
+        # Two ceilings, one stop. ``time_limit_hours`` bounds this process (how long tonight lasts);
+        # ``run_limit_hours`` bounds the whole run across every stop/resume, measured against the
+        # runtime its earlier segments already spent (``prior_runtime_s``, read off the run record
+        # by the composition root). Both stop cleanly between phases through the machine's own
+        # terminal move — the run-level cap deliberately adds no second shutdown route.
         self.machine = TradingMachine(
             clock,
             on_enter=self._on_phase_enter,
             time_limit_hours=settings.time_limit_hours,
+            run_limit_hours=settings.run_limit_hours,
+            prior_runtime_s=prior_runtime_s,
         )
         self._stop = False
         # The event-protocol view (``is_set()``) of ``_stop`` the research/trading loops poll.
@@ -473,6 +486,7 @@ class Runtime:
             if phase is Phase.RESEARCH:
                 research_start = sleeper.now()
                 self._run_research()
+                self._count_phase_time(phase, research_start, sleeper.now())
                 # If research overran into an open session, fall through so the machine can
                 # trade the remaining hours instead of skipping the day. While the market is
                 # still closed:
@@ -493,7 +507,9 @@ class Runtime:
                 # reach here after sleeping to the open, so this normally holds; the guard is
                 # what keeps a start-while-closed (e.g. a Saturday) from ever emitting orders.
                 if self.clock.is_open(sleeper.now()):
-                    self._run_trading(sleeper.now(), sleeper)
+                    trading_start = sleeper.now()
+                    self._run_trading(trading_start, sleeper)
+                    self._count_phase_time(phase, trading_start, sleeper.now())
                     # Advance to the session close. The live driver already ran the clock to
                     # the close; the instant replay driver has not, so pace to it here —
                     # bounded, like every between-work wait, so a short time limit stops the
@@ -504,7 +520,9 @@ class Runtime:
                     logger.info("trading skipped: market closed at %s", sleeper.now().isoformat())
                     self._cycle.events.append("Trading phase skipped — market closed")
             elif phase is Phase.CLOSE:
-                self._run_close(sleeper.now())
+                close_start = sleeper.now()
+                self._run_close(close_start)
+                self._count_phase_time(phase, close_start, sleeper.now())
                 if max_cycles is not None and self.result.cycles_completed >= max_cycles:
                     self.machine.stop()
                     self.result.stopped_reason = "max_cycles"
@@ -513,9 +531,9 @@ class Runtime:
             self.machine.tick(sleeper.now())
 
         if not self.result.stopped_reason:
-            self.result.stopped_reason = (
-                "time_limit" if self.machine.time_up(sleeper.now()) else "stopped"
-            )
+            # Which ceiling ended it — the per-process time limit or the run-level cap — decided in
+            # the one place both live, so the reason on the segment always names the real cause.
+            self.result.stopped_reason = self.machine.limit_hit(sleeper.now()) or "stopped"
         self.result.history = list(self.machine.history)
         logger.info(
             "runtime stopped: %s after %d cycle(s)",
@@ -524,14 +542,22 @@ class Runtime:
         )
         return self.result
 
+    def _count_phase_time(self, phase: Phase, started, ended) -> None:
+        """Add one phase body's wall-clock seconds to this segment's tally.
+
+        Measured on the pacing seam's clock (the loop's only clock) and around the *work* alone —
+        the waits that follow a phase are pacing, not research or trading, and a total that folded
+        them in would make "100 research hours" mean "100 hours of having been switched on"."""
+        elapsed = (ended - started).total_seconds()
+        current = self.result.phase_seconds.get(phase.value, 0.0)
+        self.result.phase_seconds[phase.value] = round(current + max(0.0, elapsed), 3)
+
     def _make_waiter(self, sleeper) -> BoundedWaiter:
         """Every between-phase wait goes through one :class:`BoundedWaiter`: it clamps to the
-        run's time-limit deadline and wakes promptly on a stop request, so the loop never
-        parks against the clock (a weekend, a session close) past the point it should halt."""
-        deadline = None
-        if self.machine.time_limit_hours is not None and self.machine.start_time is not None:
-            deadline = self.machine.start_time + timedelta(hours=self.machine.time_limit_hours)
-        return BoundedWaiter(sleeper, stop=lambda: self._stop, deadline=deadline)
+        run's deadline — the earlier of the per-process time limit and the run-level cap — and
+        wakes promptly on a stop request, so the loop never parks against the clock (a weekend, a
+        session close) past the point it should halt."""
+        return BoundedWaiter(sleeper, stop=lambda: self._stop, deadline=self.machine.deadline())
 
 
 def build_runtime(
@@ -551,8 +577,14 @@ def build_runtime(
     mandate=None,
     on_event=None,
     on_cycle_close=None,
+    prior_runtime_s: float = 0.0,
 ) -> Runtime:
-    """Construct a :class:`Runtime` from settings and the collaborators it needs."""
+    """Construct a :class:`Runtime` from settings and the collaborators it needs.
+
+    ``prior_runtime_s`` is the runtime the run's **earlier segments** already spent, which the
+    run-level cap (``settings.run_limit_hours``) is measured against. It defaults to 0 — a fresh
+    run, and every caller that has no run record in hand.
+    """
     from noctis.bootstrap import build_families
     from noctis.champions import build_registry
 
@@ -591,4 +623,5 @@ def build_runtime(
         mandate=mandate,
         on_event=on_event,
         on_cycle_close=on_cycle_close,
+        prior_runtime_s=prior_runtime_s,
     )

@@ -8,7 +8,10 @@
     "created_utc": "2026-07-27T14:22:33.418Z",
     "last_active_utc": "2026-07-28T02:10:04.002Z",
     "completed_utc": null,
+    "run_limit_hours": null,
     "cumulative_runtime_s": 18000.0,
+    "cumulative_research_s": 15400.0,
+    "cumulative_trading_s": 2340.0,
     "complete": true,
     "truncated": {}
   },
@@ -30,6 +33,11 @@
         "cycles": 1,
         "research_iterations": 4,
         "trades": 2
+      },
+      "phase_seconds": {
+        "RESEARCH": 12000.0,
+        "TRADING": 2340.0,
+        "CLOSE": 60.0
       },
       "engine_version": 1,
       "engine_fingerprint": {
@@ -60,6 +68,11 @@
         "cycles": 2,
         "research_iterations": 9,
         "trades": 0
+      },
+      "phase_seconds": {
+        "RESEARCH": 3400.0,
+        "TRADING": 0.0,
+        "CLOSE": 40.0
       },
       "engine_version": 1,
       "engine_fingerprint": {

@@ -73,7 +73,11 @@ config:
   # # cleared, and neither of those two sizes is a knob a mandate may move.
   # universe: [AAPL, XOM, UNH, JPM, NVDA, WMT, CAT, GOOGL, SPY, IWM]
   # research_time_budget_minutes: 60 # wall-clock cap on one research session
-  # time_limit_hours: 8 # wall-clock cap on the whole run
+  # time_limit_hours: 8 # wall-clock cap on ONE process — how long tonight lasts
+  # run_limit_hours: 100 # compute cap on the whole RUN, across every stop/resume:
+  # # once its cumulative runtime crosses this the run is `completed` (terminal, so it
+  # # refuses resume). Frozen at creation — it is what makes two runs comparable on
+  # # equal compute.
 ---
 
 I want a believable, risk-adjusted record on liquid US large- and mid-cap names — deep

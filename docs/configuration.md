@@ -53,7 +53,8 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `backtest.fee_bps`, `backtest.slippage_bps` | Simulated fill costs **per side** (default `1.0`/`1.0` — a 4bp round trip). One value threaded to the pre-filter, validation, the agent's cost hint, and paper fills. Enforced minimum `1.0` each — see **Fill costs** below |
 | `ideation` | The legacy StrategySpec path |
 | `champion_count` | Champion board size |
-| `time_limit_hours` | Global stop from any phase |
+| `time_limit_hours` | Global stop from any phase — bounds **one process** (how long tonight lasts); the run stays resumable |
+| `run_limit_hours` | Compute cap on the **whole run**, in hours of cumulative runtime across every stop/resume (`--run-limit-hours`, frozen at creation). At the cap the loop stops between phases and the run is marked `completed` — terminal, so it refuses resume. `null` = uncapped. See [cli.md](cli.md#bounding-a-run----run-limit-hours-and---finish) |
 | `workspace_dir` | **The one output root** (default `workspace/`; env `NOCTIS_WORKSPACE`) — every path below derives from it when not set |
 | `runs_dir`, `data.lake_dir` | The workspace-level pair: the run tree (`workspace/runs`) and the data lake (`workspace/data_lake`), which is **shared by every run** |
 | `run_dir` | **The one run root** (default `workspace/runs/legacy`, the reserved run an invocation that never opened a run reads). `noctis run` rebinds it to the run it mints |
@@ -101,11 +102,11 @@ operator deliberately adopts it ([below](#seeing-the-drift-and-adopting-it)).
 
 Every leaf setting belongs to exactly one of three tiers, classified in
 `src/noctis/config/rehydrate.py` and ratcheted by the test suite the same way the overlay's table
-is. Today: **69 frozen, 17 live, 2 refused**.
+is. Today: **70 frozen, 17 live, 2 refused**.
 
 | Tier | Count | What | Where it comes from on a resume |
 |---|---|---|---|
-| **Frozen** | 69 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `live_feed.*` — **plus the whole mandate** | the record |
+| **Frozen** | 70 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `live_feed.*` — **plus the whole mandate** | the record |
 | **Live** | 17 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | the current process |
 | **Refused** | 2 | `mode`, `allow_live` | neither — see below |
 
@@ -119,6 +120,14 @@ shareable and resuming it needs *your own* keys from `.env`. Paths are live so a
 a machine whose absolute paths differ. And the per-process budgets bound one *night*, not one
 experiment — `--time-limit-hours` is how you decide how long tonight lasts, weeks after the run
 started.
+
+**The two wall-clock ceilings sit in different tiers on purpose.** `time_limit_hours` is **live**:
+it bounds this process, and how long tonight lasts is your call every night. `run_limit_hours` is
+**frozen**: it bounds the whole run across every stop/resume, so it is part of what the experiment
+*is* — 100 research hours and 30 are not the same experiment, and a cap that could be raised each
+morning would bound nothing at all. Editing `run_limit_hours` in `config.yaml` therefore has no
+effect on a run already under way; it applies to the next run you mint
+([cli.md](cli.md#bounding-a-run----run-limit-hours-and---finish)).
 
 **Refused means never recorded and never restored.** The safety gate re-resolves from
 `config.yaml` + `ALLOW_LIVE` at every process start (see [safety.md](safety.md)); a record can
@@ -170,18 +179,18 @@ fill-cost floor, the promotion thresholds, the two-axis holdout geometry, the ou
 secrets). Every leaf setting is classified **exactly once** in `src/noctis/config/overlay.py` —
 the authoritative table, with a justification comment per group — and a completeness ratchet in
 the test suite fails until a newly added knob is classified deliberately, so nothing is allowed
-by accident of omission. Today: **35 allowed, 2 clamped, 51 refused**. The whole surface also
+by accident of omission. Today: **36 allowed, 2 clamped, 51 refused**. The whole surface also
 ships commented-out in `mandate/MANDATE.md.example`, so it is discoverable without reading
 source.
 
-**Allowed (35), in six groups.** None of them is read by the promotion gates
+**Allowed (36), in six groups.** None of them is read by the promotion gates
 (`champions/promotion.py`), the split geometry (`backtest/splits.py`), or the safety gate
 (`config/gate.py`) — that is the property that makes them settable at all.
 
 | Group | Knobs |
 |---|---|
 | Model seam | `research.model`, `research.base_url`, `research.agent.model` / `coder_model` / `coder_fallback_model`, the three thinking dials (`thinking`, `coder_thinking`, `coder_fallback_thinking`), `research.agent.loop` |
-| Spend ceilings | `research.cost_profile`, `research.agent.max_iterations` / `max_backtests` / `sweep_trials` / `max_author_calls` / `max_escalations` / `max_tokens` / `coder_max_tokens` / `context_window` / `episode_retries` / `web_search` / `max_web_searches` / `sweep_workers` / `worker_bar_budget`, `research_time_budget_minutes`, `time_limit_hours` |
+| Spend ceilings | `research.cost_profile`, `research.agent.max_iterations` / `max_backtests` / `sweep_trials` / `max_author_calls` / `max_escalations` / `max_tokens` / `coder_max_tokens` / `context_window` / `episode_retries` / `web_search` / `max_web_searches` / `sweep_workers` / `worker_bar_budget`, `research_time_budget_minutes`, `time_limit_hours`, `run_limit_hours` |
 | Search shape | `promotion.metric`, `research.focus_size`, `research.tuning_dispersion_penalty`, `research.draft_ttl_hours`, `research.memory_distill_every` |
 | Data acquisition | `data.history_days`, `data.auto_backfill` |
 | Housekeeping | `observability.heartbeat_polls`, `qa.keep_last_runs` |

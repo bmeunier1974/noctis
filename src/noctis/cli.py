@@ -289,6 +289,68 @@ def _show_config_drift(config: str | None, resume: str | None) -> None:
     _echo_config_drift(drift, run_id=run_id, inputs=inputs)
 
 
+def _finish_run(config: str | None, resume: str | None) -> None:
+    """``--finish``: seal one run as ``completed`` — terminal — and run nothing.
+
+    The deliberate counterpart of the run-level cap (story #136). It takes the address the operator
+    would have resumed, writes one stamp into that run's record, and exits: no segment is opened,
+    no engine starts, and the liveness lock is read only far enough to refuse a run another process
+    is working. Sealing a run that is already completed is a **no-op** that says so — terminal means
+    terminal, so the moment a published result was sealed is never rewritten.
+    """
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from noctis.bootstrap import UsageError
+    from noctis.reporting.run_store import RunLockedError, RunNotFoundError, finish_run
+
+    if resume is None:
+        _exit_red(
+            UsageError(
+                "--finish marks an existing run completed, so it needs the run: pass "
+                "--resume <address> (`noctis runs` lists them). A run being minted right now has "
+                "produced nothing to publish."
+            )
+        )
+    settings = load_settings(config_path=config)
+    try:
+        outcome = finish_run(
+            Path(settings.runs_dir),
+            resume,
+            clock=lambda: datetime.now(UTC),
+            election_metric=settings.promotion.metric,
+        )
+    except RunNotFoundError as exc:
+        _exit_red(exc, prefix="FINISH: ")
+    except RunLockedError as exc:
+        _exit_red(exc, prefix="RUN LOCKED: ")
+    if not outcome.sealed:
+        typer.echo(
+            f"Run {outcome.run_id} was already completed (at {outcome.completed_utc}) — nothing "
+            "to do. `completed` is terminal, so the stamp it was sealed with stands."
+        )
+        return
+    typer.echo(
+        f"Run {outcome.run_id} is now completed (at {outcome.completed_utc}). That is terminal: "
+        "it refuses resume from here, so the numbers quoted from its record can never gain "
+        "another segment. `noctis run-record` prints it."
+    )
+
+
+def _echo_run_limit(limit_hours: float | None, *, spent_s: float) -> None:
+    """State the run's compute budget and what is left of it, when it has one.
+
+    Printed at start beside the run id, because a cap an operator cannot see is one they will be
+    surprised by: this is the line that says tonight may end early — and why."""
+    if limit_hours is None:
+        return
+    remaining = max(0.0, limit_hours * 3600.0 - spent_s)
+    typer.echo(
+        f"Run limit: {limit_hours:g}h of cumulative runtime "
+        f"({_runtime(spent_s)} used, {_runtime(remaining)} left; the run completes at the cap)"
+    )
+
+
 def _echo_config_drift(drift, *, run_id: str, inputs: Mapping | None) -> None:
     """Render one run's config drift — the only place the diff becomes text.
 
@@ -433,7 +495,28 @@ def _echo_research_engine(settings) -> None:
 def run(
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
     time_limit_hours: float = typer.Option(
-        None, "--time-limit-hours", help="Stop after this many hours (overrides config)."
+        None,
+        "--time-limit-hours",
+        help="Stop THIS PROCESS after this many hours (overrides config). Bounds tonight, not the "
+        "experiment: the run stays resumable and the same id keeps accumulating tomorrow.",
+    ),
+    run_limit_hours: float = typer.Option(
+        None,
+        "--run-limit-hours",
+        help="Give this RUN a compute budget, in hours of cumulative runtime across every "
+        "stop/resume. Accepted at run creation only and frozen into the record: once the run's "
+        "accumulated runtime crosses it the loop stops cleanly between phases and the run is "
+        "marked `completed` — terminal, so it refuses resume. That is how 'run this mandate for "
+        "100 hours, then stop' is expressed, and it is what lets two runs be compared on equal "
+        "compute. Not settable on --resume (the cap defines the experiment).",
+    ),
+    finish: bool = typer.Option(
+        False,
+        "--finish",
+        help="With --resume: mark that run `completed` — terminal — and exit. Runs NO segment and "
+        "starts no engine; it only refuses when another process holds the run. `completed` is the "
+        "published state: a result that has been cited must not be able to gain more segments "
+        "afterwards. A no-op on a run that is already completed.",
     ),
     resume: str = typer.Option(
         None,
@@ -529,6 +612,7 @@ def run(
         build_recorder,
         open_run_store,
         segment_counters,
+        segment_phase_seconds,
     )
     from noctis.engine import MarketClock, build_runtime, initial_phase_for
     from noctis.engine.runtime import trading_roster
@@ -550,8 +634,34 @@ def run(
                 "first, then decide."
             )
         )
+    # Sealing a run is not working one (story #136): --finish writes one stamp into the record and
+    # exits before any session is assembled, so it can never be the thing that starts a segment.
+    # Every flag that shapes the segment it would have run is therefore refused beside it rather
+    # than silently ignored — a flag an operator typed must always mean something.
+    shaping = [
+        name
+        for name, given in (
+            ("--show-config-drift", show_config_drift),
+            ("--rebase-config", rebase_config),
+            ("--allow-engine-upgrade", allow_engine_upgrade),
+            ("--run-limit-hours", run_limit_hours is not None),
+            ("--time-limit-hours", time_limit_hours is not None),
+        )
+        if given
+    ]
+    if finish and shaping:
+        _exit_red(
+            UsageError(
+                f"--finish ends a run; {', '.join(shaping)} shapes the segment it would run next. "
+                "A completed run has no next segment, so pass one: run the segment, or finish "
+                "the run."
+            )
+        )
     if show_config_drift:
         _show_config_drift(config, resume)
+        return
+    if finish:
+        _finish_run(config, resume)
         return
 
     # The composition root owns the ordering: safety gate → mandate → overlay → CLI flags.
@@ -561,6 +671,7 @@ def run(
         directive=directive,
         mandate=mandate,
         time_limit_hours=time_limit_hours,
+        run_limit_hours=run_limit_hours,
         require_gate=True,
         resume=resume,
         rebase_config=rebase_config,
@@ -604,6 +715,7 @@ def run(
         _exit_red(exc, prefix="RUN LOCKED: ")
     typer.echo(f"{'Resumed run' if resume else 'Run'}: {store.run_id}")
     typer.echo(f"Run record: {store.record_path}")
+    _echo_run_limit(settings.run_limit_hours, spent_s=store.prior_runtime_s)
     _echo_config_rebase(inputs.rebase, rebased=rebase_config)
     _echo_engine_change(store, inputs, upgrading=allow_engine_upgrade)
 
@@ -667,7 +779,13 @@ def run(
             on_event=build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder),
             # Incremental durability: the record is rewritten at each CLOSE, so a multi-week run's
             # evidence is current on disk long before the process stops.
-            on_cycle_close=lambda outcome: store.checkpoint(counters=segment_counters(outcome)),
+            on_cycle_close=lambda outcome: store.checkpoint(
+                counters=segment_counters(outcome),
+                phase_seconds=segment_phase_seconds(outcome),
+            ),
+            # The run-level cap is measured against the whole run, so this segment starts counting
+            # from what its predecessors already spent (story #136).
+            prior_runtime_s=store.prior_runtime_s,
         )
 
         # SIGINT/SIGTERM route through one clean shutdown path (stops between phases).
@@ -695,7 +813,17 @@ def run(
         store.close(
             reason=stopped_reason,
             counters=segment_counters(result) if result is not None else None,
+            phase_seconds=segment_phase_seconds(result) if result is not None else None,
         )
+        # Said after the segment is closed, because that write is what makes it true: the record
+        # derives the seal from its own segments, so the run is completed the moment the segment
+        # that spent the cap lands on disk.
+        if stopped_reason == "run_limit":
+            typer.echo(
+                f"Run {store.run_id} reached its {settings.run_limit_hours:g}h compute cap and is "
+                "now completed — a terminal state, so it refuses resume. Start a new run to "
+                "continue researching."
+            )
 
 
 @app.command()
@@ -813,14 +941,18 @@ def runs(
     if rows:
         ids = max(len(row[0]) for row in rows)
         labels = max(len(row[1]) for row in rows)
+        # The runtime column carries "spent/cap" for a capped run, so it is sized from the rows
+        # rather than fixed — a board that truncated a run's compute budget would hide the one
+        # number that says whether two experiments were given the same chance.
+        times = max(9, max(len(row[4]) for row in rows))
         typer.echo(
             f"{'run':<{ids}}  {'label':<{labels}}  {'status':<11} {'segments':>8} "
-            f"{'runtime':>9}  comparable key"
+            f"{'runtime':>{times}}  comparable key"
         )
         for run_id, label, status, segments, runtime, key in rows:
             typer.echo(
                 f"{run_id:<{ids}}  {label:<{labels}}  {status:<11} {segments:>8} "
-                f"{runtime:>9}  {key}"
+                f"{runtime:>{times}}  {key}"
             )
     hidden = len(index["runs"]) - len(listed)
     if hidden:
@@ -847,9 +979,22 @@ def _run_row(entry: Mapping[str, object]) -> tuple[str, str, str, str, str, str]
         str(entry.get("label") or "-"),
         str(entry.get("status") or "-") if readable else "unreadable",
         "-" if segments is None else str(segments),
-        _runtime(entry.get("cumulative_runtime_s")),
+        _runtime_against_cap(entry),
         f"{key}  (mixed engine)" if entry.get("mixed_engine") else key,
     )
+
+
+def _runtime_against_cap(entry: Mapping[str, object]) -> str:
+    """Runtime spent, and — for a capped run — the budget it is spending: ``2h00m/100h``.
+
+    The board's answer to "may these two runs be compared?" is not only the engine bucket: two runs
+    given different compute are different experiments, so the cap belongs beside the runtime rather
+    than one lookup away in the record."""
+    spent = _runtime(entry.get("cumulative_runtime_s"))
+    limit = entry.get("run_limit_hours")
+    if isinstance(limit, bool) or not isinstance(limit, int | float):
+        return spent
+    return f"{spent}/{limit:g}h"
 
 
 def _runtime(seconds: object) -> str:

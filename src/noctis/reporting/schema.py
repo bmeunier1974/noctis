@@ -70,7 +70,16 @@ _RUN_KEYS = (
     "created_utc",
     "last_active_utc",
     "completed_utc",
+    # The run-level compute cap in hours (story #136), ``null`` when uncapped. Frozen at creation
+    # with the rest of the configuration and surfaced here so two runs can be compared on equal
+    # compute — 100 research hours and 30 are not the same experiment.
+    "run_limit_hours",
+    # The three cumulative totals, every one of them **derived** from ``segments[]`` at write time
+    # and never incremented in memory (epic D4). The two phase totals are ``null`` — not ``0`` —
+    # when no segment measured a phase at all.
     "cumulative_runtime_s",
+    "cumulative_research_s",
+    "cumulative_trading_s",
     "complete",
     "truncated",
 )
@@ -86,6 +95,10 @@ _SEGMENT_KEYS = (
     "command",
     "resumed",
     "counters",
+    # Seconds this segment spent working in each phase (``{"RESEARCH": …, "TRADING": …}``), or
+    # ``null`` when it measured none. The per-segment fact the run's cumulative research/trading
+    # seconds are summed from — attributed to the process that produced it, like ``counters``.
+    "phase_seconds",
     "engine_version",
     "engine_fingerprint",
 )

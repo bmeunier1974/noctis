@@ -29,9 +29,9 @@
       "note": null
     },
     "profiles": {
-      "digest": "6803b9d26c63d6ae",
+      "digest": "6b0e047bd1dafb6d",
       "files": {
-        "mandate/MANDATE.md.example": "52ceefcba84f0f8d",
+        "mandate/MANDATE.md.example": "032375f397521686",
         "mandate/profiles/aggressive.md": "434077567e2c4bbb",
         "mandate/profiles/conservative.md": "40d593753bd39962",
         "mandate/profiles/long-term.md": "8aa17408c2bc6b4c",
@@ -64,9 +64,9 @@
       "note": null
     },
     "schema": {
-      "digest": "cb60dda90f9c3ccd",
+      "digest": "5d56c64a2c3e32ae",
       "files": {
-        "src/noctis/reporting/schema.py": "9e88ef4cb14e5b1e"
+        "src/noctis/reporting/schema.py": "29544d47a6bcd660"
       },
       "note": null
     },

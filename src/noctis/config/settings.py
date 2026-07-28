@@ -583,7 +583,17 @@ class Settings(BaseSettings):
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     ideation: IdeationConfig = Field(default_factory=IdeationConfig)
     champion_count: int = 3
+    # The wall-clock ceiling on ONE process — how long tonight lasts. Live tier: a run is stopped
+    # each morning and resumed each night, so this is the operator's call every time, never a
+    # decision the run made weeks ago.
     time_limit_hours: float | None = None
+    # The compute ceiling on the whole RUN, across every segment (story #136). Frozen at creation
+    # like everything else that decides what the accumulated results mean: it is what makes two
+    # runs comparable on **equal compute** — a mandate given 100 research hours and one given 30
+    # are not the same experiment. Once the run's cumulative runtime breaches it the loop stops
+    # between phases (the same shutdown path ``time_limit_hours`` uses) and the run is `completed`:
+    # terminal, so a published result can never quietly gain another segment. ``null`` = uncapped.
+    run_limit_hours: float | None = None
     # ── The one output root. Everything the engine writes lands under this directory
     # (gitignored): run state, the data lake, reports, agent memory. The per-artifact knobs
     # below derive from it when not explicitly set (see ``_derive_workspace_paths``); an

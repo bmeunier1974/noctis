@@ -26,13 +26,16 @@ Two honesty rules the builder implements rather than documents:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from noctis.reporting.schema import EVENT_CAP, KIND, SCHEMA_VERSION
 
 __all__ = [
+    "RESEARCH_PHASE",
+    "RUN_LIMIT_SETTING",
     "TERMINAL_STATUSES",
+    "TRADING_PHASE",
     "EngineIdentity",
     "RecordEvent",
     "RunArtifacts",
@@ -40,6 +43,7 @@ __all__ = [
     "build",
     "mark_interrupted",
     "resume_refusal",
+    "seal",
     "utc_iso",
 ]
 
@@ -49,6 +53,21 @@ __all__ = [
 # field's, so refusing ``running`` here would make every crashed run need manual cleanup before it
 # could be resumed.
 TERMINAL_STATUSES = ("completed",)
+
+# The two phases whose seconds the run reports separately, spelled the way ``engine.machine.Phase``
+# spells them. The record never imports the engine (this module reads no configuration and drives
+# nothing), so the names are stated here and a segment simply carries whatever phase keys the
+# process that produced it measured.
+RESEARCH_PHASE = "RESEARCH"
+TRADING_PHASE = "TRADING"
+
+# The settings knob that holds the run-level compute cap, in hours (story #136). The record does
+# **not** keep a second copy of it: the cap is an ordinary frozen setting, pinned into
+# ``inputs.settings.resolved`` at creation like everything else that decides what a run's results
+# mean, and this section reads it back from there. One source, so the number an operator reads off
+# the record is by construction the number the engine rehydrates and enforces — and "the cap is
+# frozen" needs no second mechanism to be true.
+RUN_LIMIT_SETTING = "run_limit_hours"
 
 
 def utc_iso(moment: datetime) -> str:
@@ -124,6 +143,13 @@ class SegmentArtifact:
     command: str = "run"
     resumed: bool = False
     counters: Mapping[str, int] = field(default_factory=dict)
+    # Seconds this process spent *working* in each phase (``{"RESEARCH": 31200.0, …}``) — the
+    # per-segment measurement the run's cumulative research/trading seconds are summed from.
+    # ``None`` means "this segment measured nothing", which is what a record written before phase
+    # timings existed says, and it is deliberately different from ``{"TRADING": 0.0}`` ("ran, and
+    # never traded"). Waiting is not working: the between-phase waits (out a weekend, to a session
+    # close) belong to the segment's ``duration_s`` and to no phase.
+    phase_seconds: Mapping[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +213,19 @@ def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
     )
 
 
+def seal(artifacts: RunArtifacts, *, at: str) -> RunArtifacts:
+    """Return the artifacts marked ``completed`` — terminal — as of ``at`` (``--finish``).
+
+    Pure and **idempotent**: a run that is already sealed keeps the stamp it was sealed with, so
+    finishing twice is the documented no-op rather than a rewritten history. Sealing is deliberate
+    here; the run-level cap needs no equivalent, because a breach is derived from the segments at
+    every write (:func:`_capped_at`).
+    """
+    if artifacts.completed_utc is not None:
+        return artifacts
+    return replace(artifacts, completed_utc=at)
+
+
 def resume_refusal(record: Mapping[str, object]) -> str | None:
     """Why this record may not gain another segment, or ``None`` when it may.
 
@@ -198,15 +237,37 @@ def resume_refusal(record: Mapping[str, object]) -> str | None:
     ``running`` all resume — see :data:`TERMINAL_STATUSES` for why the last one is not this
     function's business.
     """
-    run = record.get("run")
-    status = run.get("status") if isinstance(run, Mapping) else None
-    if status not in TERMINAL_STATUSES:
+    section = record.get("run")
+    run: Mapping[str, object] = section if isinstance(section, Mapping) else {}
+    if run.get("status") not in TERMINAL_STATUSES:
         return None
     return (
-        "this run is completed — a terminal state, so it can never gain another segment. "
-        "Start a new run instead (identity is minted, never derived, so a fresh run under "
-        "the same configuration is one command away)."
+        f"this run is completed{_why_completed(run)} — a terminal state, so it can never gain "
+        "another segment. Start a new run instead (identity is minted, never derived, so a fresh "
+        "run under the same configuration is one command away)."
     )
+
+
+def _why_completed(run: Mapping[str, object]) -> str:
+    """The half-sentence that says *how* a run was sealed, when the record can tell.
+
+    A refusal an operator cannot act on is a wall: "completed" alone leaves them wondering whether
+    they typed the wrong id. A run that hit its own compute cap says so, with both numbers, because
+    the answer to "why can't I resume it?" is then simply "because you asked for exactly this".
+    """
+    limit = run.get("run_limit_hours")
+    runtime = run.get("cumulative_runtime_s")
+    if isinstance(limit, bool) or not isinstance(limit, int | float):
+        return ""
+    if not isinstance(runtime, int | float) or isinstance(runtime, bool):
+        return f" (it was given a {_hours(limit)} run limit)"
+    if runtime < limit * 3600.0:
+        return ""
+    return f" — it reached its {_hours(limit)} run limit, having run for {_hours(runtime / 3600.0)}"
+
+
+def _hours(value: float) -> str:
+    return f"{value:g}h"
 
 
 def build(artifacts: RunArtifacts) -> dict:
@@ -220,17 +281,23 @@ def build(artifacts: RunArtifacts) -> dict:
         truncated["errors"] = errors_note
 
     segments = [_segment(segment) for segment in artifacts.segments]
+    runtime_s = _cumulative_runtime_s(segments)
+    limit_hours = _run_limit_hours(artifacts.inputs)
+    completed_utc = artifacts.completed_utc or _capped_at(segments, limit_hours)
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": KIND,
         "run": {
             "run_id": artifacts.run_id,
             "label": artifacts.label,
-            "status": _status(artifacts),
+            "status": _status(artifacts, completed_utc=completed_utc),
             "created_utc": artifacts.created_utc,
             "last_active_utc": artifacts.last_active_utc,
-            "completed_utc": artifacts.completed_utc,
-            "cumulative_runtime_s": _cumulative_runtime_s(segments),
+            "completed_utc": completed_utc,
+            "run_limit_hours": limit_hours,
+            "cumulative_runtime_s": runtime_s,
+            "cumulative_research_s": _cumulative_phase_s(segments, RESEARCH_PHASE),
+            "cumulative_trading_s": _cumulative_phase_s(segments, TRADING_PHASE),
             "complete": bool(artifacts.complete),
             "truncated": truncated,
         },
@@ -242,14 +309,15 @@ def build(artifacts: RunArtifacts) -> dict:
     }
 
 
-def _status(artifacts: RunArtifacts) -> str:
+def _status(artifacts: RunArtifacts, *, completed_utc: str | None) -> str:
     """The run's lifecycle status, **derived** from the segments rather than carried beside them.
 
     Derived, so the two can never disagree: a run is ``running`` while its last segment is open,
     ``interrupted`` while its last segment is one a kill left behind, ``stopped`` (resumable) once
-    it closed cleanly, and ``completed`` only when something deliberately sealed it.
+    it closed cleanly, and ``completed`` once something sealed it — a deliberate ``--finish``, or
+    the run-level cap the ``completed_utc`` handed in already accounts for (:func:`_capped_at`).
     """
-    if artifacts.completed_utc is not None:
+    if completed_utc is not None:
         return "completed"
     if not artifacts.segments:
         return "stopped"
@@ -259,6 +327,7 @@ def _status(artifacts: RunArtifacts) -> str:
 
 def _segment(segment: SegmentArtifact) -> dict:
     engine = segment.engine
+    phases = segment.phase_seconds
     return {
         "index": segment.index,
         "started_utc": segment.started_utc,
@@ -270,6 +339,7 @@ def _segment(segment: SegmentArtifact) -> dict:
         "command": segment.command,
         "resumed": bool(segment.resumed),
         "counters": dict(segment.counters),
+        "phase_seconds": dict(phases) if phases is not None else None,
         "engine_version": engine.engine_version if engine is not None else None,
         "engine_fingerprint": dict(engine.fingerprint) if engine is not None else None,
     }
@@ -314,6 +384,69 @@ def _cumulative_runtime_s(segments: Sequence[Mapping[str, object]]) -> float:
     return round(total, 3)
 
 
+def _cumulative_phase_s(segments: Sequence[Mapping[str, object]], phase: str) -> float | None:
+    """Seconds this run spent working in one phase, summed over the segments that measured it.
+
+    Derived at every write from ``segments[]``, exactly like the runtime total beside it, so three
+    short nights report what one long night would and a rewrite after a crash cannot double-count.
+    ``None`` when **no** segment reports any phase timing at all — a record written before the
+    measurement existed knows nothing about it, and ``0.0`` would be a claim it never made. A run
+    that did measure and never traded reports an honest ``0.0`` (D10: an absent value is null, a
+    zero is a zero).
+    """
+    total: float | None = None
+    for segment in segments:
+        phases = segment.get("phase_seconds")
+        if not isinstance(phases, Mapping):
+            continue
+        measured = phases.get(phase)
+        total = (total or 0.0) + (float(measured) if isinstance(measured, int | float) else 0.0)
+    return None if total is None else round(total, 3)
+
+
+def _run_limit_hours(inputs: Mapping[str, object] | None) -> float | None:
+    """The run-level compute cap, read off the run's own frozen configuration (story #136).
+
+    ``None`` for an uncapped run, for a run that froze no configuration at all (an adopted
+    history), and for anything the record carries in that slot that is not a number — a
+    hand-edited record must never make a run look capped when the engine would not enforce one.
+    """
+    settings = inputs.get("settings") if isinstance(inputs, Mapping) else None
+    resolved = settings.get("resolved") if isinstance(settings, Mapping) else None
+    limit = resolved.get(RUN_LIMIT_SETTING) if isinstance(resolved, Mapping) else None
+    if isinstance(limit, bool) or not isinstance(limit, int | float):
+        return None
+    return float(limit)
+
+
+def _capped_at(segments: Sequence[Mapping[str, object]], limit_hours: float | None) -> str | None:
+    """When this run's accumulated runtime crossed its cap, or ``None`` while it has not.
+
+    The run-level cap seals a run the moment it is breached, and it does so **derivably**: the
+    crossing is recomputed from the closed segments at every write rather than latched by whichever
+    process happened to notice. A run killed at the instant it crossed is therefore still
+    ``completed`` when it is next read, which is the whole promise — a published result cannot
+    quietly gain another segment.
+
+    Only *closed* segments count (an open one has no honest duration yet), so the seal always lands
+    on a segment boundary: the loop stops between phases, the segment closes, and that stop stamp is
+    the moment the run completed.
+    """
+    if limit_hours is None:
+        return None
+    cap_s = limit_hours * 3600.0
+    total = 0.0
+    for segment in segments:
+        duration = segment.get("duration_s")
+        if not isinstance(duration, int | float):
+            continue
+        total += float(duration)
+        if total >= cap_s:
+            stopped = segment.get("stopped_utc")
+            return stopped if isinstance(stopped, str) else None
+    return None
+
+
 def _duration_s(started: str | None, stopped: str | None) -> float | None:
     """Seconds between two record stamps, or ``None`` while a segment is still open."""
     if started is None or stopped is None:
@@ -341,15 +474,4 @@ def _capped(
 
 
 def _replace_status(segment: SegmentArtifact, status: str) -> SegmentArtifact:
-    return SegmentArtifact(
-        index=segment.index,
-        started_utc=segment.started_utc,
-        engine=segment.engine,
-        stopped_utc=segment.stopped_utc,
-        stopped_reason=segment.stopped_reason,
-        status=status,
-        argv=tuple(segment.argv),
-        command=segment.command,
-        resumed=segment.resumed,
-        counters=dict(segment.counters),
-    )
+    return replace(segment, status=status)

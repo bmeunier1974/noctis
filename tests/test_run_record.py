@@ -65,6 +65,7 @@ def _segment(
     status: str,
     resumed: bool = False,
     counters: dict[str, int] | None = None,
+    phase_seconds: dict[str, float] | None = None,
 ) -> SegmentArtifact:
     return SegmentArtifact(
         index=index,
@@ -76,6 +77,7 @@ def _segment(
         command="run",
         resumed=resumed,
         counters=counters or {"cycles": 1, "research_iterations": 4, "trades": 2},
+        phase_seconds=phase_seconds or {"RESEARCH": 12000.0, "TRADING": 2340.0, "CLOSE": 60.0},
         engine=ENGINE,
     )
 
@@ -105,6 +107,7 @@ def _artifacts(**overrides) -> RunArtifacts:
                 status="stopped",
                 resumed=True,
                 counters={"cycles": 2, "research_iterations": 9, "trades": 0},
+                phase_seconds={"RESEARCH": 3400.0, "TRADING": 0.0, "CLOSE": 40.0},
             ),
         ),
         engine=ENGINE,

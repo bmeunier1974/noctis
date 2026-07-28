@@ -161,8 +161,13 @@ _SPEND_CEILINGS: frozenset[str] = frozenset(
         "research.agent.worker_bar_budget",
         # Wall-clock ceiling on one research phase.
         "research_time_budget_minutes",
-        # Wall-clock ceiling on the whole run (the loop's global stop).
+        # Wall-clock ceiling on one process — how long tonight lasts (the loop's global stop).
         "time_limit_hours",
+        # The compute ceiling on the whole *run*, across every segment: "spend 100 research hours
+        # on this thesis, then stop" is steering of exactly the kind a personality file exists to
+        # carry, and it is the same kind of knob as the two above — a ceiling that can only end a
+        # run sooner. It bounds resources; it decides nothing about what passes.
+        "run_limit_hours",
     }
 )
 

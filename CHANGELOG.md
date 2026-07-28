@@ -9,6 +9,38 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A run-level compute cap (`noctis run --run-limit-hours`) and an explicit finish
+  (`--finish`).** `time_limit_hours` bounds one *process*; this bounds the whole *run*, so
+  "research this mandate for 100 hours, then stop" is expressible — and two runs become comparable
+  on **equal compute**, which matters as much as equal config.
+  - **Frozen at creation.** `run_limit_hours` is an ordinary frozen setting (flag, `config.yaml`,
+    or a mandate's `config:` block — it joins the overlay's spend-ceiling tier), pinned into
+    `inputs.settings.resolved` when the run is minted. Editing `config.yaml` between segments does
+    not move it, and `--run-limit-hours` **with** `--resume` is refused with a reason: a cap that
+    could be raised each morning would bound nothing at all.
+  - **It stops through the shutdown path that already exists.** The state machine gained the cap
+    beside `time_limit_hours` and one `limit_hit()` both are asked through, so the run stops
+    cleanly *between phases* exactly like the per-process limit and `SIGINT` — no second shutdown
+    route — and the between-phase waits clamp to whichever deadline is earlier. The segment closes
+    with `stopped_reason: run_limit`, and the CLI says the run is now completed.
+  - **The breach is derived, not latched.** `run.status` reads `completed` whenever the record's
+    own `cumulative_runtime_s` (summed from `segments[]`) crosses the frozen cap, stamped
+    `completed_utc` at the segment close that crossed it. So a run killed at the instant it
+    crossed is still terminal when it is next read, and every later resume is refused — with a
+    message naming the cap and the runtime spent. A segment ending *below* the cap leaves the run
+    `stopped` and resumable, unchanged.
+  - **`--finish` seals a run deliberately**, and runs **no segment**: no engine starts, no segment
+    is opened, and the liveness lock is read only far enough to refuse a run another process is
+    working. On an already-`completed` run it is a documented no-op that keeps the original seal
+    stamp — terminal means terminal.
+  - **New: cumulative research / trading seconds, derived like everything else.** Each segment now
+    records the seconds its process spent *working* in each phase (`segments[].phase_seconds`;
+    waiting out a weekend is not research), and the record sums them across `segments[]` into
+    `run.cumulative_research_s` / `cumulative_trading_s` at every write. Never incremented in
+    memory: three short nights total exactly what one long one would. A segment that measured
+    nothing reports `null` rather than a `0` it never observed.
+  - Visible where runs are compared: `run_limit_hours` on the record and on every `index.json`
+    entry, and `noctis runs` shows the budget beside the runtime spent (`2d12h/100h`).
 - **Engine-change resume policy, and `noctis run --resume … --allow-engine-upgrade`.** A run
   resumed after a `git pull` may find a different engine, and the policy splits on **who changed:
   the judge, or the searcher** — the same arbiter/searcher line the CI ratchet enforces, read

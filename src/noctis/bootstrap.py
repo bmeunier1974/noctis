@@ -105,6 +105,7 @@ def resolve_session(
     mandate: str | None = None,
     metric: str | None = None,
     time_limit_hours: float | None = None,
+    run_limit_hours: float | None = None,
     require_gate: bool = False,
     resume: str | None = None,
     rebase_config: bool = False,
@@ -154,6 +155,13 @@ def resolve_session(
                 "it: champions crowned under two metrics were never comparable, and the metric "
                 "is part of the run's comparability key. Start a new run to score differently."
             )
+        if run_limit_hours is not None:
+            raise UsageError(
+                "A run's compute cap is frozen at creation, so --run-limit-hours cannot move it: "
+                "the cap is what makes two runs comparable on equal compute, and a cap that could "
+                "be raised each night would bound nothing at all. Use --time-limit-hours to bound "
+                "tonight, or start a new run to give a fresh experiment a different budget."
+            )
         return resume_session(
             config_path,
             run_id=resume,
@@ -195,6 +203,10 @@ def resolve_session(
         settings.promotion.metric = metric
     if time_limit_hours is not None:
         settings.time_limit_hours = time_limit_hours
+    if run_limit_hours is not None:
+        # Frozen tier, and this is the one moment it may be set: a run is being minted right now,
+        # so the flag is part of what this experiment *is*. Every later segment restores it.
+        settings.run_limit_hours = run_limit_hours
     return SessionInputs(
         settings=settings, mode=mode, mandate=active, overrides=overrides, changes=changes
     )
@@ -987,6 +999,19 @@ def open_run_store(
     )
     bind_run_dir(settings, store.run_dir)
     return store
+
+
+def segment_phase_seconds(result) -> dict[str, float]:
+    """This segment's per-phase working seconds, read off a ``RuntimeResult`` (story #136).
+
+    The measurement the record turns into the run's cumulative research/trading seconds — summed
+    across ``segments[]`` at write time, never carried in memory across a restart. Empty for a
+    process that never entered a phase (a startup failure), which the record then reports as "this
+    segment measured nothing" rather than as a run that spent zero seconds researching. Duck-typed
+    like :func:`segment_counters`: the run store never imports the engine.
+    """
+    measured = getattr(result, "phase_seconds", None) or {}
+    return {str(phase): float(seconds) for phase, seconds in measured.items()}
 
 
 def segment_counters(result) -> dict[str, int]:

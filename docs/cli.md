@@ -47,9 +47,11 @@ workspace state only warns, on every command.
 ```bash
 python -m noctis run -v                    # start the day/night loop (stops at time_limit_hours)
 python -m noctis run -vv --show-reasoning  # narrate each research session's reasoning inline
-python -m noctis run --time-limit-hours 8  # override the time limit
+python -m noctis run --time-limit-hours 8  # bound THIS process (tonight); the run stays resumable
+python -m noctis run --run-limit-hours 100 # bound the whole RUN; at the cap it is `completed`
 python -m noctis run --label nightly-momo  # attach a human alias to this run
 python -m noctis run --resume <address>    # continue a run (id | latest | run.json path | @label)
+python -m noctis run --resume latest --finish   # seal a run as completed; runs no segment
 python -m noctis run --resume latest --show-config-drift   # what would adopting the files change?
 python -m noctis run --resume latest --rebase-config       # adopt them, on the record
 python -m noctis run --mandate aggressive  # one-session mandate override
@@ -172,6 +174,44 @@ The safety gate is never rehydrated. It re-resolves from `config.yaml` + `ALLOW_
 process start, so `mode: live` without `ALLOW_LIVE` is the same hard startup error on a resume as
 on a first start, and a run whose frozen mode disagrees with the freshly resolved one refuses to
 continue.
+
+#### Bounding a run — `--run-limit-hours` and `--finish`
+
+```bash
+python -m noctis run --run-limit-hours 100          # "spend 100 hours on this, then stop"
+python -m noctis run --resume latest                # …resume as usual; the cap keeps counting
+python -m noctis run --resume @nightly-momo --finish  # publish it: completed, and terminal
+```
+
+**Two ceilings, one shutdown.** `--time-limit-hours` bounds *this process* — how long tonight
+lasts — and leaves the run resumable, exactly as it always has. `--run-limit-hours` bounds the
+*run*: the hours of cumulative runtime it may accumulate **across every stop and resume**. Once the
+run's total crosses the cap the loop stops cleanly between phases (the same shutdown path the time
+limit and `SIGINT` use — there is no second route), the segment closes with
+`stopped_reason: run_limit`, and the run becomes `completed`.
+
+That is how *"run this mandate for 100 research hours, then stop"* is expressed, and it is what
+lets two runs be compared **on equal compute**: a mandate given 100 hours and one given 30 are not
+the same experiment, however similar their configs.
+
+- **Frozen at creation.** The cap is accepted when a run is minted (flag, `config.yaml`, or a
+  mandate's `config:` block) and pinned into the record. Editing `config.yaml` afterwards does not
+  move it, and `--run-limit-hours` **with** `--resume` is refused with a reason — a cap that could
+  be raised each morning would bound nothing.
+- **Derived, never counted in memory.** `run.cumulative_runtime_s` (and the
+  `cumulative_research_s` / `cumulative_trading_s` beside it, summed from each segment's
+  `phase_seconds`) are recomputed from `segments[]` at every write, so the breach is a property of
+  the record rather than of whichever process happened to notice it.
+- **`completed` is terminal.** Every later resume is refused, naming the cap and the runtime spent.
+  A segment that ends *below* the cap leaves the run `stopped` and resumable as normal.
+
+`--finish` is the deliberate twin: it marks a run `completed` and exits. It opens **no segment** and
+starts no engine — it only reads the liveness lock far enough to refuse a run another process is
+working — so it is the command for "this result is published". On a run that is already
+`completed` it is a **documented no-op**: it says so and leaves the original seal stamp alone.
+
+`noctis runs` shows the state of the budget in the runtime column (`2h00m/100h`), and every record
+and index entry carries `run_limit_hours` so a leaderboard can group like-for-like.
 
 #### Config drift: seeing it, and adopting it
 
@@ -307,14 +347,18 @@ python -m noctis run-record @nightly-momo | jq .run
 without opening a file:
 
 ```
-run                      label              status      segments   runtime  comparable key
-20260730T025536Z-bc14eb  sector-specialist  stopped            1     1d01h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
-20260727T142233Z-7a8f9d  nightly-momo       running            4     2d12h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
-20260714T031102Z-4d9c1a  gate-rework        stopped            6     5d04h  2|8c1de5f0a2b34c77|3ba3e0bf1c97134f|sharpe  (mixed engine)
-20260101T000000Z-brokn0  -                  unreadable         -         -  an unreadable run.json (JSONDecodeError)
+run                      label              status      segments      runtime  comparable key
+20260730T025536Z-bc14eb  sector-specialist  stopped            1        1d01h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
+20260727T142233Z-7a8f9d  nightly-momo       running            4  2d12h/100h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
+20260714T031102Z-4d9c1a  gate-rework        completed          6    5d04h/8h  2|8c1de5f0a2b34c77|3ba3e0bf1c97134f|sharpe  (mixed engine)
+20260101T000000Z-brokn0  -                  unreadable         -            -  an unreadable run.json (JSONDecodeError)
 
 1 short run(s) hidden; pass --all to list them.
 ```
+
+A run given a compute cap shows it beside the runtime it has spent (`2d12h/100h`), because two
+runs given different compute are different experiments; `completed` is the terminal status a
+spent cap or a `--finish` leaves behind ([above](#bounding-a-run----run-limit-hours-and---finish)).
 
 The last column is the **comparable key** (see [Engine identity](#engine-identity--are-these-two-runs-comparable)):
 runs may only be pooled or ranked against each other within one key, so the board is partitioned

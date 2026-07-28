@@ -83,6 +83,7 @@ SPEND_CEILINGS = {
     "research.agent.worker_bar_budget",
     "research_time_budget_minutes",
     "time_limit_hours",
+    "run_limit_hours",
 }
 SEARCH_SHAPE = {
     "promotion.metric",
@@ -129,6 +130,7 @@ SAMPLE_VALUES: dict[str, object] = {
     "research.agent.worker_bar_budget": 3000000,
     "research_time_budget_minutes": 45,
     "time_limit_hours": 12.0,
+    "run_limit_hours": 100.0,
     # Search shape (prompt-facing).
     "promotion.metric": "sortino",
     "research.focus_size": 8,

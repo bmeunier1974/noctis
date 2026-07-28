@@ -570,7 +570,11 @@ def test_a_two_segment_fixture_run_matches_the_committed_golden_record(tmp_path)
     clock.advance(3600)
     first.checkpoint(counters={"cycles": 1, "research_iterations": 4, "trades": 2})
     clock.advance(3600)
-    first.close(reason="time_limit", counters={"cycles": 2, "research_iterations": 9, "trades": 2})
+    first.close(
+        reason="time_limit",
+        counters={"cycles": 2, "research_iterations": 9, "trades": 2},
+        phase_seconds={"RESEARCH": 5400.0, "TRADING": 1800.0, "CLOSE": 30.0},
+    )
 
     clock.advance(36000)
     _write_lock(
@@ -578,11 +582,19 @@ def test_a_two_segment_fixture_run_matches_the_committed_golden_record(tmp_path)
     )
     second = _open(runs, clock, run_id=first.run_id, argv=["run"])
     clock.advance(1800)
-    second.close(reason="stop_requested", counters={"cycles": 3})
+    second.close(
+        reason="stop_requested",
+        counters={"cycles": 3},
+        phase_seconds={"RESEARCH": 1700.0, "TRADING": 0.0, "CLOSE": 20.0},
+    )
 
     record = _record(second.run_dir)
     assert schema.validate(record) == []
     assert _masked(record) == json.loads(GOLDEN.read_text())
+    # The run-level phase totals are re-derived from both segments as they sit on disk — the
+    # resumed process never held the first night's numbers in memory.
+    assert record["run"]["cumulative_research_s"] == 7100.0
+    assert record["run"]["cumulative_trading_s"] == 1800.0
 
 
 # ── the derived index.json roll-up (story #130) ────────────────────────────────────────────

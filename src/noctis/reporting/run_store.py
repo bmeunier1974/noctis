@@ -52,7 +52,7 @@ import logging
 import os
 import socket
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -64,6 +64,7 @@ from noctis.reporting.run_record import (
     build,
     mark_interrupted,
     resume_refusal,
+    seal,
     utc_iso,
 )
 from noctis.reporting.schema import SCHEMA_VERSION
@@ -76,6 +77,7 @@ __all__ = [
     "RUN_RECORD_NAME",
     "SHORT_RUN_S",
     "STALE_HEARTBEAT_S",
+    "FinishOutcome",
     "RunAmbiguousError",
     "RunCompletedError",
     "RunLockedError",
@@ -83,6 +85,7 @@ __all__ = [
     "RunStore",
     "assert_resumable",
     "collect",
+    "finish_run",
     "index_entry",
     "open_run",
     "read_record",
@@ -237,6 +240,89 @@ def assert_resumable(record: Mapping[str, object], run_id: str) -> None:
     refusal = resume_refusal(record)
     if refusal is not None:
         raise RunCompletedError(f"cannot resume {run_id}: {refusal}")
+
+
+@dataclass(frozen=True)
+class FinishOutcome:
+    """What ``--finish`` did: which run, whether this call is what sealed it, and when.
+
+    ``sealed=False`` is the **documented no-op** — the run was already ``completed``, so the stamp
+    reported is the original one. Terminal means terminal: re-finishing must not rewrite the moment
+    a published result was sealed, and a caller that wants to say "nothing to do" needs to be told.
+    """
+
+    run_id: str
+    sealed: bool
+    completed_utc: str | None
+
+
+def finish_run(
+    runs_dir: Path | str,
+    address: str,
+    *,
+    clock: Callable[[], datetime],
+    election_metric: str,
+    engine_root: Path | None = None,
+    writer: Callable[[Path, dict], None] | None = None,
+    stale_after_s: float = STALE_HEARTBEAT_S,
+) -> FinishOutcome:
+    """Seal one addressed run as ``completed`` — terminal — **without running a segment**.
+
+    The deliberate half of story #136 (the run-level cap is the derived half). ``completed`` is the
+    one status a run never leaves, so this is how an operator says "this result is published":
+    afterwards every resume is refused, and the numbers quoted from the record can never turn out to
+    have been provisional.
+
+    It opens nothing. No segment is appended, no engine starts, and the liveness lock is **read, not
+    taken** — a run another process is actively working may not be sealed from underneath it
+    (:class:`RunLockedError`), but sealing an idle run leaves no lock behind for the next invocation
+    to trip over. One atomic rewrite of ``run.json`` (through the same builder every other write
+    uses, so a sealed record cannot drift from a written one), then the derived index.
+
+    An unclosed segment left by a kill is marked ``interrupted`` on the way past, exactly as an open
+    would: the observation is honest at this moment, and it is the last moment anyone will make it.
+    """
+    now = clock()
+    run_dir = resolve_run_dir(runs_dir, address)
+    run_id = run_dir.name
+    record, reason = read_record(run_dir)
+    if record is None:
+        raise RunNotFoundError(
+            f"run {address} has {reason}, so there is nothing to seal. `noctis run-record "
+            f"{address}` shows what is there."
+        )
+    _assert_unlocked(run_dir, run_id=run_id, now=now, stale_after_s=stale_after_s)
+    if resume_refusal(record) is not None:  # already terminal — the documented no-op
+        run = record.get("run")
+        stamp = run.get("completed_utc") if isinstance(run, Mapping) else None
+        return FinishOutcome(run_id=run_id, sealed=False, completed_utc=_optional_str(stamp))
+
+    artifacts = mark_interrupted(
+        collect(run_dir, election_metric=election_metric, engine_root=engine_root)
+    )
+    stamp = utc_iso(now)
+    (writer or write)(run_dir, build(seal(artifacts, at=stamp)))
+    update_index(run_dir.parent, run_id)
+    return FinishOutcome(run_id=run_id, sealed=True, completed_utc=stamp)
+
+
+def _assert_unlocked(run_dir: Path, *, run_id: str, now: datetime, stale_after_s: float) -> None:
+    """Refuse when another engine is live on this run — the read-only half of :func:`acquire_lock`.
+
+    Deliberately does not *take* the lock: sealing is one write, and a lock file left behind by a
+    command that started nothing would be friction the next invocation has to reason about. A stale
+    lock (a dead pid here, a heartbeat gone cold) is no obstacle at all, for the same reason a
+    resume may steal one — a crashed run must never need manual cleanup.
+    """
+    held = _read_lock(run_dir / RUN_LOCK_NAME)
+    if held is None or _stale_reason(held, now=now, stale_after_s=stale_after_s) is not None:
+        return
+    raise RunLockedError(
+        f"run {run_id} is open by pid {held.get('pid')} on host {held.get('hostname_hash')} "
+        f"(heartbeat {held.get('heartbeat_utc')}), so it cannot be sealed from underneath it: "
+        "the segment it is running would land on a record that already says the run is finished. "
+        "Stop that engine first, then finish the run."
+    )
 
 
 def _assert_resumable(run_dir: Path, run_id: str) -> None:
@@ -782,6 +868,10 @@ def _entry_from(record: Mapping[str, object], *, run_dir: Path) -> dict:
         "last_active_utc": _optional_str(run.get("last_active_utc")),
         "segments": len(segments),
         "cumulative_runtime_s": _optional_number(run.get("cumulative_runtime_s")),
+        # The compute the run was given, beside the compute it has used: a listing that shows one
+        # without the other cannot answer "are these two runs comparable?", which is the question
+        # the cap exists to make answerable (100 research hours and 30 are not one experiment).
+        "run_limit_hours": _optional_number(run.get("run_limit_hours")),
         "complete": bool(run.get("complete", False)),
         "engine_version": version if isinstance(version, int) else None,
         "comparable_key": _optional_str(engine.get("comparable_key")),
@@ -801,6 +891,7 @@ def _unreadable_entry(run_id: str, note: str | None) -> dict:
         "last_active_utc": None,
         "segments": None,
         "cumulative_runtime_s": None,
+        "run_limit_hours": None,
         "complete": False,
         "engine_version": None,
         "comparable_key": None,
@@ -978,6 +1069,10 @@ class RunStore:
 
         now = clock()
         prior = tuple(artifacts.segments)
+        # The runtime this run had accumulated before this process opened its segment — read once,
+        # off the record's own derived total, and constant for the life of the segment. It is what
+        # a run-level cap is measured against (story #136).
+        self._prior_runtime_s = _runtime_of(build(artifacts))
         current = artifacts.current_engine or artifacts.engine
         self._segment = SegmentArtifact(
             index=len(prior),
@@ -1042,21 +1137,44 @@ class RunStore:
         """The record as it stands — what the next write would put on disk."""
         return build(self._artifacts)
 
-    def checkpoint(self, counters: Mapping[str, int] | None = None) -> None:
+    @property
+    def prior_runtime_s(self) -> float:
+        """Runtime this run had already accumulated **before** this segment opened, in seconds.
+
+        What a run-level cap is measured against (story #136): the engine adds its own elapsed time
+        to this and stops between phases once the sum crosses the cap. Taken once at open from the
+        record's own derived total, so a resumed process inherits the run's history rather than
+        starting the count again — and so the number the engine measures against does not move
+        under it while the segment runs.
+        """
+        return self._prior_runtime_s
+
+    def checkpoint(
+        self,
+        counters: Mapping[str, int] | None = None,
+        *,
+        phase_seconds: Mapping[str, float] | None = None,
+    ) -> None:
         """Rewrite the record and touch the heartbeat. Called at each CLOSE."""
-        self._guarded(self._checkpoint, counters)
+        self._guarded(self._checkpoint, counters, phase_seconds)
 
     def note(self, text: str, *, kind: str = "warn") -> None:
         """Record one event against the open segment (``kind="error"`` files it under errors)."""
         self._guarded(self._note, text, kind)
 
-    def close(self, *, reason: str, counters: Mapping[str, int] | None = None) -> None:
+    def close(
+        self,
+        *,
+        reason: str,
+        counters: Mapping[str, int] | None = None,
+        phase_seconds: Mapping[str, float] | None = None,
+    ) -> None:
         """Close the segment (stop stamp, duration, reason), write, release the lock. Idempotent.
 
         The lock is released whatever happened to the record — including after the latch tripped —
         because a lock nobody holds must never be the thing that blocks the next invocation.
         """
-        self._guarded(self._close, reason, counters)
+        self._guarded(self._close, reason, counters, phase_seconds)
         self._release_lock()
 
     # ── the fail-safe latch ────────────────────────────────────────────────────────────────
@@ -1092,10 +1210,13 @@ class RunStore:
 
     # ── the guarded bodies ─────────────────────────────────────────────────────────────────
 
-    def _checkpoint(self, counters: Mapping[str, int] | None) -> None:
+    def _checkpoint(
+        self, counters: Mapping[str, int] | None, phase_seconds: Mapping[str, float] | None
+    ) -> None:
         now = self._clock()
-        if counters:
-            self._replace_segment(counters=dict(counters))
+        changes = self._measurements(counters, phase_seconds)
+        if changes:
+            self._replace_segment(**changes)
         self._touch(now)
         self._flush()
 
@@ -1105,12 +1226,17 @@ class RunStore:
         )
         self._flush()
 
-    def _close(self, reason: str, counters: Mapping[str, int] | None) -> None:
+    def _close(
+        self,
+        reason: str,
+        counters: Mapping[str, int] | None,
+        phase_seconds: Mapping[str, float] | None,
+    ) -> None:
         if self._closed:
             return
         now = self._clock()
         self._replace_segment(
-            counters=dict(counters) if counters else None,
+            **self._measurements(counters, phase_seconds),
             stopped_utc=utc_iso(now),
             stopped_reason=reason,
             status="stopped",
@@ -1122,21 +1248,26 @@ class RunStore:
 
     # ── internals (no I/O beyond the injected writer) ───────────────────────────────────────
 
+    @staticmethod
+    def _measurements(
+        counters: Mapping[str, int] | None, phase_seconds: Mapping[str, float] | None
+    ) -> dict[str, object]:
+        """The two per-segment measurements a caller may hand in, kept apart from what is absent.
+
+        An omitted measurement leaves what the segment already carries alone (a checkpoint that
+        knows only about counters must not blank the phase timings, and vice versa), which is what
+        makes the last write of a segment the sum of everything measured during it.
+        """
+        changes: dict[str, object] = {}
+        if counters:
+            changes["counters"] = dict(counters)
+        if phase_seconds:
+            changes["phase_seconds"] = dict(phase_seconds)
+        return changes
+
     def _replace_segment(self, **changes: object) -> None:
         """Swap the open segment for an updated copy, in the artifacts as well as the handle."""
-        current = self._segment
-        updated = SegmentArtifact(
-            index=current.index,
-            started_utc=current.started_utc,
-            engine=current.engine,
-            stopped_utc=changes.get("stopped_utc", current.stopped_utc),  # type: ignore[arg-type]
-            stopped_reason=changes.get("stopped_reason", current.stopped_reason),  # type: ignore[arg-type]
-            status=str(changes.get("status", current.status)),
-            argv=current.argv,
-            command=current.command,
-            resumed=current.resumed,
-            counters=changes.get("counters") or current.counters,  # type: ignore[arg-type]
-        )
+        updated = replace(self._segment, **changes)  # type: ignore[arg-type]
         self._segment = updated
         self._replace_artifacts(segments=tuple(self._artifacts.segments[:-1]) + (updated,))
 
@@ -1239,6 +1370,7 @@ def _segment_from(raw: Mapping[str, object]) -> SegmentArtifact:
             noctis_version=str(raw.get("noctis_version", "")),
         )
     counters = raw.get("counters")
+    phases = raw.get("phase_seconds")
     argv = raw.get("argv")
     index = raw.get("index")
     return SegmentArtifact(
@@ -1252,6 +1384,9 @@ def _segment_from(raw: Mapping[str, object]) -> SegmentArtifact:
         command=str(raw.get("command", "run")),
         resumed=bool(raw.get("resumed", False)),
         counters=dict(counters) if isinstance(counters, Mapping) else {},  # type: ignore[arg-type]
+        # Read back so the run's cumulative research/trading seconds are re-derived from every
+        # segment on disk at every write — the totals are never carried in memory across a restart.
+        phase_seconds=dict(phases) if isinstance(phases, Mapping) else None,  # type: ignore[arg-type]
     )
 
 
@@ -1267,6 +1402,13 @@ def _event_from(raw: Mapping[str, object]) -> RecordEvent:
 
 def _optional_str(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _runtime_of(record: Mapping[str, object]) -> float:
+    """One record's cumulative runtime in seconds, or ``0.0`` when it carries none readable."""
+    run = record.get("run")
+    total = run.get("cumulative_runtime_s") if isinstance(run, Mapping) else None
+    return float(total) if isinstance(total, int | float) and not isinstance(total, bool) else 0.0
 
 
 def _optional_number(value: object) -> float | None:

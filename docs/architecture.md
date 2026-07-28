@@ -19,10 +19,15 @@ stateDiagram-v2
 ```
 
 The state machine (`src/noctis/engine/machine.py`) researches while the market is closed, trades
-while it is open, and reports at the close — looping until a configured `time_limit_hours` is
-reached. The runtime (`src/noctis/engine/runtime.py`) paces ticks in wall-clock time, waits out
-weekends, and routes `SIGINT`/`SIGTERM` and the time limit through one clean between-phases
-shutdown that flushes state.
+while it is open, and reports at the close — looping until a ceiling is reached. There are two,
+and they stop through the *same* move: `time_limit_hours` bounds **this process** (how long
+tonight lasts, leaving the run resumable), and `run_limit_hours` bounds the **whole run** across
+every stop/resume, marking it `completed` at the cap so two runs can be compared on equal compute
+([cli.md](cli.md#bounding-a-run----run-limit-hours-and---finish)). The runtime
+(`src/noctis/engine/runtime.py`) paces ticks in wall-clock time, waits out weekends, and routes
+`SIGINT`/`SIGTERM` and both ceilings through one clean between-phases shutdown that flushes
+state — deliberately one route, so a new way to stop can never behave differently from the one an
+operator already trusts.
 
 ## The full pipeline
 
