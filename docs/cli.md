@@ -48,7 +48,8 @@ workspace state only warns, on every command.
 python -m noctis run -v                    # start the day/night loop (stops at time_limit_hours)
 python -m noctis run -vv --show-reasoning  # narrate each research session's reasoning inline
 python -m noctis run --time-limit-hours 8  # override the time limit
-python -m noctis run --resume <run_id>     # continue an existing run under its frozen config
+python -m noctis run --label nightly-momo  # attach a human alias to this run
+python -m noctis run --resume <address>    # continue a run (id | latest | run.json path | @label)
 python -m noctis run --mandate aggressive  # one-session mandate override
 python -m noctis run --directive "..."     # one-session inline directive (excludes --mandate)
 python -m noctis run --debug               # also record an hour-segmented QA report under the run's qa/
@@ -72,18 +73,70 @@ to open a run another engine already holds; a stale lock (a dead pid on this hos
 week-cold heartbeat) is stolen with a warning and a recorded event. A run killed mid-segment is
 marked `interrupted` the next time it is opened.
 
-### Resuming a run — `--resume <run_id>`
+### Resuming a run — `--resume <address>`
 
 ```bash
-python -m noctis run                       # night 1: mints a run, echoes its id
-python -m noctis run --resume 20260727T142233Z-a1b2c3   # every night after
+python -m noctis run --label nightly-momo                # night 1: mints a run, echoes its id
+python -m noctis run --resume 20260727T142233Z-a1b2c3    # by id — the identity, always
+python -m noctis run --resume latest                     # the most recently active resumable run
+python -m noctis run --resume workspace/runs/20260727T142233Z-a1b2c3/run.json   # by record path
+python -m noctis run --resume @nightly-momo              # by label
 ```
 
 `--resume` continues an existing run instead of minting one: same id, same tree, one more entry in
 `segments[]`, and the same record keeps accumulating research hours, trials, champions and P&L. The
 **run**, not the process, is the unit progress is tracked on — stop the engine each morning, resume
 it each night, and a multi-week experiment survives every restart. `noctis runs` lists the ids;
-the kickoff echoes `Resumed run: <run_id>`.
+the kickoff echoes `Resumed run: <run_id>` — the **id** of the run reached, whatever address got
+you there.
+
+#### The four address forms, and how they are told apart
+
+An address is resolved in one place (`reporting/run_store.resolve_run_dir`, shared with
+`run-record`), in this **fixed order**, so one string always names one run whatever a workspace
+happens to contain:
+
+| # | form | matches when | resolves to |
+|---|---|---|---|
+| 1 | **path** | it contains `/` or `\`, or is `run.json` / `.` / `..` | that `run.json`'s directory, or that run directory — honoured wherever it points, including outside `runs_dir` |
+| 2 | **`@label`** | it starts with `@` | the one run carrying that label; if none does, the same name read as an **id** |
+| 3 | **`latest`** | it is exactly `latest` | the most recently active run that is not `completed` |
+| 4 | **run id** | anything else | `runs_dir/<id>` |
+
+Three rules follow, and they are the whole disambiguation story:
+
+- **A bare address is always the id.** A run *labelled* `nightly-momo` is not addressed by
+  `nightly-momo` — the refusal says so and names `@nightly-momo`. So a label that looks exactly
+  like another run's id can never shadow that run.
+- **`@` means "label first".** `@<name>` looks `name` up as a label and only then as an id, so an
+  id typed (or pasted) with a leading `@` still resolves, and a run labelled with another run's id
+  is still reachable — as `@<that-id>`.
+- **`latest` is a reserved word, not a lookup.** It means the same thing in every workspace, so a
+  run that happens to be *named* `latest` never captures it (address that one by its path) and one
+  *labelled* `latest` never does either (address it as `@latest`).
+
+**"Most recently active"** is read off the record — `run.last_active_utc`, falling back to
+`created_utc` — and never off a filesystem mtime, which lies after a copy or a migration; ties
+break on the run id, so the answer is deterministic rather than dependent on directory order.
+`latest` skips `completed` runs (they refuse resume anyway) and runs whose record cannot be read
+(they carry no stamp to be "most recent" by — address those by id). It does **not** skip a
+`running` run: that is usually the one you mean, and if another engine really holds it the
+liveness lock refuses a moment later. With nothing resumable left, `--resume latest` fails and
+says what it found instead.
+
+#### Labels — `--label`
+
+`--label nightly-momo` attaches a human alias. It is stored in the **record** (the source of
+truth) and reaches `index.json` only by derivation, so `noctis runs` shows it and a rebuilt index
+still carries it. `--label` is also accepted **with `--resume`**, where it renames the run it
+addressed: a label decides nothing, so fixing a typo'd nickname must not cost a run — unlike the
+frozen config, which a resume refuses to move.
+
+A label is **convenience only: the id is the identity.** A label may be reassigned to a second
+run; when it is, both runs keep their own ids, records and history — and `@nightly-momo` then
+answers with a **refusal naming both candidate ids** rather than picking one, because an alias
+that silently chose between two runs would eventually append a night's work to the wrong record.
+Address the one you mean by its id (or relabel the other on its next resume).
 
 Every cumulative number in the record is **derived, never incremented**: recomputed at each write
 from the durable artifacts plus the append-only `segments[]` list, so three one-hour segments total
@@ -95,11 +148,12 @@ A resumed run reads its **own** state — champions, paper account, memory, stra
 — out of its own tree, exactly as its earlier segments did, and shares the workspace-level data
 lake with every other run.
 
-Three things refuse a resume, all before any work starts:
+Four things refuse a resume, all before any work starts:
 
 | refusal | why |
 |---|---|
-| the id names no run | an address an operator typed must not silently become a *new* run |
+| the address names no run | an address an operator typed must not silently become a *new* run |
+| the address names more than one | a reassigned label has no honest single answer; the refusal lists the candidate ids |
 | the run is `completed` | terminal by design: a published result can never quietly gain segments |
 | the resolved mode differs from the run's | a paper run's results may not acquire live segments (see below) |
 
@@ -149,7 +203,7 @@ plus `jq` one-liners over `events.jsonl` — see
 
 ```bash
 python -m noctis runs [--all]              # the run board: id, label, status, segments, headline numbers
-python -m noctis run-record <run_id>       # print one run's whole record (pipe it into jq)
+python -m noctis run-record <address>      # print one run's whole record (pipe it into jq)
 python -m noctis status                    # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>            # preflight a mandate: provenance + the effective settings diff
 python -m noctis engine                    # engine identity: version, component fingerprint, comparable key
@@ -163,7 +217,7 @@ python -m noctis champions [--reset]       # the champion board; --reset re-fill
 ```bash
 python -m noctis runs                      # the experiments worth comparing
 python -m noctis runs --all                # …plus the noise
-python -m noctis run-record <run_id> | jq .run
+python -m noctis run-record @nightly-momo | jq .run
 ```
 
 `runs` lists this workspace's runs newest first, so an experiment can be found and compared
@@ -190,11 +244,14 @@ count of what was hidden is always printed, and `--all` shows everything. Two ki
 hidden whatever their runtime — a run that is still `running`, and a run whose record could not
 be read.
 
-`run-record <run_id>` prints that run's whole `run.json` on stdout. The record has **no
+`run-record <address>` prints that run's whole `run.json` on stdout, and takes the same four
+address forms as [`--resume`](#the-four-address-forms-and-how-they-are-told-apart) — an id,
+`latest`, a `run.json` path, `@label` — resolved by the same rules, because an address form
+invented twice would eventually resolve two different runs from one string. The record has **no
 sidecars**: one file holds everything about the run, which is exactly what a website `fetch()`es
-and what `jq` reads here. It exits non-zero when no run answers the id, or when that one run's
-record cannot be read (the listing tolerates a broken record because it has others to show; a
-command asked for exactly one does not).
+and what `jq` reads here. It exits non-zero when no run answers the address (or when more than
+one does), or when that one run's record cannot be read (the listing tolerates a broken record
+because it has others to show; a command asked for exactly one does not).
 
 Beside the run trees, `workspace/runs/index.json` is a **derived** roll-up of the same entries —
 one `fetch()` for a listing page. Derived, never authoritative: the engine refreshes it after

@@ -460,6 +460,170 @@ def test_no_secret_reaches_a_resumed_runs_record(tmp_path, monkeypatch):
         assert value not in text
 
 
+# ── addressing a resume: latest, a record path, @label, --label (story #133) ───────────────
+
+
+def _echoed_run_id(result) -> str:
+    """The id the kickoff banner names — ``Run:`` on a fresh run, ``Resumed run:`` on a resume.
+
+    Read from the output on purpose: an operator addressing a run by an alias is told which run
+    they actually reached, and that echo is the contract the tests below hold to.
+    """
+    (line,) = [
+        text
+        for text in result.output.splitlines()
+        if text.startswith("Run: ") or text.startswith("Resumed run: ")
+    ]
+    return line.split(": ", 1)[1].strip()
+
+
+def _seal(run_dir: Path) -> None:
+    """Seal a run the way ``--finish`` will (story #136): ``completed``, so it refuses resume."""
+    record = _record(run_dir)
+    record["run"]["status"] = "completed"
+    record["run"]["completed_utc"] = record["run"]["last_active_utc"]
+    (run_dir / RUN_RECORD_NAME).write_text(json.dumps(record))
+
+
+def test_noctis_run_label_stores_the_alias_in_the_record_and_the_index_and_runs_shows_it(tmp_path):
+    cfg = _config(tmp_path)
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--label", "nightly-momo"])
+
+    assert result.exit_code == 0, result.output
+    run_dir = _run_dirs(tmp_path)[0]
+    assert _record(run_dir)["run"]["label"] == "nightly-momo"
+    index = json.loads((_runs_dir(tmp_path) / "index.json").read_text())
+    assert [entry["label"] for entry in index["runs"]] == ["nightly-momo"]
+    listed = runner.invoke(app, ["runs", "--all", "--config", cfg])
+    assert listed.exit_code == 0, listed.output
+    assert "nightly-momo" in listed.output
+
+
+def test_noctis_run_resume_latest_continues_the_most_recent_run_and_names_its_id(tmp_path):
+    cfg = _config(tmp_path)
+    runner.invoke(app, ["run", "--config", cfg])
+    newest = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg]))
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", "latest"])
+
+    assert result.exit_code == 0, result.output
+    assert _echoed_run_id(result) == newest
+    assert len(_record(_runs_dir(tmp_path) / newest)["segments"]) == 2
+    assert len(_run_dirs(tmp_path)) == 2  # nothing new was minted
+
+
+def test_noctis_run_resume_latest_skips_a_completed_run(tmp_path):
+    cfg = _config(tmp_path)
+    first = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg]))
+    second = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg]))
+    _seal(_runs_dir(tmp_path) / second)
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", "latest"])
+
+    assert result.exit_code == 0, result.output
+    assert _echoed_run_id(result) == first
+
+
+def test_noctis_run_resume_latest_with_no_resumable_run_exits_nonzero_saying_why(tmp_path):
+    cfg = _config(tmp_path)
+    _seal(_runs_dir(tmp_path) / _echoed_run_id(runner.invoke(app, ["run", "--config", cfg])))
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", "latest"])
+
+    assert result.exit_code == 1
+    assert "RESUME" in result.output
+    assert "completed" in result.output
+    assert "noctis runs" in result.output
+    assert len(_run_dirs(tmp_path)) == 1  # a refused resume never mints a run instead
+
+
+def test_noctis_run_resume_by_the_path_of_the_record_you_are_looking_at(tmp_path):
+    cfg = _config(tmp_path)
+    run_id = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg]))
+    record_path = _runs_dir(tmp_path) / run_id / RUN_RECORD_NAME
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", str(record_path)])
+
+    assert result.exit_code == 0, result.output
+    assert _echoed_run_id(result) == run_id
+    assert len(_record(record_path.parent)["segments"]) == 2
+
+
+def test_noctis_run_resume_by_label(tmp_path):
+    cfg = _config(tmp_path)
+    momo = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg, "--label", "nightly-momo"]))
+    runner.invoke(app, ["run", "--config", cfg, "--label", "sector-specialist"])
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", "@nightly-momo"])
+
+    assert result.exit_code == 0, result.output
+    assert _echoed_run_id(result) == momo
+    assert len(_record(_runs_dir(tmp_path) / momo)["segments"]) == 2
+
+
+def test_noctis_run_resume_on_an_ambiguous_label_refuses_and_names_the_candidates(tmp_path):
+    cfg = _config(tmp_path)
+    first = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg, "--label", "nightly-momo"]))
+    second = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg, "--label", "nightly-momo"]))
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", "@nightly-momo"])
+
+    assert result.exit_code == 1
+    assert first in result.output and second in result.output
+    assert len(_run_dirs(tmp_path)) == 2  # neither continued, and nothing new was minted
+
+
+def test_noctis_run_resume_on_an_unknown_label_exits_nonzero_saying_how_to_find_runs(tmp_path):
+    cfg = _config(tmp_path)
+    runner.invoke(app, ["run", "--config", cfg, "--label", "nightly-momo"])
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", "@no-such-label"])
+
+    assert result.exit_code == 1
+    assert "no-such-label" in result.output
+    assert "noctis runs" in result.output
+
+
+def test_a_label_may_be_attached_or_changed_on_a_resume_without_moving_the_id(tmp_path):
+    """A label decides nothing — it is a nickname — so fixing a typo'd one must not cost a run.
+    The id is untouched, which is what keeps the alias convenience rather than identity."""
+    cfg = _config(tmp_path)
+    run_id = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg, "--label", "nightly-momo"]))
+
+    result = runner.invoke(
+        app, ["run", "--config", cfg, "--resume", run_id, "--label", "nightly-momentum"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _echoed_run_id(result) == run_id
+    record = _record(_runs_dir(tmp_path) / run_id)
+    assert record["run"]["run_id"] == run_id
+    assert record["run"]["label"] == "nightly-momentum"
+
+
+def test_resuming_without_a_label_keeps_the_one_the_run_already_carries(tmp_path):
+    cfg = _config(tmp_path)
+    run_id = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg, "--label", "nightly-momo"]))
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", run_id])
+
+    assert result.exit_code == 0, result.output
+    assert _record(_runs_dir(tmp_path) / run_id)["run"]["label"] == "nightly-momo"
+
+
+def test_a_completed_run_addressed_by_label_refuses_by_its_id_not_by_the_alias(tmp_path):
+    cfg = _config(tmp_path)
+    run_id = _echoed_run_id(runner.invoke(app, ["run", "--config", cfg, "--label", "nightly-momo"]))
+    _seal(_runs_dir(tmp_path) / run_id)
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", "@nightly-momo"])
+
+    assert result.exit_code == 1
+    assert run_id in result.output
+    assert "completed" in result.output
+
+
 # ── the resumed process: rehydrated settings and run-scoped state ──────────────────────────
 
 

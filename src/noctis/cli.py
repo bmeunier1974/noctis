@@ -278,9 +278,21 @@ def run(
     resume: str = typer.Option(
         None,
         "--resume",
-        help="Continue an existing run by id instead of minting a new one: it appends a segment "
-        "and keeps accumulating research hours, trials, champions and P&L into the same record, "
-        "under the config that run froze at creation. `noctis runs` lists the ids.",
+        help="Continue an existing run instead of minting a new one: it appends a segment and "
+        "keeps accumulating research hours, trials, champions and P&L into the same record, "
+        "under the config that run froze at creation. Four address forms, tried in this order: "
+        "a path to a run.json (or the run dir); @LABEL (the label first, then the same name as "
+        "an id); the reserved word `latest` (the most recently active run that is not completed, "
+        "never one merely named or labelled `latest`); a run id. A bare address is ALWAYS the "
+        "id. `noctis runs` lists ids and labels.",
+    ),
+    label: str = typer.Option(
+        None,
+        "--label",
+        help="Attach a human alias to this run, stored in its record and shown by `noctis runs`; "
+        "address it later with `--resume @LABEL`. Convenience only — the id stays the identity, "
+        "and a label may be reused, in which case @LABEL refuses rather than guess. Also accepted "
+        "with --resume, where it renames the run it addressed (a nickname decides nothing).",
     ),
     directive: str = typer.Option(
         None,
@@ -377,6 +389,7 @@ def run(
             command="run",
             run_id=resume,
             resume=resume is not None,
+            label=label,
             mandate=active_mandate,
             mode=mode,
             overrides=inputs.overrides,
@@ -641,7 +654,11 @@ def _runtime(seconds: object) -> str:
 
 @app.command("run-record")
 def run_record(
-    run_id: str = typer.Argument(..., help="Run id, exactly as `noctis runs` lists it."),
+    run_id: str = typer.Argument(
+        ...,
+        help="Run address: an id as `noctis runs` lists it, a path to a run.json, @LABEL, or "
+        "`latest`. The same four forms `run --resume` takes, resolved by the same rules.",
+    ),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
 ) -> None:
     """Print one run's record — the whole self-contained ``run.json``, straight to stdout.

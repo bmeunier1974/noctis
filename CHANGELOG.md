@@ -9,6 +9,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Resume addressing: `--resume latest`, a `run.json` path, `--resume @label`, and `--label`.**
+  `--resume` now takes four address forms, resolved in one place (shared with `run-record`) in a
+  fixed order, so one string always names one run whatever a workspace happens to contain: a
+  **path** (anything with a separator, or `run.json` — the record file you are looking at, wherever
+  it lives), **`@label`** (the label first, then the same name as an id, so an id pasted with a
+  leading `@` still resolves), the reserved word **`latest`**, and a **run id**. A bare address is
+  *always* the id — a run merely labelled like one can never shadow it — and `latest` is a reserved
+  word rather than a lookup, so a run named or labelled `latest` never captures it (address those
+  by path, or as `@latest`). "Most recently active" is read off the record's own stamps, never a
+  filesystem mtime, ties break on the id, and `latest` skips `completed` runs (they refuse resume
+  anyway) and unreadable ones; with nothing resumable left it fails saying what it found.
+  - **`--label nightly-momo`** attaches a human alias, stored in the **record** and derived from
+    there into `index.json`, listed by `noctis runs`. Also accepted with `--resume`, where it
+    renames the run it addressed — a nickname decides nothing, unlike the frozen config a resume
+    refuses to move.
+  - Labels are **convenience only: the id is the identity.** A label may be reassigned; both runs
+    then keep their own ids, records and history, and `@label` **refuses, naming both candidate
+    ids**, rather than silently picking one — an alias that chose between two runs would eventually
+    append a night's work to the wrong record. Everything an aliased open writes (the lock, the
+    record, the echoed `Resumed run:` line, every refusal message) names the run's **id**, never
+    the address it was reached by.
 - **A run is stoppable and resumable: `noctis run --resume <run_id>`.** It opens an existing run,
   rehydrates that run's settings from its record, appends a segment, and keeps accumulating
   research hours, trials, champions and P&L into the same `run.json`. The **run**, not the

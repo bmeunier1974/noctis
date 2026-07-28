@@ -199,7 +199,11 @@ def resume_session(
     settings = load_settings(config_path=config_path)
     mode = resolve_execution_mode(settings) if require_gate else None
     record = read_run_record(settings.runs_dir, run_id)
-    assert_resumable(record, run_id)
+    # ``run_id`` is the *address* an operator typed (an id, `latest`, a path, `@label`); the run's
+    # own id is what the record it resolved to says. Every refusal and warning below names that,
+    # so a refusal is always about a run an operator can go and look at.
+    addressed = _addressed_id(record, run_id)
+    assert_resumable(record, addressed)
     if mode is not None:
         assert_mode_unchanged(record, mode)
     if not has_frozen_inputs(record):
@@ -207,7 +211,7 @@ def resume_session(
             "run %s froze no configuration (it predates config freezing, or it is history adopted "
             "by `noctis migrate`), so this segment runs under the current config.yaml and "
             "mandate/ — and freezes them onto the run for every segment after it.",
-            run_id,
+            addressed,
         )
     settings = rehydrate(record, settings)
     frozen = record.get("inputs") if has_frozen_inputs(record) else None
@@ -220,6 +224,16 @@ def resume_session(
     if time_limit_hours is not None:
         settings.time_limit_hours = time_limit_hours
     return SessionInputs(settings=settings, mode=mode, mandate=active, overrides=overrides)
+
+
+def _addressed_id(record: dict, address: str) -> str:
+    """The id of the run an address resolved to, falling back to the address itself.
+
+    One line, but it is the difference between "cannot resume @nightly-momo" and a message naming
+    the run that actually refused — and after a label is reassigned those are not the same run.
+    """
+    run = record.get("run")
+    return str(run.get("run_id") or address) if isinstance(run, dict) else address
 
 
 def overlay_mandate(settings: Settings, mandate: Mandate | None) -> list[str]:

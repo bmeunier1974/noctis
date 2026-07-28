@@ -163,9 +163,12 @@ honesty rules: a killed segment is marked `interrupted` on the **next** open, ne
 time, and a live lock is a hard refusal (two engines on one run is corruption) while everything else
 latches off with one warning rather than raising into the engine.
 
-**A run outlives its process, so it carries its own config.** `noctis run --resume <run_id>` appends
+**A run outlives its process, so it carries its own config.** `noctis run --resume <address>` appends
 a segment to an existing run and keeps accumulating into the same record — the run, not the process,
-is the unit progress is tracked on. Every cumulative number in the record is **derived, never
+is the unit progress is tracked on. One resolver (`run_store.resolve_run_dir`, shared with
+`run-record`) understands four address forms in a fixed order — a `run.json` path, `@label`,
+the reserved word `latest`, a run id — and a bare address is *always* the id; `--label` is a
+nickname the record stores, so an ambiguous `@label` refuses naming both ids rather than pick one. Every cumulative number in the record is **derived, never
 incremented** (recomputed at write time from the durable artifacts + the append-only `segments[]`),
 which is why three short segments total exactly what one long one does and a crash mid-write cannot
 double-count. Config is **frozen at creation** and rehydrated by the pure
