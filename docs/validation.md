@@ -117,6 +117,28 @@ startup, with the reason printed
 > independent out-of-sample axes, the gap guard, scale-free comparison) binds regardless of how
 > aggressive the numeric thresholds are set.
 
+### Every verdict carries its evidence
+
+`decide()` returns the one-line rationale it always has **and** `gates`: one
+`GateResult(gate, passed, observed, threshold, note)` per gate, in the order above. The champion
+board journals it beside each decision, and the run record publishes it per candidate — so *"47 of
+66 candidates died at the symbol-holdout gate"* is computed from stored numbers rather than parsed
+out of prose. That is the point: the rejections are the product, and a funnel nobody can count is
+a claim, not evidence.
+
+Three properties make it trustworthy:
+
+- **It changed no decision.** The evidence is appended as each gate evaluates; the early returns,
+  their order and their outcomes are exactly what they were. A committed decision corpus
+  (`tests/fixtures/promotion_decisions_golden.json`, captured before the change) pins every
+  branch and both sides of every threshold, and regenerating it means a *judgment* moved — which
+  is an engine change with an `ENGINE_VERSION` bump, never a test fix.
+- **A rejection short-circuits, and says so.** `gates` holds the gates *reached* plus the one that
+  failed: a candidate stopped at the gap guard was never measured against the holdouts, and the
+  record must not imply it was. An absent gate means "not reached", never "passed".
+- **Evidence, never a gate.** Nothing computed for the record is read by a decision: the promotion
+  path imports nothing from `noctis.reporting`, asserted in a fresh subprocess by the test suite.
+
 ## A failing strategy is a signal, not a bug
 
 This is the load-bearing cultural rule, and it is defended in code. When a candidate can't clear

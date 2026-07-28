@@ -106,6 +106,7 @@ def resolve_session(
     metric: str | None = None,
     time_limit_hours: float | None = None,
     run_limit_hours: float | None = None,
+    embed_all_sources: bool = False,
     require_gate: bool = False,
     resume: str | None = None,
     rebase_config: bool = False,
@@ -154,6 +155,15 @@ def resolve_session(
                 "A resumed run's election metric is frozen at creation, so --metric cannot move "
                 "it: champions crowned under two metrics were never comparable, and the metric "
                 "is part of the run's comparability key. Start a new run to score differently."
+            )
+        if embed_all_sources:
+            raise UsageError(
+                "A run's source-embedding choice is frozen at creation, so --embed-all-sources "
+                "cannot move it: the record is rewritten whole at every write, and a flag that "
+                "could be passed on some nights and not others would make what the record "
+                "contains depend on how it was last invoked. Every candidate is already named in "
+                "the record by path and content hash — read them from the run's own "
+                "strategies/__tmp/ tier, which survives as long as the run does."
             )
         if run_limit_hours is not None:
             raise UsageError(
@@ -207,6 +217,10 @@ def resolve_session(
         # Frozen tier, and this is the one moment it may be set: a run is being minted right now,
         # so the flag is part of what this experiment *is*. Every later segment restores it.
         settings.run_limit_hours = run_limit_hours
+    if embed_all_sources:
+        # The same rule for the same reason (story #141): what the run's record archives is part
+        # of what the run is, decided once, here.
+        settings.embed_all_sources = True
     return SessionInputs(
         settings=settings, mode=mode, mandate=active, overrides=overrides, changes=changes
     )

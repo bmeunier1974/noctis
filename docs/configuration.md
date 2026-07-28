@@ -56,6 +56,7 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `champion_count` | Champion board size |
 | `time_limit_hours` | Global stop from any phase — bounds **one process** (how long tonight lasts); the run stays resumable |
 | `run_limit_hours` | Compute cap on the **whole run**, in hours of cumulative runtime across every stop/resume (`--run-limit-hours`, frozen at creation). At the cap the loop stops between phases and the run is marked `completed` — terminal, so it refuses resume. `null` = uncapped. See [cli.md](cli.md#bounding-a-run----run-limit-hours-and---finish) |
+| `embed_all_sources` | Embed **every** candidate's strategy source in the run record, not just the champions' (`--embed-all-sources`, frozen at creation). Default `false`: champions are embedded in full, every other candidate is a run-relative path plus a content hash. See [cli.md](cli.md#archiving-a-run-whole----embed-all-sources) |
 | `workspace_dir` | **The one output root** (default `workspace/`; env `NOCTIS_WORKSPACE`) — every path below derives from it when not set |
 | `runs_dir`, `data.lake_dir` | The workspace-level pair: the run tree (`workspace/runs`) and the data lake (`workspace/data_lake`), which is **shared by every run** |
 | `run_dir` | **The one run root** (default `workspace/runs/legacy`, the reserved run an invocation that never opened a run reads). `noctis run` / `noctis research` rebind it to the run they mint or resume |
@@ -103,11 +104,11 @@ operator deliberately adopts it ([below](#seeing-the-drift-and-adopting-it)).
 
 Every leaf setting belongs to exactly one of three tiers, classified in
 `src/noctis/config/rehydrate.py` and ratcheted by the test suite the same way the overlay's table
-is. Today: **71 frozen, 17 live, 2 refused**.
+is. Today: **72 frozen, 17 live, 2 refused**.
 
 | Tier | Count | What | Where it comes from on a resume |
 |---|---|---|---|
-| **Frozen** | 71 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `live_feed.*` — **plus the whole mandate** | the record |
+| **Frozen** | 72 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `embed_all_sources`, `live_feed.*` — **plus the whole mandate** | the record |
 | **Live** | 17 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | the current process |
 | **Refused** | 2 | `mode`, `allow_live` | neither — see below |
 
@@ -212,7 +213,7 @@ while the run does another. `null` — "no bound": an unlimited budget, no exhau
 — ranks as the least-disciplined end of *either* scale, so an overlay may replace it with a
 number and never the reverse.
 
-**Refused (51) — fatal at startup, with the reason printed.** A refused, unknown, or invalid
+**Refused (53) — fatal at startup, with the reason printed.** A refused, unknown, or invalid
 key stops the process before any work starts, listing **every** problem in one error so a bad
 mandate is one fix rather than a fix-one-rerun loop. (Refusals used to be warned about and
 silently skipped, which meant discovering three days into a run that a knob never applied.) The
@@ -221,7 +222,7 @@ fill-cost floor (`backtest.fee_bps`, `backtest.slippage_bps`), every `promotion.
 `metric`, the holdout geometry (`research.fit_set_size`, `research.symbol_holdout_size`),
 `champion_count`, every state/IO path (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`,
 `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`), the
-three API keys,
+three API keys, cost accounting (`research.pricing`), record content (`embed_all_sources`),
 self-selection (`research.mandate`, `research.mode`), `risk.*` / `trading.*` /
 `live_feed.poll_interval_s`, `data.provider` / `data.dataset`, `session.calendar` /
 `session.timezone`, and `ideation.*`.

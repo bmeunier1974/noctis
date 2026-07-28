@@ -29,13 +29,21 @@ from collections.abc import Mapping, Sequence
 
 __all__ = [
     "EVENT_CAP",
+    "GATE_KEYS",
     "KIND",
+    "PROMOTED_OUTCOME",
+    "RECORD_SIZE_BUDGET_BYTES",
+    "REJECTED_OUTCOME",
     "REQUIRED_SECTIONS",
     "RUN_STATUSES",
     "SCHEMA_VERSION",
     "SEGMENT_COMMANDS",
     "SEGMENT_STATUSES",
+    "STRATEGY_CAP",
+    "STRATEGY_OUTCOMES",
+    "STRATEGY_TIERS",
     "TRADE_CAP",
+    "UNDECIDED_OUTCOME",
     "validate",
 ]
 
@@ -62,6 +70,11 @@ REQUIRED_SECTIONS = (
     "environment_latest",
     "engine",
     "inputs",
+    # Everything this run considered, with the structured gate evidence behind each verdict
+    # (story #141). Present as a list — empty for a run that has considered nothing — never
+    # ``null``: "no candidates yet" is a fact a young run can state, and the *rejections* are what
+    # this section exists to publish.
+    "strategies",
     "performance",
     "events",
     "errors",
@@ -82,10 +95,27 @@ SEGMENT_STATUSES = ("running", "stopped", "interrupted")
 # already had to carry: the command each process was invoked as.
 SEGMENT_COMMANDS = ("run", "research")
 
-# Bounds on the two lists that grow without limit in a long run. A record is meant to be fetched
-# whole by a website, so these keep a multi-week run in the tens of kilobytes.
+# Bounds on the lists that grow without limit in a long run. A record is meant to be fetched
+# whole by a website, so these keep a multi-week run in the low hundreds of kilobytes.
 TRADE_CAP = 5_000
 EVENT_CAP = 2_000
+# Candidates carried in full. Deliberately generous: at the epic's own worked rate (66 candidates
+# in a fortnight) this is roughly a year of nightly research, and the rejections are the product —
+# dropping them cheaply would throw away exactly what the record exists to publish. When it does
+# bite, champions are kept first (:func:`~noctis.reporting.run_record.build`) and the note beside
+# it names the total.
+STRATEGY_CAP = 500
+
+# What a whole record is *meant* to weigh, and the number the caps above are sized against. Not
+# enforced — a byte ceiling that truncated mid-write would be the silent truncation this contract
+# forbids — but measured: a synthetic two-week run (14 segments, 66 candidates, 3 champions
+# embedded in full, ~3 000 trials) is held under it by a test, so a change that quietly makes the
+# record ten times heavier is a red test rather than a slow website.
+#
+# The epic's planning estimate was ~40 KB; that predates §7.1's per-candidate gate evidence, which
+# is the single largest thing in the section and also the whole point of it. The budget states the
+# measured reality instead of the estimate.
+RECORD_SIZE_BUDGET_BYTES = 256 * 1024
 
 # The keys the ``run`` section always carries — presence is the contract, ``null`` is a value.
 _RUN_KEYS = (
@@ -195,6 +225,59 @@ _ENGINE_CHANGE_KEYS = (
 )
 
 _EVENT_KEYS = ("t", "segment", "kind", "text")
+
+# One considered candidate (story #141). Every candidate the run judged is here, not just the
+# champions: "47 of 66 candidates died at the symbol-holdout gate" is the sentence that makes a
+# results page credible, and it is computable only from the whole funnel.
+_STRATEGY_KEYS = (
+    "name",
+    # promoted | rejected | undecided — the last verdict the champion board journaled for this
+    # name, or ``undecided`` for a candidate that was authored and never carried to one.
+    "outcome",
+    # Which library tier the file sits in now (``champions`` / ``__tmp``), or ``null`` when the
+    # run no longer has the file — a pruned run, or a draft that was swept.
+    "tier",
+    "decided_utc",
+    # Trials journaled for this candidate, off its own ``state/experiments/<name>.jsonl``.
+    "trials",
+    # The structured evidence behind the verdict, in gate order.
+    "gates",
+    "rationale",
+    # The path-plus-hash reference every non-champion carries instead of its text (see below).
+    # The path is **relative to the run directory** the record sits in, so it stays portable
+    # between machines and resolves beside the file quoting it.
+    "source_path",
+    "source_sha256",
+    # The full text — for champions only, unless the run was created with ``embed_all_sources``.
+    # ``null`` on every other candidate, which is what holds a fortnight's record to
+    # :data:`RECORD_SIZE_BUDGET_BYTES` instead of a megabyte. The consequence is stated rather
+    # than hidden: a rejected candidate's code is readable only while the run's tree survives
+    # (``run.state_pruned`` says when it no longer does).
+    "source",
+)
+
+# One gate's measurement (``champions/promotion.py``'s ``GateResult``). ``observed`` and
+# ``threshold`` are ``null`` where a gate had nothing numeric to compare or the scorecard carried
+# no such metric at all; ``note`` says why a gate could not bite.
+#
+# **The list is the gates *reached*, plus the one that failed.** A rejection short-circuits — the
+# candidate was never measured against the gates after the one that stopped it — so a decision's
+# evidence is a prefix of the gate order, and a consumer must read it as such: an absent gate means
+# "not reached", never "passed". That is the honest shape, and it is why the funnel's death counts
+# are read off the one entry whose ``passed`` is false.
+GATE_KEYS = ("gate", "passed", "observed", "threshold", "note")
+
+# A candidate's fate, as the record states it. ``undecided`` is a real and common state — a
+# candidate authored, perhaps tuned, and never carried to a verdict — and it is evidence of the
+# funnel's width above the gates, not a hole in the record.
+PROMOTED_OUTCOME = "promoted"
+REJECTED_OUTCOME = "rejected"
+UNDECIDED_OUTCOME = "undecided"
+STRATEGY_OUTCOMES = (PROMOTED_OUTCOME, REJECTED_OUTCOME, UNDECIDED_OUTCOME)
+
+# The two writable library tiers a run owns (the committed ``strategies/`` seeds are read-only
+# input and belong to no run, so they are never a candidate's tier).
+STRATEGY_TIERS = ("champions", "__tmp")
 
 # The run's frozen configuration (story #132). Present as an explicit ``null`` on a run that never
 # froze one — an adopted history — and otherwise carrying the rehydration source plus the tier
@@ -318,6 +401,7 @@ def validate(record: Mapping[str, object]) -> list[str]:
         problems.append("engine: section must be an object")
 
     problems += _check_inputs(record.get("inputs"))
+    problems += _check_strategies(record.get("strategies"))
     problems += _check_spend(record.get("spend"))
     problems += _check_performance(record.get("performance"), run=run)
 
@@ -346,6 +430,59 @@ def _check_performance(performance: object, *, run: object) -> list[str]:
             "realised performance, and zeros would render as a result it never produced"
         ]
     return []
+
+
+def _check_strategies(strategies: object) -> list[str]:
+    """Everything the run considered: one entry per candidate, each carrying its gate evidence.
+
+    Two rules beyond presence, both of which exist because a consumer would otherwise be misled
+    rather than merely under-informed:
+
+    * a **gate entry** carries all five keys, so "which gate stopped this candidate, and by how
+      much" is answerable without guessing what a missing key meant;
+    * an **embedded source** carries the hash of what was embedded. A record that quoted code with
+      no digest beside it could not be checked against the file it claims to be, and the reference
+      form (path + hash) is the whole contract for every candidate that is *not* embedded.
+    """
+    if strategies is None:
+        return []
+    if not isinstance(strategies, Sequence) or isinstance(strategies, str | bytes):
+        return ["strategies: must be a list"]
+    problems: list[str] = []
+    for position, strategy in enumerate(strategies):
+        label = f"strategies[{position}]"
+        if not isinstance(strategy, Mapping):
+            problems.append(f"{label}: must be an object")
+            continue
+        problems += _check_keys(label, strategy, _STRATEGY_KEYS)
+        problems += _check_status(f"{label}.outcome", strategy.get("outcome"), STRATEGY_OUTCOMES)
+        problems += _check_stamp(f"{label}.decided_utc", strategy.get("decided_utc"))
+        tier = strategy.get("tier")
+        if tier is not None:
+            problems += _check_status(f"{label}.tier", tier, STRATEGY_TIERS)
+        if strategy.get("source") is not None and strategy.get("source_sha256") is None:
+            problems.append(
+                f"{label}.source_sha256: an embedded source must carry the hash of what was "
+                "embedded, or nothing can check the record against the file it quotes"
+            )
+        problems += _check_gates(f"{label}.gates", strategy.get("gates"))
+    return problems
+
+
+def _check_gates(label: str, gates: object) -> list[str]:
+    """One decision's gate evidence — the gates reached, plus the one that failed."""
+    if gates is None:
+        return []
+    if not isinstance(gates, Sequence) or isinstance(gates, str | bytes):
+        return [f"{label}: must be a list"]
+    problems: list[str] = []
+    for position, gate in enumerate(gates):
+        entry = f"{label}[{position}]"
+        if not isinstance(gate, Mapping):
+            problems.append(f"{entry}: must be an object")
+            continue
+        problems += _check_keys(entry, gate, GATE_KEYS)
+    return problems
 
 
 def _check_spend(spend: object) -> list[str]:

@@ -618,6 +618,14 @@ class Settings(BaseSettings):
     # between phases (the same shutdown path ``time_limit_hours`` uses) and the run is `completed`:
     # terminal, so a published result can never quietly gain another segment. ``null`` = uncapped.
     run_limit_hours: float | None = None
+    # Archive this run whole: embed **every** candidate's strategy source in the run record, not
+    # just its champions' (story #141, `noctis run --embed-all-sources`). Off by default, because
+    # the champions-only policy is what holds a fortnight's record to a couple of hundred
+    # kilobytes instead of megabytes — every other candidate is still named there, by a
+    # run-relative path plus a content hash. Frozen at run creation like the compute cap above: it
+    # says what the run's artifact *is*, and a record whose contents depended on how the last
+    # segment happened to be invoked would quietly lose what an earlier one embedded.
+    embed_all_sources: bool = False
     # ── The one output root. Everything the engine writes lands under this directory
     # (gitignored): run state, the data lake, reports, agent memory. The per-artifact knobs
     # below derive from it when not explicitly set (see ``_derive_workspace_paths``); an

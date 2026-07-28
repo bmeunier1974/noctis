@@ -378,3 +378,31 @@ shared workspace-level lake directory) — stated once, resolved, so nothing dow
 fallback chain to know what produced a run's numbers. No credential is reachable from any of it: a
 model name is public, and the keys are secret tier and excluded from the record entirely, which is
 why a resumed run takes its keys from the live `.env` (see [safety.md](safety.md)).
+
+**`strategies[]` — everything considered, and the gate that stopped it.** One entry per candidate,
+not per champion: *"47 of 66 candidates died at the symbol-holdout gate"* is the sentence that
+makes these results credible where an equity curve does not, and it is computable only when the
+rejections are on the record in the same shape as the promotions. Each entry carries its name,
+outcome (`promoted` / `rejected` / `undecided`), library tier, decision stamp, journaled trials,
+the prose rationale — and `gates[]`, the structured evidence `champions/promotion.py` produced.
+
+- **`gates[]` is `(gate, passed, observed, threshold, note)` per gate, in gate order.** It is
+  carried *beside* the decision and read by nothing in it: `decide()`'s early returns, order and
+  outcomes are exactly what they were before the evidence existed (a committed decision corpus
+  proves it case by case), and the promotion path imports nothing from `noctis.reporting` — a test
+  asserts that in a fresh subprocess. Evidence, never a gate (AGENTS.md rule 2).
+- **A rejection short-circuits, so the list is the gates *reached* plus the one that failed.** An
+  absent gate means "never reached", never "passed"; a gate that could not bite — switched off by
+  a zero threshold, or handed a metric the scorecard never carried — is still listed, with a note
+  saying which, so the funnel's denominators are honest.
+- **Champion sources are embedded in full; everyone else is a reference.** `source_path` (relative
+  to the run directory, so it stays portable) plus `source_sha256`, with `source: null`. That is
+  what holds a two-week run's record to a couple of hundred kilobytes
+  (`schema.RECORD_SIZE_BUDGET_BYTES`, held by a test on a synthetic fortnight) instead of
+  megabytes. The cost is stated rather than hidden: a rejected candidate's code is readable while
+  the run's own `strategies/__tmp/` tier survives, and `run.state_pruned` says when it no longer
+  does — what the record *embeds* survives a prune. `noctis run --embed-all-sources` archives a run
+  whole, frozen at creation like every other knob that says what a run is.
+- **Derived at every write**, from the run's own champion board (which journals each decision's
+  gates), its experiment journals and its strategy tiers — never a list carried across a restart,
+  so three short segments report exactly what one long one does.

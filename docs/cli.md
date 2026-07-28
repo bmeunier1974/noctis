@@ -49,6 +49,7 @@ python -m noctis run -v                    # start the day/night loop (stops at 
 python -m noctis run -vv --show-reasoning  # narrate each research session's reasoning inline
 python -m noctis run --time-limit-hours 8  # bound THIS process (tonight); the run stays resumable
 python -m noctis run --run-limit-hours 100 # bound the whole RUN; at the cap it is `completed`
+python -m noctis run --embed-all-sources   # archive EVERY candidate's source in the record
 python -m noctis run --label nightly-momo  # attach a human alias to this run
 python -m noctis run --resume <address>    # continue a run (id | latest | run.json path | @label)
 python -m noctis run --resume latest --finish   # seal a run as completed; runs no segment
@@ -216,6 +217,33 @@ working — so it is the command for "this result is published". On a run that i
 
 `noctis runs` shows the state of the budget in the runtime column (`2h00m/100h`), and every record
 and index entry carries `run_limit_hours` so a leaderboard can group like-for-like.
+
+#### Archiving a run whole — `--embed-all-sources`
+
+```bash
+python -m noctis run --embed-all-sources          # keep every candidate's code in the record
+```
+
+The record's `strategies[]` lists **every** candidate the run considered — champions, rejections
+and the drafts that never reached a verdict — each with the structured gate results behind its
+outcome, so *"47 of 66 candidates died at the symbol-holdout gate"* is a number a reader computes
+rather than a claim the page makes. Sources follow one rule: a **champion's** file is embedded in
+full, and every other candidate is named by `source_path` (relative to the run directory) plus
+`source_sha256`. That is what keeps a fortnight's record in the hundreds of kilobytes instead of
+megabytes, and it is why the record stays a single `fetch()` a website can render.
+
+The cost of that rule is stated rather than hidden: a rejected candidate's *code* is readable only
+while the run's own `strategies/__tmp/` tier survives — which is as long as the run does, since
+[retention](#reclaiming-disk--run-prune-address) refuses to prune anything resumable and the
+record's `run.state_pruned` says when it finally went. `--embed-all-sources` is the deliberate
+alternative for an experiment worth keeping after its workspace is not: every candidate's source
+lands *inside* the record, which then survives a prune, a copy, or a move to another machine.
+
+Like `--run-limit-hours`, it is **accepted at run creation only and frozen into the record**
+(`embed_all_sources` in `config.yaml` does the same for the next run you mint). Passing it with
+`--resume` is refused with a reason: the record is rewritten whole at every write, so a flag
+supplied on some nights and not others would make what the record *contains* depend on how it was
+last invoked — and an earlier night's embedded sources would silently vanish.
 
 #### Config drift: seeing it, and adopting it
 

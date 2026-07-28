@@ -321,6 +321,11 @@ _SESSION_CLOCK = (
     "session clock — the lake and every catalog are aligned to one calendar and timezone"
 )
 _IDEATION = "legacy ideation path — deferred, and not run-shaping"
+_RECORD_CONTENT = (
+    "record content — how much of a run the record embeds is an archival choice about the "
+    "artifact, made once at creation; steering says what to look for, never what the evidence "
+    "describing it contains"
+)
 _ACCOUNTING = (
     "cost accounting — the price table decides what a run is *reported* to have cost, not what "
     "it does; a mandate that could restate its own bill would make every cross-run cost "
@@ -370,6 +375,8 @@ REFUSED: dict[str, str] = {
     "openai_api_key": SECRETS,
     # Cost accounting — what the record says a run cost, never what it does.
     "research.pricing": _ACCOUNTING,
+    # Record content — how much of itself the run archives.
+    "embed_all_sources": _RECORD_CONTENT,
     # Self-selection / recursion.
     "research.mandate": _SELF_SELECTION,
     "research.mode": _SELF_SELECTION,

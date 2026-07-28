@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import builtins
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -132,6 +132,12 @@ class ChampionRegistry:
             "gap": round(challenger.gap, 10),
             "promoted": decision.promote,
             "rationale": decision.rationale,
+            # The structured evidence behind the rationale (story #141), journaled beside it so a
+            # rejection stays computable long after the session that produced it: the board is the
+            # only durable record of a candidate the gates turned away. Serialized here rather
+            # than by ``promotion`` — the decision function stays a value, and knows nothing about
+            # how anything stores it.
+            "gates": [asdict(gate) for gate in decision.gates],
         }
 
         if decision.promote:

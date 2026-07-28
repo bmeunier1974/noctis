@@ -258,16 +258,24 @@ def test_pruning_sets_state_pruned_on_the_record(tmp_path):
 
 def test_pruning_changes_nothing_in_the_record_but_the_marker_and_a_note(tmp_path):
     """Whatever the record *embeds* survives a prune by construction — pruning touches three
-    directories and rewrites one flag. (The embedded champion sources themselves arrive with story
-    #141; this is the rule they will land into.)"""
+    directories and rewrites one flag. Story #141 makes that concrete: the champion source
+    embedded below is still in the record after the file it was read from is gone, which is the
+    whole point of embedding it (a rejected candidate's ``source_path`` reference, by contrast,
+    stops resolving — and ``state_pruned: true`` is how a reader knows)."""
     runs = tmp_path / "runs"
     clock = FakeClock()
     run_dir, _ = _completed_with_state(runs, clock)
     before = _on_disk(run_dir)
+    embedded = {entry["name"]: entry["source"] for entry in before["strategies"]}
+    # The champion (embedded in full), a working-tier draft and a journalled name with no file —
+    # every candidate the fixture's tree knows about, each in the shape the source policy gives it.
+    assert embedded == {"momo": "c" * 250, "draft": None, "momentum": None}
 
     _prune(runs, run_dir.name, clock)
 
     after = _on_disk(run_dir)
+    assert {entry["name"]: entry["source"] for entry in after["strategies"]} == embedded
+    assert not (run_dir / "strategies").exists()  # …and the file it was read from is gone
     assert after["run"].pop("state_pruned") is True
     assert before["run"].pop("state_pruned") is False
     assert after.pop("events")[:-1] == before.pop("events")  # one appended note, nothing rewritten

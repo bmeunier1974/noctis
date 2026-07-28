@@ -510,6 +510,17 @@ def run(
         "100 hours, then stop' is expressed, and it is what lets two runs be compared on equal "
         "compute. Not settable on --resume (the cap defines the experiment).",
     ),
+    embed_all_sources: bool = typer.Option(
+        False,
+        "--embed-all-sources",
+        help="Archive this RUN whole: embed every candidate's strategy source in the run record, "
+        "not just the champions'. Accepted at run creation only and frozen into the record — what "
+        "the artifact contains is part of what the run is, and a flag passed on some nights and "
+        "not others would make the record's contents depend on how it was last invoked. Off by "
+        "default: champions are embedded in full and every other candidate is named by a "
+        "run-relative path plus a content hash, which keeps a fortnight's record in the hundreds "
+        "of kilobytes. Turn it on when an experiment is worth keeping after its workspace is not.",
+    ),
     finish: bool = typer.Option(
         False,
         "--finish",
@@ -646,6 +657,7 @@ def run(
             ("--allow-engine-upgrade", allow_engine_upgrade),
             ("--run-limit-hours", run_limit_hours is not None),
             ("--time-limit-hours", time_limit_hours is not None),
+            ("--embed-all-sources", embed_all_sources),
         )
         if given
     ]
@@ -672,6 +684,7 @@ def run(
         mandate=mandate,
         time_limit_hours=time_limit_hours,
         run_limit_hours=run_limit_hours,
+        embed_all_sources=embed_all_sources,
         require_gate=True,
         resume=resume,
         rebase_config=rebase_config,

@@ -82,6 +82,13 @@ time_limit_hours: null # cap on ONE process — how long tonight lasts (null = u
 # under way. At the cap the run stops between phases and is marked `completed` — terminal, so it
 # refuses resume. That is what makes two runs comparable on equal compute. null = uncapped.
 run_limit_hours: null
+# Archive the run whole: embed EVERY candidate's strategy source in the run record, not just the
+# champions'. Frozen at run creation (`noctis run --embed-all-sources`), so editing it here never
+# changes a run already under way. Off by default — champions are embedded in full and every other
+# candidate is named by a run-relative path plus a content hash, which holds a fortnight's record
+# to a couple of hundred kilobytes. Turn it on for an experiment worth keeping after its workspace
+# is not. Mandate: REFUSED — steering says what to look for, never what the record contains.
+embed_all_sources: false
 
 # Everything Noctis writes lands under this one gitignored folder (env: NOCTIS_WORKSPACE).
 # Inside it, a RUN owns its state: workspace/runs/<run_id>/{state,strategies,memory,reports,qa},

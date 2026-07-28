@@ -28,10 +28,18 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from typing import TypeVar
 
-from noctis.reporting.schema import EVENT_CAP, KIND, SCHEMA_VERSION
+from noctis.reporting.schema import (
+    EVENT_CAP,
+    KIND,
+    PROMOTED_OUTCOME,
+    SCHEMA_VERSION,
+    STRATEGY_CAP,
+)
 
 __all__ = [
+    "EMBED_ALL_SOURCES_SETTING",
     "PRUNABLE_STATUSES",
     "RESEARCH_PHASE",
     "RUN_LIMIT_SETTING",
@@ -44,6 +52,7 @@ __all__ = [
     "RunArtifacts",
     "SegmentArtifact",
     "SpendEntry",
+    "StrategyArtifact",
     "build",
     "mark_interrupted",
     "prune_refusal",
@@ -88,6 +97,14 @@ TRADES_COUNTER = "trades"
 # frozen" needs no second mechanism to be true.
 RUN_LIMIT_SETTING = "run_limit_hours"
 
+# The settings knob that says this run archives **every** candidate's source, not just its
+# champions' (story #141, ``noctis run --embed-all-sources``). Frozen at creation for the same
+# reason the compute cap is: it says what the run's artifact *is*, and a record whose contents
+# depended on how the last segment happened to be invoked would quietly lose the sources an
+# earlier one embedded. Read off ``inputs.settings.resolved`` by the store, which is the side that
+# can open a file; named here beside the other frozen knobs so the record spells it once.
+EMBED_ALL_SOURCES_SETTING = "embed_all_sources"
+
 # The four neutral token fields every provider reports and every provider bills separately (story
 # #140). Spelled here as the record's own field names — with their unit, like every other number —
 # because the record must stay readable without the research package that produced them.
@@ -106,6 +123,10 @@ TOTAL_TOKENS = "total_tokens"
 # table (``research/pricing.py``); they ignore volume discounts, batch tiers and mid-month changes,
 # so a number derived from them is an estimate and says so in its own name.
 USD_ESTIMATE = "usd_estimate"
+
+
+# One bounded list, whatever it holds: the cap rule is the same for events and for candidates.
+_T = TypeVar("_T")
 
 
 def utc_iso(moment: datetime) -> str:
@@ -225,6 +246,42 @@ class SpendEntry:
 
 
 @dataclass(frozen=True)
+class StrategyArtifact:
+    """One candidate this run considered, and how it fared — champion or not (story #141).
+
+    **Every** candidate, because the rejections are the product: "47 of 66 candidates died at the
+    symbol-holdout gate" is the sentence that makes this project's results credible, and it is
+    computable only when the ones that failed are on the record beside the ones that did not.
+
+    ``gates`` is the structured evidence ``champions.promotion.decide`` produced, carried through
+    the champion board that journaled it. A rejection short-circuits, so it is the gates *reached*
+    plus the one that failed — an absent gate means "never reached", never "passed".
+
+    ``source`` is the file's full text for a champion and ``None`` for everyone else, with
+    ``source_path`` (relative to the run directory) plus ``source_sha256`` always naming the
+    artifact. That is the whole size policy: a fortnight's record stays in the hundreds of
+    kilobytes instead of the megabytes an all-sources record would weigh, and an experiment worth
+    archiving whole says so at creation (:data:`EMBED_ALL_SOURCES_SETTING`). The choice of *which*
+    to embed is made where the files are read (``run_store.read_strategies``); this module renders
+    what it was handed.
+    """
+
+    name: str
+    # promoted | rejected | undecided — the last verdict the run's champion board journaled for
+    # this name. ``undecided`` is a real and common state: a candidate authored, maybe tuned, and
+    # never carried to a verdict is evidence of the funnel's width, not a gap in the record.
+    outcome: str
+    tier: str | None = None
+    decided_utc: str | None = None
+    trials: int | None = None
+    gates: Sequence[Mapping[str, object]] = ()
+    rationale: str | None = None
+    source_path: str | None = None
+    source_sha256: str | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True)
 class RunArtifacts:
     """Everything the run tree and this engine know about one run — the builder's only input.
 
@@ -285,6 +342,11 @@ class RunArtifacts:
     # denominator of the two per-champion efficiency numbers. ``None`` when the board could not be
     # read at all (a pruned or absent state dir), which is not the same as an honest zero.
     champions: int | None = None
+    # Every candidate this run considered, read at write time off its own champion board, its
+    # experiment journals and its strategy tiers (``run_store.read_strategies``) — derived like
+    # every other cumulative fact, never a list carried across a restart. An empty sequence is a
+    # run that has considered nothing yet, which is a statement a young run can honestly make.
+    strategies: Sequence[StrategyArtifact] = ()
 
 
 def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
@@ -390,11 +452,14 @@ def build(artifacts: RunArtifacts) -> dict:
     """Assemble the run record. Pure: same artifacts in, byte-identical document out."""
     events, events_note = _capped(artifacts.events, EVENT_CAP)
     errors, errors_note = _capped(artifacts.errors, EVENT_CAP)
+    strategies, strategies_note = _capped(_ordered(artifacts.strategies), STRATEGY_CAP)
     truncated: dict[str, dict[str, int]] = {}
     if events_note is not None:
         truncated["events"] = events_note
     if errors_note is not None:
         truncated["errors"] = errors_note
+    if strategies_note is not None:
+        truncated["strategies"] = strategies_note
 
     segments = [_segment(segment) for segment in artifacts.segments]
     runtime_s = _cumulative_runtime_s(segments)
@@ -431,6 +496,10 @@ def build(artifacts: RunArtifacts) -> dict:
         "environment_latest": _environment_latest(segments),
         "engine": _engine(artifacts),
         "inputs": dict(artifacts.inputs) if artifacts.inputs is not None else None,
+        # Everything considered, champions first (story #141) — the funnel, not the trophy shelf.
+        # Its death counts are what a results page is judged on, so the rejections are carried in
+        # exactly the same shape as the promotions.
+        "strategies": [_strategy(strategy) for strategy in strategies],
         # What this run cost and what that bought (story #140) — derived here from the entries the
         # store read off the run's own ledgers, never from a counter carried across a restart.
         "spend": _spend(artifacts, segments),
@@ -830,19 +899,45 @@ def _parse(stamp: str) -> datetime:
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
-def _capped(
-    events: Sequence[RecordEvent], cap: int
-) -> tuple[Sequence[RecordEvent], dict[str, int] | None]:
+def _ordered(strategies: Sequence[StrategyArtifact]) -> list[StrategyArtifact]:
+    """Champions first, then by name — the order the section is capped in, and read in.
+
+    Two jobs in one rule. A consumer gets the run's *product* at the top without sorting anything,
+    and the cap below can never drop a champion: the entries at risk are the tail, and a champion
+    is never in it. Everything after the champions is alphabetical, so two writes of the same run
+    order identically and a diff between them is meaningful.
+    """
+    return sorted(strategies, key=lambda s: (s.outcome != PROMOTED_OUTCOME, s.name))
+
+
+def _strategy(strategy: StrategyArtifact) -> dict:
+    """One candidate's entry — the same shape whether it was crowned or killed."""
+    return {
+        "name": strategy.name,
+        "outcome": strategy.outcome,
+        "tier": strategy.tier,
+        "decided_utc": strategy.decided_utc,
+        "trials": strategy.trials,
+        "gates": [dict(gate) for gate in strategy.gates],
+        "rationale": strategy.rationale,
+        "source_path": strategy.source_path,
+        "source_sha256": strategy.source_sha256,
+        "source": strategy.source,
+    }
+
+
+def _capped(items: Sequence[_T], cap: int) -> tuple[Sequence[_T], dict[str, int] | None]:
     """Bound one list, and say so when the bound bit.
 
-    The **earliest** entries are kept: they are the ones that explain how a run reached its
-    state (a stolen lock, a degraded seam, the first error), and the note names the total so a
-    reader always knows what is not here. Silent truncation is forbidden.
+    The **earliest** entries are kept, which each caller has already ordered so that the earliest
+    are the ones worth keeping: for events, the ones explaining how a run reached its state (a
+    stolen lock, a degraded seam, the first error); for strategies, the champions. The note names
+    the total, so a reader always knows what is not here. Silent truncation is forbidden.
     """
-    total = len(events)
+    total = len(items)
     if total <= cap:
-        return events, None
-    return events[:cap], {"kept": cap, "total": total}
+        return items, None
+    return items[:cap], {"kept": cap, "total": total}
 
 
 def _replace_status(segment: SegmentArtifact, status: str) -> SegmentArtifact:

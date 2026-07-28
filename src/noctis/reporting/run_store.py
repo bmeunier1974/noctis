@@ -46,6 +46,7 @@ ever reached from here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -57,11 +58,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from noctis.reporting.run_record import (
+    EMBED_ALL_SOURCES_SETTING,
     EngineIdentity,
     RecordEvent,
     RunArtifacts,
     SegmentArtifact,
     SpendEntry,
+    StrategyArtifact,
     build,
     mark_interrupted,
     prune_refusal,
@@ -69,11 +72,18 @@ from noctis.reporting.run_record import (
     seal,
     utc_iso,
 )
-from noctis.reporting.schema import SCHEMA_VERSION
+from noctis.reporting.schema import (
+    PROMOTED_OUTCOME,
+    REJECTED_OUTCOME,
+    SCHEMA_VERSION,
+    UNDECIDED_OUTCOME,
+)
 
 __all__ = [
     "PRUNED_SUBDIRS",
     "RUNS_SUBDIR",
+    "STRATEGIES_SUBDIR",
+    "STRATEGY_TIER_SUBDIRS",
     "RUN_INDEX_KIND",
     "RUN_INDEX_NAME",
     "RUN_LOCK_NAME",
@@ -96,6 +106,7 @@ __all__ = [
     "prune_run_state",
     "read_record",
     "read_run_record",
+    "read_strategies",
     "read_trials",
     "rebuild_index",
     "resolve_run_dir",
@@ -137,6 +148,21 @@ STALE_HEARTBEAT_S = 7 * 24 * 3600.0
 # and neither is anything else the tree happens to hold — the run's ``memory/`` and its ``qa/`` area
 # (which has retention of its own) are left exactly where they are.
 PRUNED_SUBDIRS = ("state", "strategies", "reports")
+
+# The run's own strategy library, and the two writable tiers inside it — the layout
+# ``strategies.library.LibraryPaths.from_settings`` writes and this reads back for the record's
+# strategies section (story #141). Spelled here rather than imported: the library module pulls
+# pandas and numpy in behind it, and a record write must stay as cheap as the rest of this file
+# (``tests/test_run_store.py`` pins that no heavy package is reachable from here). One test
+# asserts the two spellings still describe the same directories, which is where a drift would
+# surface. The committed ``strategies/`` seeds are deliberately absent: they are read-only input
+# every run starts from, so they are nobody's candidate.
+STRATEGIES_SUBDIR = "strategies"
+TMP_TIER = "__tmp"
+CHAMPIONS_TIER = "champions"
+# Lowest precedence first, the order the library itself discovers them in: a champion of the same
+# name overrides a working-tier draft.
+STRATEGY_TIER_SUBDIRS = (TMP_TIER, CHAMPIONS_TIER)
 
 
 class RunLockedError(RuntimeError):
@@ -571,6 +597,9 @@ def collect(
         run_dir, _frozen_inputs(prior.get("inputs")) if prior else None
     )
     champions = read_champions(run_dir)
+    # Candidates are read under the run's own frozen inputs too: whether a source is embedded is
+    # the run's choice, made once at creation, not this process's.
+    strategies = read_strategies(run_dir, _frozen_inputs(prior.get("inputs")) if prior else None)
     if prior is not None:
         try:
             return _artifacts_from(
@@ -581,6 +610,7 @@ def collect(
                 spend=spend,
                 pricing_table_version=table_version,
                 champions=champions,
+                strategies=strategies,
             )
         except Exception as exc:  # a hand-edited or foreign file, still valid JSON
             note = RecordEvent(
@@ -600,6 +630,7 @@ def collect(
         spend=spend,
         pricing_table_version=table_version,
         champions=champions,
+        strategies=strategies,
     )
 
 
@@ -719,6 +750,209 @@ def read_champions(run_dir: Path | str) -> int | None:
         return None
 
 
+def read_strategies(
+    run_dir: Path | str, inputs: Mapping[str, object] | None = None
+) -> tuple[StrategyArtifact, ...]:
+    """Every candidate this run considered, off its own board, journals and strategy tiers (#141).
+
+    **Read, never counted** — the third of the same family as :func:`read_trials` and
+    :func:`read_spend`, and for the same reason: all three sources are the *run's*, not the
+    process's, so the section is cumulative across every segment by construction and a rewrite
+    after a crash cannot double-count it. Three reads, joined on the candidate's name:
+
+    * ``state/champions.json``'s decision history — the only durable trace a *rejected* candidate
+      leaves, and since story #141 it carries each decision's structured gate evidence beside its
+      prose rationale. The last decision journaled for a name is the decision of record;
+    * ``state/experiments/<name>.jsonl`` — how many trials that candidate cost;
+    * ``strategies/__tmp/`` and ``strategies/champions/`` — the file itself, for the path, the
+      content hash, and (for a champion) the text.
+
+    A name known to any one of them is a candidate. A file with no verdict is ``undecided``, which
+    is a real state and not a gap: it is the width of the funnel above the gates.
+
+    **The source policy lives here**, because it is a decision about what to open: a champion's
+    file is embedded in full, every other candidate is referenced by a run-relative path plus its
+    sha256, and a run created with ``embed_all_sources`` embeds them all. That is what holds a
+    fortnight's record to :data:`~noctis.reporting.schema.RECORD_SIZE_BUDGET_BYTES` rather than a
+    megabyte; the cost — a rejected candidate's code is readable only while the run's tree survives
+    — is stated on the record itself by ``run.state_pruned``.
+
+    ``inputs`` is the run's frozen inputs, the only source of that choice: it is fixed at creation
+    like the compute cap beside it, so a resumed segment can never quietly drop the sources an
+    earlier one embedded.
+
+    Never raises, and the three reads degrade **independently**: an unparseable board costs the
+    record its verdicts, not the candidates whose files are sitting right there.
+    """
+    run = Path(run_dir)
+    decisions = _last_decisions(run)
+    files = _strategy_files(run)
+    trials = _journaled_trials(run)
+    embed_all = _embed_all_sources(inputs)
+    return tuple(
+        _strategy_artifact(
+            run,
+            name,
+            decision=decisions.get(name),
+            located=files.get(name),
+            trials=trials.get(name),
+            embed_all=embed_all,
+        )
+        for name in sorted(set(decisions) | set(files) | set(trials))
+    )
+
+
+def _state_dir(run_dir: Path) -> Path:
+    from noctis.config.settings import run_scoped_paths
+
+    return Path(run_scoped_paths(run_dir)["state_dir"])
+
+
+def _last_decisions(run_dir: Path) -> dict[str, Mapping[str, object]]:
+    """The decision of record for each candidate: the **last** one the board journaled for it.
+
+    A candidate may be judged more than once (tuned, re-run, re-considered), and a champion may
+    later be dropped by a reset. The latest entry is what the run currently says about that name,
+    and it carries its own rationale — so a reader is never left reconciling two verdicts.
+
+    Each of the three reads behind the section degrades **on its own**: a board nobody can parse
+    costs the record its verdicts, never the candidates whose files and journals are right there.
+    Partial evidence is still evidence, and a record that dropped it all because one file was
+    corrupt would be the least informative exactly when an operator most needs to look.
+    """
+    from noctis.champions.registry import ChampionRegistry
+
+    latest: dict[str, Mapping[str, object]] = {}
+    try:
+        board = _state_dir(run_dir) / CHAMPIONS_NAME
+        if not board.is_file():
+            return {}
+        for entry in ChampionRegistry(board, capacity=0).history:
+            name = entry.get("family")
+            if isinstance(name, str) and name:
+                latest[name] = entry
+    except Exception:  # a board we cannot read is a verdict we do not have
+        return {}
+    return latest
+
+
+def _strategy_files(run_dir: Path) -> dict[str, tuple[str, Path]]:
+    """Each candidate's file and the tier it sits in, later tiers overriding earlier ones."""
+    located: dict[str, tuple[str, Path]] = {}
+    for tier in STRATEGY_TIER_SUBDIRS:
+        directory = run_dir / STRATEGIES_SUBDIR / tier
+        if not directory.is_dir():
+            continue
+        try:
+            paths = sorted(directory.glob("*.py"))
+        except OSError:  # pragma: no cover - a tier we cannot list
+            continue
+        for path in paths:
+            located[path.stem] = (tier, path)
+    return located
+
+
+def _journaled_trials(run_dir: Path) -> dict[str, int]:
+    """How many trials each candidate cost, off its own experiment journal."""
+    from noctis.research.journal import ExperimentJournal
+
+    try:
+        journal = ExperimentJournal(_state_dir(run_dir))
+        return {name: journal.stats(name).n_trials for name in journal.strategies()}
+    except Exception:  # pragma: no cover - an unreadable journal is evidence we do not have
+        return {}
+
+
+def _strategy_artifact(
+    run_dir: Path,
+    name: str,
+    *,
+    decision: Mapping[str, object] | None,
+    located: tuple[str, Path] | None,
+    trials: int | None,
+    embed_all: bool,
+) -> StrategyArtifact:
+    """One candidate, assembled from whichever of the three sources knew about it."""
+    outcome = UNDECIDED_OUTCOME
+    gates: tuple[Mapping[str, object], ...] = ()
+    rationale = None
+    decided_utc = None
+    if decision is not None:
+        outcome = PROMOTED_OUTCOME if decision.get("promoted") else REJECTED_OUTCOME
+        journaled = decision.get("gates")
+        gates = (
+            tuple(gate for gate in journaled if isinstance(gate, Mapping))
+            if isinstance(journaled, Sequence) and not isinstance(journaled, str | bytes)
+            else ()
+        )
+        rationale = _optional_str(decision.get("rationale"))
+        decided_utc = _record_stamp(decision.get("at"))
+    tier, path = located if located is not None else (None, None)
+    # A champion by *either* measure — the tier its file sits in, or the verdict the board
+    # journaled — because the one source worth never losing is the run's own product.
+    embed = embed_all or tier == CHAMPIONS_TIER or outcome == PROMOTED_OUTCOME
+    return StrategyArtifact(
+        name=name,
+        outcome=outcome,
+        tier=tier,
+        decided_utc=decided_utc,
+        trials=trials,
+        gates=gates,
+        rationale=rationale,
+        source_path=path.relative_to(run_dir).as_posix() if path is not None else None,
+        source_sha256=_file_sha256(path) if path is not None else None,
+        source=_source_text(path) if path is not None and embed else None,
+    )
+
+
+def _file_sha256(path: Path) -> str | None:
+    """The content hash of the file as stored — what a path reference is checkable against."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:  # pragma: no cover - a file that vanished between the glob and the read
+        return None
+
+
+def _source_text(path: Path) -> str | None:
+    """A strategy file's text, or ``None`` when it cannot be read as the UTF-8 source it is.
+
+    Deliberately strict: a lossy decode would embed text whose hash does not match the reference
+    beside it, and a record that quotes something the file does not say is worse than one that
+    quotes nothing and points at the path.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):  # pragma: no cover - not source after all
+        return None
+
+
+def _record_stamp(value: object) -> str | None:
+    """One foreign ISO stamp in the record's own shape, or ``None`` if it is not a stamp.
+
+    The champion board stamps its history with ``datetime.now(UTC).isoformat()``; the record's
+    contract is UTC ISO-8601 with a ``Z``. Converting here — rather than teaching the board a
+    second format — keeps one timestamp shape in the record without moving a byte in the arbiter.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return utc_iso(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _embed_all_sources(inputs: Mapping[str, object] | None) -> bool:
+    """Whether this run archives every candidate's source, off its own frozen settings.
+
+    The same tolerant read as the price overrides beside it: a run that froze no configuration, or
+    carries something else in that slot, gets the default — champions only.
+    """
+    node: object = inputs
+    for key in ("settings", "resolved", EMBED_ALL_SOURCES_SETTING):
+        node = node.get(key) if isinstance(node, Mapping) else None
+    return bool(node)
+
+
 def _artifacts_from(
     prior: Mapping[str, object],
     *,
@@ -728,13 +962,14 @@ def _artifacts_from(
     spend: tuple[SpendEntry, ...] | None = None,
     pricing_table_version: str | None = None,
     champions: int | None = None,
+    strategies: tuple[StrategyArtifact, ...] = (),
 ) -> RunArtifacts:
     """One prior record, parsed back into artifacts. Raises on a shape it cannot read.
 
-    ``trials``, ``spend`` and ``champions`` are deliberately **not** read back off the record: all
-    three are derived from the run's own durable artifacts at every write (:func:`read_trials`,
-    :func:`read_spend`, :func:`read_champions`), and a number carried forward from a prior write
-    could only ever go stale.
+    ``trials``, ``spend``, ``champions`` and ``strategies`` are deliberately **not** read back off
+    the record: all four are derived from the run's own durable artifacts at every write
+    (:func:`read_trials`, :func:`read_spend`, :func:`read_champions`, :func:`read_strategies`), and
+    a value carried forward from a prior write could only ever go stale.
     """
     run = prior.get("run")
     if not isinstance(run, Mapping):
@@ -762,6 +997,7 @@ def _artifacts_from(
         spend=spend,
         pricing_table_version=pricing_table_version,
         champions=champions,
+        strategies=strategies,
         # Carried forward verbatim, never re-derived from what is on disk: it states that the heavy
         # directories were deliberately removed, and a later write must not un-say it because
         # something recreated an empty ``state/``.
@@ -1481,6 +1717,7 @@ class RunStore:
             # deliberate ``--rebase-config``, which is the operator saying "adopt these instead".
             inputs=inputs if rebase_config or artifacts.inputs is None else artifacts.inputs,
             trials=artifacts.trials,
+            strategies=artifacts.strategies,
         )
         if opening_note is not None:
             self._append(
@@ -1686,6 +1923,7 @@ class RunStore:
                 "pricing_table_version", current.pricing_table_version
             ),
             champions=changes.get("champions", current.champions),  # type: ignore[arg-type]
+            strategies=changes.get("strategies", current.strategies),  # type: ignore[arg-type]
             state_pruned=current.state_pruned,
         )
 
@@ -1700,6 +1938,7 @@ class RunStore:
             spend=spend,
             pricing_table_version=table_version,
             champions=read_champions(self._run_dir),
+            strategies=read_strategies(self._run_dir, self._artifacts.inputs),
         )
         self._writer(self._run_dir, build(self._artifacts))
         # The roll-up follows the record, never leads it: it is refreshed *after* a successful

@@ -226,6 +226,7 @@
     "engine_changes": []
   },
   "inputs": null,
+  "strategies": [],
   "spend": null,
   "performance": null,
   "events": [

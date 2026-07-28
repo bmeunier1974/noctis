@@ -9,6 +9,56 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Structured gate evidence, and the run record's strategies section: the rejections are now
+  computable.** "47 of 66 candidates died at the symbol-holdout gate" is the sentence that makes
+  these results credible where an equity curve does not, and until now it could not be computed
+  from anything stored — a promotion rationale was prose.
+  - **`decide()` returns `gates: tuple[GateResult, ...]`** — `(gate, passed, observed, threshold,
+    note)` per gate, appended as each one evaluates. **No decision moved.** Same early returns,
+    same order (activity floor → overfit gap → forward holdout → symbol holdout → consistency →
+    beat the weakest), same outcomes; every existing caller ignores the new field. That is
+    *proved*, not asserted: `tests/fixtures/promotion_decisions_golden.json` snapshots
+    `(promote, rationale, demote_index)` for a 30-case corpus covering every branch and both sides
+    of every threshold, captured from the promotion module **before** the change, and
+    `tests/test_gate_evidence.py` replays it. Regenerating that golden means a judgment moved —
+    which is an engine change, not a test fix.
+  - **A rejection short-circuits, and the record says so.** `gates` holds the gates *reached* plus
+    the one that failed; an absent gate means "never reached", never "passed". That shape is part
+    of the record contract (`reporting/schema.py`), because a consumer counting deaths per gate
+    would otherwise silently mis-attribute them. A gate that could not bite — switched off by a
+    zero threshold, or handed a metric the scorecard never carried — is still recorded, with a
+    note saying which: a funnel's denominators are honest only when every gate in the path is on
+    the record.
+  - **New: `strategies[]` on the run record — every candidate, not just the champions.** Name,
+    outcome (`promoted` / `rejected` / `undecided`), tier, decision stamp, trials journaled, the
+    prose rationale and the structured gate results behind it. Derived at every write from the
+    run's **own** champion board, experiment journals and strategy tiers (epic D4), so three short
+    segments report exactly what one long one does. The champion board now journals each
+    decision's gates beside its rationale, which is the only durable trace a *rejected* candidate
+    leaves.
+  - **Champion sources are embedded in full; every other candidate is a path plus a content
+    hash** (`source_path` relative to the run directory, `source_sha256`). A synthetic two-week
+    run — 14 segments, 66 candidates, 3 champions, ~3 000 trials — weighs ~140 KB, against a
+    stated `RECORD_SIZE_BUDGET_BYTES` of 256 KB that a test holds; embedding everything is 2.4×
+    that. (The epic's ~40 KB planning estimate predates per-candidate gate evidence, which is the
+    largest thing in the section and also the point of it.) The cost is stated rather than hidden:
+    a rejected candidate's code is readable while the run's tree survives, and `run.state_pruned`
+    says when it no longer does — what the record *embeds* survives a prune, as the retention
+    suite now asserts directly.
+  - **New: `noctis run --embed-all-sources`** (setting `embed_all_sources`, default off) archives
+    a run whole. Frozen at creation like the compute cap beside it and refused on `--resume`: the
+    record is rewritten whole at every write, so a flag passed on some nights and not others would
+    make what the record contains depend on how it was last invoked. Refused to the mandate
+    overlay by name — steering says what to look for, never what the evidence describing it
+    contains.
+  - **New cap: `STRATEGY_CAP` (500 candidates)**, with the usual honest note
+    (`truncated.strategies` = kept/total). Champions are ordered first and are therefore never the
+    entries a cap drops.
+  - **Evidence, never a gate** (AGENTS.md rule 2). A test imports the whole promotion path in a
+    fresh subprocess and asserts that **nothing under `noctis.reporting`** is reachable from it —
+    deliberately the package, not one module, so it is meaningful today and strictly stronger the
+    moment `reporting/metrics.py` (story #142) exists.
+
 - **The run record's spend roll-up: attributable tokens, a versioned price table, efficiency
   numbers.** Token usage was already computed per session and then only *logged*, so cost per
   champion — the single most useful cross-run number this system can publish — was not recoverable
