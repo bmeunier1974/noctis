@@ -1239,6 +1239,12 @@ def mandate(
 
 @app.command()
 def report(
+    run_id: str = typer.Argument(
+        None,
+        help="Run address: an id as `noctis runs` lists it, a path to a run.json, @LABEL, or "
+        "`latest`. The same four forms `run --resume` takes, resolved by the same rules. "
+        "Omitted, this reads the reserved `legacy` run, as every unaddressed verb does.",
+    ),
     as_of: str = typer.Option(None, "--as-of", help="Report date (YYYY-MM-DD); default latest."),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
     sweep_stale: bool = typer.Option(
@@ -1252,7 +1258,19 @@ def report(
         help="With --sweep-stale: preview only (default); pass --no-dry-run to actually move.",
     ),
 ) -> None:
-    """Generate or retrieve the close-of-day report."""
+    """Generate or retrieve the close-of-day report — of the reserved run, or of one you name.
+
+    ``noctis report latest`` is the just-finished run's report, ``noctis report @nightly-momo``
+    a named experiment's; with no address this reads the reserved ``legacy`` run exactly as it
+    always has, which is what an invocation that never opened a run should read. Everything else
+    composes unchanged: ``--as-of`` picks the day, ``--sweep-stale`` sweeps that run's reports.
+
+    An addressed run's own tree is authoritative — its ``reports/`` are read, its ``state/``
+    assembles a missing one, and its ``reports/`` is where that one lands. A run whose state
+    retention has **pruned** is refused instead: a report assembled from deleted state would
+    claim an empty champion board for a run that had one, and the record retention deliberately
+    kept still says everything the run accumulated (``noctis run-record <address>``).
+    """
     from pathlib import Path
 
     from noctis.bootstrap import build_memory
@@ -1261,7 +1279,7 @@ def report(
     from noctis.reporting import latest_report, sweep_stale_reports, today_str, write_report
 
     settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    _bind_reported_run_or_exit(settings, run_id)
     reports_dir = settings.reports_dir
 
     # Opt-in, never automatic: a legitimately simulated run writes future-dated as-ofs on
@@ -1303,6 +1321,46 @@ def report(
     path = write_report(data, reports_dir)
     typer.echo(path.read_text())
     typer.echo(f"\n(written to {path})")
+
+
+def _bind_reported_run_or_exit(settings, address: str | None) -> None:
+    """Point ``report`` at the run it will read — the reserved one, or the one an operator named.
+
+    Two branches, and they are one decision seen twice:
+
+    * **No address** changes nothing and runs the legacy-layout guard, because an unaddressed
+      ``report`` is exactly the invocation that guard exists for: it reads the reserved run, and
+      un-migrated data beside ``config.yaml`` would make it read as silently empty.
+    * **An address** *is* the answer to the guard's question, so the guard does not ask it. The
+      operator named the tree, one resolver turns the address into a run dir (the four forms, in
+      one fixed order) and the composition root binds ``reports_dir``/``state_dir``/
+      ``memory_path`` onto it — after which nothing about a pre-workspace layout elsewhere can
+      make a named run unreadable.
+
+    A run whose heavy state ``run-prune`` removed is refused rather than reported on: its
+    ``reports/`` are gone and its ``state/`` with them, so the only report left to give would be
+    one assembled from nothing — an empty champion board attributed to a run that had one.
+    """
+    from noctis.bootstrap import bind_addressed_run
+    from noctis.reporting.run_store import RunNotFoundError, read_record
+
+    if address is None:
+        _guard_legacy_or_exit(settings)
+        return
+    try:
+        run_dir = bind_addressed_run(settings, address)
+    except RunNotFoundError as exc:
+        _exit_red(exc)
+    record, _ = read_record(run_dir)
+    if isinstance(record, Mapping) and (record.get("run") or {}).get("state_pruned"):
+        _exit_red(
+            RuntimeError(
+                f"Run {run_dir.name} was pruned: `noctis run-prune` deleted its reports/ and "
+                f"state/, so there is no report to print and nothing honest to assemble one "
+                f"from. Everything the run accumulated is still in its record — "
+                f"`noctis run-record {run_dir.name}`."
+            )
+        )
 
 
 @app.command()
