@@ -80,6 +80,8 @@ python -m noctis run -v            # the day/night loop (stops at time_limit_hou
 python -m noctis research -v       # ONE observable agent research session (needs ANTHROPIC_API_KEY)
 python -m noctis runs [--all]      # the run board: id, label, status, segments, headline numbers
 python -m noctis run-record <id>   # print one run's whole self-contained run.json
+python -m noctis run-prune <id> [--dry-run]   # retention: delete a COMPLETED run's state/,
+                           # strategies/ and reports/; never its run.json, never a resumable run
 python -m noctis status            # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>    # preflight a mandate: provenance + the effective settings diff
 python -m noctis engine            # engine identity: version, component fingerprint, comparable key
@@ -161,7 +163,11 @@ appends the process's segment and writes atomically behind a fail-safe latch —
 (`bootstrap.open_run_store`), rewritten at each CLOSE via the runtime's `on_cycle_close` seam. Two
 honesty rules: a killed segment is marked `interrupted` on the **next** open, never guessed at write
 time, and a live lock is a hard refusal (two engines on one run is corruption) while everything else
-latches off with one warning rather than raising into the engine.
+latches off with one warning rather than raising into the engine. **Retention is opt-in and
+completed-only**: `run_store.prune_run_state` (`noctis run-prune <address> [--dry-run]`) is the one
+code path in Noctis that deletes a run's files — the heavy `state/`, `strategies/` and `reports/`
+directories, never `run.json`/`index.json` (they *are* the progress history), and never for a run
+that could still be resumed, since prunable and resumable are the same constant's two sides.
 
 **A run outlives its process, so it carries its own config.** `noctis run --resume <address>` appends
 a segment to an existing run and keeps accumulating into the same record — the run, not the process,

@@ -1043,6 +1043,99 @@ def run_record(
     typer.echo(json.dumps(record, indent=2))
 
 
+@app.command("run-prune")
+def run_prune(
+    run_id: str = typer.Argument(
+        ...,
+        help="Run address: an id as `noctis runs` lists it, a path to a run.json, or @LABEL. "
+        "(`latest` is the most recent *resumable* run, so it never names a prunable one.)",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report what would be removed and how many bytes it would free, and remove nothing.",
+    ),
+    config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
+) -> None:
+    """Reclaim disk: delete one **completed** run's ``state/``, ``strategies/`` and ``reports/``.
+
+    Retention is **opt-in and one run at a time** — nothing here runs on a schedule, and no
+    configuration setting can make it: a deletion nobody typed is exactly the surprise this design
+    refuses. The run's ``run.json`` and the ``index.json`` roll-up are never pruned; they are
+    kilobytes, and they *are* the long-term progress history the record exists for, so a pruned run
+    still lists in ``noctis runs`` and still prints here in full.
+
+    **Only a ``completed`` run may be pruned.** The pruned directories are what a resume reads back,
+    so pruning a ``stopped``, ``interrupted`` or ``running`` run would silently destroy its
+    resumability — the one thing the run record promises — and is refused with that reason. Seal a
+    run you really are finished with first (``noctis run --resume <address> --finish``);
+    ``completed`` is terminal, so nothing that could still be continued is ever at risk. A run
+    another engine is live on is refused too, whatever its record says.
+
+    Afterwards the record carries ``state_pruned: true``, so a reader knows the run's path-plus-hash
+    references *into* those directories no longer resolve. Everything the record itself carries is
+    untouched — pruning removes three directories and rewrites one flag.
+    """
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from noctis.reporting.run_store import (
+        RunLockedError,
+        RunNotFoundError,
+        RunNotPrunableError,
+        prune_run_state,
+    )
+
+    settings = load_settings(config_path=config)
+    try:
+        outcome = prune_run_state(
+            Path(settings.runs_dir),
+            run_id,
+            clock=lambda: datetime.now(UTC),
+            election_metric=settings.promotion.metric,
+            dry_run=dry_run,
+        )
+    except RunNotFoundError as exc:
+        _exit_red(exc, prefix="PRUNE: ")
+    except RunNotPrunableError as exc:
+        _exit_red(exc, prefix="PRUNE REFUSED: ")
+    except RunLockedError as exc:
+        _exit_red(exc, prefix="RUN LOCKED: ")
+    _echo_prune(outcome)
+
+
+def _echo_prune(outcome) -> None:
+    """Say exactly what went (or would go), and what is deliberately still there."""
+    listed = ", ".join(f"{name}/" for name in outcome.removed)
+    size = f"{outcome.freed_bytes} bytes ({_human_bytes(outcome.freed_bytes)})"
+    if not outcome.removed:
+        typer.echo(
+            f"Run {outcome.run_id} has no state/, strategies/ or reports/ left to prune — "
+            "nothing to do. Its record is kept, as always."
+        )
+        return
+    if outcome.dry_run:
+        typer.echo(
+            f"Would prune {listed} from run {outcome.run_id}, freeing {size}. Nothing was "
+            "removed — drop --dry-run to do it."
+        )
+        return
+    typer.echo(
+        f"Pruned {listed} from run {outcome.run_id}, freeing {size}. Its run.json and the "
+        "index.json roll-up are kept (the record now says state_pruned: true, so references into "
+        "the pruned directories no longer resolve)."
+    )
+
+
+def _human_bytes(size_bytes: int) -> str:
+    """The byte count as an operator reads it. Bytes stay bytes below a kilobyte — a run that
+    freed 400 B should say so rather than round itself to a reassuring `0.0 MB`."""
+    for unit, scale in (("MB", 1024**2), ("KB", 1024)):
+        if size_bytes >= scale:
+            return f"{size_bytes / scale:.1f} {unit}"
+    return f"{size_bytes} B"
+
+
 @app.command()
 def engine(
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),

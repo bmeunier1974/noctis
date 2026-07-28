@@ -14,6 +14,7 @@
     "cumulative_research_s": 15400.0,
     "cumulative_trading_s": 2340.0,
     "cumulative_trials": null,
+    "state_pruned": false,
     "complete": true,
     "truncated": {}
   },

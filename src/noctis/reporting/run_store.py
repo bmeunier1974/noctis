@@ -50,6 +50,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import socket
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -63,6 +64,7 @@ from noctis.reporting.run_record import (
     SegmentArtifact,
     build,
     mark_interrupted,
+    prune_refusal,
     resume_refusal,
     seal,
     utc_iso,
@@ -70,6 +72,7 @@ from noctis.reporting.run_record import (
 from noctis.reporting.schema import SCHEMA_VERSION
 
 __all__ = [
+    "PRUNED_SUBDIRS",
     "RUNS_SUBDIR",
     "RUN_INDEX_KIND",
     "RUN_INDEX_NAME",
@@ -78,16 +81,19 @@ __all__ = [
     "SHORT_RUN_S",
     "STALE_HEARTBEAT_S",
     "FinishOutcome",
+    "PruneOutcome",
     "RunAmbiguousError",
     "RunCompletedError",
     "RunLockedError",
     "RunNotFoundError",
+    "RunNotPrunableError",
     "RunStore",
     "assert_resumable",
     "collect",
     "finish_run",
     "index_entry",
     "open_run",
+    "prune_run_state",
     "read_record",
     "read_run_record",
     "read_trials",
@@ -121,6 +127,14 @@ SHORT_RUN_S = 60.0
 # exists to prevent. The same-host dead-pid check is what catches the common crash promptly.
 STALE_HEARTBEAT_S = 7 * 24 * 3600.0
 
+# The only directories retention may ever remove (story #138), named here **as literal children of
+# one run dir** — this list is the entire blast radius, and it is a constant so that reviewing it is
+# reviewing the whole destructive surface. They are the heavy, re-derivable ones; ``run.json`` and
+# ``index.json`` are never pruned (they are small, and they *are* the long-term progress history),
+# and neither is anything else the tree happens to hold — the run's ``memory/`` and its ``qa/`` area
+# (which has retention of its own) are left exactly where they are.
+PRUNED_SUBDIRS = ("state", "strategies", "reports")
+
 
 class RunLockedError(RuntimeError):
     """Another engine holds this run. The one hard refusal — see the module docstring."""
@@ -143,6 +157,17 @@ class RunAmbiguousError(RunNotFoundError):
 
 class RunCompletedError(RuntimeError):
     """A resume addressed a run that is ``completed`` — terminal, so it gains no more segments."""
+
+
+class RunNotPrunableError(RuntimeError):
+    """Retention addressed a run that could still be resumed, so its state was **not** deleted.
+
+    The exact twin of :class:`RunCompletedError`, one gate down: that one refuses to continue a run
+    that is finished, this one refuses to delete the state of a run that is not. Between them a run
+    is either resumable or prunable and never both (:data:`~noctis.reporting.run_record.
+    PRUNABLE_STATUSES` *is* ``TERMINAL_STATUSES``), which is what makes "a pruned run that later
+    resumed" unreachable rather than merely unlikely.
+    """
 
 
 def open_run(
@@ -292,7 +317,17 @@ def finish_run(
             f"run {address} has {reason}, so there is nothing to seal. `noctis run-record "
             f"{address}` shows what is there."
         )
-    _assert_unlocked(run_dir, run_id=run_id, now=now, stale_after_s=stale_after_s)
+    _assert_unlocked(
+        run_dir,
+        run_id=run_id,
+        now=now,
+        stale_after_s=stale_after_s,
+        consequence=(
+            "so it cannot be sealed from underneath it: the segment it is running would land on a "
+            "record that already says the run is finished. Stop that engine first, then finish the "
+            "run."
+        ),
+    )
     if resume_refusal(record) is not None:  # already terminal — the documented no-op
         run = record.get("run")
         stamp = run.get("completed_utc") if isinstance(run, Mapping) else None
@@ -307,23 +342,182 @@ def finish_run(
     return FinishOutcome(run_id=run_id, sealed=True, completed_utc=stamp)
 
 
-def _assert_unlocked(run_dir: Path, *, run_id: str, now: datetime, stale_after_s: float) -> None:
+def _assert_unlocked(
+    run_dir: Path, *, run_id: str, now: datetime, stale_after_s: float, consequence: str
+) -> None:
     """Refuse when another engine is live on this run — the read-only half of :func:`acquire_lock`.
 
-    Deliberately does not *take* the lock: sealing is one write, and a lock file left behind by a
-    command that started nothing would be friction the next invocation has to reason about. A stale
-    lock (a dead pid here, a heartbeat gone cold) is no obstacle at all, for the same reason a
-    resume may steal one — a crashed run must never need manual cleanup.
+    Deliberately does not *take* the lock: sealing (and pruning) is one write, and a lock file left
+    behind by a command that started nothing would be friction the next invocation has to reason
+    about. A stale lock (a dead pid here, a heartbeat gone cold) is no obstacle at all, for the same
+    reason a resume may steal one — a crashed run must never need manual cleanup.
+
+    ``consequence`` is the caller's half of the sentence: the holder is named identically whatever
+    was asked for, and what would have gone wrong differs.
     """
     held = _read_lock(run_dir / RUN_LOCK_NAME)
     if held is None or _stale_reason(held, now=now, stale_after_s=stale_after_s) is not None:
         return
     raise RunLockedError(
         f"run {run_id} is open by pid {held.get('pid')} on host {held.get('hostname_hash')} "
-        f"(heartbeat {held.get('heartbeat_utc')}), so it cannot be sealed from underneath it: "
-        "the segment it is running would land on a record that already says the run is finished. "
-        "Stop that engine first, then finish the run."
+        f"(heartbeat {held.get('heartbeat_utc')}), {consequence}"
     )
+
+
+@dataclass(frozen=True)
+class PruneOutcome:
+    """What retention did (or, under ``dry_run``, what it would do) to one run's tree.
+
+    ``removed`` names the directories, never paths, because the names *are* the policy
+    (:data:`PRUNED_SUBDIRS`); ``freed_bytes`` carries its unit in its name, the record schema's own
+    convention. Both are populated identically for a dry run — that is what makes the preview worth
+    trusting: it is the same measurement of the same targets, taken one line before the removal it
+    then does not perform.
+    """
+
+    run_id: str
+    dry_run: bool
+    removed: tuple[str, ...]
+    freed_bytes: int
+
+
+def prune_run_state(
+    runs_dir: Path | str,
+    address: str,
+    *,
+    clock: Callable[[], datetime],
+    election_metric: str,
+    dry_run: bool = False,
+    engine_root: Path | None = None,
+    writer: Callable[[Path, dict], None] | None = None,
+    stale_after_s: float = STALE_HEARTBEAT_S,
+) -> PruneOutcome:
+    """Delete one **completed** run's heavy directories, keeping its record (story #138).
+
+    Retention in this system is opt-in, one addressed run at a time, and it is the only code in
+    Noctis that removes a run's own files — so every gate it passes through is here, in order, and
+    nothing runs it on a schedule:
+
+    1. the address must resolve to a run tree carrying a **readable record**. That is what stops a
+       path address (which is honoured wherever it points, by design) from ever aiming this at an
+       arbitrary directory: no ``run.json``, nothing deleted.
+    2. the record must say the run may never gain another segment
+       (:func:`~noctis.reporting.run_record.prune_refusal`). ``stopped``, ``interrupted`` and
+       ``running`` all refuse, because :data:`PRUNED_SUBDIRS` is exactly what a resume would read
+       back — deleting it would silently destroy the resumability this whole design promises.
+       Checked before the lock, so a *crashed* run (whose record still says ``running`` while its
+       lock has gone stale and stealable) is refused on the status that matters rather than let
+       through on a lock nobody holds.
+    3. no other engine may be live on the run. A stale lock is no obstacle — as everywhere else,
+       a crashed run must never need manual cleanup — but a live one is: the directories this
+       removes are the ones that engine is reading and writing.
+    4. only the three named children of *this* run dir are touched, and only when each is a real
+       directory that is not a symlink — retention never follows a link out of the run tree.
+
+    The record is **collected before anything is deleted** and rewritten afterwards. That ordering
+    is load-bearing: the run's trial count is derived from ``state/experiments/*.jsonl`` at write
+    time, so rewriting after the removal would replace a run's own history with ``null`` — the
+    precise opposite of what pruning is for. The rewritten record carries ``state_pruned: true`` and
+    one event saying what went and when; a reader then knows the run's path-plus-hash references
+    into those directories no longer resolve, while everything the record *embeds* is untouched.
+
+    ``dry_run=True`` measures and reports, and writes nothing at all — not the marker, not the
+    index, not a byte.
+    """
+    now = clock()
+    run_dir = resolve_run_dir(runs_dir, address)
+    run_id = run_dir.name
+    record, reason = read_record(run_dir)
+    if record is None:
+        raise RunNotFoundError(
+            f"run {address} has {reason}, so nothing here can be pruned: retention deletes a run's "
+            f"state only when its own record says the run is completed. Nothing was removed."
+        )
+    refusal = prune_refusal(record)
+    if refusal is not None:
+        raise RunNotPrunableError(f"cannot prune {run_id}: {refusal} Nothing was removed.")
+    _assert_unlocked(
+        run_dir,
+        run_id=run_id,
+        now=now,
+        stale_after_s=stale_after_s,
+        consequence=(
+            "so its state cannot be deleted from underneath it: the directories this would remove "
+            "are the ones that engine is reading and writing. Stop that engine first, then prune "
+            "the run. Nothing was removed."
+        ),
+    )
+
+    targets = _prunable_dirs(run_dir)
+    freed = sum(_dir_bytes(target) for target in targets)
+    names = tuple(target.name for target in targets)
+    if dry_run:
+        return PruneOutcome(run_id=run_id, dry_run=True, removed=names, freed_bytes=freed)
+
+    # Read the whole record BEFORE the removal — see the docstring: the trial count is counted off
+    # the very journals this is about to delete.
+    artifacts = mark_interrupted(
+        collect(run_dir, election_metric=election_metric, engine_root=engine_root)
+    )
+    for target in targets:
+        shutil.rmtree(target)
+    pruned = replace(
+        artifacts,
+        state_pruned=True,
+        events=(*artifacts.events, _prune_event(now, names=names, freed_bytes=freed)),
+    )
+    (writer or write)(run_dir, build(pruned))
+    update_index(run_dir.parent, run_id)
+    return PruneOutcome(run_id=run_id, dry_run=False, removed=names, freed_bytes=freed)
+
+
+def _prune_event(now: datetime, *, names: Sequence[str], freed_bytes: int) -> RecordEvent:
+    """The note a prune leaves on the record: what went, and when it went.
+
+    The marker says the state is gone; this says when, and how much — so a record read a year later
+    can tell "pruned last Tuesday" from "this run never wrote any state at all".
+    """
+    listed = ", ".join(f"{name}/" for name in names) if names else "nothing (already pruned)"
+    return RecordEvent(
+        t=utc_iso(now),
+        kind="info",
+        text=f"retention pruned this completed run's {listed} ({freed_bytes} bytes freed); "
+        f"{RUN_RECORD_NAME} is kept, and references into the pruned directories no longer resolve",
+    )
+
+
+def _prunable_dirs(run_dir: Path) -> list[Path]:
+    """The directories this run may lose — the *whole* destructive surface, computed one way.
+
+    Only the constant names in :data:`PRUNED_SUBDIRS`, joined to this run dir (they carry no
+    separator, so nothing an address contained can traverse out through here), only when the child
+    is a real directory, and never through a symlink: a linked ``state/`` points somewhere the
+    operator chose, and following it would delete a tree outside the run entirely.
+    """
+    return [
+        child
+        for child in (run_dir / name for name in PRUNED_SUBDIRS)
+        if child.is_dir() and not child.is_symlink()
+    ]
+
+
+def _dir_bytes(path: Path) -> int:
+    """How much this directory holds, in bytes — the number a dry run reports.
+
+    Never follows a symlink (neither into a linked subdirectory nor through a linked file), so the
+    figure describes exactly what removal would free and nothing that lives elsewhere. Unreadable
+    entries are skipped: a byte count is information, never a reason to fail.
+    """
+    total = 0
+    for parent, _dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            entry = Path(parent) / name
+            try:
+                if not entry.is_symlink():
+                    total += entry.stat().st_size
+            except OSError:  # pragma: no cover - a file that vanished mid-count
+                continue
+    return total
 
 
 def _assert_resumable(run_dir: Path, run_id: str) -> None:
@@ -437,6 +631,10 @@ def _artifacts_from(
         # may have changed in between.
         inputs=_frozen_inputs(prior.get("inputs")),
         trials=trials,
+        # Carried forward verbatim, never re-derived from what is on disk: it states that the heavy
+        # directories were deliberately removed, and a later write must not un-say it because
+        # something recreated an empty ``state/``.
+        state_pruned=bool(run.get("state_pruned", False)),
     )
 
 

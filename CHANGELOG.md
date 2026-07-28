@@ -9,6 +9,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`noctis run-prune <address> [--dry-run]` — opt-in retention for completed runs.** A run's
+  `state/`, `strategies/` and `reports/` directories are the megabytes; its `run.json` is
+  kilobytes and *is* the long-term progress history. This reclaims the first three and never the
+  record — so a pruned run still lists in `noctis runs`, still prints in full through
+  `run-record`, and keeps every number it accumulated (including its trial count, which is read
+  off the journals *before* anything is deleted).
+  - **Completed runs only, and the refusal is the point.** The pruned directories are exactly what
+    a resume reads back, so pruning a `stopped`, `interrupted` or `running` run would silently
+    destroy its resumability — the one thing the run record promises — and all three are refused
+    with that reason. "Prunable" is not a second rule but the same constant as "terminal"
+    (`PRUNABLE_STATUSES is TERMINAL_STATUSES`), so a pruned-then-resumed run is unreachable rather
+    than merely unlikely. A run another engine is live on is refused too, whatever its record says.
+  - **Opt-in, never a schedule.** No config knob, no startup sweep, no automatic retention: a byte
+    is removed only when an operator names one run. The default keeps everything, forever.
+  - **`--dry-run` reports the directories and the bytes and removes nothing** — same measurement,
+    one step short of the removal.
+  - **New: `run.state_pruned`** (`false` on every run until one is pruned), so a reader knows the
+    record's path-plus-hash references into those directories no longer resolve. Everything the
+    record *carries* is untouched: pruning removes three directories and rewrites one flag.
+  - The blast radius is a reviewable constant — three fixed child names of one run directory,
+    each removed only when it really is a directory and never through a symlink, and never at all
+    unless the address resolved to a tree whose own `run.json` says `completed`.
 - **`noctis research --resume <address>` — a research-only night belongs to the same run.** A
   standalone session is no longer an unrecorded write into the reserved `legacy` run: a bare
   `noctis research` now **mints its own run** (record, tree and lock, like `noctis run`), and

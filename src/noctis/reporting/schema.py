@@ -98,6 +98,12 @@ _RUN_KEYS = (
     # the same lines the exhaustion gate counts, and the multiple-testing count a deflated Sharpe
     # needs. ``null`` when the run journaled nothing at all.
     "cumulative_trials",
+    # Whether retention removed this run's heavy directories (story #138). ``false`` on every run
+    # that was never pruned; ``true`` says ``state/``, ``strategies/`` and ``reports/`` are gone, so
+    # the record's path-plus-hash references into them no longer resolve — everything the record
+    # *embeds* is still here, because the record is never pruned. Only a ``completed`` run can carry
+    # it: pruning a resumable run's state would destroy its resumability, so it is refused.
+    "state_pruned",
     "complete",
     "truncated",
 )

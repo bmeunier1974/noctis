@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from noctis.reporting.schema import EVENT_CAP, KIND, SCHEMA_VERSION
 
 __all__ = [
+    "PRUNABLE_STATUSES",
     "RESEARCH_PHASE",
     "RUN_LIMIT_SETTING",
     "TERMINAL_STATUSES",
@@ -43,6 +44,7 @@ __all__ = [
     "SegmentArtifact",
     "build",
     "mark_interrupted",
+    "prune_refusal",
     "resume_refusal",
     "seal",
     "utc_iso",
@@ -54,6 +56,14 @@ __all__ = [
 # field's, so refusing ``running`` here would make every crashed run need manual cleanup before it
 # could be resumed.
 TERMINAL_STATUSES = ("completed",)
+
+# The states whose heavy state may be pruned (story #138) — **the same tuple**, deliberately, not a
+# copy that happens to agree today. Retention's whole safety argument is that a run is prunable
+# exactly when it can never gain another segment: one constant means a status that stopped being
+# terminal would stop being prunable in the same edit, so no window can ever open in which a run is
+# both resumable and prunable. That equivalence is what makes "a pruned-then-resumed run is
+# impossible" provable from the existing rules rather than guarded by a second flag.
+PRUNABLE_STATUSES = TERMINAL_STATUSES
 
 # The two phases whose seconds the run reports separately, spelled the way ``engine.machine.Phase``
 # spells them. The record never imports the engine (this module reads no configuration and drives
@@ -199,6 +209,13 @@ class RunArtifacts:
     # run journaled nothing at all — a run that has not researched yet has no count to report, and
     # a zero would be a claim about a journal that does not exist.
     trials: int | None = None
+    # Whether retention has removed this run's heavy directories (story #138). ``False`` on every
+    # run until an operator prunes one deliberately — retention is opt-in, and nothing sets this by
+    # accident. Once ``True`` it is carried forward verbatim, like ``inputs``: it is a statement
+    # about the tree beside the record ("``state/``, ``strategies/`` and ``reports/`` are gone, so
+    # the path-plus-hash references into them no longer resolve"), and re-deriving it from whatever
+    # happens to be on disk would let a half-restored directory quietly make it false again.
+    state_pruned: bool = False
 
 
 def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
@@ -247,6 +264,34 @@ def resume_refusal(record: Mapping[str, object]) -> str | None:
         f"this run is completed{_why_completed(run)} — a terminal state, so it can never gain "
         "another segment. Start a new run instead (identity is minted, never derived, so a fresh "
         "run under the same configuration is one command away)."
+    )
+
+
+def prune_refusal(record: Mapping[str, object]) -> str | None:
+    """Why this run's heavy state may not be pruned, or ``None`` when it may (story #138).
+
+    Pure, and the **exact complement** of :func:`resume_refusal` by construction: pruning is
+    permitted precisely when a resume is refused. That is the whole safety argument — the
+    directories retention removes (``state/``, ``strategies/``, ``reports/``) are the ones a resume
+    would read, so a run that can still gain a segment must keep them or the record's central
+    promise quietly stops being true. A record whose status cannot be read at all is *not* prunable:
+    unreadable evidence is not evidence that deleting is safe.
+
+    Nothing here deletes, decides on a lock, or touches a path — the store checks this before it
+    touches the disk, and the CLI shows the sentence it returns.
+    """
+    if resume_refusal(record) is not None:
+        return None
+    section = record.get("run")
+    run: Mapping[str, object] = section if isinstance(section, Mapping) else {}
+    status = run.get("status")
+    named = str(status) if isinstance(status, str) else "of an unreadable status"
+    return (
+        f"this run is {named}, so pruning its state/, strategies/ and reports/ directories would "
+        "silently destroy its resumability — the one thing the run record promises. Only a "
+        "completed run may be pruned (`noctis run --resume <address> --finish` seals one "
+        "deliberately, and completed is terminal, so nothing that could still be continued is "
+        "ever at risk)."
     )
 
 
@@ -302,6 +347,11 @@ def build(artifacts: RunArtifacts) -> dict:
             "cumulative_research_s": _cumulative_phase_s(segments, RESEARCH_PHASE),
             "cumulative_trading_s": _cumulative_phase_s(segments, TRADING_PHASE),
             "cumulative_trials": artifacts.trials,
+            # Retention's one mark on the record (story #138): the heavy directories beside this
+            # file are gone, so a reader knows the run's non-champion source references no longer
+            # resolve. The record itself is never pruned — it *is* the long-term history — so this
+            # is the only thing a prune changes about it.
+            "state_pruned": bool(artifacts.state_pruned),
             "complete": bool(artifacts.complete),
             "truncated": truncated,
         },

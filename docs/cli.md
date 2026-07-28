@@ -331,6 +331,7 @@ plus `jq` one-liners over `events.jsonl` — see
 ```bash
 python -m noctis runs [--all]              # the run board: id, label, status, segments, headline numbers
 python -m noctis run-record <address>      # print one run's whole record (pipe it into jq)
+python -m noctis run-prune <address> [--dry-run]   # reclaim a completed run's heavy directories
 python -m noctis status                    # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>            # preflight a mandate: provenance + the effective settings diff
 python -m noctis engine                    # engine identity: version, component fingerprint, comparable key
@@ -393,6 +394,41 @@ Beside the run trees, `workspace/runs/index.json` is a **derived** roll-up of th
 one `fetch()` for a listing page. Derived, never authoritative: the engine refreshes it after
 every record write, `noctis runs` regenerates it from the records on disk, and a test pins that a
 rebuild reproduces the incrementally-maintained file byte for byte. Delete it whenever you like.
+
+### Reclaiming disk — `run-prune <address>`
+
+```bash
+python -m noctis run-prune 20260714T031102Z-4d9c1a --dry-run   # what would go, and how much?
+python -m noctis run-prune 20260714T031102Z-4d9c1a             # …do it
+```
+
+A run's `state/`, `strategies/` and `reports/` directories are the megabytes; its `run.json` is
+kilobytes. `run-prune` deletes the first three and **never** the record — nor `index.json` — so a
+pruned run still lists in `noctis runs`, still prints in full through `run-record`, and still
+carries every number it accumulated. Retention takes the same four
+[address forms](#the-four-address-forms-and-how-they-are-told-apart) as everything else that names
+a run.
+
+Three properties are the whole design, and each is enforced rather than documented:
+
+- **Opt-in, one run at a time.** Nothing prunes on a schedule, at startup, or from a config
+  setting: the only way a byte is removed is an operator typing this verb at one address. The
+  default keeps everything, forever.
+- **`completed` runs only.** The pruned directories are exactly what a resume reads back, so
+  pruning a `stopped`, `interrupted` or `running` run would silently destroy its resumability — the
+  one thing the run record promises. All three are refused, with that reason. Seal a run you really
+  have finished with (`noctis run --resume <address> --finish`) and prune it then; `completed` is
+  terminal, so nothing that could still be continued is ever at risk. A run another engine is live
+  on is refused too, whatever its record says.
+- **`--dry-run` measures and removes nothing** — the same directories, the same byte count, one
+  step short of the removal.
+
+Afterwards the record's `run.state_pruned` reads `true`. That is the flag a reader checks before
+following a path into the run tree: **everything the record carries in it survives** — pruning
+removes three directories and rewrites one flag — while any reference *out* of the record into
+those directories (a path plus a hash, rather than the content itself) no longer resolves. It is
+also why the strategy sources that matter are meant to be embedded in the record rather than
+pointed at: an embedded champion is readable a year after its run's tree was reclaimed.
 
 ### What `status` reports about steering
 
