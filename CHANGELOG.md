@@ -9,6 +9,42 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`docs/run-record.md` — the run record's contract, so a website can be built from the docs
+  alone.** The epic ends with the artifact it exists to publish being documented rather than
+  inferred: every section field by field with **when each field is `null`**, the additive-only
+  versioning promise and the in-place upgrade path, the four conventions `validate()` enforces
+  (self-describing `kind`, units in the name, UTC `Z`, explicit `null`), the caps and the measured
+  384 KiB size budget, and the load-bearing rules stated plainly — evidence is never a gate, the
+  safety gate is never rehydrated, the writer is never fatal except for lock contention, cumulative
+  fields are derived, numbers are never pooled across `comparable_key`, retention never breaks
+  resumability, output is workspace-only.
+  - **The resume model in one place**: mint vs. resume, the four statuses (and why `completed` is
+    the only one that refuses a resume *and* the only one that may be pruned — the same constant),
+    `interrupted` observed on the next open rather than guessed, the liveness lock and its 7-day
+    stale horizon, and everything a resume refuses.
+  - **Engine identity, whole**: the eight-component table with its allowlisted files, the
+    arbiter/searcher split declared once and read by both enforcers, and `comparable_key` as the
+    tuple two runs must match on before their numbers may be pooled.
+  - **New: `examples/run_record.json`** — a complete, schema-valid record built by the real builder
+    (two nights plus a research-only segment, a promoted champion, a rejection that died at the
+    symbol-holdout gate, an undecided draft, ten traded sessions, a priced spend block).
+    `tests/test_docs_run_record.py` validates it and holds the page to the code: every key the
+    schema names must appear on the page, and every number the page pins (schema version, engine
+    version, the three caps, the size budget, the freezing-tier counts, the stale-lock horizon) is
+    compared against the constant.
+  - **What the record does *not* know is documented too**: the conversation research loop writes no
+    session ledger (so its spend is `null`, not `$0`), coder-authoring completions are not
+    token-metered, `assumptions.symbol_holdout.symbols` is always `null`, and there is no
+    `strategies[].scorecard` — a candidate's backtest numbers reach the record only as each gate's
+    `observed` value.
+  - Docs swept for staleness against the delivered code: the frozen-key count in the drift
+    paragraph (70 → **72**) and the mandate-overlay refusal count (52 → **53**) now match
+    `rehydrate.py` and `overlay.py`; `noctis engine` sample output shows `ENGINE_VERSION` **2** with
+    a real `schema` digest instead of version 1 and a missing input; `docs/architecture.md` and
+    `docs/validation.md` no longer point at a `strategies[].scorecard` field that does not exist;
+    four broken doc anchors fixed. `AGENTS.md`'s "Where state lives" now names `runs/index.json`
+    and the `state_scope` the record publishes.
+
 - **The run record's `assumptions` block, a versioned schema with an upgrade path, and
   `noctis run-record --validate`.** The arena a run's numbers were produced in, published as data
   so a website renders it as a table and two runs' blocks subtract.

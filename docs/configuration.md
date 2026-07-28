@@ -95,7 +95,7 @@ sitting in the same workspace waiting to be claimed by a run.
 ## Config freezing — what a resumed run reads
 
 A run outlives the process that started it: `noctis run --resume <run_id>`
-([cli.md](cli.md#resuming-a-run----resume-run_id)) appends a segment and keeps accumulating into
+([cli.md](cli.md#resuming-a-run----resume-address)) appends a segment and keeps accumulating into
 the same record. That only *means* something if the configuration held still in between — so a
 run's config is **frozen at creation**, stored in its own `run.json`, and restored on every later
 segment. Editing `config.yaml` or a mandate profile tomorrow cannot retroactively change what a
@@ -104,7 +104,9 @@ operator deliberately adopts it ([below](#seeing-the-drift-and-adopting-it)).
 
 Every leaf setting belongs to exactly one of three tiers, classified in
 `src/noctis/config/rehydrate.py` and ratcheted by the test suite the same way the overlay's table
-is. Today: **72 frozen, 17 live, 2 refused**.
+is. Today: **72 frozen, 17 live, 2 refused**. The record publishes the three lists it froze under
+`inputs.settings` ([run-record.md](run-record.md#inputs--the-frozen-configuration)), so a consumer
+never has to guess which tier a key is in.
 
 | Tier | Count | What | Where it comes from on a resume |
 |---|---|---|---|
@@ -159,7 +161,7 @@ who really did mean to change the run's configuration needs a way to say so. Two
 
 - `--show-config-drift` prints how the current `config.yaml` and `mandate/` differ from what the
   run froze, then exits. Inspection only — it opens no segment, takes no lock, writes nothing.
-  It compares the **70 frozen keys** and the resolved **mandate text**; the 17 live keys are never
+  It compares the **72 frozen keys** and the resolved **mandate text**; the 17 live keys are never
   reported (they are this process's by design) and the 2 refused ones never appear at all.
 - `--rebase-config` adopts the current files for the rest of the run: it re-freezes them, bumps
   `inputs.config_epoch`, and appends a before/after entry to `inputs.config_changes` naming the
@@ -181,7 +183,7 @@ fill-cost floor, the promotion thresholds, the two-axis holdout geometry, the ou
 secrets). Every leaf setting is classified **exactly once** in `src/noctis/config/overlay.py` —
 the authoritative table, with a justification comment per group — and a completeness ratchet in
 the test suite fails until a newly added knob is classified deliberately, so nothing is allowed
-by accident of omission. Today: **36 allowed, 2 clamped, 52 refused**. The whole surface also
+by accident of omission. Today: **36 allowed, 2 clamped, 53 refused**. The whole surface also
 ships commented-out in `mandate/MANDATE.md.example`, so it is discoverable without reading
 source.
 

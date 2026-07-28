@@ -1,0 +1,1012 @@
+{
+  "schema_version": 1,
+  "kind": "noctis.run",
+  "run": {
+    "run_id": "20260727T142233Z-a1b2c3",
+    "label": "nuclear-nights",
+    "status": "stopped",
+    "created_utc": "2026-07-27T14:22:33.418Z",
+    "last_active_utc": "2026-08-08T00:10:00.000Z",
+    "completed_utc": null,
+    "run_limit_hours": 100.0,
+    "traded": true,
+    "cumulative_runtime_s": 63000.0,
+    "cumulative_research_s": 54300.0,
+    "cumulative_trading_s": 8000.0,
+    "cumulative_trials": 111,
+    "state_pruned": false,
+    "complete": true,
+    "truncated": {}
+  },
+  "segments": [
+    {
+      "index": 0,
+      "started_utc": "2026-07-27T14:22:33.418Z",
+      "stopped_utc": "2026-07-27T22:22:33.418Z",
+      "duration_s": 28800.0,
+      "stopped_reason": "time_limit",
+      "status": "stopped",
+      "argv": [
+        "run",
+        "-v",
+        "--run-limit-hours",
+        "100"
+      ],
+      "command": "run",
+      "resumed": false,
+      "counters": {
+        "cycles": 1,
+        "research_iterations": 12,
+        "trades": 4
+      },
+      "phase_seconds": {
+        "RESEARCH": 24600.0,
+        "TRADING": 3900.0,
+        "CLOSE": 90.0
+      },
+      "environment": {
+        "hostname_hash": "9f2c1d3e4b5a",
+        "os": {
+          "system": "Linux",
+          "release": "7.0.0-14-generic",
+          "arch": "x86_64"
+        },
+        "container": true,
+        "cpu": {
+          "model": "AMD Ryzen 9 7950X",
+          "cores_physical": 16,
+          "cores_logical": 32,
+          "freq_max_mhz": 5881.0
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+          "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+          "branch": "main",
+          "dirty": false,
+          "describe": "v0.1.0-42-ga380d3a"
+        },
+        "lockfile_digest": "sha256:9f2c1d",
+        "extras_present": {
+          "llm": "0.120.0",
+          "data": "0.82.0",
+          "research": "4.6.0",
+          "engine": null,
+          "hardware": "7.2.2"
+        },
+        "degraded_seams": [
+          "engine"
+        ]
+      },
+      "engine_version": 2,
+      "engine_fingerprint": {
+        "gates": "0fb6148041c95608",
+        "backtest": "3ba3e0bf1c97134f",
+        "research": "67528310408eeefc",
+        "prompts": "14eb169506a6b5aa",
+        "profiles": "6b0e047bd1dafb6d",
+        "seeds": "4826fe7224641eb4",
+        "memory_seed": "3337fa2cbf896932",
+        "schema": "8ff21a89b4298a42"
+      }
+    },
+    {
+      "index": 1,
+      "started_utc": "2026-07-28T14:20:00.000Z",
+      "stopped_utc": "2026-07-28T22:20:00.000Z",
+      "duration_s": 28800.0,
+      "stopped_reason": "stop_requested",
+      "status": "stopped",
+      "argv": [
+        "run",
+        "-v",
+        "--resume",
+        "latest"
+      ],
+      "command": "run",
+      "resumed": true,
+      "counters": {
+        "cycles": 1,
+        "research_iterations": 9,
+        "trades": 2
+      },
+      "phase_seconds": {
+        "RESEARCH": 24300.0,
+        "TRADING": 4100.0,
+        "CLOSE": 80.0
+      },
+      "environment": {
+        "hostname_hash": "9f2c1d3e4b5a",
+        "os": {
+          "system": "Linux",
+          "release": "7.0.0-14-generic",
+          "arch": "x86_64"
+        },
+        "container": true,
+        "cpu": {
+          "model": "AMD Ryzen 9 7950X",
+          "cores_physical": 16,
+          "cores_logical": 32,
+          "freq_max_mhz": 5881.0
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+          "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+          "branch": "main",
+          "dirty": false,
+          "describe": "v0.1.0-42-ga380d3a"
+        },
+        "lockfile_digest": "sha256:9f2c1d",
+        "extras_present": {
+          "llm": "0.120.0",
+          "data": "0.82.0",
+          "research": "4.6.0",
+          "engine": null,
+          "hardware": "7.2.2"
+        },
+        "degraded_seams": [
+          "engine"
+        ]
+      },
+      "engine_version": 2,
+      "engine_fingerprint": {
+        "gates": "0fb6148041c95608",
+        "backtest": "3ba3e0bf1c97134f",
+        "research": "67528310408eeefc",
+        "prompts": "14eb169506a6b5aa",
+        "profiles": "6b0e047bd1dafb6d",
+        "seeds": "4826fe7224641eb4",
+        "memory_seed": "3337fa2cbf896932",
+        "schema": "8ff21a89b4298a42"
+      }
+    },
+    {
+      "index": 2,
+      "started_utc": "2026-08-07T22:40:00.000Z",
+      "stopped_utc": "2026-08-08T00:10:00.000Z",
+      "duration_s": 5400.0,
+      "stopped_reason": "agent_done",
+      "status": "stopped",
+      "argv": [
+        "research",
+        "--resume",
+        "@nuclear-nights"
+      ],
+      "command": "research",
+      "resumed": true,
+      "counters": {
+        "sessions": 1,
+        "research_iterations": 6,
+        "research_promotions": 0
+      },
+      "phase_seconds": {
+        "RESEARCH": 5400.0
+      },
+      "environment": {
+        "hostname_hash": "9f2c1d3e4b5a",
+        "os": {
+          "system": "Linux",
+          "release": "7.0.0-14-generic",
+          "arch": "x86_64"
+        },
+        "container": true,
+        "cpu": {
+          "model": "AMD Ryzen 9 7950X",
+          "cores_physical": 16,
+          "cores_logical": 32,
+          "freq_max_mhz": 5881.0
+        },
+        "memory_total_bytes": 67351248896,
+        "disk_free_bytes": 412000000000,
+        "python": "3.11.9",
+        "noctis_version": "0.1.0",
+        "git": {
+          "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+          "branch": "main",
+          "dirty": false,
+          "describe": "v0.1.0-42-ga380d3a"
+        },
+        "lockfile_digest": "sha256:9f2c1d",
+        "extras_present": {
+          "llm": "0.120.0",
+          "data": "0.82.0",
+          "research": "4.6.0",
+          "engine": null,
+          "hardware": "7.2.2"
+        },
+        "degraded_seams": [
+          "engine"
+        ]
+      },
+      "engine_version": 2,
+      "engine_fingerprint": {
+        "gates": "0fb6148041c95608",
+        "backtest": "3ba3e0bf1c97134f",
+        "research": "67528310408eeefc",
+        "prompts": "14eb169506a6b5aa",
+        "profiles": "6b0e047bd1dafb6d",
+        "seeds": "4826fe7224641eb4",
+        "memory_seed": "3337fa2cbf896932",
+        "schema": "8ff21a89b4298a42"
+      }
+    }
+  ],
+  "environment_latest": {
+    "hostname_hash": "9f2c1d3e4b5a",
+    "os": {
+      "system": "Linux",
+      "release": "7.0.0-14-generic",
+      "arch": "x86_64"
+    },
+    "container": true,
+    "cpu": {
+      "model": "AMD Ryzen 9 7950X",
+      "cores_physical": 16,
+      "cores_logical": 32,
+      "freq_max_mhz": 5881.0
+    },
+    "memory_total_bytes": 67351248896,
+    "disk_free_bytes": 412000000000,
+    "python": "3.11.9",
+    "noctis_version": "0.1.0",
+    "git": {
+      "commit": "a380d3a4f1c0b9e2d5a6f7c8b9a0d1e2f3a4b5c6",
+      "branch": "main",
+      "dirty": false,
+      "describe": "v0.1.0-42-ga380d3a"
+    },
+    "lockfile_digest": "sha256:9f2c1d",
+    "extras_present": {
+      "llm": "0.120.0",
+      "data": "0.82.0",
+      "research": "4.6.0",
+      "engine": null,
+      "hardware": "7.2.2"
+    },
+    "degraded_seams": [
+      "engine"
+    ]
+  },
+  "engine": {
+    "engine_version": 2,
+    "engine_epoch": 1,
+    "noctis_version": "0.1.0",
+    "fingerprint": {
+      "gates": "0fb6148041c95608",
+      "backtest": "3ba3e0bf1c97134f",
+      "research": "67528310408eeefc",
+      "prompts": "14eb169506a6b5aa",
+      "profiles": "6b0e047bd1dafb6d",
+      "seeds": "4826fe7224641eb4",
+      "memory_seed": "3337fa2cbf896932",
+      "schema": "8ff21a89b4298a42"
+    },
+    "comparable_key": "2|0fb6148041c95608|3ba3e0bf1c97134f|sharpe",
+    "mixed_engine": false,
+    "engine_changes": []
+  },
+  "inputs": {
+    "config_epoch": 1,
+    "config_changes": [],
+    "frozen_at_utc": "2026-07-27T14:22:33.418Z",
+    "execution_mode": "paper",
+    "mandate": {
+      "source": "profile:sector-specialist",
+      "summary": "One sector, deeply \u2014 nuclear fuel-cycle names.",
+      "text": "Trade the nuclear fuel cycle. Risk appetite: moderate.\n",
+      "text_sha256": "9c1f0b0d0e3a4f5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d",
+      "symbols": [
+        "SMR",
+        "CCJ",
+        "LEU"
+      ],
+      "config_overrides": {
+        "research_time_budget_minutes": 60
+      },
+      "overrides_applied": [
+        "research_time_budget_minutes=60"
+      ],
+      "references": []
+    },
+    "models": {
+      "research": "anthropic/claude-sonnet-5",
+      "coder": "anthropic/claude-sonnet-5",
+      "coder_fallback": null,
+      "ideation": null,
+      "research_loop": "episodic",
+      "context_window": 200000,
+      "cost_profile": "balanced"
+    },
+    "data": {
+      "provider": "databento",
+      "dataset": "XNAS.ITCH",
+      "lake_dir": "workspace/data_lake"
+    },
+    "settings": {
+      "digest": "44502474589f",
+      "resolved": {
+        "universe": [
+          "AAPL",
+          "MSFT",
+          "NVDA",
+          "SMR",
+          "CCJ",
+          "LEU"
+        ],
+        "champion_count": 5,
+        "run_limit_hours": 100.0,
+        "embed_all_sources": false,
+        "research_time_budget_minutes": 60,
+        "backtest": {
+          "fee_bps": 1.0,
+          "slippage_bps": 2.0
+        },
+        "promotion": {
+          "metric": "sharpe",
+          "max_gap": 1.0,
+          "min_test_metric": 0.5,
+          "min_holdout_metric": 0.0,
+          "min_symbol_holdout_metric": 0.0,
+          "min_symbol_consistency": 0.5,
+          "min_test_activity": 0.02,
+          "annualization_cap": 252,
+          "max_period_ratio": 1.0,
+          "max_reverse_gap": 1.0,
+          "max_test_metric": 0.0
+        },
+        "research": {
+          "min_trials": 8,
+          "fit_set_size": 4,
+          "symbol_holdout_size": 2
+        },
+        "data": {
+          "provider": "databento",
+          "dataset": "XNAS.ITCH"
+        }
+      },
+      "frozen_keys": [
+        "backtest.fee_bps",
+        "promotion.metric",
+        "universe"
+      ],
+      "live_keys": [
+        "data.lake_dir",
+        "state_dir",
+        "time_limit_hours"
+      ],
+      "refused_keys": [
+        "allow_live",
+        "mode"
+      ]
+    }
+  },
+  "strategies": [
+    {
+      "name": "uranium_momo",
+      "outcome": "promoted",
+      "tier": "champions",
+      "decided_utc": "2026-07-28T21:41:09.700Z",
+      "trials": 64,
+      "gates": [
+        {
+          "gate": "validated",
+          "passed": true,
+          "observed": null,
+          "threshold": null,
+          "note": null
+        },
+        {
+          "gate": "activity_floor",
+          "passed": true,
+          "observed": 0.11,
+          "threshold": 0.02,
+          "note": null
+        },
+        {
+          "gate": "overfit_gap",
+          "passed": true,
+          "observed": 0.31,
+          "threshold": 1.0,
+          "note": null
+        },
+        {
+          "gate": "reverse_gap",
+          "passed": true,
+          "observed": -0.31,
+          "threshold": 1.0,
+          "note": null
+        },
+        {
+          "gate": "magnitude_cap",
+          "passed": true,
+          "observed": 1.28,
+          "threshold": 0.0,
+          "note": "inert: switched off by a max_test_metric of 0"
+        },
+        {
+          "gate": "forward_holdout",
+          "passed": true,
+          "observed": 0.94,
+          "threshold": 0.0,
+          "note": null
+        },
+        {
+          "gate": "symbol_holdout",
+          "passed": true,
+          "observed": 0.62,
+          "threshold": 0.0,
+          "note": null
+        },
+        {
+          "gate": "symbol_consistency",
+          "passed": true,
+          "observed": 0.75,
+          "threshold": 0.5,
+          "note": null
+        },
+        {
+          "gate": "minimum_bar",
+          "passed": true,
+          "observed": 1.28,
+          "threshold": 0.5,
+          "note": "a free slot: the board holds 0 of 5 champions"
+        }
+      ],
+      "rationale": "promoted: test metric 1.2800 clears bar 0.5000 into a free slot (gap 0.3100)",
+      "source_path": "strategies/champions/uranium_momo.py",
+      "source_sha256": "7b1f5e2c9d0a4b6f8c3e1d2a5b7c9e0f1a2b3c4d5e6f708192a3b4c5d6e7f809",
+      "source": "\"\"\"Uranium momentum \u2014 the whole strategy file, embedded verbatim.\"\"\"\n"
+    },
+    {
+      "name": "enricher_breakout",
+      "outcome": "undecided",
+      "tier": "__tmp",
+      "decided_utc": null,
+      "trials": 6,
+      "gates": [],
+      "rationale": null,
+      "source_path": "strategies/__tmp/enricher_breakout.py",
+      "source_sha256": "93a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f607182",
+      "source": null
+    },
+    {
+      "name": "fuel_cycle_meanrev",
+      "outcome": "rejected",
+      "tier": "__tmp",
+      "decided_utc": "2026-07-28T19:02:55.120Z",
+      "trials": 41,
+      "gates": [
+        {
+          "gate": "validated",
+          "passed": true,
+          "observed": null,
+          "threshold": null,
+          "note": null
+        },
+        {
+          "gate": "activity_floor",
+          "passed": true,
+          "observed": 0.08,
+          "threshold": 0.02,
+          "note": null
+        },
+        {
+          "gate": "overfit_gap",
+          "passed": true,
+          "observed": 0.44,
+          "threshold": 1.0,
+          "note": null
+        },
+        {
+          "gate": "reverse_gap",
+          "passed": true,
+          "observed": -0.44,
+          "threshold": 1.0,
+          "note": null
+        },
+        {
+          "gate": "magnitude_cap",
+          "passed": true,
+          "observed": 0.61,
+          "threshold": 0.0,
+          "note": "inert: switched off by a max_test_metric of 0"
+        },
+        {
+          "gate": "forward_holdout",
+          "passed": true,
+          "observed": 0.21,
+          "threshold": 0.0,
+          "note": null
+        },
+        {
+          "gate": "symbol_holdout",
+          "passed": false,
+          "observed": -0.37,
+          "threshold": 0.0,
+          "note": null
+        }
+      ],
+      "rationale": "rejected: symbol-holdout metric -0.3700 below bar 0.0000 (symbol-holdout gate)",
+      "source_path": "strategies/__tmp/fuel_cycle_meanrev.py",
+      "source_sha256": "1c9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70819293a4b5c6",
+      "source": null
+    }
+  ],
+  "spend": {
+    "tokens": {
+      "input_tokens": 33100,
+      "output_tokens": 5600,
+      "cache_creation_input_tokens": 4000,
+      "cache_read_input_tokens": 161000,
+      "total_tokens": 203700
+    },
+    "by_model": {
+      "anthropic/claude-sonnet-5": {
+        "input_tokens": 33100,
+        "output_tokens": 5600,
+        "cache_creation_input_tokens": 4000,
+        "cache_read_input_tokens": 161000,
+        "total_tokens": 203700,
+        "usd_estimate": 0.2466
+      }
+    },
+    "by_stage": {
+      "author": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 0,
+        "usd_estimate": 0.0
+      },
+      "decide": {
+        "input_tokens": 8100,
+        "output_tokens": 1000,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 41000,
+        "total_tokens": 50100,
+        "usd_estimate": 0.0516
+      },
+      "formulate": {
+        "input_tokens": 15200,
+        "output_tokens": 3200,
+        "cache_creation_input_tokens": 4000,
+        "cache_read_input_tokens": 62000,
+        "total_tokens": 84400,
+        "usd_estimate": 0.1272
+      },
+      "match": {
+        "input_tokens": 9800,
+        "output_tokens": 1400,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 58000,
+        "total_tokens": 69200,
+        "usd_estimate": 0.0678
+      }
+    },
+    "by_segment": [
+      {
+        "index": 0,
+        "input_tokens": 25000,
+        "output_tokens": 4600,
+        "cache_creation_input_tokens": 4000,
+        "cache_read_input_tokens": 120000,
+        "total_tokens": 153600,
+        "usd_estimate": 0.195
+      },
+      {
+        "index": 1,
+        "input_tokens": 8100,
+        "output_tokens": 1000,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 41000,
+        "total_tokens": 50100,
+        "usd_estimate": 0.0516
+      },
+      {
+        "index": 2,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 0,
+        "usd_estimate": 0.0
+      }
+    ],
+    "llm_usd_estimate": 0.2466,
+    "pricing_table_version": "2026-07",
+    "efficiency": {
+      "usd_per_champion_estimate": 0.2466,
+      "usd_per_trial_estimate": 0.002222,
+      "trials_per_hour": 7.359,
+      "research_hours_per_champion": 15.083
+    }
+  },
+  "sessions": [
+    {
+      "as_of": "2026-07-27",
+      "equity": 100500.0,
+      "start_equity": 100000.0,
+      "end_equity": 100500.0,
+      "realized_pnl": 500.0,
+      "orders_submitted": 1,
+      "positions_end": {
+        "CCJ": 100.0
+      },
+      "trades": [
+        {
+          "ts": "2026-07-27T19:31:00Z",
+          "symbol": "CCJ",
+          "side": "buy",
+          "quantity": 100.0,
+          "price": 50.0,
+          "fees_usd": 0.5,
+          "slippage_bps": 2.0,
+          "champion": "uranium_momo",
+          "rationale": "target 0.25 gross weight"
+        }
+      ]
+    },
+    {
+      "as_of": "2026-07-28",
+      "equity": 99800.0,
+      "start_equity": 100500.0,
+      "end_equity": 99800.0,
+      "realized_pnl": -700.0,
+      "orders_submitted": 0,
+      "positions_end": {
+        "CCJ": 100.0
+      },
+      "trades": []
+    },
+    {
+      "as_of": "2026-07-29",
+      "equity": 100900.0,
+      "start_equity": 99800.0,
+      "end_equity": 100900.0,
+      "realized_pnl": 1100.0,
+      "orders_submitted": 0,
+      "positions_end": {
+        "CCJ": 100.0
+      },
+      "trades": []
+    },
+    {
+      "as_of": "2026-07-30",
+      "equity": 100300.0,
+      "start_equity": 100900.0,
+      "end_equity": 100300.0,
+      "realized_pnl": -600.0,
+      "orders_submitted": 1,
+      "positions_end": {},
+      "trades": [
+        {
+          "ts": "2026-07-30T19:55:00Z",
+          "symbol": "CCJ",
+          "side": "sell",
+          "quantity": 100.0,
+          "price": 55.0,
+          "fees_usd": 0.5,
+          "slippage_bps": 2.0,
+          "champion": "uranium_momo",
+          "rationale": "flat into the close"
+        }
+      ]
+    },
+    {
+      "as_of": "2026-07-31",
+      "equity": 101400.0,
+      "start_equity": 100300.0,
+      "end_equity": 101400.0,
+      "realized_pnl": 1100.0,
+      "orders_submitted": 1,
+      "positions_end": {
+        "LEU": 50.0
+      },
+      "trades": [
+        {
+          "ts": "2026-07-31T15:02:00Z",
+          "symbol": "LEU",
+          "side": "buy",
+          "quantity": 50.0,
+          "price": 40.0,
+          "fees_usd": 0.5,
+          "slippage_bps": 2.0,
+          "champion": "uranium_momo",
+          "rationale": "target 0.20 gross weight"
+        }
+      ]
+    },
+    {
+      "as_of": "2026-08-03",
+      "equity": 102100.0,
+      "start_equity": 101400.0,
+      "end_equity": 102100.0,
+      "realized_pnl": 700.0,
+      "orders_submitted": 1,
+      "positions_end": {
+        "LEU": 50.0,
+        "SMR": 200.0
+      },
+      "trades": [
+        {
+          "ts": "2026-08-03T15:11:00Z",
+          "symbol": "SMR",
+          "side": "buy",
+          "quantity": 200.0,
+          "price": 25.0,
+          "fees_usd": 0.5,
+          "slippage_bps": 2.0,
+          "champion": "uranium_momo",
+          "rationale": "target 0.25 gross weight"
+        }
+      ]
+    },
+    {
+      "as_of": "2026-08-04",
+      "equity": 100900.0,
+      "start_equity": 102100.0,
+      "end_equity": 100900.0,
+      "realized_pnl": -1200.0,
+      "orders_submitted": 1,
+      "positions_end": {
+        "SMR": 200.0
+      },
+      "trades": [
+        {
+          "ts": "2026-08-04T19:48:00Z",
+          "symbol": "LEU",
+          "side": "sell",
+          "quantity": 50.0,
+          "price": 36.0,
+          "fees_usd": 0.5,
+          "slippage_bps": 2.0,
+          "champion": "uranium_momo",
+          "rationale": "stopped out"
+        }
+      ]
+    },
+    {
+      "as_of": "2026-08-05",
+      "equity": 102000.0,
+      "start_equity": 100900.0,
+      "end_equity": 102000.0,
+      "realized_pnl": 1100.0,
+      "orders_submitted": 0,
+      "positions_end": {
+        "SMR": 200.0
+      },
+      "trades": []
+    },
+    {
+      "as_of": "2026-08-06",
+      "equity": 101600.0,
+      "start_equity": 102000.0,
+      "end_equity": 101600.0,
+      "realized_pnl": -400.0,
+      "orders_submitted": 0,
+      "positions_end": {
+        "SMR": 200.0
+      },
+      "trades": []
+    },
+    {
+      "as_of": "2026-08-07",
+      "equity": 103000.0,
+      "start_equity": 101600.0,
+      "end_equity": 103000.0,
+      "realized_pnl": 1400.0,
+      "orders_submitted": 1,
+      "positions_end": {},
+      "trades": [
+        {
+          "ts": "2026-08-07T19:55:00Z",
+          "symbol": "SMR",
+          "side": "sell",
+          "quantity": 200.0,
+          "price": 27.0,
+          "fees_usd": 0.5,
+          "slippage_bps": 2.0,
+          "champion": "uranium_momo",
+          "rationale": "flat into the weekend"
+        }
+      ]
+    }
+  ],
+  "performance": {
+    "source": "paper_account",
+    "account": {
+      "opened": "2026-07-27",
+      "start_equity": 100500.0,
+      "end_equity": 103000.0,
+      "cumulative_pnl_usd": 2500.0,
+      "sessions": 10
+    },
+    "equity_curve": [
+      {
+        "date": "2026-07-27",
+        "equity": 100500.0
+      },
+      {
+        "date": "2026-07-28",
+        "equity": 99800.0
+      },
+      {
+        "date": "2026-07-29",
+        "equity": 100900.0
+      },
+      {
+        "date": "2026-07-30",
+        "equity": 100300.0
+      },
+      {
+        "date": "2026-07-31",
+        "equity": 101400.0
+      },
+      {
+        "date": "2026-08-03",
+        "equity": 102100.0
+      },
+      {
+        "date": "2026-08-04",
+        "equity": 100900.0
+      },
+      {
+        "date": "2026-08-05",
+        "equity": 102000.0
+      },
+      {
+        "date": "2026-08-06",
+        "equity": 101600.0
+      },
+      {
+        "date": "2026-08-07",
+        "equity": 103000.0
+      }
+    ],
+    "returns": {
+      "total_return_pct": 2.487562189055,
+      "cagr_pct": 125.989670402877,
+      "annual_volatility_pct": 15.535141729321,
+      "best_day_pct": 1.377952755906,
+      "worst_day_pct": -1.175318315377
+    },
+    "risk_adjusted": {
+      "sharpe": 4.503660030772,
+      "sortino": 8.581640357518,
+      "calmar": 107.196211234448,
+      "psr": 0.779550808377,
+      "deflated_sharpe": 0.036213259062,
+      "n_trials_used": 111,
+      "deflation_basis": "sharpe_standard_error_under_the_zero_sharpe_null",
+      "skew": -0.269760459321,
+      "excess_kurtosis": -1.623097691138,
+      "annualization_basis": 252
+    },
+    "drawdown": {
+      "max_drawdown_pct": -1.175318315377,
+      "max_drawdown_days": 4,
+      "peak_date": "2026-08-03",
+      "trough_date": "2026-08-04",
+      "recovered": true,
+      "recovery_factor": 2.116500829187
+    },
+    "trades": {
+      "count": 3,
+      "win_rate": 0.666666666667,
+      "loss_rate": 0.333333333333,
+      "profit_factor": 4.467661691542,
+      "expectancy_usd": 232.333333333333,
+      "avg_win_usd": 449.0,
+      "avg_loss_usd": -201.0,
+      "payoff_ratio": 2.233830845771,
+      "gross_profit_usd": 898.0,
+      "gross_loss_usd": -201.0,
+      "total_fees_usd": 3.0,
+      "by_champion": {
+        "uranium_momo": {
+          "count": 3,
+          "pnl_usd": 697.0,
+          "fees_usd": 3.0,
+          "win_rate": 0.666666666667
+        }
+      },
+      "open_at_close": 0,
+      "exposure": 1.0,
+      "turnover": 0.024395061728
+    },
+    "benchmark": {
+      "name": "equal_weight_universe_bh",
+      "method": "equal-weight buy-and-hold over the symbols this run actually traded, priced from bars already in the shared lake over the run's own session window; weights are set at the first session mark and never rebalanced",
+      "symbols": [
+        "CCJ",
+        "LEU",
+        "SMR"
+      ],
+      "total_return_pct": 2.1,
+      "sharpe": 4.34070048913,
+      "alpha_pct": 3.29319887202,
+      "beta": 1.128494109364,
+      "information_ratio": 3.737958790878,
+      "tracking_error_pct": 2.911929515304,
+      "correlation": 0.9887059035,
+      "note": null
+    },
+    "monthly_returns_pct": {
+      "2026-07": 0.89552238806,
+      "2026-08": 1.577909270217
+    }
+  },
+  "assumptions": {
+    "paper_only": true,
+    "live_gate": {
+      "execution_mode": "paper",
+      "real_orders_reachable": false,
+      "re_resolved_each_segment": true,
+      "note": "real-money orders need BOTH config mode: live and ALLOW_LIVE=true; the pair is re-resolved from the config file and the environment at every process start, is never written to this record and is never restored from one, and a resume whose verdict differs from the frozen one is refused rather than reconciled"
+    },
+    "fill_model": "next_bar_open",
+    "lookahead": "none \u2014 a decision taken on bar t is filled at bar t+1's open, and every walk-forward test window sits strictly after its train window",
+    "fee_bps": 1.0,
+    "slippage_bps": 2.0,
+    "round_trip_cost_bps": 6.0,
+    "costs_charged": "per side \u2014 a round trip pays both legs",
+    "walk_forward": {
+      "sizing": "auto",
+      "min_train_bars": 40,
+      "max_train_bars": 120,
+      "min_test_bars": 20,
+      "max_test_bars": 40,
+      "step_bars": null,
+      "embargo_bars": 0,
+      "test_after_train": true
+    },
+    "forward_holdout": {
+      "min_bars": 20,
+      "max_bars": 40,
+      "reserved": true,
+      "note": "one test window of the most-recent bars, reserved from the pre-filter, the walk-forward and the optimizer alike; a panel too short to leave a full split behind degrades to no forward-holdout gate rather than starving the search"
+    },
+    "symbol_holdout": {
+      "size": 2,
+      "fit_set_size": 4,
+      "symbols": null
+    },
+    "min_trials": 8,
+    "promotion_thresholds": {
+      "metric": "sharpe",
+      "max_gap": 1.0,
+      "min_test_metric": 0.5,
+      "min_holdout_metric": 0.0,
+      "min_symbol_holdout_metric": 0.0,
+      "min_symbol_consistency": 0.5,
+      "min_test_activity": 0.02,
+      "annualization_cap": 252,
+      "max_period_ratio": 1.0,
+      "max_reverse_gap": 1.0,
+      "max_test_metric": 0.0,
+      "champion_count": 5
+    },
+    "benchmark": {
+      "name": "equal_weight_universe_bh",
+      "method": "equal-weight buy-and-hold over the symbols this run actually traded, priced from bars already in the shared lake over the run's own session window; weights are set at the first session mark and never rebalanced",
+      "rebalancing": "none \u2014 weights are set at the first session mark this run can price and are never rebalanced; each name's contribution drifts with its own return thereafter"
+    },
+    "state_scope": "run"
+  },
+  "events": [
+    {
+      "t": "2026-07-28T14:20:00.000Z",
+      "segment": 1,
+      "kind": "warn",
+      "text": "engine component 'prompts' moved since this run was created (searcher tier)"
+    }
+  ],
+  "errors": []
+}
+

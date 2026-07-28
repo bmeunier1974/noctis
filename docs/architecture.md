@@ -297,7 +297,9 @@ workspace/
 ```
 
 Two runs in one workspace therefore cannot crown champions onto one board or trade one paper
-account, and a run's numbers describe only what that run produced. The four per-run paths
+account, and a run's numbers describe only what that run produced — which is why every record
+states `assumptions.state_scope: "run"`, so a comparison between two runs is a comparison of two
+experiments rather than of two views of one board. The four per-run paths
 (`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from `run_dir` in
 `config/settings.py`; `bootstrap.open_run_store` rebinds `run_dir` to the run it just minted, so
 no command body does path arithmetic. `run_dir` defaults to the reserved `runs/legacy/` run —
@@ -315,7 +317,7 @@ bare `research`), and the run `noctis migrate` adopts existing state into. The *
 | `strategies/*.py` | The seed library — `TEMPLATE.py` + three worked examples, one reviewable `.py` per strategy with its research record in the header (see `strategies/README.md`) | **committed** |
 | `mandate/` | Operator mandate scaffold — `MANDATE.md.example` (a balanced Sortino swing brief), five shipped profiles, `tune-first`, `references/` (see `mandate/README.md`) | **committed** (scaffold only) |
 | `mandate/MANDATE.md` + custom personalities + personal `references/` | The operator's own steering input | ignored |
-| `MEMORY.seed.md` | Curated starting lessons — copied into the live memory on first run | **committed** |
+| `MEMORY.seed.md` | Curated starting lessons — copied into `<run>/memory/MEMORY.md` at **every** run's creation, so each run starts from the same lessons and grows its own | **committed** |
 
 **The workspace (output — git never sees inside it):**
 
@@ -341,8 +343,9 @@ bare `research`), and the run `noctis migrate` adopts existing state into. The *
 
 `run.json` is written by three modules with one boundary between them: `reporting/run_store.py`
 does every read and the one write, `reporting/run_record.py` is a **pure** builder over what was
-collected, and `reporting/schema.py` is a pure validator. Two of the sections that boundary
-carries are worth naming here.
+collected, and `reporting/schema.py` is a pure validator. This section is *why* those sections
+exist and how they are produced; the field-by-field contract — every key, when it is `null`, the
+versioning promise, the caps, and a worked example — is [run-record.md](run-record.md).
 
 **`segments[].environment` — per segment, never per run.** Each process invocation records the
 machine it actually ran on: hardware (CPU model, physical/logical cores, max frequency, total RAM,
@@ -414,8 +417,10 @@ said it would do. `sessions[]` is the evidence — one entry per closed session,
 account's equity mark for that date, its own start/end equity, orders submitted, closing positions
 and its **trade log**, where every fill states its timestamp, fees, modelled slippage and the
 **champion** the symbol was assigned when it filled. `performance` is what that evidence computes
-to, and it names itself `source: "paper_account"` so no consumer can present it as a scorecard;
-backtest numbers stay under `strategies[].scorecard` and are never mixed in.
+to, and it names itself `source: "paper_account"` so no consumer can present it as a scorecard. The
+backtest numbers stay in the other section entirely: a candidate's are the `observed` values inside
+`strategies[].gates[]`, beside the `threshold` each was measured against, and nothing from a
+scorecard is ever mixed into the realised block.
 
 - **The curve is derived, never appended to.** At each CLOSE the engine writes one dated mark to
   the run's own account ledger (`<run>/state/equity_curve.jsonl`, append-only, one mark per date

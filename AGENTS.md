@@ -15,8 +15,9 @@ seeds are read-only input) and drives `formulate → match → optimize → deci
 registry. Without a key it falls back to a legacy Optuna/proposer loop over the same library.
 
 `README.md` is a short landing page; the authoritative narrative lives in `docs/`
-(architecture, research, configuration, data, cli, safety, development). This file is the
-operating contract — read it first, then the relevant `docs/` page for depth.
+(architecture, research, validation, run-record, configuration, data, cli, safety, development,
+parity). This file is the operating contract — read it first, then the relevant `docs/` page for
+depth.
 
 ## The rules that don't bend
 
@@ -167,7 +168,11 @@ latches off with one warning rather than raising into the engine. **Retention is
 completed-only**: `run_store.prune_run_state` (`noctis run-prune <address> [--dry-run]`) is the one
 code path in Noctis that deletes a run's files — the heavy `state/`, `strategies/` and `reports/`
 directories, never `run.json`/`index.json` (they *are* the progress history), and never for a run
-that could still be resumed, since prunable and resumable are the same constant's two sides.
+that could still be resumed, since prunable and resumable are the same constant's two sides. The
+record's own contract — every field and when it is `null`, the additive-only versioning promise,
+the caps, engine identity and `comparable_key`, and a worked example — is
+[`docs/run-record.md`](docs/run-record.md); `noctis run-record <address> --validate` checks a
+record against it.
 
 **A run outlives its process, so it carries its own config.** `noctis run --resume <address>` appends
 a segment to an existing run and keeps accumulating into the same record — the run, not the process,
@@ -206,12 +211,16 @@ the strategy-family registry, the agent research session), live in one compositi
   ```
   workspace/
     data_lake/            ← SHARED by every run. Vendor data is expensive and run-neutral.
+    runs/index.json       ← the DERIVED listing roll-up over every record (never authoritative)
     runs/<run_id>/        ← run.json + run.lock, and everything that run produced:
       state/  strategies/{__tmp,champions}/  memory/MEMORY.md  reports/  qa/
   ```
 
   Two runs in one workspace therefore cannot crown champions onto one board or trade one paper
-  account. `workspace_dir` (env `NOCTIS_WORKSPACE`) is still the one output root; the four
+  account — and `assumptions.state_scope: "run"` on every record says so, so a comparison between
+  two runs is a comparison of two experiments (the record's own contract:
+  [`docs/run-record.md`](docs/run-record.md)). `workspace_dir` (env `NOCTIS_WORKSPACE`) is still
+  the one output root; the four
   per-run paths (`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from **`run_dir`**,
   which defaults to the reserved `runs/legacy/` run — what an invocation that never opened a run
   reads (`status`, `champions`, `account`, `report`, a bare `research`) — and is rebound to the

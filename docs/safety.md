@@ -19,7 +19,7 @@ And even with both gates open, the live execution adapter is a **stub that refus
 real-order path exists in the codebase.
 
 **The gate is never restored from a file that is not `config.yaml`.** A run freezes its
-configuration so it can be resumed weeks later ([configuration.md](configuration.md#config-freezing-what-a-resumed-run-reads)),
+configuration so it can be resumed weeks later ([configuration.md](configuration.md#config-freezing--what-a-resumed-run-reads)),
 and `mode`/`allow_live` are the one pair excluded from that: never written to a run record (the
 record schema refuses one that carries either) and never rehydrated. `resolve_execution_mode` runs
 fresh at **every** process start, so `noctis run --resume <run_id>` faces exactly the same hard

@@ -2,7 +2,8 @@
 
 All commands run as `python -m noctis <command>` (or `noctis <command>` with the venv active).
 A bare `noctis run` contacts no external service; `research` and the verdict tools need a
-configured LLM (see [research.md](research.md)).
+configured LLM (see [research.md](research.md)). What the verbs below write into `run.json` is
+documented field by field in [run-record.md](run-record.md).
 
 ## Setup
 
@@ -167,7 +168,7 @@ Four things refuse a resume, all before any work starts:
 | the resolved mode differs from the run's | a paper run's results may not acquire live segments (see below) |
 
 **Config is frozen at run creation** (the full contract:
-[configuration.md → Config freezing](configuration.md#config-freezing-what-a-resumed-run-reads)).
+[configuration.md → Config freezing](configuration.md#config-freezing--what-a-resumed-run-reads)).
 Editing `config.yaml` or a mandate profile between segments does not change what a running
 experiment was told to do; the frozen keys and the run's frozen digest stay put. The current files
 still supply the *live* tier — secrets, paths, and the per-process budgets like
@@ -303,7 +304,7 @@ freezes its engine identity at creation — the declared `ENGINE_VERSION` plus o
 behavioural component (see [Engine identity](#engine-identity--are-these-two-runs-comparable)) —
 and every resume compares that against this checkout, component by component. The policy splits on
 **who changed: the judge, or the searcher**, and it is deliberately the same line the CI ratchet
-draws (see [development.md → Engine fingerprint ratchet](development.md#engine-fingerprint-ratchet)).
+draws (see [development.md → Engine fingerprint ratchet](development.md#the-engine-fingerprint-ratchet)).
 
 | what moved | on resume |
 |---|---|
@@ -381,9 +382,9 @@ without opening a file:
 
 ```
 run                      label              status      segments      runtime  comparable key
-20260730T025536Z-bc14eb  sector-specialist  stopped            1        1d01h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
-20260727T142233Z-7a8f9d  nightly-momo       running            4  2d12h/100h  1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
-20260714T031102Z-4d9c1a  gate-rework        completed          6    5d04h/8h  2|8c1de5f0a2b34c77|3ba3e0bf1c97134f|sharpe  (mixed engine)
+20260730T025536Z-bc14eb  sector-specialist  stopped            1        1d01h  2|0fb6148041c95608|3ba3e0bf1c97134f|sharpe
+20260727T142233Z-7a8f9d  nightly-momo       running            4  2d12h/100h  2|0fb6148041c95608|3ba3e0bf1c97134f|sharpe
+20260714T031102Z-4d9c1a  gate-rework        completed          6    5d04h/8h  3|8c1de5f0a2b34c77|3ba3e0bf1c97134f|sharpe  (mixed engine)
 20260101T000000Z-brokn0  -                  unreadable         -            -  an unreadable run.json (JSONDecodeError)
 
 1 short run(s) hidden; pass --all to list them.
@@ -426,7 +427,8 @@ python -m noctis run-record latest --validate
 # workspace/runs/20260714T031102Z-4d9c1a/run.json: valid against run-record schema version 1 …
 ```
 
-It checks the whole contract in `reporting/schema.py` — every section present, every absent value
+It checks the whole contract in `reporting/schema.py` — documented field by field in
+[run-record.md](run-record.md) — every section present, every absent value
 an explicit `null` rather than a dropped key, every timestamp UTC ISO-8601 with a `Z`, every
 dimensioned number naming its unit the one canonical way (`_usd`, `_pct`, `_bps`, `_s`, `_bytes`,
 `_bars`), every cost field calling itself an estimate, and neither live-money gate anywhere in the
@@ -582,20 +584,21 @@ moved, a prompt reworded, a shipped profile edited, a seed strategy changed: eac
 without a single config key differing. `engine` prints that identity in one screen.
 
 ```
-engine version:    1
+engine version:    2
 components:
-  gates        f63d47b7b9604ab1  (arbiter — binds comparability)
+  gates        0fb6148041c95608  (arbiter — binds comparability)
   backtest     3ba3e0bf1c97134f  (arbiter — binds comparability)
-  research     4baf9dea0c82c8cc
+  research     67528310408eeefc
   prompts      14eb169506a6b5aa
-  profiles     6803b9d26c63d6ae
+  profiles     6b0e047bd1dafb6d
   seeds        4826fe7224641eb4
   memory_seed  3337fa2cbf896932
-  schema       null
-               missing input(s): src/noctis/reporting/schema.py
+  schema       8ff21a89b4298a42
 election metric:   sharpe
-comparable key:    1|f63d47b7b9604ab1|3ba3e0bf1c97134f|sharpe
+comparable key:    2|0fb6148041c95608|3ba3e0bf1c97134f|sharpe
 ```
+
+(Digests are whatever *this* checkout hashes to; run the command for yours.)
 
 `engine version` is a plain incrementing integer versioning the **behavioural contract**,
 deliberately decoupled from the package version: a release that changes no behaviour must not
@@ -619,8 +622,9 @@ custom profiles and personal references are deliberately **out**, so the same ch
 identically on every machine. Content is hashed raw (LF-normalized), *not* stripped of comments:
 prompt text is indistinguishable from a comment to any safe automated rule, so a docstring edit
 moving a component is the accepted cost of never silently pooling incomparable runs. A missing
-input — like the run-record `schema` module before it lands — reads `null` with a note, never a
-crash.
+input — a checkout without the file a component maps to — reads `null` with a note naming what was
+missing, never a crash. The full component table, and where the key lands on a record:
+[run-record.md → engine](run-record.md#engine--identity-components-comparable-key).
 
 ## Research & strategies
 
@@ -671,9 +675,9 @@ night came from `noctis run` or from a standalone session.
 
 **A run that only ever researched is a first-class shape.** It reports `traded: false` and
 `performance: null` — never zeros — so a consumer renders "researching" rather than a flat 0% equity
-curve it was handed as if it were a result. (`performance` is `null` for every run until the
-performance block itself lands; the *rule* `traded: false` ⇒ `null` is enforced by the record's
-schema validator.)
+curve it was handed as if it were a result. The pairing is enforced by the record's schema
+validator, and it is one of the two cases `performance` is `null` in
+([run-record.md](run-record.md#performance)).
 
 One asymmetry worth knowing: `research --resume` has no `--allow-engine-upgrade`. Searcher-tier
 engine drift warns and is recorded here exactly as on `run`, but a resume whose **arbiter** moved is

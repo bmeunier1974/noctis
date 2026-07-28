@@ -145,8 +145,11 @@ A backtest number and a traded number are different claims, and the most common 
 misleads is by letting a reader mistake one for the other. So they live in different sections of
 the run record and neither is computed by the other's code:
 
-- **Backtest numbers** are `Scorecard`s, under `strategies[].scorecard` — panel means, per-symbol
-  splits, the two holdout metrics — produced by `backtest/scorecard.py`, which feeds the gates.
+- **Backtest numbers** are `Scorecard`s — panel means, per-symbol splits, the two holdout metrics —
+  produced by `backtest/scorecard.py`, which feeds the gates. What of them reaches the run record
+  does so under `strategies[]`, as the `observed` value of each gate beside the `threshold` it was
+  measured against ([run-record.md](run-record.md#strategiesgates)); the whole card lives in the
+  run's own state, not in the record.
 - **Realised numbers** are the paper account's, under `performance` (labelled
   `source: "paper_account"`) and derived from the run's own daily equity marks and fills by
   `reporting/metrics.py`, a **pure** module that no gate can import. Adding a reporting metric can
