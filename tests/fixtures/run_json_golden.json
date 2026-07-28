@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "kind": "noctis.run",
+  "run": {
+    "run_id": "<run_id>",
+    "label": null,
+    "status": "stopped",
+    "created_utc": "2026-07-27T14:22:33.418Z",
+    "last_active_utc": "2026-07-28T02:52:33.418Z",
+    "completed_utc": null,
+    "cumulative_runtime_s": 9000.0,
+    "complete": true,
+    "truncated": {}
+  },
+  "segments": [
+    {
+      "index": 0,
+      "started_utc": "2026-07-27T14:22:33.418Z",
+      "stopped_utc": "2026-07-27T16:22:33.418Z",
+      "duration_s": 7200.0,
+      "stopped_reason": "time_limit",
+      "status": "stopped",
+      "argv": [
+        "run",
+        "-v"
+      ],
+      "command": "run",
+      "resumed": false,
+      "counters": {
+        "cycles": 2,
+        "research_iterations": 9,
+        "trades": 2
+      },
+      "engine_version": "<engine_version>",
+      "engine_fingerprint": [
+        "backtest",
+        "gates",
+        "memory_seed",
+        "profiles",
+        "prompts",
+        "research",
+        "schema",
+        "seeds"
+      ]
+    },
+    {
+      "index": 1,
+      "started_utc": "2026-07-28T02:22:33.418Z",
+      "stopped_utc": "2026-07-28T02:52:33.418Z",
+      "duration_s": 1800.0,
+      "stopped_reason": "stop_requested",
+      "status": "stopped",
+      "argv": [
+        "run"
+      ],
+      "command": "run",
+      "resumed": true,
+      "counters": {
+        "cycles": 3
+      },
+      "engine_version": "<engine_version>",
+      "engine_fingerprint": [
+        "backtest",
+        "gates",
+        "memory_seed",
+        "profiles",
+        "prompts",
+        "research",
+        "schema",
+        "seeds"
+      ]
+    }
+  ],
+  "engine": {
+    "engine_version": "<engine_version>",
+    "noctis_version": "<noctis_version>",
+    "fingerprint": [
+      "backtest",
+      "gates",
+      "memory_seed",
+      "profiles",
+      "prompts",
+      "research",
+      "schema",
+      "seeds"
+    ],
+    "comparable_key": "<comparable_key>",
+    "mixed_engine": false
+  },
+  "events": [
+    {
+      "t": "2026-07-28T02:22:33.418Z",
+      "segment": 1,
+      "kind": "warn",
+      "text": "stole a stale run lock held by pid 999999: its heartbeat is 207368553s cold (older than the 604800s threshold)"
+    }
+  ],
+  "errors": []
+}

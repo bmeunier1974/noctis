@@ -338,6 +338,7 @@ REFUSED: dict[str, str] = {
     "reports_dir": _STATE_IO,
     "memory_path": _STATE_IO,
     "qa_dir": _STATE_IO,
+    "runs_dir": _STATE_IO,
     "strategies_dir": _STATE_IO,
     "mandate_dir": _STATE_IO,
     "data.lake_dir": _STATE_IO,

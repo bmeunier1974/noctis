@@ -52,6 +52,18 @@ It needs catalog data first — ingest history (or let auto-backfill run), then 
 `SIGINT`/`SIGTERM` and the time limit all route through one clean shutdown that stops between
 phases and flushes state.
 
+Every invocation **mints a new run** and echoes its id and record path at start
+(`Run: 20260727T142233Z-a1b2c3`, `Run record: workspace/runs/<run_id>/run.json`). Identity is
+minted, never derived from the configuration: two byte-identical configs are two runs. The run
+owns a tree under `runs_dir` (default `workspace/runs/<run_id>/`) holding one self-describing
+`run.json` — identity, lifecycle, one entry in `segments[]` per process invocation, the engine
+identity that produced it, and the run's events — plus a `run.lock` while the engine holds it.
+The record is rewritten at each CLOSE and at stop, atomically; a writer failure logs one warning
+and leaves the record marked incomplete rather than taking the run down. A second engine refuses
+to open a run another engine already holds; a stale lock (a dead pid on this host, or a
+week-cold heartbeat) is stolen with a warning and a recorded event. A run killed mid-segment is
+marked `interrupted` the next time it is opened.
+
 ### Verbosity
 
 `run` and `research` share one ladder. A bare command is silent; `-v` streams phase banners and

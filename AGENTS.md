@@ -149,6 +149,18 @@ scorecards (see rule 2 for the gate order); `src/noctis/champions/registry.py` p
 the state dir's `champions.json`. Promotion compares on a scale-free footing and treats a champion scored
 under a *different* metric as "stale" (displaceable), because cross-metric numbers aren't comparable.
 
+**The run is an entity, and it writes one file.** Every `noctis run` mints a run id
+(`observability/debug/runid.py` — identity is minted, never derived from the config) and opens
+`workspace/runs/<run_id>/`: `run.json` (the record) + `run.lock` (liveness). The I/O boundary is the
+design: `reporting/run_store.py` is the **only** module that touches that tree — it collects, locks,
+appends the process's segment and writes atomically behind a fail-safe latch — while
+`reporting/run_record.py` (`build(artifacts) -> dict`) and `reporting/schema.py` (`validate`) are
+**pure**, which is what makes the golden-record snapshot cheap. Wired in the composition root
+(`bootstrap.open_run_store`), rewritten at each CLOSE via the runtime's `on_cycle_close` seam. Two
+honesty rules: a killed segment is marked `interrupted` on the **next** open, never guessed at write
+time, and a live lock is a hard refusal (two engines on one run is corruption) while everything else
+latches off with one warning rather than raising into the engine.
+
 **Config + mandate overlay.** `config.yaml` + `.env` → typed `src/noctis/config/settings.py` (env vars
 override YAML; `NOCTIS_CONFIG` points at an alternate file). The active mandate's front-matter
 `config:` block may overlay **only** the run-shaping tier `src/noctis/config/overlay.py` classifies
@@ -164,8 +176,9 @@ the strategy-family registry, the agent research session), live in one compositi
 - **Where state lives — the input/output contract:** committed files are input the engine treats
   as read-only (`strategies/` seeds + `TEMPLATE.py` + `strategies/README.md`, the `mandate/`
   scaffold, `config.example.yaml`, `MEMORY.seed.md`); **everything the engine writes lands under
-  the gitignored `workspace/`** (state, data lake, reports, agent memory, and the strategy
-  `__tmp`/`champions` tiers), one knob (`workspace_dir`, env `NOCTIS_WORKSPACE`) all derived paths
+  the gitignored `workspace/`** (state, data lake, reports, agent memory, the strategy
+  `__tmp`/`champions` tiers, and one `runs/<run_id>/` folder per run — its `run.json` record and
+  liveness lock), one knob (`workspace_dir`, env `NOCTIS_WORKSPACE`) all derived paths
   follow. `noctis init` scaffolds the local input copies; `noctis migrate` moves a pre-workspace
   layout in; a startup guard refuses to run beside un-migrated legacy data (`status` only warns).
   A public clone ships templates/seeds/scaffold only, and no operator's champions or rejects

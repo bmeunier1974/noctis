@@ -461,16 +461,75 @@ def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | No
 _DIGEST_SECRET_FIELDS = frozenset({"databento_api_key", "anthropic_api_key", "openai_api_key"})
 
 
-def build_recorder(settings, *, argv: list[str], mode: str | None):
+def open_run_store(
+    settings,
+    *,
+    argv: list[str],
+    command: str = "run",
+    run_id: str | None = None,
+    clock: Callable[[], Any] | None = None,
+    label: str | None = None,
+):
+    """Open this invocation's run — the always-on run identity, minted here and nowhere else.
+
+    Every ``noctis run`` gets a run id, a tree under ``settings.runs_dir``
+    (``workspace/runs/<run_id>/``), a liveness lock and one self-describing ``run.json``, whether
+    or not ``--debug`` is on. Identity is **minted**, never derived from the configuration: two
+    byte-identical configs are two runs unless one explicitly resumes the other (story #131), so
+    nothing here hashes settings into an id.
+
+    The id minted here is also the ``--debug`` QA tree's id (``build_recorder`` takes it as an
+    argument), so a run has exactly one identity and one tree per artifact instead of two ids
+    nobody can correlate.
+
+    Raises :class:`~noctis.reporting.run_store.RunLockedError` when another engine already holds
+    the addressed run — the one failure in this subsystem that is fatal rather than latched.
+    """
+    from datetime import UTC, datetime
+
+    from noctis.reporting.run_store import open_run
+
+    return open_run(
+        Path(settings.runs_dir),
+        clock=clock or (lambda: datetime.now(UTC)),
+        argv=list(argv),
+        election_metric=settings.promotion.metric,
+        run_id=run_id,
+        command=command,
+        label=label,
+    )
+
+
+def segment_counters(result) -> dict[str, int]:
+    """This segment's own counters, read off a ``RuntimeResult``.
+
+    Per-segment rather than per-run because throughput is only comparable when it is attributed
+    to the process that produced it — a run resumed on another machine, or after a code change,
+    must not have one segment's work credited to another's conditions. Duck-typed on purpose: the
+    run store never imports the engine.
+    """
+    return {
+        "cycles": int(getattr(result, "cycles_completed", 0) or 0),
+        "research_iterations": int(getattr(result, "research_iterations", 0) or 0),
+        "research_promotions": int(getattr(result, "research_promotions", 0) or 0),
+        "trades": int(getattr(result, "trades", 0) or 0),
+    }
+
+
+def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str | None = None):
     """Assemble the ``--debug`` QA recorder — the one place the run tree is minted (story #45).
 
-    Prune-on-start first (retention per ``qa.keep_last_runs``), then mint a fresh run id and
+    Prune-on-start first (retention per ``qa.keep_last_runs``), then take the run's id and
     construct a :class:`~noctis.observability.debug.Recorder` under ``settings.qa_dir`` with a UTC
     wall-clock and the manifest fields the recorder cannot know itself: the CLI ``argv``, the run
     ``mode``, a deterministic config digest, and the noctis/python versions. The recorder owns run
     id and the started/stopped/duration stamps; everything else is injected here. The digest is
     taken over the *resolved* settings with API keys excluded (:data:`_DIGEST_SECRET_FIELDS`) so a
     credential can never ride into the report tree.
+
+    ``run_id`` is the run's own id (:func:`open_run_store`), so the QA tree and the run record
+    describe the same run under one name; it defaults to a freshly minted id for callers that
+    have no run store, which keeps this function usable on its own.
     """
     import hashlib
     import platform
@@ -497,7 +556,7 @@ def build_recorder(settings, *, argv: list[str], mode: str | None):
     }
     return Recorder(
         settings.qa_dir,
-        run_id=new_run_id(),
+        run_id=run_id or new_run_id(),
         clock=lambda: datetime.now(UTC),
         manifest=manifest,
     )

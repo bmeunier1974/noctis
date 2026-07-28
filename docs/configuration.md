@@ -55,13 +55,14 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `champion_count` | Champion board size |
 | `time_limit_hours` | Global stop from any phase |
 | `workspace_dir` | **The one output root** (default `workspace/`; env `NOCTIS_WORKSPACE`) — every path below derives from it when not set |
-| `state_dir`, `reports_dir`, `memory_path`, `data.lake_dir` | Per-artifact overrides; each defaults to its workspace-derived location (`workspace/state`, `workspace/reports`, `workspace/memory/MEMORY.md`, `workspace/data_lake`) |
+| `state_dir`, `reports_dir`, `memory_path`, `data.lake_dir`, `runs_dir` | Per-artifact overrides; each defaults to its workspace-derived location (`workspace/state`, `workspace/reports`, `workspace/memory/MEMORY.md`, `workspace/data_lake`, `workspace/runs`) |
 | `strategies_dir`, `mandate_dir` | The committed input surfaces: the seed strategy library and the mandate scaffold |
 
 ## The workspace
 
-Everything the engine writes — run state, the data lake, reports, agent memory, and the
-strategy working/champion tiers — lands under the single gitignored `workspace_dir`. One
+Everything the engine writes — run state, the data lake, reports, agent memory, the strategy
+working/champion tiers, and one `runs/<run_id>/` folder per run (its `run.json` record and
+liveness lock) — lands under the single gitignored `workspace_dir`. One
 gitignore line, one thing to back up or wipe. Setting the env var `NOCTIS_WORKSPACE`
 relocates all of it at once (useful when running the CLI from outside the repo); an explicit
 per-artifact knob is an absolute override. `noctis init` creates the workspace alongside the
@@ -80,7 +81,7 @@ fill-cost floor, the promotion thresholds, the two-axis holdout geometry, the ou
 secrets). Every leaf setting is classified **exactly once** in `src/noctis/config/overlay.py` —
 the authoritative table, with a justification comment per group — and a completeness ratchet in
 the test suite fails until a newly added knob is classified deliberately, so nothing is allowed
-by accident of omission. Today: **35 allowed, 2 clamped, 49 refused**. The whole surface also
+by accident of omission. Today: **35 allowed, 2 clamped, 50 refused**. The whole surface also
 ships commented-out in `mandate/MANDATE.md.example`, so it is discoverable without reading
 source.
 
@@ -112,7 +113,7 @@ while the run does another. `null` — "no bound": an unlimited budget, no exhau
 — ranks as the least-disciplined end of *either* scale, so an overlay may replace it with a
 number and never the reverse.
 
-**Refused (49) — fatal at startup, with the reason printed.** A refused, unknown, or invalid
+**Refused (50) — fatal at startup, with the reason printed.** A refused, unknown, or invalid
 key stops the process before any work starts, listing **every** problem in one error so a bad
 mandate is one fix rather than a fix-one-rerun loop. (Refusals used to be warned about and
 silently skipped, which meant discovering three days into a run that a knob never applied.) The
@@ -120,7 +121,8 @@ refused set is the arena: the live-money double gate (`mode`, `allow_live`), the
 fill-cost floor (`backtest.fee_bps`, `backtest.slippage_bps`), every `promotion.*` except
 `metric`, the holdout geometry (`research.fit_set_size`, `research.symbol_holdout_size`),
 `champion_count`, every state/IO path (`workspace_dir`, `state_dir`, `reports_dir`,
-`memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`), the three API keys,
+`memory_path`, `qa_dir`, `runs_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`), the three
+API keys,
 self-selection (`research.mandate`, `research.mode`), `risk.*` / `trading.*` /
 `live_feed.poll_interval_s`, `data.provider` / `data.dataset`, `session.calendar` /
 `session.timezone`, and `ideation.*`.

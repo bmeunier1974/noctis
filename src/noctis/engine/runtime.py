@@ -132,6 +132,7 @@ class Runtime:
         ideator=None,
         mandate=None,
         on_event=None,
+        on_cycle_close=None,
     ):
         self.settings = settings
         self.clock = clock
@@ -139,6 +140,12 @@ class Runtime:
         # bare run byte-identical: the research feed falls back to its own logger, and the phase
         # hooks below emit nothing. The CLI builds this from ``run``'s ``-v``/``--show-reasoning``.
         self._on_event = on_event
+        # The run-record checkpoint seam: called once at the end of every CLOSE with the current
+        # :class:`RuntimeResult`, so the run's durable record is current after each day-cycle
+        # rather than only when the process finally stops. ``None`` on a bare run. The hook is
+        # expected not to raise — the run store it is wired to latches its own failures off — so
+        # a reporting artifact can never take down a multi-week run.
+        self._on_cycle_close = on_cycle_close
         self.market_lake = market_lake
         self.registry = registry
         self.families = families
@@ -428,6 +435,8 @@ class Runtime:
             self.result.reports.append(result.report_path)
         self.result.cycles_completed += 1
         self._reset_cycle()
+        if self._on_cycle_close is not None:
+            self._on_cycle_close(self.result)
 
     # --- main loop ---
     def run(self, start: datetime | None = None, max_cycles: int | None = None) -> RuntimeResult:
@@ -541,6 +550,7 @@ def build_runtime(
     sleeper_factory=None,
     mandate=None,
     on_event=None,
+    on_cycle_close=None,
 ) -> Runtime:
     """Construct a :class:`Runtime` from settings and the collaborators it needs."""
     from noctis.bootstrap import build_families
@@ -580,4 +590,5 @@ def build_runtime(
         ideator=ideator,
         mandate=mandate,
         on_event=on_event,
+        on_cycle_close=on_cycle_close,
     )

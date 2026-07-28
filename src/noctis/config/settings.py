@@ -536,6 +536,10 @@ class Settings(BaseSettings):
     memory_path: str = "workspace/memory/MEMORY.md"
     # Hour-segmented QA run reports (the --debug tree); gitignored like everything under workspace/.
     qa_dir: str = "workspace/qa"
+    # The run tree: one ``<run_id>/`` folder per run, each holding that run's ``run.json`` record
+    # and its liveness lock. Every ``noctis run`` mints a new run here (identity is minted, never
+    # derived from the config), so this directory is the run history of the whole workspace.
+    runs_dir: str = "workspace/runs"
     # The one-file strategy library root: committed seeds + TEMPLATE.py, plus the gitignored
     # __tmp/ (working files) and champions/ (local champions) tiers. See strategies/README.md.
     strategies_dir: str = "strategies/"
@@ -572,6 +576,7 @@ class Settings(BaseSettings):
         data.setdefault("reports_dir", _workspace_subpath(workspace, "reports"))
         data.setdefault("memory_path", _workspace_subpath(workspace, "memory", "MEMORY.md"))
         data.setdefault("qa_dir", _workspace_subpath(workspace, "qa"))
+        data.setdefault("runs_dir", _workspace_subpath(workspace, "runs"))
         derived_lake = _workspace_subpath(workspace, "data_lake")
         raw_data = data.get("data")
         if raw_data is None:

@@ -9,6 +9,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The run is now a real, always-on entity with its own record.** Every `noctis run` mints a
+  fresh run id (identity is *minted*, never derived from the config — two byte-identical configs
+  are two runs) and gets its own tree, `workspace/runs/<run_id>/`, holding one self-describing
+  `run.json` at `schema_version: 1`, `kind: "noctis.run"`, plus a `run.lock`. The record carries
+  the run's identity/lifecycle, an append-only `segments[]` (one per process invocation, with
+  start/stop stamps, duration, stop reason, argv and its own counters), the **engine identity**
+  that produced it (declared version + per-component fingerprint + comparable key), and the
+  events/errors streams. Three new modules keep the I/O boundary sharp:
+  `reporting/run_store.py` (the only module that touches the run tree), `reporting/run_record.py`
+  (a **pure** `build(artifacts) -> dict` — no I/O, no clock, no config; snapshot-tested against a
+  committed golden record) and `reporting/schema.py` (the versioned, additive-only contract plus a
+  pure `validate()`). The `--debug` QA tree now rides the run's own id, so one run has one
+  identity.
+  - **Durability**: written at each CLOSE and at segment close, atomically (temp file +
+    `os.replace`), synchronously, on an injected clock. A writer failure logs exactly one warning,
+    latches the writer off, and leaves the record honestly marked `complete: false` — a reporting
+    artifact can never take down a multi-week run. Caps (`events` 2 000, `trades` 5 000) always
+    write a truncation note with kept/total counts; segments are uncapped.
+  - **Liveness**: a live `run.lock` (pid, hashed hostname, started, heartbeat) is a **hard
+    refusal** — two engines writing one run would corrupt it. A stale lock (a dead pid on this
+    host, or a heartbeat colder than a week) is stolen with a warning and a recorded event.
+  - **Honesty**: a run killed mid-segment is marked `interrupted` on the **next open**, never
+    guessed at write time.
 - **Engine identity** (`src/noctis/observability/engine_id.py`) and the `noctis engine` verb.
   A declared `ENGINE_VERSION` (a plain incrementing integer, decoupled from the package
   version) plus a **per-component** fingerprint over the committed files that decide behaviour

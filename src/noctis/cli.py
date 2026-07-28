@@ -280,9 +280,17 @@ def run(
     import signal
     import sys
 
-    from noctis.bootstrap import build_event_sink, build_lake, build_memory, build_recorder
+    from noctis.bootstrap import (
+        build_event_sink,
+        build_lake,
+        build_memory,
+        build_recorder,
+        open_run_store,
+        segment_counters,
+    )
     from noctis.engine import MarketClock, build_runtime, initial_phase_for
     from noctis.engine.runtime import trading_roster
+    from noctis.reporting.run_store import RunLockedError
     from noctis.research import client_status
 
     # Off by default (WARNING) so a bare run stays quiet; the -v feed rides the Console below,
@@ -313,21 +321,36 @@ def run(
     typer.echo(f"Initial phase: {initial_phase_for(clock).value}")
     _echo_mandate(active_mandate, inputs.overrides)
 
+    # Always-on run identity (story #129): every invocation mints a run, gets its own tree under
+    # workspace/runs/<run_id>/, takes the liveness lock, and writes one self-describing run.json.
+    # A live lock is the one fatal failure in this subsystem — two engines writing one run would
+    # corrupt it — so it exits non-zero here instead of degrading to a shared write.
+    try:
+        store = open_run_store(settings, argv=sys.argv[1:], command="run")
+    except RunLockedError as exc:
+        _exit_red(exc, prefix="RUN LOCKED: ")
+    typer.echo(f"Run: {store.run_id}")
+    typer.echo(f"Run record: {store.record_path}")
+
     # --debug assembles the QA recorder in the composition root (prune-on-start → run tree →
     # stamped manifest), echoes the run id + report path here at start, and — when the legacy
     # loop will drive research — marks the funnel uninstrumented so a zero-fill can't read as
     # "nothing happened". Off by default: recorder stays None and the run is byte-identical.
+    # It rides the run's OWN id, so the QA tree and the run record name the same run.
     recorder = None
     if debug:
-        recorder = build_recorder(settings, argv=sys.argv[1:], mode=mode)
+        recorder = build_recorder(settings, argv=sys.argv[1:], mode=mode, run_id=store.run_id)
         typer.echo(f"QA run: {recorder.run_id}")
         typer.echo(f"QA report: {recorder.run_dir}")
         if not client_status(settings).ok:
             recorder.mark_legacy_research()
 
-    # The recorder wraps the whole run: a between-phases stop (SIGINT/SIGTERM/time limit returns
-    # normally through runtime.run()) AND a hard error both reach close() via the finally, so an
-    # interrupted run still lands a readable final segment and a stamped manifest.
+    # The run store and the recorder wrap the whole run: a between-phases stop
+    # (SIGINT/SIGTERM/time limit returns normally through runtime.run()) AND a hard error both
+    # reach close() via the finally, so an interrupted run still lands a readable final segment,
+    # a stamped manifest, and a closed run record with its lock released.
+    stopped_reason = "startup"
+    result = None
     try:
         memory = build_memory(settings)
         lake = build_lake(settings)
@@ -353,6 +376,7 @@ def run(
                 "No catalog data yet — ingest history first (e.g. `noctis data ingest AAPL "
                 "--start 2024-01-01 --end 2024-12-31`), then run again. Exiting cleanly."
             )
+            stopped_reason = "no_data"
             return
 
         # One level-aware sink renders the loop's typed events (phase banners + the research feed,
@@ -366,6 +390,9 @@ def run(
             clock=clock,
             mandate=active_mandate,
             on_event=build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder),
+            # Incremental durability: the record is rewritten at each CLOSE, so a multi-week run's
+            # evidence is current on disk long before the process stops.
+            on_cycle_close=lambda outcome: store.checkpoint(counters=segment_counters(outcome)),
         )
 
         # SIGINT/SIGTERM route through one clean shutdown path (stops between phases).
@@ -377,6 +404,7 @@ def run(
             signal.signal(sig, _shutdown)
 
         result = runtime.run()
+        stopped_reason = result.stopped_reason
         typer.echo(
             f"Stopped ({result.stopped_reason}): {result.cycles_completed} cycle(s), "
             f"{result.research_iterations} candidates researched, {result.trades} paper orders."
@@ -386,6 +414,13 @@ def run(
             recorder.close()
             typer.echo(f"QA report: {recorder.run_dir} (run {recorder.run_id})")
             typer.echo(f"QA funnel: {recorder.funnel_line()}")
+        # Closing the segment stamps its stop reason and duration, writes the record one last
+        # time and releases the lock — including on the paths that never reached the loop, so a
+        # run that exits early is still a closed, resumable run rather than a dangling lock.
+        store.close(
+            reason=stopped_reason,
+            counters=segment_counters(result) if result is not None else None,
+        )
 
 
 @app.command()

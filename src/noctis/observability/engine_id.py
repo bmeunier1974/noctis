@@ -112,8 +112,7 @@ COMPONENT_PATHS: Mapping[str, tuple[str, ...]] = {
     ),
     # The starting condition of every run's memory.
     "memory_seed": ("MEMORY.seed.md",),
-    # Changes what is recorded. The run-record schema module does not exist yet (#143); until
-    # it lands this component is null-with-a-note, which is exactly the missing-input rule.
+    # Changes what is recorded: the run record's version, its caps and its validator.
     "schema": ("src/noctis/reporting/schema.py",),
 }
 

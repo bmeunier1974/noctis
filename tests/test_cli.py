@@ -542,8 +542,13 @@ def _one_qa_run(tmp_path) -> Path:
 
 
 def _strip_qa_lines(output: str) -> str:
-    """Drop the additive ``QA …`` framing lines so the event/console feed can be compared."""
-    return "".join(line + "\n" for line in output.splitlines() if not line.startswith("QA "))
+    """Drop the additive ``QA …``/``Run …`` framing lines so the event/console feed can be
+    compared. Both carry the minted run id, which differs by construction between invocations."""
+    return "".join(
+        line + "\n"
+        for line in output.splitlines()
+        if not line.startswith(("QA ", "Run: ", "Run record: "))
+    )
 
 
 def test_run_debug_creates_report_tree_and_echoes_start_and_stop(tmp_path):
@@ -595,7 +600,7 @@ def test_run_debug_v_output_is_byte_identical_to_v_alone(tmp_path):
     assert "QA report:" in debug.output  # the framing IS present under --debug
     assert "QA report:" not in plain.output
     # ...and stripped of that framing, the two feeds are byte-for-byte the same.
-    assert _strip_qa_lines(debug.output) == plain.output
+    assert _strip_qa_lines(debug.output) == _strip_qa_lines(plain.output)
 
 
 def test_run_debug_prunes_qa_area_on_start(tmp_path):

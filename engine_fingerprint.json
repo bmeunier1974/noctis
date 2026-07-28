@@ -64,11 +64,11 @@
       "note": null
     },
     "schema": {
-      "digest": null,
+      "digest": "ec2186d00e7ac23e",
       "files": {
-        "src/noctis/reporting/schema.py": null
+        "src/noctis/reporting/schema.py": "81c9ba07db3e1291"
       },
-      "note": "missing input(s): src/noctis/reporting/schema.py"
+      "note": null
     },
     "seeds": {
       "digest": "4826fe7224641eb4",
