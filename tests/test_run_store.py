@@ -944,6 +944,19 @@ def test_noctis_runs_hides_short_runs_until_all_widens_the_filter(tmp_path):
     assert real.run_id in widened.output and aborted.run_id in widened.output
 
 
+def test_noctis_runs_says_everything_was_hidden_rather_than_crashing(tmp_path):
+    """A workspace whose only run is a failed start has runs to count but none to show. The
+    listing must still tell the operator that, and how to see them."""
+    runs = _runs_dir(tmp_path)
+    aborted = _finished_run(runs, FakeClock(), label="aborted", seconds=2)
+
+    result = runner.invoke(app, ["runs", "--config", _config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert aborted.run_id not in result.output
+    assert "--all" in result.output  # the hidden ones are never silent
+
+
 def test_noctis_runs_lists_an_unreadable_run_rather_than_crashing(tmp_path):
     runs = _runs_dir(tmp_path)
     good = _finished_run(runs, FakeClock(), seconds=7200)

@@ -560,16 +560,18 @@ def runs(
 
     listed = visible_runs(index["runs"], include_all=show_all)
     rows = [_run_row(entry) for entry in listed]
-    ids = max(len(row[0]) for row in rows)
-    labels = max(len(row[1]) for row in rows)
-    typer.echo(
-        f"{'run':<{ids}}  {'label':<{labels}}  {'status':<11} {'segments':>8} {'runtime':>9}  "
-        "comparable key"
-    )
-    for run_id, label, status, segments, runtime, key in rows:
+    if rows:
+        ids = max(len(row[0]) for row in rows)
+        labels = max(len(row[1]) for row in rows)
         typer.echo(
-            f"{run_id:<{ids}}  {label:<{labels}}  {status:<11} {segments:>8} {runtime:>9}  {key}"
+            f"{'run':<{ids}}  {'label':<{labels}}  {'status':<11} {'segments':>8} "
+            f"{'runtime':>9}  comparable key"
         )
+        for run_id, label, status, segments, runtime, key in rows:
+            typer.echo(
+                f"{run_id:<{ids}}  {label:<{labels}}  {status:<11} {segments:>8} "
+                f"{runtime:>9}  {key}"
+            )
     hidden = len(index["runs"]) - len(listed)
     if hidden:
         typer.echo(f"\n{hidden} short run(s) hidden; pass --all to list them.")
