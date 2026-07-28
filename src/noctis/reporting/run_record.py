@@ -35,6 +35,7 @@ __all__ = [
     "RESEARCH_PHASE",
     "RUN_LIMIT_SETTING",
     "TERMINAL_STATUSES",
+    "TRADES_COUNTER",
     "TRADING_PHASE",
     "EngineIdentity",
     "RecordEvent",
@@ -60,6 +61,12 @@ TERMINAL_STATUSES = ("completed",)
 # process that produced it measured.
 RESEARCH_PHASE = "RESEARCH"
 TRADING_PHASE = "TRADING"
+
+# The per-segment counter that says a process actually placed paper orders — the one piece of
+# evidence the record carries today that a run *traded* (story #137). Named here beside the phases
+# for the same reason: the record never imports the engine, so the key the engine writes is stated
+# once, and ``run.traded`` is derived from it rather than latched by whoever noticed first.
+TRADES_COUNTER = "trades"
 
 # The settings knob that holds the run-level compute cap, in hours (story #136). The record does
 # **not** keep a second copy of it: the cap is an ordinary frozen setting, pinned into
@@ -184,6 +191,14 @@ class RunArtifacts:
     # the builder cannot quietly reinterpret it. ``None`` for a run that never froze one (an
     # adopted history, story #131).
     inputs: Mapping[str, object] | None = None
+    # Trials this run has journaled, counted at read time off its **own** experiment journals
+    # (``run_store.read_trials``) — the very lines the exhaustion gate counts, never a counter
+    # incremented in memory. It is therefore cumulative across every segment by construction,
+    # including the research-only ones a standalone ``noctis research --resume`` appends (story
+    # #137), and it is the multiple-testing count a deflated Sharpe will need. ``None`` when the
+    # run journaled nothing at all — a run that has not researched yet has no count to report, and
+    # a zero would be a claim about a journal that does not exist.
+    trials: int | None = None
 
 
 def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
@@ -197,20 +212,7 @@ def mark_interrupted(artifacts: RunArtifacts) -> RunArtifacts:
         segment if segment.stopped_utc is not None else _replace_status(segment, "interrupted")
         for segment in artifacts.segments
     )
-    return RunArtifacts(
-        run_id=artifacts.run_id,
-        created_utc=artifacts.created_utc,
-        last_active_utc=artifacts.last_active_utc,
-        engine=artifacts.engine,
-        current_engine=artifacts.current_engine,
-        segments=segments,
-        label=artifacts.label,
-        completed_utc=artifacts.completed_utc,
-        complete=artifacts.complete,
-        events=tuple(artifacts.events),
-        errors=tuple(artifacts.errors),
-        inputs=artifacts.inputs,
-    )
+    return replace(artifacts, segments=segments)
 
 
 def seal(artifacts: RunArtifacts, *, at: str) -> RunArtifacts:
@@ -295,18 +297,50 @@ def build(artifacts: RunArtifacts) -> dict:
             "last_active_utc": artifacts.last_active_utc,
             "completed_utc": completed_utc,
             "run_limit_hours": limit_hours,
+            "traded": _traded(segments),
             "cumulative_runtime_s": runtime_s,
             "cumulative_research_s": _cumulative_phase_s(segments, RESEARCH_PHASE),
             "cumulative_trading_s": _cumulative_phase_s(segments, TRADING_PHASE),
+            "cumulative_trials": artifacts.trials,
             "complete": bool(artifacts.complete),
             "truncated": truncated,
         },
         "segments": segments,
         "engine": _engine(artifacts),
         "inputs": dict(artifacts.inputs) if artifacts.inputs is not None else None,
+        # The realised paper-account record — an explicit key from story #137 on, and deliberately
+        # **always** ``null`` today: nothing in this engine computes a run's equity curve, Sharpe or
+        # drawdown yet (that is story #142), and a section invented to hold zeros would be
+        # indistinguishable from a run that genuinely flat-lined. What this slice pins is the rule
+        # #142 must keep — ``traded: false`` ⇒ ``performance: null`` — which ``schema.validate`` now
+        # enforces, so the degenerate zeros can never arrive by accident.
+        "performance": None,
         "events": [event.as_dict() for event in events],
         "errors": [error.as_dict() for error in errors],
     }
+
+
+def _traded(segments: Sequence[Mapping[str, object]]) -> bool:
+    """Whether this run ever placed a paper order — the flag a ``null`` performance block hangs on.
+
+    A **research-only run is first-class** (epic §5.6): a run may accumulate many research segments
+    and never trade — the market was closed, no champion was crowned, or every segment came from a
+    standalone ``noctis research --resume``. Then this is ``false`` and ``performance`` is ``null``
+    rather than zeros (D10), so a website renders "researching" instead of a fake flat 0% equity
+    curve.
+
+    Derived, from the only evidence of trading the record carries **today**: the per-segment
+    ``trades`` counter the loop writes at each CLOSE. When story #142 adds ``sessions[]`` and the
+    realised paper account, that becomes the richer evidence and this reads it too — the rule
+    ("no trading was ever recorded ⇒ false") does not move, only the list of places it looks.
+    """
+    return any(_counted(segment, TRADES_COUNTER) > 0 for segment in segments)
+
+
+def _counted(segment: Mapping[str, object], key: str) -> int:
+    counters = segment.get("counters")
+    value = counters.get(key) if isinstance(counters, Mapping) else None
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _status(artifacts: RunArtifacts, *, completed_utc: str | None) -> str:

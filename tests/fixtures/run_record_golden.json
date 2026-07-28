@@ -9,9 +9,11 @@
     "last_active_utc": "2026-07-28T02:10:04.002Z",
     "completed_utc": null,
     "run_limit_hours": null,
+    "traded": true,
     "cumulative_runtime_s": 18000.0,
     "cumulative_research_s": 15400.0,
     "cumulative_trading_s": 2340.0,
+    "cumulative_trials": null,
     "complete": true,
     "truncated": {}
   },
@@ -106,6 +108,7 @@
     "engine_changes": []
   },
   "inputs": null,
+  "performance": null,
   "events": [
     {
       "t": "2026-07-28T01:10:04.002Z",

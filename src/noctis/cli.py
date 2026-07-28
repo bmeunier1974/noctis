@@ -1354,6 +1354,17 @@ def research(
         help="Scoring metric for this session (overrides config promotion.metric AND any "
         "mandate overlay): sharpe | sortino | total_return.",
     ),
+    resume: str = typer.Option(
+        None,
+        "--resume",
+        help="Append this session to an existing run instead of minting a new one: the same "
+        "record, the same frozen config, the same run-scoped state, strategy tiers and memory — "
+        "so a research-only night accumulates into the run exactly as a `noctis run` night does. "
+        "The same four address forms as `run --resume`, in the same order: a path to a run.json "
+        "(or the run dir); @LABEL; the reserved word `latest`; a run id. A bare address is ALWAYS "
+        "the id. `noctis runs` lists them. A run's mandate and metric are frozen at creation, so "
+        "--directive/--mandate/--metric are refused here rather than silently ignored.",
+    ),
     verbose: int = typer.Option(
         0, "--verbose", "-v", count=True, help="-v prints each tool call; -vv adds DEBUG logs."
     ),
@@ -1378,8 +1389,17 @@ def research(
     backtests/sweeps until the parameter space is exhausted, and reaches a verdict. Needs the
     [llm] extra and an API key for the configured ``research.model`` provider (OPENAI_API_KEY for
     ``openai/*``, ANTHROPIC_API_KEY for ``anthropic/*``; a local backend needs none).
+
+    **The session belongs to a run** (story #137). Without ``--resume`` it mints one, exactly as
+    ``noctis run`` does — a standalone night is an experiment, not an unrecorded write into a
+    shared default. With ``--resume <address>`` it appends a **research-only segment** to an
+    existing run: same lock, same frozen config, same run-scoped state, strategy tiers and memory,
+    same record. A run may accumulate many such segments and never trade; it then reports
+    ``traded: false`` and a ``null`` performance block, which is a first-class shape, not a
+    degenerate one.
     """
     import sys
+    import time
 
     from noctis.bootstrap import (
         build_event_sink,
@@ -1388,8 +1408,12 @@ def research(
         build_memory,
         build_recorder,
         build_research_session,
+        open_run_store,
+        research_segment_counters,
     )
     from noctis.champions import build_registry
+    from noctis.reporting.run_record import RESEARCH_PHASE
+    from noctis.reporting.run_store import RunLockedError
     from noctis.research import client_status, provider_of, resolved_research_model
 
     logging.basicConfig(
@@ -1397,63 +1421,98 @@ def research(
     )
 
     # The composition root owns the ordering (§5): load_settings → resolve_mandate →
-    # overlay_mandate → explicit CLI flags, so --metric still wins over a mandate overlay.
-    inputs = _resolve_session_or_exit(config, directive=directive, mandate=mandate, metric=metric)
+    # overlay_mandate → explicit CLI flags, so --metric still wins over a mandate overlay. Under
+    # --resume that middle is replaced by the run's frozen config, and the flags that would
+    # re-steer it are refused with a reason — the same chain `run --resume` walks, from one place.
+    inputs = _resolve_session_or_exit(
+        config, directive=directive, mandate=mandate, metric=metric, resume=resume
+    )
     settings, active_mandate = inputs.settings, inputs.mandate
     _guard_legacy_or_exit(settings)
 
-    # --debug opens the QA recorder only once the agent session is known to be buildable
-    # (``client_status.ok`` mirrors ``build_research_session is not None``), so an early exit —
-    # research never records a legacy session — leaves no orphaned half-written run tree. The
-    # recorder is then teed alongside the console below so it records even on a quiet run.
-    recorder = None
-    if debug and client_status(settings).ok:
-        recorder = build_recorder(settings, argv=sys.argv[1:], mode=None)
-        typer.echo(f"QA run: {recorder.run_id}")
-        typer.echo(f"QA report: {recorder.run_dir}")
-
-    # One level-aware sink renders the loop's typed events, teed into the recorder under --debug;
-    # --show-reasoning opens the think/say streams without the full -vv DEBUG noise. Quiet (no -v,
-    # no --debug) ⇒ None ⇒ the loop's own logging default handles events. The command duck-types
-    # console.saw_think/hint off this sink — the EventTee proxies both to the primary (or a
-    # no-op stand-in when --debug runs without -v), so -v output stays byte-identical.
-    console = build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder)
-    session = build_research_session(
-        settings=settings,
-        lake=build_lake(settings),
-        registry=build_registry(settings),
-        families=build_families(settings),  # champions may be minted spec-families
-        memory=build_memory(settings),
-        mandate=active_mandate,
-        on_event=console,
-    )
-    if session is None:
-        if recorder is not None:  # defensive: no orphaned run tree if a session went missing
-            recorder.close()
-        resolved_model = resolved_research_model(settings)
-        provider = provider_of(resolved_model)
-        key_env = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider)
-        need_key = f" and {key_env}" if key_env else ""
-        typer.secho(
-            f"Agent research needs the [llm] extra{need_key} for model {resolved_model!r}.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    typer.echo(
-        f"Agent research session: model={session.model}, "
-        f"profile={session.budgets.name}, "
-        f"metric={settings.promotion.metric}, "
-        f"budget={settings.research_time_budget_minutes} min, "
-        f"max_iterations={max_iterations or session.budgets.max_iterations}, "
-        f"exhaustion gate={settings.research.min_trials} trials"
-    )
-    _echo_mandate(active_mandate, inputs.overrides)
-    # The recorder wraps the session so a hard error still stamps the manifest and finalizes the
-    # open segment (recording is secondary — close in the finally, then let the error propagate).
+    # Open the run BEFORE any collaborator is assembled: opening binds the run's own tree
+    # (state, memory, strategy tiers, reports), so everything built below reads the run's state
+    # with no path arithmetic here. A live lock is the one fatal failure in this subsystem — two
+    # engines writing one run would corrupt it — and it refuses identically whichever verb asked.
     try:
+        store = open_run_store(
+            settings,
+            argv=sys.argv[1:],
+            command="research",
+            run_id=resume,
+            resume=resume is not None,
+            mandate=active_mandate,
+            overrides=inputs.overrides,
+        )
+    except RunLockedError as exc:
+        _exit_red(exc, prefix="RUN LOCKED: ")
+    typer.echo(f"{'Resumed run' if resume else 'Run'}: {store.run_id}")
+    typer.echo(f"Run record: {store.record_path}")
+    _echo_engine_change(store, inputs, upgrading=False)
+
+    # The run store and the recorder wrap the whole session: an early exit (no key/extra) and a
+    # hard error both reach the one finally, so a session that never ran still lands a closed,
+    # resumable segment with its lock released — the same shape `run` uses.
+    stopped_reason = "startup"
+    summary = None
+    research_s = 0.0
+    recorder = None
+    try:
+        # --debug opens the QA recorder only once the agent session is known to be buildable
+        # (``client_status.ok`` mirrors ``build_research_session is not None``), so an early exit —
+        # research never records a legacy session — leaves no orphaned half-written run tree. It
+        # rides the run's OWN id, so the QA tree and the run record name the same run.
+        if debug and client_status(settings).ok:
+            recorder = build_recorder(settings, argv=sys.argv[1:], mode=None, run_id=store.run_id)
+            typer.echo(f"QA run: {recorder.run_id}")
+            typer.echo(f"QA report: {recorder.run_dir}")
+
+        # One level-aware sink renders the loop's typed events, teed into the recorder under
+        # --debug; --show-reasoning opens the think/say streams without the full -vv DEBUG noise.
+        # Quiet (no -v, no --debug) ⇒ None ⇒ the loop's own logging default handles events. The
+        # command duck-types console.saw_think/hint off this sink — the EventTee proxies both to
+        # the primary (or a no-op stand-in when --debug runs without -v), so -v output stays
+        # byte-identical.
+        console = build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder)
+        session = build_research_session(
+            settings=settings,
+            lake=build_lake(settings),
+            registry=build_registry(settings),
+            families=build_families(settings),  # champions may be minted spec-families
+            memory=build_memory(settings),
+            mandate=active_mandate,
+            on_event=console,
+        )
+        if session is None:
+            stopped_reason = "no_session"
+            resolved_model = resolved_research_model(settings)
+            provider = provider_of(resolved_model)
+            key_env = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider)
+            need_key = f" and {key_env}" if key_env else ""
+            typer.secho(
+                f"Agent research needs the [llm] extra{need_key} for model {resolved_model!r}.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        typer.echo(
+            f"Agent research session: model={session.model}, "
+            f"profile={session.budgets.name}, "
+            f"metric={settings.promotion.metric}, "
+            f"budget={settings.research_time_budget_minutes} min, "
+            f"max_iterations={max_iterations or session.budgets.max_iterations}, "
+            f"exhaustion gate={settings.research.min_trials} trials"
+        )
+        _echo_mandate(active_mandate, inputs.overrides)
+        # Seconds this process spent *working* in RESEARCH — measured around the session itself,
+        # monotonically, so a clock step cannot make a night look longer. Startup and waiting are
+        # not research: they belong to the segment's wall-clock duration and to no phase, exactly
+        # as the day loop's own phase timings work.
+        started = time.monotonic()
         summary = session.run(max_iterations=max_iterations)
+        research_s = round(time.monotonic() - started, 3)
+        stopped_reason = summary.stopped_reason or "agent_done"
         # Graceful degradation: a reasoning view (-vv or --show-reasoning) that surfaced no `think`
         # events almost always means the provider returns no chain-of-thought over the API — the
         # default OpenAI reasoning models are exactly this case. Say so once, so silence reads as
@@ -1494,6 +1553,16 @@ def research(
             recorder.close()
             typer.echo(f"QA report: {recorder.run_dir} (run {recorder.run_id})")
             typer.echo(f"QA funnel: {recorder.funnel_line()}")
+        # Closing the segment stamps its stop reason and duration, writes the record one last time
+        # (re-counting the run's journaled trials from disk) and releases the lock — including on
+        # the paths that never reached a session, so a run that exits early is still a closed,
+        # resumable run rather than a dangling lock. A session that never ran measured no phase
+        # and counts nothing: ``None`` leaves both off the segment rather than claiming a zero.
+        store.close(
+            reason=stopped_reason,
+            counters=research_segment_counters(summary) if summary is not None else None,
+            phase_seconds={RESEARCH_PHASE: research_s} if summary is not None else None,
+        )
 
 
 @app.command()

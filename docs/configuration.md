@@ -57,7 +57,7 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `run_limit_hours` | Compute cap on the **whole run**, in hours of cumulative runtime across every stop/resume (`--run-limit-hours`, frozen at creation). At the cap the loop stops between phases and the run is marked `completed` — terminal, so it refuses resume. `null` = uncapped. See [cli.md](cli.md#bounding-a-run----run-limit-hours-and---finish) |
 | `workspace_dir` | **The one output root** (default `workspace/`; env `NOCTIS_WORKSPACE`) — every path below derives from it when not set |
 | `runs_dir`, `data.lake_dir` | The workspace-level pair: the run tree (`workspace/runs`) and the data lake (`workspace/data_lake`), which is **shared by every run** |
-| `run_dir` | **The one run root** (default `workspace/runs/legacy`, the reserved run an invocation that never opened a run reads). `noctis run` rebinds it to the run it mints |
+| `run_dir` | **The one run root** (default `workspace/runs/legacy`, the reserved run an invocation that never opened a run reads). `noctis run` / `noctis research` rebind it to the run they mint or resume |
 | `state_dir`, `reports_dir`, `memory_path`, `qa_dir` | Per-artifact overrides; each defaults to its **run**-derived location (`<run_dir>/state`, `<run_dir>/reports`, `<run_dir>/memory/MEMORY.md`, `<run_dir>/qa`) |
 | `strategies_dir`, `mandate_dir` | The committed input surfaces: the seed strategy library and the mandate scaffold |
 

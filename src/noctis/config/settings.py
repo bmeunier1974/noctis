@@ -498,13 +498,13 @@ SECRET_FIELDS: frozenset[str] = frozenset(
     {"databento_api_key", "anthropic_api_key", "openai_api_key"}
 )
 
-# The reserved run id every invocation that has **not** opened a run reads and writes: the
-# read-only verbs (``status``, ``champions``, ``account``, ``report``, ``backtest``) and a bare
-# ``noctis research``. It is also the run ``noctis migrate`` adopts a pre-run-scoped
-# ``workspace/state/`` into, and that coincidence is the point: an operator who migrates finds
-# their champions, account and reports exactly where those verbs already look, instead of a
-# silently-empty board beside abandoned state. ``noctis run`` never uses it — every run mints its
-# own id (story #129) and binds it here through :func:`bind_run_dir`.
+# The reserved run id every invocation that has **not** opened a run reads: the read-only verbs
+# (``status``, ``champions``, ``account``, ``report``, ``backtest``). It is also the run
+# ``noctis migrate`` adopts a pre-run-scoped ``workspace/state/`` into, and that coincidence is the
+# point: an operator who migrates finds their champions, account and reports exactly where those
+# verbs already look, instead of a silently-empty board beside abandoned state. The two verbs that
+# *work* a run — ``noctis run`` and ``noctis research`` (story #137) — never use it: each opens a
+# run, mints or addresses its id, and binds it here through :func:`bind_run_dir`.
 DEFAULT_RUN_ID = "legacy"
 
 # The per-artifact paths one run OWNS, and the subpath each takes under the run dir. Champions,

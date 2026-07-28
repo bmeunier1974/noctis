@@ -17,6 +17,15 @@ working area and drives the whole loop through curated tools —
 `preview_bars`, `screen_symbols`, `get_champions`, `get_experiment_log`, `ensure_data`,
 `write_strategy`, `run_backtest`, `run_sweep`, `evaluate_vs_champion`, `reject_strategy`.
 
+**A session always belongs to a run.** Whether it comes from the night loop or from a standalone
+`noctis research`, the session reads and writes *one run's* tree — its champions, paper account,
+experiment journals, strategy `__tmp/`/`champions/` tiers and per-run `MEMORY.md`. A bare
+`noctis research` mints its own run; `noctis research --resume <address>` appends a research-only
+segment to an existing one, under that run's frozen config, so a night of standalone research
+accumulates into the same record (and the same research hours and trial count) as a night of
+`noctis run` — [cli.md](cli.md#a-research-session-belongs-to-a-run--research---resume-address).
+None of the discipline below changes with the verb: the gates are the run's, not the command's.
+
 The structural gates:
 
 - **Validation-on-write.** `write_strategy` validates in an isolated interpreter (import +

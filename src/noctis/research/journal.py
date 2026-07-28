@@ -119,6 +119,34 @@ class ExperimentJournal:
     def path(self, name: str) -> Path:
         return self.root / f"{name}.jsonl"
 
+    def strategies(self) -> list[str]:
+        """Every strategy this journal holds a file for, sorted. ``[]`` when none ever did."""
+        if not self.root.is_dir():
+            return []
+        return sorted(path.stem for path in self.root.glob("*.jsonl"))
+
+    def totals(self) -> JournalStats | None:
+        """Every strategy's stats, summed — how much searching happened here in total.
+
+        The multiple-testing count: a run's whole trial tally lives across one file per strategy,
+        and this is the one place they are added up, so a caller that wants "how many trials has
+        this run spent?" never re-parses an ``event`` string of its own (the run record asks
+        exactly that, story #137). Distinct param sets are summed *per strategy* rather than
+        pooled — two strategies' identically-named params are not the same experiment.
+
+        ``None`` when there is no journal directory at all: nothing has been journaled here, which
+        is a different statement from "zero trials were run", and the record renders it as a null.
+        """
+        names = self.strategies()
+        if not names:
+            return None
+        stats = [self.stats(name) for name in names]
+        return JournalStats(
+            n_trials=sum(stat.n_trials for stat in stats),
+            n_distinct_params=sum(stat.n_distinct_params for stat in stats),
+            sweep_completed=any(stat.sweep_completed for stat in stats),
+        )
+
     # ── reads ────────────────────────────────────────────────────────────────
     def records(self, name: str) -> list[dict[str, Any]]:
         """Every parseable record, in journal (append) order."""

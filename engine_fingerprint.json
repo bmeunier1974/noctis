@@ -64,9 +64,9 @@
       "note": null
     },
     "schema": {
-      "digest": "5d56c64a2c3e32ae",
+      "digest": "9cf471c5544ace95",
       "files": {
-        "src/noctis/reporting/schema.py": "29544d47a6bcd660"
+        "src/noctis/reporting/schema.py": "a77fddca69211214"
       },
       "note": null
     },

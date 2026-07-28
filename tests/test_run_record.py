@@ -353,6 +353,107 @@ def test_segments_are_uncapped_they_are_the_runs_spine():
     assert record["run"]["truncated"] == {}
 
 
+# ── a research-only run is a first-class shape, not a degenerate one (story #137) ───────────
+
+
+def _research_segment(index: int, *, resumed: bool, research_s: float) -> SegmentArtifact:
+    """One ``noctis research --resume`` segment: a research-only night, no trading at all."""
+    return SegmentArtifact(
+        index=index,
+        started_utc="2026-07-27T14:22:33.418Z",
+        stopped_utc="2026-07-27T18:22:33.418Z",
+        stopped_reason="agent_done",
+        status="stopped",
+        argv=("research", "--resume", "latest"),
+        command="research",
+        resumed=resumed,
+        counters={"sessions": 1, "research_iterations": 6, "research_promotions": 0},
+        phase_seconds={"RESEARCH": research_s},
+        engine=ENGINE,
+    )
+
+
+def test_a_research_only_segment_says_so_through_the_command_it_was_run_by():
+    """Research-only is *derived*, not a second flag: the segment records the verb that produced
+    it, and ``research`` is a verb that cannot trade."""
+    record = build(_artifacts(segments=(_research_segment(0, resumed=False, research_s=900.0),)))
+
+    segment = record["segments"][0]
+    assert segment["command"] == "research"
+    assert segment["argv"] == ["research", "--resume", "latest"]
+    assert segment["stopped_reason"] == "agent_done"
+    assert segment["counters"]["research_iterations"] == 6
+    assert schema.validate(record) == []
+
+
+def test_a_run_that_only_ever_researched_reports_traded_false_and_null_performance():
+    """Epic D10 / §5.6: a website must render "researching", never a fake flat 0% equity curve."""
+    record = build(
+        _artifacts(
+            segments=(
+                _research_segment(0, resumed=False, research_s=900.0),
+                _research_segment(1, resumed=True, research_s=100.0),
+            )
+        )
+    )
+
+    assert record["run"]["traded"] is False
+    assert record["performance"] is None
+    assert "performance" in record  # an explicit null, never an omitted key
+    assert record["run"]["cumulative_research_s"] == 1000.0
+    assert record["run"]["cumulative_trading_s"] == 0.0
+
+
+def test_a_run_whose_segments_recorded_trades_reports_traded_true():
+    assert build(_artifacts())["run"]["traded"] is True
+
+
+def test_research_only_segments_carry_their_seconds_into_the_runs_research_total():
+    """A research-only night belongs to the same run: its hours accumulate beside the loop's."""
+    mixed = _artifacts(
+        segments=(
+            _segment(
+                0,
+                started="2026-07-27T14:22:33.418Z",
+                stopped="2026-07-27T18:22:33.418Z",
+                reason="time_limit",
+                status="stopped",
+            ),
+            _research_segment(1, resumed=True, research_s=600.0),
+        )
+    )
+
+    record = build(mixed)
+
+    assert record["run"]["cumulative_research_s"] == 12000.0 + 600.0
+    assert record["run"]["traded"] is True  # the loop segment traded; the research one did not
+
+
+def test_the_validator_refuses_a_performance_block_on_a_run_that_never_traded():
+    """The rule story #142 has to keep: no trading, no performance — not even zeros."""
+    record = build(_artifacts(segments=(_research_segment(0, resumed=False, research_s=900.0),)))
+    record["performance"] = {"returns": {"total_return_pct": 0.0}}
+
+    problems = schema.validate(record)
+
+    assert any("performance" in problem and "traded" in problem for problem in problems)
+
+
+def test_the_validator_names_a_segment_run_by_an_unknown_command():
+    record = build(_artifacts())
+    record["segments"][0]["command"] = "meditate"
+
+    assert any("command" in problem for problem in schema.validate(record))
+
+
+def test_the_run_reports_the_trials_it_journaled_or_an_explicit_null():
+    """The multiple-testing count DSR needs, read off the run's own experiment journals — never a
+    counter incremented in memory. ``null`` when nothing was journaled at all."""
+    assert build(_artifacts(trials=3180))["run"]["cumulative_trials"] == 3180
+    assert build(_artifacts())["run"]["cumulative_trials"] is None
+    assert "cumulative_trials" in build(_artifacts())["run"]
+
+
 # ── interrupted is decided on the next OPEN, never guessed at write time ────────────────────
 
 

@@ -220,6 +220,88 @@ def test_a_second_invocation_appends_its_own_segment_with_its_own_counters(tmp_p
     assert schema.validate(record) == []
 
 
+# ── research-only segments and the trials they journal (story #137) ────────────────────────
+
+
+def _journal_trial(run_dir: Path, strategy: str, **params) -> None:
+    """Journal one trial into the run's own experiment journal — the exhaustion gate's ground
+    truth, and the only place the record's trial count is ever read from."""
+    from noctis.research.journal import ExperimentJournal
+    from tests.test_champions import make_scorecard
+
+    ExperimentJournal(run_dir / "state").record_trial(
+        strategy,
+        source="sweep",
+        symbols=["AAPL"],
+        params=params,
+        window={},
+        card=make_scorecard(strategy, test_metric=1.2, train_metric=1.4),
+    )
+
+
+def test_a_segment_records_the_command_it_was_opened_by(tmp_path):
+    """One record, two kinds of night: the loop's, and a standalone research session's."""
+    runs = tmp_path / "runs"
+    clock = FakeClock()
+    first = _open(runs, clock, argv=["run", "-v"])
+    clock.advance(3600)
+    first.close(reason="time_limit")
+
+    second = _open(
+        runs,
+        clock,
+        run_id=first.run_id,
+        resume=True,
+        command="research",
+        argv=["research", "--resume", "latest"],
+    )
+    clock.advance(1800)
+    second.close(reason="agent_done", phase_seconds={"RESEARCH": 1750.0})
+
+    record = _record(first.run_dir)
+    assert [segment["command"] for segment in record["segments"]] == ["run", "research"]
+    assert record["segments"][1]["argv"] == ["research", "--resume", "latest"]
+    assert record["segments"][1]["stopped_reason"] == "agent_done"
+    assert record["run"]["cumulative_research_s"] == 1750.0
+    assert schema.validate(record) == []
+
+
+def test_the_record_counts_the_trials_the_run_journaled(tmp_path):
+    """The multiple-testing count comes from the run's own journals — the same lines the
+    exhaustion gate counts — and is re-read at every write rather than incremented."""
+    runs = tmp_path / "runs"
+    clock = FakeClock()
+    store = _open(runs, clock)
+    assert _record(store.run_dir)["run"]["cumulative_trials"] is None
+
+    _journal_trial(store.run_dir, "alpha", lookback=10)
+    _journal_trial(store.run_dir, "alpha", lookback=20)
+    _journal_trial(store.run_dir, "beta", lookback=5)
+    store.checkpoint()
+
+    assert _record(store.run_dir)["run"]["cumulative_trials"] == 3
+    clock.advance(3600)
+    store.close(reason="stopped")
+    assert _record(store.run_dir)["run"]["cumulative_trials"] == 3
+
+
+def test_the_trial_count_is_re_read_from_the_journals_never_carried_across_a_restart(tmp_path):
+    runs = tmp_path / "runs"
+    clock = FakeClock()
+    first = _open(runs, clock)
+    _journal_trial(first.run_dir, "alpha", lookback=10)
+    clock.advance(3600)
+    first.close(reason="time_limit")
+
+    second = _open(runs, clock, run_id=first.run_id, resume=True, command="research")
+    _journal_trial(second.run_dir, "alpha", lookback=20)
+    clock.advance(1800)
+    second.close(reason="agent_done")
+
+    # Nothing was handed forward: the resumed process read both segments' trials off disk.
+    assert _record(second.run_dir)["run"]["cumulative_trials"] == 2
+
+
 def test_a_run_killed_mid_segment_is_marked_interrupted_on_the_next_open(tmp_path, caplog):
     runs = tmp_path / "runs"
     clock = FakeClock()

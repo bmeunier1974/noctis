@@ -33,6 +33,7 @@ __all__ = [
     "REQUIRED_SECTIONS",
     "RUN_STATUSES",
     "SCHEMA_VERSION",
+    "SEGMENT_COMMANDS",
     "SEGMENT_STATUSES",
     "TRADE_CAP",
     "validate",
@@ -45,9 +46,11 @@ SCHEMA_VERSION = 1
 KIND = "noctis.run"
 
 # The top-level sections every record carries. Later stories in the epic add sections
-# (``research``, ``strategies``, ``sessions``, ``performance``, ``assumptions``); additive-only
-# means this set may grow, never shrink.
-REQUIRED_SECTIONS = ("run", "segments", "engine", "inputs", "events", "errors")
+# (``research``, ``strategies``, ``sessions``, ``assumptions``); additive-only means this set may
+# grow, never shrink. ``performance`` is here from story #137 as an explicit ``null``: a run that
+# never traded must report *no* performance rather than zeros, and a consumer has to be able to
+# tell "this run is still researching" from "this schema version had no such key".
+REQUIRED_SECTIONS = ("run", "segments", "engine", "inputs", "performance", "events", "errors")
 
 # The run's lifecycle. ``interrupted`` is observed on the next open (a segment with a start stamp
 # and no stop stamp), never guessed at write time. ``completed`` is terminal.
@@ -56,6 +59,13 @@ RUN_STATUSES = ("running", "stopped", "interrupted", "completed")
 # One segment = one process invocation. It is open (``running``), closed cleanly (``stopped``), or
 # was killed mid-flight and found that way on the next open (``interrupted``).
 SEGMENT_STATUSES = ("running", "stopped", "interrupted")
+
+# The verbs that append a segment, and therefore the only two kinds of segment a run has: the
+# day/night loop (``run``) and a standalone observable research session (``research``, story #137).
+# A **research-only segment is derived from this**, not marked by a second flag — ``research`` is a
+# verb that cannot trade, so "which segments were research-only" is answerable from what the record
+# already had to carry: the command each process was invoked as.
+SEGMENT_COMMANDS = ("run", "research")
 
 # Bounds on the two lists that grow without limit in a long run. A record is meant to be fetched
 # whole by a website, so these keep a multi-week run in the tens of kilobytes.
@@ -74,12 +84,20 @@ _RUN_KEYS = (
     # with the rest of the configuration and surfaced here so two runs can be compared on equal
     # compute — 100 research hours and 30 are not the same experiment.
     "run_limit_hours",
+    # Whether this run ever placed a paper order (story #137). ``false`` ⇒ ``performance`` is
+    # ``null`` throughout, because a run that never traded has no equity curve — and a rendered
+    # flat 0% one would be a lie about a run that is simply still researching.
+    "traded",
     # The three cumulative totals, every one of them **derived** from ``segments[]`` at write time
     # and never incremented in memory (epic D4). The two phase totals are ``null`` — not ``0`` —
     # when no segment measured a phase at all.
     "cumulative_runtime_s",
     "cumulative_research_s",
     "cumulative_trading_s",
+    # Trials this run journaled, counted off its own ``state/experiments/*.jsonl`` at write time —
+    # the same lines the exhaustion gate counts, and the multiple-testing count a deflated Sharpe
+    # needs. ``null`` when the run journaled nothing at all.
+    "cumulative_trials",
     "complete",
     "truncated",
 )
@@ -208,10 +226,33 @@ def validate(record: Mapping[str, object]) -> list[str]:
         problems.append("engine: section must be an object")
 
     problems += _check_inputs(record.get("inputs"))
+    problems += _check_performance(record.get("performance"), run=run)
 
     for name in ("events", "errors"):
         problems += _check_events(name, record.get(name))
     return problems
+
+
+def _check_performance(performance: object, *, run: object) -> list[str]:
+    """A run that never traded reports **no** performance — ``null``, never zeros (epic D10, §5.6).
+
+    The whole rule, enforced structurally so it cannot be lost when story #142 fills the block in:
+    a research-only run (many research segments, no trades) is a *first-class* shape, and a
+    consumer rendering it must be able to say "researching" rather than plot a flat 0% equity curve
+    it was handed as if it were a result. So the pairing is part of the contract — ``traded: false``
+    and a populated ``performance`` is a schema violation, not a rounding detail.
+    """
+    if performance is None:
+        return []
+    if not isinstance(performance, Mapping):
+        return ["performance: section must be an object or null"]
+    traded = run.get("traded") if isinstance(run, Mapping) else None
+    if traded is False:
+        return [
+            "performance: must be null when run.traded is false — a run that never traded has no "
+            "realised performance, and zeros would render as a result it never produced"
+        ]
+    return []
 
 
 def _check_inputs(inputs: object) -> list[str]:
@@ -288,6 +329,7 @@ def _check_segments(segments: object) -> list[str]:
                 "(segments are append-only and indexed from 0)"
             )
         problems += _check_status(f"{label}.status", segment.get("status"), SEGMENT_STATUSES)
+        problems += _check_status(f"{label}.command", segment.get("command"), SEGMENT_COMMANDS)
         problems += _check_stamp(f"{label}.started_utc", segment.get("started_utc"))
         problems += _check_stamp(f"{label}.stopped_utc", segment.get("stopped_utc"))
     return problems

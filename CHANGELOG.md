@@ -9,6 +9,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`noctis research --resume <address>` — a research-only night belongs to the same run.** A
+  standalone session is no longer an unrecorded write into the reserved `legacy` run: a bare
+  `noctis research` now **mints its own run** (record, tree and lock, like `noctis run`), and
+  `--resume` appends a **research-only segment** to an existing one — same lock, same frozen
+  config, same run-scoped state, strategy tiers and per-run memory, same record.
+  - **One resume, two verbs.** The address forms (`<id>`, `latest`, a `run.json` path, `@label`),
+    the refusals (unknown address, ambiguous label, live lock, `completed` run) and the frozen-tier
+    rules (`--mandate`/`--directive`/`--metric` refused with a reason) all come from the same
+    resolver and the same composition root as `run --resume`, so the two cannot drift apart.
+  - **"Research-only" is derived, not a second flag.** A segment already records the `command` it
+    was invoked as, and `research` is a verb that cannot trade — so the record answers "which
+    nights were research-only?" with what it already had to carry. The segment keeps its own
+    start/stop stamps, duration, `stopped_reason` (the session's own), argv and counters
+    (`sessions` / `research_iterations` / `research_promotions`).
+  - **New: `run.cumulative_trials`, read from the journals.** The run's trial count is counted at
+    write time off its own `state/experiments/*.jsonl` — the very lines the exhaustion gate counts
+    — never a counter carried across a restart, so it is cumulative across every segment including
+    the research-only ones, and it is the multiple-testing count a deflated Sharpe will want.
+    `null` when a run has journaled nothing.
+  - **New: `run.traded` and an explicit `performance: null`.** A run may research for weeks and
+    never trade; that is a **first-class** shape, so it reports `traded: false` and a `null`
+    performance block rather than zeros, and a consumer renders "researching" instead of a fake
+    flat 0% equity curve. The schema validator enforces the pairing (`traded: false` ⇒
+    `performance: null`), so the degenerate zeros cannot arrive by accident when the performance
+    block itself lands.
 - **A run-level compute cap (`noctis run --run-limit-hours`) and an explicit finish
   (`--finish`).** `time_limit_hours` bounds one *process*; this bounds the whole *run*, so
   "research this mandate for 100 hours, then stop" is expressible — and two runs become comparable

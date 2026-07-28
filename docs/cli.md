@@ -94,6 +94,10 @@ it each night, and a multi-week experiment survives every restart. `noctis runs`
 the kickoff echoes `Resumed run: <run_id>` — the **id** of the run reached, whatever address got
 you there.
 
+`noctis research --resume <address>` continues the same run with a **research-only** segment, using
+the same lock, the same frozen config and the same run-scoped state — see
+[A research session belongs to a run](#a-research-session-belongs-to-a-run--research---resume-address).
+
 #### The four address forms, and how they are told apart
 
 An address is resolved in one place (`reporting/run_store.resolve_run_dir`, shared with
@@ -540,6 +544,7 @@ crash.
 
 ```bash
 python -m noctis research -v               # one observable agent research session (needs a configured LLM)
+python -m noctis research --resume latest  # …append it to an existing run, under that run's config
 python -m noctis research --metric total_return   # override the promotion metric for this session
 python -m noctis research --debug          # record this session's QA report under the run's qa/
 python -m noctis strategies                # the strategy library: status / style / thesis / tuned
@@ -553,6 +558,46 @@ legacy session that would immediately exit. `--metric` is applied **after** the 
 it wins over a mandate's `promotion.metric` (as `--time-limit-hours` does over its knob on `run`);
 everything else a mandate binds comes from the mandate file —
 [configuration.md](configuration.md#the-mandate-overlay).
+
+### A research session belongs to a run — `research --resume <address>`
+
+**A session is always part of a run.** A bare `noctis research` *mints* one, exactly as `noctis run`
+does — identity is minted, never derived, so two sessions under one config are two runs — and
+`--resume <address>` appends a **research-only segment** to an existing one instead:
+
+```bash
+python -m noctis research --resume 20260727T142233Z-a1b2c3   # by id
+python -m noctis research --resume latest                    # …or @label, or a run.json path
+```
+
+Everything about the resume is the resume `run` performs, from the same code: the
+[four address forms](#the-four-address-forms-and-how-they-are-told-apart) resolve identically, the
+run's **frozen config** is rehydrated (so `--mandate` / `--directive` / `--metric` are refused with
+a reason rather than silently ignored), the run's own state, strategy tiers, per-run memory and
+reports are what the session reads and writes, and the liveness lock refuses a run another engine
+is working — while a `completed` run refuses resume outright, because terminal is terminal.
+
+The segment records what a `run` segment records, for a session instead of a night: its own
+start/stop stamps and duration, `command: "research"`, `stopped_reason` (the session's own —
+`agent_done`, `budget_exhausted`, …), its argv, and its counters
+(`sessions` / `research_iterations` / `research_promotions`). **"Research-only" is derived, not a
+second flag:** `research` is a verb that cannot trade, so the command each segment was invoked as
+is the whole answer. Its measured RESEARCH seconds roll into the run's `cumulative_research_s`, and
+the trials it journals into the run's `state/experiments/` roll into `cumulative_trials` — both
+re-derived at every write, so a run's research hours and trials accumulate the same whether the
+night came from `noctis run` or from a standalone session.
+
+**A run that only ever researched is a first-class shape.** It reports `traded: false` and
+`performance: null` — never zeros — so a consumer renders "researching" rather than a flat 0% equity
+curve it was handed as if it were a result. (`performance` is `null` for every run until the
+performance block itself lands; the *rule* `traded: false` ⇒ `null` is enforced by the record's
+schema validator.)
+
+One asymmetry worth knowing: `research --resume` has no `--allow-engine-upgrade`. Searcher-tier
+engine drift warns and is recorded here exactly as on `run`, but a resume whose **arbiter** moved is
+refused, and accepting that deliberately is done once with
+`noctis run --resume <address> --allow-engine-upgrade` (see
+[Engine change](#engine-change-resuming-after-the-code-moved)).
 
 ## Data
 

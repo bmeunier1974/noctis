@@ -1030,6 +1030,26 @@ def segment_counters(result) -> dict[str, int]:
     }
 
 
+def research_segment_counters(summary) -> dict[str, int]:
+    """A **research-only** segment's counters, read off one ``ResearchSummary`` (story #137).
+
+    The standalone-session twin of :func:`segment_counters`, and deliberately spelled in the same
+    words where it means the same thing (``research_iterations`` / ``research_promotions`` are what
+    the loop accumulates from these very fields), so per-segment throughput compares across the two
+    verbs. ``sessions`` is the one thing only this path knows: a ``noctis research`` invocation *is*
+    one session, where a loop segment holds as many as the night had cycles.
+
+    There is deliberately **no ``trades`` key**: a research session cannot place an order, and the
+    record derives ``run.traded`` from that counter — a zero written here would be a claim about
+    trading made by a process that never traded. Duck-typed like its twin.
+    """
+    return {
+        "sessions": 1,
+        "research_iterations": int(getattr(summary, "iterations", 0) or 0),
+        "research_promotions": int(getattr(summary, "promotions", 0) or 0),
+    }
+
+
 def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str | None = None):
     """Assemble the ``--debug`` QA recorder — the one place the run tree is minted (story #45).
 

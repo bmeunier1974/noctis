@@ -90,6 +90,7 @@ __all__ = [
     "open_run",
     "read_record",
     "read_run_record",
+    "read_trials",
     "rebuild_index",
     "resolve_run_dir",
     "update_index",
@@ -349,10 +350,11 @@ def collect(
     """
     path = Path(run_dir) / RUN_RECORD_NAME
     engine = read_engine_identity(election_metric, root=engine_root)
+    trials = read_trials(run_dir)
     prior, note = _read_record(path)
     if prior is not None:
         try:
-            return _artifacts_from(prior, run_dir=Path(run_dir), current=engine)
+            return _artifacts_from(prior, run_dir=Path(run_dir), current=engine, trials=trials)
         except Exception as exc:  # a hand-edited or foreign file, still valid JSON
             note = RecordEvent(
                 t=None,
@@ -367,13 +369,51 @@ def collect(
         engine=engine,
         current_engine=engine,
         events=(note,) if note is not None else (),
+        trials=trials,
     )
 
 
+def read_trials(run_dir: Path | str) -> int | None:
+    """How many trials this run has journaled, or ``None`` when it has journaled nothing.
+
+    **Read, never counted.** The number comes from the run's own experiment journals — the very
+    lines the exhaustion gate counts (``<run>/state/experiments/<name>.jsonl``) — so the record and
+    the research discipline can never disagree about how much searching a run did, and no counter
+    has to survive a restart to be right. It is therefore cumulative across every segment by
+    construction, including the research-only ones ``noctis research --resume`` appends (story
+    #137): the journals are the run's, not the process's.
+
+    Both imports are deferred: the run store is written on the core install alone and must stay
+    importable without pulling the research package (or the settings model) in behind it. The
+    journal owns the record schema end-to-end, so nothing here parses an ``event`` string, and the
+    state directory is derived by the one function that owns that derivation.
+
+    Never raises: an unreadable journal is missing evidence, not a reason to fail a run's write.
+    """
+    from noctis.config.settings import run_scoped_paths
+    from noctis.research.journal import ExperimentJournal
+
+    try:
+        state_dir = run_scoped_paths(Path(run_dir))["state_dir"]
+        totals = ExperimentJournal(state_dir).totals()
+    except Exception:  # pragma: no cover - a journal we cannot read is evidence we do not have
+        return None
+    return None if totals is None else totals.n_trials
+
+
 def _artifacts_from(
-    prior: Mapping[str, object], *, run_dir: Path, current: EngineIdentity
+    prior: Mapping[str, object],
+    *,
+    run_dir: Path,
+    current: EngineIdentity,
+    trials: int | None = None,
 ) -> RunArtifacts:
-    """One prior record, parsed back into artifacts. Raises on a shape it cannot read."""
+    """One prior record, parsed back into artifacts. Raises on a shape it cannot read.
+
+    ``trials`` is deliberately **not** read back off the record: it is derived from the journals at
+    every write (:func:`read_trials`), and a number carried forward from a prior write could only
+    ever go stale.
+    """
     run = prior.get("run")
     if not isinstance(run, Mapping):
         raise TypeError("the 'run' section is missing or is not an object")
@@ -396,6 +436,7 @@ def _artifacts_from(
         # creation, so every later segment restores it rather than re-deriving it from files that
         # may have changed in between.
         inputs=_frozen_inputs(prior.get("inputs")),
+        trials=trials,
     )
 
 
@@ -1102,6 +1143,7 @@ class RunStore:
             # by a run that has never frozen any (a fresh one, or an adopted history) — or by a
             # deliberate ``--rebase-config``, which is the operator saying "adopt these instead".
             inputs=inputs if rebase_config or artifacts.inputs is None else artifacts.inputs,
+            trials=artifacts.trials,
         )
         if opening_note is not None:
             self._append(
@@ -1301,10 +1343,14 @@ class RunStore:
             events=changes.get("events", current.events),  # type: ignore[arg-type]
             errors=changes.get("errors", current.errors),  # type: ignore[arg-type]
             inputs=current.inputs,
+            trials=changes.get("trials", current.trials),  # type: ignore[arg-type]
         )
 
     def _flush(self) -> None:
-        self._replace_artifacts()  # re-stamp ``complete`` from the current lifecycle state
+        # Derived at write time, like every cumulative number the record carries: the run's own
+        # journals are re-counted here rather than handed forward, so a segment that journalled
+        # trials all night lands them on disk without anyone tracking a total in memory.
+        self._replace_artifacts(trials=read_trials(self._run_dir))
         self._writer(self._run_dir, build(self._artifacts))
         # The roll-up follows the record, never leads it: it is refreshed *after* a successful
         # write and re-read from the file just written, so the listing can never advertise a
