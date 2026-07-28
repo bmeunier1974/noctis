@@ -31,6 +31,7 @@ from noctis.reporting.run_record import (
     resume_refusal,
     utc_iso,
 )
+from noctis.research.pricing import PRICING_TABLE_VERSION, default_table
 
 RUN_RECORD_SOURCE = Path(__file__).resolve().parents[1] / "src/noctis/reporting/run_record.py"
 SCHEMA_SOURCE = Path(__file__).resolve().parents[1] / "src/noctis/reporting/schema.py"
@@ -658,6 +659,7 @@ def _usage(inp: int = 0, out: int = 0, write: int = 0, read: int = 0) -> dict[st
 
 OPUS = "anthropic/claude-opus-4-8"
 LOCAL = "ollama/qwen3-coder-30b"
+WIZARD_LOCAL = "ollama_chat/noctis-qwen3:14b"  # the spelling `noctis setup` writes into config.yaml
 
 
 def _entry(
@@ -840,6 +842,40 @@ def test_a_journaled_session_that_spent_nothing_reports_a_real_zero():
 
     assert spend["tokens"]["total_tokens"] == 0
     assert spend["llm_usd_estimate"] == 0.0
+
+
+def test_a_run_on_the_shipped_local_driver_publishes_a_zero_bill_not_a_null_one():
+    """The wizard's own configuration, priced through the shipped table exactly as the store prices
+    a real ledger (story #146). ``ollama_chat/`` used to be missing from the table, so a run that
+    followed every default published no cost at all — and because a total is all-or-nothing, the
+    efficiency numbers built on it went ``null`` with it. The run really did cost nothing, and that
+    is a number, not an unknown."""
+    table = default_table()
+    usage = _usage(inp=900, out=300)
+    entries = tuple(
+        SpendEntry(
+            at=at,
+            stage=stage,
+            model=WIZARD_LOCAL,
+            tokens=sum(usage.values()),
+            usage=usage,
+            usd_estimate=table.estimate_usd(WIZARD_LOCAL, usage),
+        )
+        for at, stage in (
+            ("2026-07-27T15:00:00.000Z", "formulate"),
+            ("2026-07-28T01:30:00.000Z", "decide"),
+        )
+    )
+    spend = _spent(spend=entries, pricing_table_version=table.version)
+
+    assert spend["llm_usd_estimate"] == 0.0
+    assert spend["by_model"][WIZARD_LOCAL]["usd_estimate"] == 0.0
+    assert spend["by_stage"]["decide"]["usd_estimate"] == 0.0
+    assert spend["pricing_table_version"] == PRICING_TABLE_VERSION
+    assert spend["efficiency"]["usd_per_champion_estimate"] == 0.0
+    assert spend["efficiency"]["usd_per_trial_estimate"] == 0.0
+    assert spend["efficiency"]["trials_per_hour"] is not None
+    assert spend["efficiency"]["research_hours_per_champion"] is not None
 
 
 def test_spend_entries_outside_every_segment_window_still_reach_the_run_total():

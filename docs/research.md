@@ -231,9 +231,12 @@ are constructed, and how every champion is made reproducible — is written up i
 
 The agent talks to one neutral seam, so the model is a config line: `research.model` takes a
 LiteLLM `provider/model` string — any hosted provider, or a local / self-hosted backend
-(`ollama/…`, `vllm/…`, or any endpoint speaking the standard chat-completions protocol via
-`research.base_url`). Hosted keys resolve per prefix from `.env` (the matching `*_API_KEY`); a
-**local backend needs no key and costs $0/token**.
+(`ollama_chat/…` — what `noctis setup` writes — `ollama/…`, `vllm/…`, or any endpoint speaking the
+standard chat-completions protocol via `research.base_url`). Hosted keys resolve per prefix from
+`.env` (the matching `*_API_KEY`); a **local backend needs no key and costs $0/token**, and the
+price table states that zero for each of those prefixes, so a free run publishes `0.0` rather than
+"unknown" (see
+[configuration.md → Pricing the spend estimate](configuration.md#pricing-the-spend-estimate)).
 
 Provider-specific levers capability-gate to clean no-ops: prompt-cache breakpoints, reasoning
 effort, and thinking apply only where supported, and server-side `web_search` auto-disables on

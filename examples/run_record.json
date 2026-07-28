@@ -619,7 +619,7 @@
       }
     ],
     "llm_usd_estimate": 0.2466,
-    "pricing_table_version": "2026-07",
+    "pricing_table_version": "2026-07.1",
     "efficiency": {
       "usd_per_champion_estimate": 0.2466,
       "usd_per_trial_estimate": 0.002222,

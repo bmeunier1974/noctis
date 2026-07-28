@@ -314,10 +314,17 @@ Three rules make the estimate safe to publish, and they are worth knowing before
 
 - **An unknown model contributes `null`, never zero.** A model the table does not carry has no
   price, and any total it belongs to is `null` too — a partial sum presented as a total would read
-  as complete while understating the bill. A `$0`/token local backend (`ollama/…`, `vllm/…`,
-  `lm_studio/…`) is priced at an explicit zero, because that zero is a *stated price*.
+  as complete while understating the bill. A `$0`/token local backend (`ollama/…`, `ollama_chat/…`,
+  `vllm/…`, `lm_studio/…`, `local/…`) is priced at an explicit zero, because that zero is a *stated
+  price*. That list is an **allowlist**, deliberately: a provider that merely isn't one of the paid
+  clouds the table surveyed is *unknown*, not free — otherwise a paid third-party gateway would one
+  day publish a confident `$0`.
 - **The table version travels with the numbers.** `spend.pricing_table_version` names the table
-  that produced them, so a record read next year is still interpretable.
+  that produced them, so a record read next year is still interpretable. The label is
+  `<month>[.<revision>]` — `2026-07.1` is July 2026's prices with corrected coverage (`ollama_chat/`
+  was missing, so the shipped local driver priced as an unknown model). Coverage earns a revision
+  because it changes the published number for the same model, and a record keeps whichever label was
+  in force when it was written: nothing is migrated, and that is the point of having one.
 - **The estimate is never a gate.** Nothing here is read by a promotion gate, a budget, or the
   exhaustion floor. `data.budget_usd` (the vendor-data preflight) and `research.cost_profile` (the
   session ceilings) are the knobs that actually bound spend; this one only reports it.
@@ -337,7 +344,7 @@ research:
 ```
 
 An overridden table **cannot borrow the shipped version label**: it identifies itself as
-`<version>+custom.<digest>` (e.g. `2026-07+custom.a1b2c3d4`), derived from the override itself —
+`<version>+custom.<digest>` (e.g. `2026-07.1+custom.a1b2c3d4`), derived from the override itself —
 stable for the same prices, different for any other. So a reader can always tell whether the
 numbers came from this engine's own table.
 

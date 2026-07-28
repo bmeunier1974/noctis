@@ -12,9 +12,11 @@ the record builder can lean on it without importing the world.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 from noctis.research.pricing import (
+    LOCAL_PREFIXES,
     PRICING_TABLE_VERSION,
     ModelPrice,
     PriceTable,
@@ -22,7 +24,11 @@ from noctis.research.pricing import (
     table_from_config,
 )
 
-SOURCE = Path(__file__).resolve().parents[1] / "src/noctis/research/pricing.py"
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = ROOT / "src/noctis/research/pricing.py"
+# The two files that decide which model a stock install ends up running.
+ONBOARDING = ROOT / "src/noctis/onboarding.py"
+CLI = ROOT / "src/noctis/cli.py"
 
 # One completion's worth of the four neutral usage fields every provider seam reports.
 USAGE = {
@@ -123,12 +129,97 @@ def test_the_builtin_table_declares_the_version_that_produced_its_numbers():
     assert default_table().prices  # the shipped table is not empty
 
 
+def test_the_shipped_label_is_a_month_and_an_optional_revision_of_that_month():
+    """``<month>[.<revision>]``: a re-survey of the prices is a new month, a corrected **coverage**
+    is a revision of the same one (story #146). Either way the label changes, because both change
+    the number a record publishes — and nothing may parse the label beyond the ``+custom`` split,
+    which is why a dot inside it stays safe."""
+    assert re.fullmatch(r"\d{4}-\d{2}(\.\d+)?", PRICING_TABLE_VERSION)
+    assert "+" not in PRICING_TABLE_VERSION  # ``+custom.`` is the one separator anything splits on
+
+
 def test_the_shipped_table_prices_the_default_research_and_agent_models():
     """The two models a stock install actually runs must not report a null bill."""
     table = default_table()
 
     assert table.price_for("openai/gpt-5.4") is not None
     assert table.price_for("claude-opus-4-8") is not None
+
+
+# ── the shipped local driver's coverage (story #146) ────────────────────────────────────────
+
+LOCAL_DRIVER = "ollama_chat/noctis-qwen3:14b"  # exactly what `noctis setup` writes
+
+
+def test_the_shipped_local_driver_prefix_is_a_stated_zero_not_an_unknown_model():
+    """``ollama_chat/`` is the same free Ollama server ``ollama/`` is — the suffix only selects
+    the chat-completions driver — so the two must price identically. Leaving it uncarried spent the
+    ``null`` signal ("nobody knows what this cost") on the one run whose cost is known exactly, and
+    because a total is all-or-nothing it nulled the whole run's estimate."""
+    table = default_table()
+
+    assert table.price_for(LOCAL_DRIVER) == ModelPrice(0.0, 0.0, 0.0, 0.0)
+    assert table.price_for(LOCAL_DRIVER) == table.price_for("ollama/qwen3:14b")
+    assert table.estimate_usd(LOCAL_DRIVER, USAGE) == 0.0
+
+
+def test_every_local_prefix_is_priced_from_the_one_stated_allowlist():
+    """The list of ``$0`` backends is stated once, so adding a driver is one line rather than a
+    line here and a forgotten one there — which is how ``ollama_chat/`` came to be missing."""
+    table = default_table()
+
+    assert LOCAL_PREFIXES  # deny-by-default is not the same as an empty table
+    for prefix in LOCAL_PREFIXES:
+        assert table.estimate_usd(f"{prefix}any-tag:14b", USAGE) == 0.0, prefix
+
+
+def _wizard_models() -> list[str]:
+    """Every model string the shipped onboarding path itself emits or offers, read out of the source
+    that emits it — the same technique ``tests/test_engine_id.py`` uses on the fingerprint's files.
+
+    Derived, not transcribed: a wizard that starts writing a different prefix must fail the test
+    below rather than quietly configure an operator into an unpriceable run.
+    """
+    wizard = ONBOARDING.read_text(encoding="utf-8")
+    hosted = re.search(r"_HOSTED_DEFAULT_MODEL = (\{.*?\})", wizard)
+    assert hosted, "the wizard's hosted defaults moved — re-point this reader, not its point"
+    # The local branch interpolates the tag the operator picked off their own Ollama server.
+    local = re.findall(r'f"([a-z0-9_]+/)\{tag\}"', wizard)
+    offered = re.findall(r"([a-z0-9_]+/[a-z0-9][\w.:-]*) \(skips the LLM menu\)", CLI.read_text())
+    assert local and offered, "the local-driver literals moved — re-point this reader"
+    models = [
+        *ast.literal_eval(hosted.group(1)).values(),
+        *(f"{prefix}noctis-qwen3:14b" for prefix in local),
+        *offered,
+    ]
+    return models
+
+
+def test_every_model_the_setup_wizard_configures_is_priced_by_the_shipped_table():
+    """The shipped path cannot silently become unpriced: an operator who took every default must
+    never be told the price table cannot bill the model it chose for them."""
+    table = default_table()
+
+    for model in _wizard_models():
+        assert table.estimate_usd(model, USAGE) is not None, (
+            f"`noctis setup` configures {model!r}, which the shipped price table cannot bill, so "
+            "the operator's whole run publishes a null cost (a total is all-or-nothing). Add its "
+            "prefix to LOCAL_PREFIXES if the backend is a $0 local one, or its four rates to "
+            f"BUILTIN_PRICES if it is paid — then revise PRICING_TABLE_VERSION "
+            f"({PRICING_TABLE_VERSION}), because coverage changes the published number."
+        )
+
+
+def test_a_paid_cloud_the_table_never_surveyed_is_still_null_never_a_free_local_guess():
+    """The invariant the coverage fix must not erode. The ``$0`` list is an allowlist, so "not one
+    of the clouds we priced" still means *unknown*: pricing a paid third-party gateway at a
+    confident zero would publish a false bill, which is worse than the gap it closed."""
+    table = default_table()
+
+    assert table.price_for("mistralai/mistral-large-3") is None
+    assert table.price_for("gemini/gemini-3-pro") is None
+    assert table.estimate_usd("acme/oracle-1", USAGE) is None
+    assert table.total_usd([(LOCAL_DRIVER, USAGE), ("gemini/gemini-3-pro", USAGE)]) is None
 
 
 def _override(input_rate: float = 99.0) -> dict[str, dict[str, float]]:

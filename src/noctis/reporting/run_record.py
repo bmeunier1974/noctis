@@ -340,9 +340,11 @@ class RunArtifacts:
     # with no LLM key looks like: it reports a ``null`` bill rather than a $0 one. An **empty**
     # sequence is different and deliberate — a session that ran and spent nothing.
     spend: Sequence[SpendEntry] | None = None
-    # Which price table produced the estimates on those entries (``2026-07``, or a
-    # ``2026-07+custom.<digest>`` label when an operator overrode it in config). Carried into the
-    # record so a later reader knows which prices are behind the numbers.
+    # Which price table produced the estimates on those entries — the shipped
+    # ``<month>[.<revision>]`` label (``2026-07.1``), or a ``<version>+custom.<digest>`` one when an
+    # operator overrode it in config. Carried into the record so a later reader knows which prices
+    # are behind the numbers; a record keeps the label that was in force when it was written, so it
+    # is never migrated when the table gains a price or a prefix.
     pricing_table_version: str | None = None
     # Champions this run currently holds, read off its own champion board at write time — the
     # denominator of the two per-champion efficiency numbers. ``None`` when the board could not be

@@ -403,7 +403,7 @@ present, with an explicit `null` wherever a number is genuinely unknown.
 | `by_stage` | object \| null | as above. `{stage: bucket}` — the stages the driver actually journaled, spelled as it spells them (`formulate`, `match`, `discover`, `author`, `optimize`, `decide`); the record invents no taxonomy of its own |
 | `by_segment` | list \| null | as above. One `{index, …bucket}` per segment, joined on the entry's stamp |
 | `llm_usd_estimate` | number \| null | **any** entry could not be priced — a partial sum presented as a total understates the bill while looking complete |
-| `pricing_table_version` | string \| null | no ledger. `2026-07`, or `2026-07+custom.<digest>` when an operator overrode prices |
+| `pricing_table_version` | string \| null | no ledger. `2026-07.1`, or `2026-07.1+custom.<digest>` when an operator overrode prices. A `<month>[.<revision>]` label: a revision is the same month's prices with corrected coverage, and a record keeps whichever label was in force when it was written |
 | `efficiency` | object | never |
 
 A **bucket** is the four fields (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
@@ -779,7 +779,7 @@ Its skeleton — the shape of every record:
   },
   "inputs": { "config_epoch": 1, "execution_mode": "paper", "...": "…" },
   "strategies": [{ "name": "uranium_momo", "outcome": "promoted", "...": "…" }],
-  "spend": { "llm_usd_estimate": 0.2466, "pricing_table_version": "2026-07", "...": "…" },
+  "spend": { "llm_usd_estimate": 0.2466, "pricing_table_version": "2026-07.1", "...": "…" },
   "sessions": [{ "as_of": "2026-07-27", "equity": 100500.0, "...": "…" }],
   "performance": { "source": "paper_account", "...": "…" },
   "assumptions": { "paper_only": true, "fill_model": "next_bar_open", "...": "…" },

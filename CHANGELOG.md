@@ -554,6 +554,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The shipped local driver costs `$0`, not "nobody knows": `ollama_chat/` is in the price table.**
+  `ollama_chat/…` is the prefix the system itself writes (`noctis setup`) and recommends everywhere
+  (the `--model` help, `config.example.yaml`, the README, the docs) — and it was the one local
+  spelling the table did not carry, so a run that took every default priced as an **unknown model**:
+  `spend.llm_usd_estimate: null`, every efficiency ratio `null` with it (a total is all-or-nothing),
+  and `noctis research` printing "the price table cannot bill the model" about a session that really
+  did cost nothing. `ollama_chat/` is the same free Ollama server `ollama/` is; the suffix only
+  selects LiteLLM's chat-completions driver.
+  - `null` stays the load-bearing signal for **"this model has no known price"**, so the `$0` list
+    stays an explicit **allowlist** — now one named `LOCAL_PREFIXES` constant, stated once and built
+    into the table. It is deliberately *not* shared with `research.cost.is_free_local`, which defines
+    free-local negatively (anything that is not Anthropic or OpenAI): being wrong there loosens a
+    resource ceiling, while being wrong here would price a future paid third-party cloud (`gemini/`,
+    `mistralai/`, a paid OpenAI-compatible gateway) at a confident `$0` — a published false figure,
+    and exactly the "infer a price from the absence of one" the module forbids. A test pins that a
+    paid-but-uncarried prefix still contributes `null` and still poisons the total.
+  - **The shipped path cannot silently become unpriced again**: a test derives the models from the
+    code that emits them — the `ollama_chat/` literal in `onboarding.py`'s local-driver branch, the
+    `--model` help text, and `_HOSTED_DEFAULT_MODEL` — and fails, with instructions, if the wizard
+    ever configures a model the table cannot bill.
+  - `PRICING_TABLE_VERSION` is **`2026-07.1`**: no price changed, the table's *coverage* did, and
+    coverage changes the published number (`null` → `0.0`) for the same model. The label is now
+    documented as `<month>[.<revision>]` — a new month means the prices were re-surveyed, a revision
+    means the same month's prices with corrected coverage. Existing records keep the label that was
+    in force when they were written; nothing is migrated, which is the point of having one.
+
 - **The engine ratchet's promise now actually holds: `--write` refuses to record an undeclared
   arbiter move.** The ratchet compares the committed record against the freshly computed tree, so
   the only state it could see was *disagreement between the two* — and regenerating erased it. "Edit

@@ -14,10 +14,13 @@ Three rules make an estimate honest enough to publish:
   ``$0``/token local backend costs nothing, but that is a *stated* price (an explicit table entry),
   not an inference from the absence of one.
 * **The table says which table it is.** :data:`PRICING_TABLE_VERSION` travels into the record
-  beside every number it produced, so a later reader knows which prices were in force. A config
-  override cannot borrow that identity: :func:`table_from_config` stamps a derived
-  ``<version>+custom.<digest>`` label, which is stable for the same override and different for a
-  different one.
+  beside every number it produced, so a later reader knows which prices were in force. The label is
+  ``<month>[.<revision>]``: a new month means the prices were re-surveyed, a ``.<revision>`` means
+  the same month's prices with corrected **coverage** — because gaining a prefix changes the
+  published number (``null`` → a real one) for the same model, and two records disagreeing about one
+  run under one label is the thing the label exists to prevent. A config override cannot borrow that
+  identity either: :func:`table_from_config` stamps a derived ``<version>+custom.<digest>`` label,
+  which is stable for the same override and different for a different one.
 * **Every field is billed at its own rate.** Input, output, cache-write and cache-read are four
   different prices at every provider, so usage that never recorded the split is *unpriceable*
   (``None``) rather than billed at a blended guess.
@@ -42,6 +45,7 @@ from typing import Any
 
 __all__ = [
     "BUILTIN_PRICES",
+    "LOCAL_PREFIXES",
     "PRICING_TABLE_VERSION",
     "USAGE_FIELDS",
     "ModelPrice",
@@ -51,9 +55,14 @@ __all__ = [
 ]
 
 # The shipped table's version — the label that travels into the record beside every number it
-# priced. Bump it (and the prices below) in one edit, so a record written under the old prices
-# stays readable as exactly that.
-PRICING_TABLE_VERSION = "2026-07"
+# priced. It is a ``<month>[.<revision>]`` label, and it is revised in the same edit as the change
+# it describes: a new ``<month>`` says the prices below were re-surveyed, a ``.<revision>`` says the
+# same month's prices with **corrected coverage** — a prefix the table should always have carried
+# (story #146 added ``ollama_chat/``). A coverage change earns a label of its own because it changes
+# the published output (``null`` → a real number) for the same model, and two records that disagree
+# about one run under one label are exactly what this label rules out. A record written under an
+# older label keeps it: it says which prices produced its numbers, which is the whole job.
+PRICING_TABLE_VERSION = "2026-07.1"
 
 
 @dataclass(frozen=True)
@@ -122,16 +131,36 @@ _OPENAI = {
 }
 _FREE_LOCAL = ModelPrice(0.0, 0.0, 0.0, 0.0)
 
+# Every prefix that names a **local / self-hosted** backend, stated once so a future driver is
+# priced by adding one line here rather than one line here and a forgotten one there.
+# ``ollama_chat/`` and ``ollama/`` are the same free Ollama server — the suffix only selects
+# LiteLLM's chat-completions driver — and ``ollama_chat/`` is the spelling the system itself writes
+# (``noctis setup``) and recommends (the ``--model`` help, the example config, the docs), so it is
+# the one an operator who took every default is actually running.
+#
+# This list is deliberately an **allowlist**, and deliberately *not* shared with
+# :func:`noctis.research.cost.is_free_local`, which defines free-local negatively (anything that is
+# not ``anthropic`` or ``openai``). That definition is right where it lives — being wrong about a
+# *resource ceiling* costs a budget — and wrong here: it would price any future paid third-party
+# cloud (``gemini/``, ``mistralai/``, a paid OpenAI-compatible gateway) at a confident ``$0``, which
+# is inferring a price from the absence of one, the first rule of this module. Being wrong here
+# publishes a false dollar figure, so billing stays deny-by-default: a prefix earns its zero by
+# being named on this list.
+LOCAL_PREFIXES: tuple[str, ...] = (
+    "ollama/",
+    "ollama_chat/",
+    "vllm/",
+    "lm_studio/",
+    "local/",
+)
+
 BUILTIN_PRICES: Mapping[str, ModelPrice] = {
     **{name: price for name, price in _ANTHROPIC.items()},
     **{f"anthropic/{name}": price for name, price in _ANTHROPIC.items()},
     **{name: price for name, price in _OPENAI.items()},
     **{f"openai/{name}": price for name, price in _OPENAI.items()},
     # Local / self-hosted backends: a stated zero, not an absent price.
-    "ollama/": _FREE_LOCAL,
-    "vllm/": _FREE_LOCAL,
-    "lm_studio/": _FREE_LOCAL,
-    "local/": _FREE_LOCAL,
+    **dict.fromkeys(LOCAL_PREFIXES, _FREE_LOCAL),
 }
 
 
