@@ -17,6 +17,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   two runs must match on before their numbers may be pooled or ranked together. Only committed
   scaffold is hashed, so an operator's gitignored mandate never moves a digest and fingerprints
   stay portable between machines.
+- **The engine fingerprint ratchet** — behavioural drift can no longer land silently. The
+  committed `engine_fingerprint.json` records the current per-component digests (and a digest
+  per allowlisted file) beside `ENGINE_VERSION`; `scripts/engine_fingerprint.py` recomputes and
+  compares it in CI and pre-commit. Drift in an **arbiter** component (`gates`, `backtest` — what
+  passes, what a number means) without an `ENGINE_VERSION` bump **fails**, naming the component
+  and the files that moved; **searcher**-tier drift (`research`, `prompts`, `profiles`, `seeds`,
+  `memory_seed`, `schema`) **warns and passes**, because improving the searcher must not
+  invalidate an experiment whose arbiter held still. A stale record fails with the regeneration
+  command in the message: `uv run python scripts/engine_fingerprint.py --write`. The check reads
+  the one `ARBITER_COMPONENTS` constant the resume policy will read — two copies of that set
+  would eventually disagree, silently.
 
 ### Changed
 

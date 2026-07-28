@@ -70,6 +70,8 @@ pytest tests/test_champions.py::test_name -q     # a single test
 ruff check . && ruff format --check .   # lint + format (line-length 100; rules E,F,I,W,UP,B)
 mypy                       # type-check src/noctis (config in pyproject.toml)
 pre-commit run --all-files # every quality gate (install once: pre-commit install)
+python scripts/engine_fingerprint.py [--write]   # the engine fingerprint ratchet: check, or
+                           # regenerate engine_fingerprint.json after moving a behavioural file
 
 python -m noctis setup [--check]   # guided first-run wizard: files, extras, keys, LLM verify
 python -m noctis init              # scaffold local config/.env/mandate + workspace (idempotent)

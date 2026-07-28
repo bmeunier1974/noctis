@@ -211,6 +211,18 @@ def comparable_key(
     )
 
 
+def file_digest(path: Path) -> str | None:
+    """One allowlisted file's digest, under the same normalization a component digest uses.
+
+    A component digest answers "did this surface move?"; this answers "which file moved?", which
+    is what a drift report has to name for a reviewer to see the change. ``None`` for a missing
+    file — the same missing-input rule, one level down.
+    """
+    if not path.is_file():
+        return None
+    return hashlib.sha256(_normalized(path.read_bytes())).hexdigest()[:_DIGEST_CHARS]
+
+
 def compare(a: EngineFingerprint, b: EngineFingerprint) -> set[str]:
     """The names of the components whose digests differ between two fingerprints.
 

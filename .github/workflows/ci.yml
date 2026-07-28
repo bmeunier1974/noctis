@@ -47,5 +47,12 @@ jobs:
       - name: Type check (mypy)
         run: uv run --no-sync mypy
 
+      # The behavioural ratchet: recompute the per-component engine fingerprint and compare it
+      # with the committed engine_fingerprint.json. Arbiter drift (what passes, what a number
+      # means) without an ENGINE_VERSION bump FAILS here; searcher-tier drift warns in the job
+      # log and passes. Exit code and message come from noctis.observability.engine_ratchet.
+      - name: Engine fingerprint ratchet
+        run: uv run --no-sync python scripts/engine_fingerprint.py --check
+
       - name: Build package
         run: uv build

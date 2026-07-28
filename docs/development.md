@@ -69,12 +69,53 @@ uv run ruff check .               # lint
 uv run ruff format .              # format
 uv run mypy                       # type-check src/noctis
 uv run pre-commit run --all-files # all quality gates at once
+
+uv run python scripts/engine_fingerprint.py          # the engine fingerprint ratchet (below)
+uv run python scripts/engine_fingerprint.py --write  # regenerate engine_fingerprint.json
 ```
+
+## The engine fingerprint ratchet
+
+`engine_fingerprint.json` (repo root) is the committed statement of what this engine *is*: the
+declared `ENGINE_VERSION` plus one digest per behavioural component — and, under each component,
+a digest per allowlisted file, so a drift report names the file that moved rather than every file
+the component covers. The digests come from `src/noctis/observability/engine_id.py`; the check
+that compares them lives in `src/noctis/observability/engine_ratchet.py` and runs in **CI** and
+in **pre-commit**.
+
+Why it exists: `ENGINE_VERSION` is the key two runs' numbers are compared on
+(`noctis engine` prints it), and a declared version nobody remembers to bump is worse than none —
+it asserts a comparability that does not hold. The check is split on the arbiter/searcher line
+(see [architecture.md](architecture.md)):
+
+| Component drift, no `ENGINE_VERSION` bump | Result |
+|---|---|
+| `gates`, `backtest` — the **arbiter**: what passes, and what a number means | **Fail.** Naming the component and the files that moved. This is the change that invalidates every stored champion comparison, so it can never land silently |
+| `research`, `prompts`, `profiles`, `seeds`, `memory_seed`, `schema` — the **searcher** | **Warn and pass.** Naming the component and the files. Improving the searcher must not invalidate an experiment whose arbiter held still, and a ratchet that fires on a docstring edit gets disabled |
+
+The rule in full, in evaluation order: a missing or unreadable record fails; a record declaring
+another `ENGINE_VERSION` than the tree fails as **stale**; arbiter drift fails (with the version
+unchanged that is undeclared drift, with it bumped the record simply was not regenerated); drift
+confined to the searcher tier warns and exits zero. Staleness is always reported and always names
+the regeneration command — which tier moved decides only whether it *blocks*.
+
+So, when you move a component:
+
+```bash
+# 1. arbiter component (gates/backtest)? bump ENGINE_VERSION in
+#    src/noctis/observability/engine_id.py — searcher-only changes need no bump
+# 2. regenerate the record, and commit it in the SAME PR so the diff shows what moved
+uv run python scripts/engine_fingerprint.py --write
+```
+
+Files outside the allowlist in `COMPONENT_PATHS` — docs, tests, the README, an operator's
+gitignored mandate — move no digest and never fire the check.
 
 ## Dev scripts
 
-`scripts/` holds dev tools that are deliberately *not* CLI subcommands. The one there today is the
-**parity harness** (`scripts/parity_harness.py`): it runs both research loops — conversation and
+`scripts/` holds dev tools that are deliberately *not* CLI subcommands. One is the ratchet
+entrypoint above (`scripts/engine_fingerprint.py`, a thin wrapper over the tested module). The
+other is the **parity harness** (`scripts/parity_harness.py`): it runs both research loops — conversation and
 episodic — on one fixed lake fixture and prints a side-by-side metrics comparison, the evidence gate
 for preferring episodic on small-context backends. It runs *paid* model sessions, so it refuses
 without an API key and prints its spend first; the deterministic metric math it prints is covered by
