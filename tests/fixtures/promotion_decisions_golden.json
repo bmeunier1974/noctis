@@ -39,6 +39,21 @@
     "promote": false,
     "rationale": "rejected: test metric 0.4000 does not beat weakest champion 0.5000"
   },
+  "family_already_crowned_with_free_slots": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: 'vol_breakout' already holds a champion slot; a champion file is immutable \u2014 author an improvement under a new name (one slot per family)"
+  },
+  "family_demoted_off_the_board_competes_again": {
+    "demote_index": 1,
+    "promote": true,
+    "rationale": "promoted: test metric 0.9000 beats weakest champion 0.5000; demoting the weakest (gap 0.0000)"
+  },
+  "family_recrowned_on_an_identical_card": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: 'vol_breakout' already holds a champion slot; a champion file is immutable \u2014 author an improvement under a new name (one slot per family)"
+  },
   "free_slot_above_bar": {
     "demote_index": null,
     "promote": true,
@@ -109,6 +124,11 @@
     "promote": false,
     "rationale": "rejected: challenger was not validated (no out-of-sample splits)"
   },
+  "renamed_variant_displaces_its_sibling": {
+    "demote_index": 0,
+    "promote": true,
+    "rationale": "promoted: test metric 0.9000 beats weakest champion 0.5000; demoting the weakest (gap 0.0000)"
+  },
   "reverse_gap_disabled": {
     "demote_index": null,
     "promote": true,
@@ -123,6 +143,11 @@
     "demote_index": null,
     "promote": false,
     "rationale": "rejected: test exceeds train by 2.0000, over max 1.0000 (degenerate \u2014 likely noise, not a robust edge)"
+  },
+  "same_family_stale_incumbent_not_displaced": {
+    "demote_index": null,
+    "promote": false,
+    "rationale": "rejected: 'vol_breakout' already holds a champion slot; a champion file is immutable \u2014 author an improvement under a new name (one slot per family)"
   },
   "stale_champion_but_below_bar": {
     "demote_index": null,

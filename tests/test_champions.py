@@ -314,6 +314,96 @@ def test_unvalidated_challenger_rejected():
     assert "not validated" in d.rationale
 
 
+# --- one slot per family -------------------------------------------------------------------
+
+
+def test_crowned_family_rejected_even_with_free_slots():
+    """The board holds one slot per family: a re-tune of a crowned family cannot take a second.
+
+    A champion file is immutable, so a "better" draw of the same family is not an improvement —
+    it is the incumbent crowding its own board (epic #158: three identical entries of one family).
+    """
+    champs = [make_scorecard("daily_momentum_trend", test_metric=1.0, train_metric=1.1)]
+    d = decide(make_scorecard("daily_momentum_trend", 1.5, 1.6), champs, RULES)
+    assert d.promote is False
+    assert d.demote_index is None
+    assert "already holds a champion slot" in d.rationale
+    assert "one slot per family" in d.rationale
+    failed = d.gates[-1]
+    assert (failed.gate, failed.passed, failed.observed, failed.threshold) == (
+        "family_slot",
+        False,
+        None,
+        None,
+    )
+
+
+def test_identical_rescore_of_a_champion_is_rejected():
+    """The exact shape that filled the overnight board: the same card considered twice."""
+    card = make_scorecard("daily_momentum_trend", 1.0, 1.1, lookback=40)
+    d = decide(card, [card], RULES)
+    assert d.promote is False
+    assert "immutable" in d.rationale
+
+
+def test_renamed_variant_may_displace_its_own_sibling():
+    """A different name is a different family, judged on the metric like any other challenger —
+    including against a sibling it beats."""
+    champs = [
+        make_scorecard("daily_momentum_trend", 0.5, 0.6),  # weakest
+        make_scorecard("b", 1.0, 1.0),
+        make_scorecard("c", 2.0, 2.0),
+    ]
+    d = decide(make_scorecard("daily_momentum_trend_v2", 0.9, 1.0), champs, RULES)
+    assert d.promote is True
+    assert d.demote_index == 0
+
+
+def test_family_gate_runs_before_stale_displacement():
+    """A stale incumbent is displaceable — never by its own re-tune.
+
+    The family gate sits ahead of the stale rule, so the one candidate that must not quietly
+    take the slot back (the same family, re-scored under the current metric) cannot.
+    """
+    stale = make_scorecard("daily_momentum_trend", 1.0, 1.0)
+    stale.metric_name = "sortino"
+    champs = [stale, make_scorecard("other", 9.0, 9.0)]
+    rules = PromotionRules(champion_count=2, max_gap=1.0, min_test_metric=0.0)
+    d = decide(make_scorecard("daily_momentum_trend", 0.3, 0.3), champs, rules)
+    assert d.promote is False
+    assert d.demote_index is None
+    assert "already holds a champion slot" in d.rationale
+
+
+def test_registry_holds_one_slot_per_family(tmp_path):
+    reg = ChampionRegistry(tmp_path / "champions.json", capacity=3)
+    reg.consider(make_scorecard("daily_momentum_trend", 1.0, 1.1, lookback=20), RULES)
+    d = reg.consider(make_scorecard("daily_momentum_trend", 2.0, 2.1, lookback=40), RULES)
+
+    assert d.promote is False
+    assert [e.family for e in reg.list()] == ["daily_momentum_trend"]
+    assert reg.list()[0].params == {"lookback": 20}  # the incumbent is untouched
+    assert not reg.demotions()  # a rejected re-tune displaces nobody, so it is no demotion
+
+    journaled = reg.history[-1]["gates"][-1]
+    assert (journaled["gate"], journaled["passed"]) == ("family_slot", False)
+    note = str(journaled["note"])
+    assert reg.list()[0].crowned_at in note and "lookback" in note
+
+
+def test_family_demoted_off_the_board_may_promote_again(tmp_path):
+    """One slot per family is a rule about the *board*, not a lifetime ban."""
+    rules = PromotionRules(champion_count=1, max_gap=1.0, min_test_metric=0.0)
+    reg = ChampionRegistry(tmp_path / "champions.json", capacity=1)
+    reg.consider(make_scorecard("daily_momentum_trend", 0.5, 0.6), rules)
+    reg.consider(make_scorecard("other", 1.0, 1.0), rules)
+    assert [e.family for e in reg.list()] == ["other"]
+
+    d = reg.consider(make_scorecard("daily_momentum_trend", 2.0, 2.0), rules)
+    assert d.promote is True
+    assert [e.family for e in reg.list()] == ["daily_momentum_trend"]
+
+
 # --- registry apply + persistence --------------------------------------------------------
 
 

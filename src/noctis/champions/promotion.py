@@ -19,13 +19,21 @@ Fixed rules, in order:
 5. **Consistency gate (optional)** — reject if fewer than ``min_symbol_consistency`` of the
    fit symbols have a positive per-symbol test metric. ``0.0`` disables it (the default —
    a legitimately specialized strategy should not be punished for breadth).
-6. **Free slot** — if the registry is below capacity and the challenger clears the minimum
+6. **One slot per family** — reject if a current champion is of the challenger's family. A
+   champion file is immutable, so a better draw of a crowned family is not an improvement to
+   it: promoting it would crowd the board with the same strategy (three identical entries of
+   one family, and half a night's trials spent re-tuning the incumbent, is what put this gate
+   here). The honest move is a new name — a different thesis, judged on its own. The rule is
+   about the *board*, not a lifetime ban: a family demoted off it may compete again.
+7. **Free slot** — if the registry is below capacity and the challenger clears the minimum
    out-of-sample bar, promote.
-7. **Stale champions lose first** — a champion whose scorecard was scored under a different
+8. **Stale champions lose first** — a champion whose scorecard was scored under a different
    metric than the challenger's carries a number in different units; comparing across
    metrics is meaningless. A stale slot behaves like a free slot: any challenger clearing
-   the minimum bar displaces the stale champion, and one below the bar is rejected.
-8. **Beat the weakest** — otherwise promote iff the challenger's out-of-sample test metric
+   the minimum bar displaces the stale champion, and one below the bar is rejected. Because
+   gate 6 runs first, a stale champion is never displaced by its **own** family's re-tune —
+   only by a different strategy.
+9. **Beat the weakest** — otherwise promote iff the challenger's out-of-sample test metric
    beats the weakest champion's; that champion is demoted. On panel scorecards the test
    metric is the panel mean, so champions with different fit sets compare on the same
    scale-free, risk-adjusted footing.
@@ -45,6 +53,7 @@ subprocess.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from noctis.backtest.scorecard import Scorecard
@@ -61,6 +70,7 @@ GATE_ORDER: tuple[str, ...] = (
     "forward_holdout",
     "symbol_holdout",
     "symbol_consistency",
+    "family_slot",
 )
 
 # The last gate, which of the two depending on the board: a challenger facing a free (or stale)
@@ -149,12 +159,36 @@ _OFF = "inert: switched off by a {name} of 0"
 _UNMEASURED = "inert: this scorecard carries no {what} metric, so the gate had nothing to judge"
 
 
-def decide(challenger: Scorecard, champions: list[Scorecard], rules: PromotionRules) -> Decision:
+def _incumbent_note(
+    champions: list[Scorecard], crowned_at: Sequence[str | None], index: int
+) -> str:
+    """Who is holding the family's slot — the fact a rejected re-tune is owed."""
+    incumbent = champions[index]
+    stamp = crowned_at[index] if index < len(crowned_at) else None
+    since = f" crowned {stamp}" if stamp else ""
+    return (
+        f"the {incumbent.family!r} slot is held by a champion{since} "
+        f"with params {incumbent.params!r}"
+    )
+
+
+def decide(
+    challenger: Scorecard,
+    champions: list[Scorecard],
+    rules: PromotionRules,
+    *,
+    crowned_at: Sequence[str | None] = (),
+) -> Decision:
     """Judge a challenger against the current champions. Pure: scorecards in, decision out.
 
     The decision is the early-return ladder documented at the top of this module. Beside it, each
     gate appends a :class:`GateResult` to ``decision.gates`` as it evaluates — measurement only,
     read by nothing here.
+
+    ``crowned_at`` is when each champion took its slot, positionally aligned with ``champions``
+    (indices are already this module's currency — see ``Decision.demote_index``). Evidence only:
+    the family gate names the incumbent it turned a challenger away for. A caller with no
+    timestamps to hand — the corpus, a unit drive — omits it and the note simply says less.
     """
     gates: list[GateResult] = []
     if challenger.stage != "validated" or not challenger.symbols:
@@ -315,7 +349,31 @@ def decide(challenger: Scorecard, champions: list[Scorecard], rules: PromotionRu
         )
     )
 
-    # 6) free capacity
+    # 6) one slot per family — a champion file is immutable, so a stronger draw of a crowned
+    # family cannot improve it in place; crowning it too only fills the board with one strategy.
+    # Placed after the honesty gates (a rejected re-tune still records how it scored) and before
+    # the free-slot/stale/beat-weakest logic, so no incumbent is ever displaced by itself.
+    incumbent = next((i for i, c in enumerate(champions) if c.family == challenger.family), None)
+    if incumbent is not None:
+        gates.append(
+            GateResult("family_slot", False, note=_incumbent_note(champions, crowned_at, incumbent))
+        )
+        return Decision(
+            False,
+            f"rejected: {challenger.family!r} already holds a champion slot; a champion file is "
+            "immutable — author an improvement under a new name (one slot per family)",
+            gates=tuple(gates),
+        )
+    gates.append(
+        GateResult(
+            "family_slot",
+            True,
+            note=f"no champion holds the {challenger.family!r} slot "
+            f"({len(champions)} on the board)",
+        )
+    )
+
+    # 7) free capacity
     if len(champions) < rules.champion_count:
         free_slot = (
             f"a free slot: the board holds {len(champions)} of {rules.champion_count} champions"
@@ -339,7 +397,7 @@ def decide(challenger: Scorecard, champions: list[Scorecard], rules: PromotionRu
             gates=tuple(gates),
         )
 
-    # 7) stale champions lose first — a champion scored under a different metric carries a
+    # 8) stale champions lose first — a champion scored under a different metric carries a
     # number in different units, so its stored value cannot be compared. A stale slot
     # behaves like a free slot: the minimum bar applies, nothing more.
     stale = [i for i, c in enumerate(champions) if c.metric_name != challenger.metric_name]
@@ -372,7 +430,7 @@ def decide(challenger: Scorecard, champions: list[Scorecard], rules: PromotionRu
             gates=tuple(gates),
         )
 
-    # 8) beat the weakest champion
+    # 9) beat the weakest champion
     weakest_index = min(range(len(champions)), key=lambda i: champions[i].avg_test_metric)
     weakest_metric = champions[weakest_index].avg_test_metric
     weakest_note = (

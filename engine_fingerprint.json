@@ -13,11 +13,11 @@
       "note": null
     },
     "gates": {
-      "digest": "0fb6148041c95608",
+      "digest": "0e0c8e03392f374a",
       "files": {
         "src/noctis/backtest/scorecard.py": "4d4ae86c6d4c4531",
         "src/noctis/backtest/splits.py": "1e0d5162d148eb4b",
-        "src/noctis/champions/promotion.py": "2d6206e2dcf4ef5a"
+        "src/noctis/champions/promotion.py": "7181f5d30b950e68"
       },
       "note": null
     },
@@ -81,7 +81,7 @@
       "note": null
     }
   },
-  "engine_version": 2,
+  "engine_version": 3,
   "kind": "noctis.engine_fingerprint",
   "regenerate_with": "uv run python scripts/engine_fingerprint.py --write"
 }

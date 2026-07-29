@@ -176,20 +176,52 @@ def cases() -> Iterator[Case]:
         rules(),
     )
 
-    # 6) free capacity
+    # 6) one slot per family
+    yield Case(
+        "family_already_crowned_with_free_slots",
+        card("vol_breakout", test=1.5),
+        [card("vol_breakout", test=1.0)],
+        rules(),
+    )
+    yield Case(
+        "family_recrowned_on_an_identical_card",
+        card("vol_breakout", test=1.0),
+        [card("vol_breakout", test=1.0)],
+        rules(),
+    )
+    yield Case(
+        "renamed_variant_displaces_its_sibling",
+        card("vol_breakout_v2", test=0.9),
+        [card("vol_breakout", test=0.5), *full[:2]],
+        rules(),
+    )
+    yield Case(
+        "family_demoted_off_the_board_competes_again",
+        card("vol_breakout", test=0.9),
+        full,
+        rules(),
+    )
+    yield Case(
+        "same_family_stale_incumbent_not_displaced",
+        card("vol_breakout", test=0.3),
+        [card("vol_breakout", test=1.0, metric_name="sortino"), card("champ_b", test=9.0)],
+        rules(champion_count=2),
+    )
+
+    # 7) free capacity
     yield Case("free_slot_above_bar", card(test=1.5), [], rules())
     yield Case("free_slot_exactly_on_bar", card(test=0.0), [], rules())
     yield Case("free_slot_below_bar", card(test=-0.2), [], rules())
     yield Case("free_slot_beside_one_champion", card(test=0.2), full[:1], rules())
 
-    # 7) stale champions lose first
+    # 8) stale champions lose first
     stale_board = [card("champ_a", test=1.0, metric_name="sortino"), card("champ_b", test=9.0)]
     yield Case("stale_champion_displaced", card(test=0.3), stale_board, rules(champion_count=2))
     yield Case(
         "stale_champion_but_below_bar", card(test=-0.1), stale_board, rules(champion_count=2)
     )
 
-    # 8) beat the weakest
+    # 9) beat the weakest
     yield Case("beats_weakest", card(test=0.9), full, rules())
     yield Case("ties_weakest", card(test=0.5), full, rules())
     yield Case("does_not_beat_weakest", card(test=0.4), full, rules())

@@ -216,7 +216,8 @@ The gate order:
 3. forward temporal holdout (`promotion.min_holdout_metric`)
 4. symbol holdout (`promotion.min_symbol_holdout_metric`)
 5. consistency breadth (`promotion.min_symbol_consistency`, optional)
-6. beat the weakest current champion
+6. one slot per family (a crowned family cannot take a second seat)
+7. beat the weakest current champion
 
 Comparison is on a scale-free footing, and a champion scored under a *different* metric is
 treated as "stale" (displaceable) because cross-metric numbers aren't comparable. A candidate
