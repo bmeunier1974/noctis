@@ -369,6 +369,34 @@ python -m noctis account [--reset]         # the continuous paper account; --res
 python -m noctis champions [--reset]       # the champion board; --reset re-fills slots under current gates
 ```
 
+### Reading the run you just ran
+
+Three commands read a finished run back — the board, the record, the report. They are the same
+three the README's try-it example ends on, verbatim:
+
+```bash
+uv run python -m noctis runs                                  # id, label, status, segments
+uv run python -m noctis run-record latest | jq .performance   # the paper account's numbers
+uv run python -m noctis report latest                         # the close-of-day report
+```
+
+Each step narrows. [`runs`](#the-run-board--runs-and-run-record) finds the run — its id, whether
+it is still `running`, and the [comparable key](#engine-identity--are-these-two-runs-comparable)
+that says what it may be ranked against. `run-record` prints that one run's whole `run.json`,
+which is why piping into `jq` works at all: the record has no sidecars, so `.performance` sits in
+the same document as the config that run froze, its engine identity and every candidate's gate
+evidence. It reads `null` until the run has actually traded — a night of pure research reports no
+performance rather than a flat zero. [`report`](#the-close-of-day-report--report-address) prints
+that run's close-of-day report, which is a file under the run's own tree, at
+`workspace/runs/<run_id>/reports/YYYY-MM-DD.md`.
+
+`latest` is one of the four
+[address forms](#the-four-address-forms-and-how-they-are-told-apart), so the same three commands
+take an id, a `run.json` path or `@label` when the run wanted is not the newest. Dropping the
+address is not the same question: a bare `report` reads the reserved `legacy` run, not the run
+that just finished — see [the close-of-day report](#the-close-of-day-report--report-address) for
+what an address does and does not change.
+
 ### The run board — `runs` and `run-record`
 
 ```bash

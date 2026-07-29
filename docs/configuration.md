@@ -47,7 +47,7 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `live_feed.poll_interval_s` | Live-feed poll pacing (the feed self-throttles regardless) |
 | `observability.heartbeat_polls` | `-vv` live-trading heartbeat cadence in polls (0 disables; default `60` ≈ every ~2 min) |
 | `qa.keep_last_runs` | `--debug` QA-report retention: prune-on-start keeps the newest N run folders under `qa_dir` (default `20`; `0` keeps none). Housekeeping only — no decision path reads it. See [development.md → Reading a QA report](development.md#reading-a-qa-report) |
-| `promotion.metric` | `sharpe` \| `sortino` \| `total_return` — changing it reinterprets every threshold below in the new metric's units |
+| `promotion.metric` | `sharpe` \| `sortino` \| `total_return` — the election metric every candidate is scored, ranked and promoted on; changing it reinterprets every threshold below in the new metric's units. **Normally set in the active mandate's `config:` block** ([The mandate overlay](#the-mandate-overlay)) — it is the one `promotion.*` knob a mandate may bind. The value in `config.yaml` stays the **base**: what an un-mandated run scores on, and what an `auto` session scores on by contract ([below](#researchmandate-auto-makes-a-profiles-config-block-inert)) |
 | `promotion.max_gap`, `min_test_metric`, `min_test_activity` | Overfit-gap guard, OOS bar, and the almost-never-trades activity floor |
 | `promotion.min_holdout_metric`, `min_symbol_holdout_metric`, `min_symbol_consistency` | The out-of-sample promotion gates |
 | `promotion.annualization_cap`, `max_period_ratio`, `max_reverse_gap`, `max_test_metric` | Metric-robustness caps + degeneracy backstops (sub-daily Sharpe inflation, too-good-to-be-true OOS) |

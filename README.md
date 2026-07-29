@@ -94,34 +94,77 @@ mid-session downgrade. The full commented config file:
 [config.example.yaml](config.example.yaml) · every knob explained:
 [docs/configuration.md](docs/configuration.md)
 
-Once it's running: `noctis status` (mode, market state, champions), `noctis report`
-(close-of-day report), `noctis research -v` (watch one research session live). Every
-command: [docs/cli.md](docs/cli.md)
+Once it's running: `noctis status` (mode, market state, champions), `noctis runs` (the run
+board), `noctis run-record latest` (one run's whole record), `noctis report latest`
+(close-of-day report), `noctis research -v` (watch one research session live). Every command:
+[docs/cli.md](docs/cli.md)
 
-## Steering it — your two most important knobs
+## Steering it — the mandate is your input surface
 
-Noctis researches on its own, but **what it hunts for** and **how results are judged** are
-yours to set. Both live in the local files `noctis setup` just created (gitignored —
-editing them never touches the repo):
+Noctis researches on its own, but **what it hunts for** is yours to set — and it lives in one
+place: the local `mandate/` folder `noctis setup` created (gitignored, so steering the agent
+never shows up as a repo change).
 
-- **The mandate** (`research.mandate` in `config.yaml`) — the research brief: style, risk
-  appetite, symbols. Pick a shipped profile (`aggressive`, `conservative`, `long-term`,
-  `short-term`, `sector-specialist`), write your own brief in `mandate/MANDATE.md` (selector
-  `MANDATE`), let the agent choose per session (`auto`), or leave it `null` for unconstrained
-  research. A pinned mandate also **configures the run** it steers — which model thinks, what
-  one session may spend, which names it starts from — but it can never loosen a validation
-  gate: the arena (safety mode, fill costs, promotion thresholds, holdouts, paths, secrets) is
-  refused by name, and a mandate that reaches for it doesn't start.
-  → [mandate/README.md](mandate/README.md)
-- **The election metric** (`promotion.metric` in `config.yaml`) — the risk appetite every
-  candidate is scored, ranked, and promoted on: `sharpe` (penalizes all volatility),
-  `sortino` (penalizes only downside), or `total_return` (raw profit). It threads through
-  the whole pipeline, and it is the **one** `promotion.*` knob a mandate may bind — the
-  thresholds beside it are read in its units, so they stay yours.
-  → [docs/configuration.md](docs/configuration.md) · [docs/research.md](docs/research.md)
+A mandate is two things in one file. The **prose brief** tells the agent what kind of trader you
+want the system to be: style, risk appetite, horizon, which names to look at. The front-matter
+`config:` block **shapes the run** it steers: which model thinks, what one session may spend,
+which universe it starts from — and the flagship knob, the election metric.
+
+- **The election metric** (`promotion.metric`) — the risk dial every candidate is scored,
+  ranked, and promoted on: `sharpe` (penalizes all volatility), `sortino` (penalizes only
+  downside), or `total_return` (raw profit). It threads through the whole pipeline, and it is
+  the **one** `promotion.*` knob a mandate may bind — the thresholds beside it are read in its
+  units, so they stay yours. `config.yaml` sets the base every run starts from, which is what
+  an unmandated run — or an `auto` session, whose profile is picked too late to overlay —
+  scores on.
+- **Which mandate governs a run** (`research.mandate` in `config.yaml`) — a shipped profile
+  (`aggressive`, `conservative`, `long-term`, `short-term`, `sector-specialist`), your own brief
+  in `mandate/MANDATE.md` (selector `MANDATE`), `auto` to let the agent pick a personality each
+  session, or `null` for unconstrained research. `--mandate <name>` and `--directive "<text>"`
+  (mutually exclusive) override the selector for one session; on `--resume` they are refused,
+  because a run's steering is frozen at creation.
+- **The run is yours, the arena is not.** A mandate can never loosen a validation gate. The
+  overlay allowlist is deny-by-default: the safety mode, the fill costs, every promotion
+  threshold but the metric, the holdout geometry, the state paths and the secrets are refused by
+  name, and a mandate that reaches for one doesn't start.
+
+→ [Authoring mandates](mandate/README.md) ·
+[the overlay surface, knob by knob](docs/configuration.md#the-mandate-overlay) ·
+[how a mandate steers research](docs/research.md)
 
 Secrets (LLM/vendor keys, the `ALLOW_LIVE` gate) go in `.env` — see
 [docs/configuration.md](docs/configuration.md).
+
+## Try it: one brief, one hour, one record
+
+Give it a brief and an hour. Research runs while the market is closed; when it opens, the
+same loop trades the champions that survived.
+
+```bash
+uv run python -m noctis run -v --time-limit-hours 1 \
+  --directive "find a mean-reversion strategy on very volatile stocks; high risk appetite"
+```
+
+Then read what the night produced — the board, the record, the report:
+
+```bash
+uv run python -m noctis runs                                  # id, label, status, segments
+uv run python -m noctis run-record latest | jq .performance   # the paper account's numbers
+uv run python -m noctis report latest                         # the close-of-day report
+```
+
+`run-record` prints the whole `run.json`, which is why piping it into `jq` works at all: the
+record has no sidecars, so `.performance` sits in the same document as the config that run
+froze, its engine identity, and every candidate with the gate evidence behind its verdict.
+It reads `null` until the run has actually traded — a night of pure research reports no
+performance rather than a flat zero. The report is a file too: it lives beside the record, at
+`workspace/runs/<run_id>/reports/YYYY-MM-DD.md`.
+
+The hour bounds the **process, not the experiment**: `noctis run --resume latest` picks the
+same run back up tomorrow and keeps accumulating into the same record, under the config that
+run froze at creation. And a brief worth keeping graduates from a flag into a file — write it
+to `mandate/MANDATE.md`, set `research.mandate: MANDATE` in `config.yaml`, and every run reads
+it without being asked.
 
 ## How it works
 
@@ -135,7 +178,8 @@ tuning ever saw — emitting paper orders through a simulated exchange under ris
 → [docs/architecture.md](docs/architecture.md)
 
 **Close.** It writes the daily report, syncs its data catalog, tidies its own memory,
-and loops back to research — day after day, until its configured time limit.
+rewrites the run's own record, and loops back to research — day after day, until its
+configured time limit. → [docs/run-record.md](docs/run-record.md)
 
 ## Safety
 
@@ -177,10 +221,14 @@ the local copies; editing them never shows in `git status`.
 | [CLI](docs/cli.md) | Every `python -m noctis` command |
 | [Safety](docs/safety.md) | The paper-only safety model in full |
 | [Development](docs/development.md) | Full installation, optional extras, quality gates |
+| [Parity harness](docs/parity.md) | The evidence gate behind the `auto` research loop: conversation vs episodic, measured |
 
 In-tree contracts: [`strategies/README.md`](strategies/README.md) (the strategy-file
 format) · [`mandate/README.md`](mandate/README.md) (authoring mandates) ·
 [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) (workflow and governance).
+
+Design plans for work not yet shipped are internal working documents, kept apart from the
+narrative above in [`docs/plans/`](docs/plans/).
 
 Project: [Changelog](CHANGELOG.md) · [Roadmap](ROADMAP.md) · [Validation methodology](docs/validation.md)
 
