@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from noctis.champions import PromotionRules, decide
 from noctis.research import Mandate
 from noctis.research.agent import _estimate_tokens
 from noctis.research.briefings import (
@@ -39,11 +40,27 @@ _BREADTH_KEY = "trend_efficiency"  # a per-symbol character field, only in the d
 _LEDGER_SENTINEL = "LEDGERSENTINEL"
 _EXHAUSTED_LABEL = "minute rsi mean reversion"
 
+# The one-slot-per-family steering (story #163): the rule itself and the crowned names it
+# names, rendered beside the board so no session spends trials re-tuning a family that can
+# never land. Both are gate-facing — they say what promotion will refuse.
+_CROWNED_RULE = "one slot per family"
+_CROWNED_NAMES = '"crowned_families": ["alpha_mom", "gamma_break"]'
+
+# The vocabulary the family_slot rejection message speaks; the steering must not invent its own.
+_FAMILY_SLOT_PHRASES = (
+    "already holds a champion slot",
+    "a champion file is immutable",
+    "author an improvement under a new name",
+    "one slot per family",
+)
+
 # Gate-facing markers that must survive every trim level of the FORMULATE briefing.
 _FORMULATE_GATE_MARKERS = (
     "round_trip_cost_bp",  # market cost arithmetic
     _EXHAUSTED_LABEL,  # exhausted-class hygiene guard
     "test_metric",  # champion board (beat-the-weakest bar)
+    _CROWNED_RULE,  # the one-slot-per-family rule
+    _CROWNED_NAMES,  # the families that already hold a slot
     _LEDGER_SENTINEL,  # the session narrative — never dropped
 )
 
@@ -272,6 +289,34 @@ def test_decide_gate_numbers_survive_trim_at_8k(tmp_path):
     assert "min_trials_gate" in fitted
     assert '"n_distinct_params": 3' in fitted
     assert '"lookback": 12' in fitted
+
+
+# ── one slot per family: the board steers, it does not merely score (story #163) ────────────
+def _family_slot_rationale() -> str:
+    """The live ``family_slot`` rejection message — the one dialect the steering must speak."""
+    card = make_scorecard("crowned_fam", test_metric=1.0, train_metric=1.1)
+    rules = PromotionRules(champion_count=3, max_gap=1.0, min_test_metric=0.0)
+    return decide(card, [card], rules).rationale
+
+
+def test_briefings_name_the_crowned_families_and_state_the_one_slot_rule(tmp_path):
+    box, ledger, mandate = _populate(tmp_path)
+    for brief in (
+        formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE),
+        decide_briefing(box, ledger, "probe", mandate=mandate, context_window=_HUGE),
+    ):
+        assert _CROWNED_NAMES in brief  # exactly which families are off the table
+        assert _CROWNED_RULE in brief  # ...and why re-tuning one cannot land
+        assert "full funnel" in brief  # the honest path: a new name through the whole funnel
+
+
+def test_one_slot_steering_speaks_the_family_slot_gate_dialect(tmp_path):
+    box, ledger, mandate = _populate(tmp_path)
+    brief = formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE)
+    rationale = _family_slot_rationale()
+    for phrase in _FAMILY_SLOT_PHRASES:
+        assert phrase in rationale, f"the gate no longer says {phrase!r}"
+        assert phrase in brief, f"the briefing invented a dialect for {phrase!r}"
 
 
 # ── the DISCOVER briefing: the no-lake-match symbol ask (story #112) ────────────────────────

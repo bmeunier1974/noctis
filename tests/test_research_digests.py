@@ -15,7 +15,9 @@ the prompt tail is assembled *from the shared builders*, not an inline copy that
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
+from noctis.champions import PromotionRules, decide
 from noctis.memory.consolidate import consolidate_findings, consolidate_rejected
 from noctis.research import build_system_prompt, digests
 from noctis.research.prompt import _MARKET_REALITY_BLOCK
@@ -79,6 +81,7 @@ def _expected_tail(box, *, prefix_trim: bool = False) -> str:
         }
         for e in box.registry.list()
     ]
+    crowned = sorted({e.family for e in box.registry.list()})
     limit = 5 if prefix_trim else 20
     raw = box.memory.findings() if hasattr(box.memory, "findings") else []
     distilled = box.memory.distilled() if hasattr(box.memory, "distilled") else []
@@ -92,6 +95,8 @@ def _expected_tail(box, *, prefix_trim: bool = False) -> str:
         f"Strategy library (rejected entries stubbed; list_strategies/get_strategy show any "
         f"in full): {json.dumps(index, default=str)}\n"
         f"Champion board ({box.registry.capacity} slots): {json.dumps(champions)}\n"
+        f"Crowned families (cannot re-promote): {json.dumps(crowned)}\n"
+        f"{digests.ONE_SLOT_PER_FAMILY}\n"
         f"Memory — findings: {json.dumps(findings)}\n"
         f"Memory — known dead ends (do not re-mine): {json.dumps(rejected)}\n"
     )
@@ -122,13 +127,54 @@ def test_prompt_tail_is_assembled_from_the_shared_digest_builders(tmp_path):
     market = _MARKET_REALITY_BLOCK.format(digest=digests.market_digest(box))
     index = digests.library_index(box.strategies_dir)
     champions = digests.champion_digest(box.registry)
+    crowned = digests.crowned_families(box.registry)
     findings, rejected = digests.memory_block(box.memory)
     state = (
         f"\nCURRENT STATE\n"
         f"Strategy library (rejected entries stubbed; list_strategies/get_strategy show any "
         f"in full): {json.dumps(index, default=str)}\n"
         f"Champion board ({box.registry.capacity} slots): {json.dumps(champions)}\n"
+        f"Crowned families (cannot re-promote): {json.dumps(crowned)}\n"
+        f"{digests.ONE_SLOT_PER_FAMILY}\n"
         f"Memory — findings: {json.dumps(findings)}\n"
         f"Memory — known dead ends (do not re-mine): {json.dumps(rejected)}\n"
     )
     assert _tail_of(box) == market + state
+
+
+# ── one slot per family: CURRENT STATE says which families cannot re-promote (story #163) ──
+def test_current_state_names_the_crowned_families_and_states_the_one_slot_rule(tmp_path):
+    box = _populated_toolbox(tmp_path)
+    state = _tail_of(box)
+
+    assert 'Crowned families (cannot re-promote): ["sma_crossover"]' in state
+    assert "one slot per family" in state
+    assert "author an improvement under a new name" in state
+    assert "full funnel" in state
+
+
+def test_crowned_families_dedupes_a_legacy_board_and_sorts(tmp_path):
+    # A board frozen before the family_slot gate can hold the same family three times (the
+    # overnight triple crown). The steering names each crowned family once, in a stable order.
+    registry = SimpleNamespace(
+        list=lambda: [
+            SimpleNamespace(family="daily_momentum_trend"),
+            SimpleNamespace(family="daily_momentum_trend"),
+            SimpleNamespace(family="alpha_mom"),
+        ]
+    )
+    assert digests.crowned_families(registry) == ["alpha_mom", "daily_momentum_trend"]
+
+
+def test_one_slot_steering_speaks_the_family_slot_gate_dialect():
+    card = make_scorecard("crowned_fam", test_metric=1.0, train_metric=1.1)
+    rules = PromotionRules(champion_count=3, max_gap=1.0, min_test_metric=0.0)
+    rationale = decide(card, [card], rules).rationale
+    for phrase in (
+        "already holds a champion slot",
+        "a champion file is immutable",
+        "author an improvement under a new name",
+        "one slot per family",
+    ):
+        assert phrase in rationale, f"the gate no longer says {phrase!r}"
+        assert phrase in digests.ONE_SLOT_PER_FAMILY, f"the steering drifted on {phrase!r}"

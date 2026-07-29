@@ -227,7 +227,8 @@ def formulate_briefing(
     """The FORMULATE episode briefing, rebuilt fresh from disk and asserted to fit the window.
 
     Embeds the mandate summary, the market cost arithmetic, the exhausted-class guard, the
-    champion board, the session-ledger tail (what this session already tried and why it failed),
+    champion board (with the one-slot-per-family rule and the crowned families it puts off the
+    table), the session-ledger tail (what this session already tried and why it failed),
     and — as advisory, trimmable blocks — the distilled memory tail, the library index (rejected
     entries stubbed), and the per-symbol digest breadth. See the module docstring for the trim
     contract."""
@@ -239,7 +240,11 @@ def formulate_briefing(
         _Section("market", "MARKET ECONOMICS (cost arithmetic)", market_core),
         _Section("breadth", "MARKET BREADTH (per-symbol character)", breadth),
         _Section("exhausted", "EXHAUSTED CLASSES (do not re-mine)", exhausted),
-        _Section("champions", "CHAMPION BOARD (beat the weakest)", _json(_champions(toolbox))),
+        _Section(
+            "champions",
+            "CHAMPION BOARD (beat the weakest; one slot per family)",
+            _json(_champions(toolbox)),
+        ),
         _Section("ledger", "ALREADY TRIED THIS SESSION", _json(_ledger_tail(ledger))),
         _Section(
             "memory", "MEMORY (advisory)", _json({"findings": findings, "dead_ends": dead_ends})
@@ -262,7 +267,8 @@ def decide_briefing(
 
     Carries the candidate's gate-facing evidence (the ranked journaled trials/stats, the
     min_trials floor, journaled verdicts, the holdout-taint set), the market cost arithmetic, the
-    exhausted-class guard, the champion board, and the ledger tail. Advisory, trimmable blocks are
+    exhausted-class guard, the champion board with its one-slot-per-family rule, and the ledger
+    tail. Advisory, trimmable blocks are
     the distilled memory tail, the library index, and the per-symbol digest breadth."""
     market_core, exhausted, breadth = _market_parts(toolbox)
     findings, dead_ends = digests.memory_block(toolbox.memory)
@@ -277,7 +283,11 @@ def decide_briefing(
         _Section("market", "MARKET ECONOMICS (cost arithmetic)", market_core),
         _Section("breadth", "MARKET BREADTH (per-symbol character)", breadth),
         _Section("exhausted", "EXHAUSTED CLASSES (do not re-mine)", exhausted),
-        _Section("champions", "CHAMPION BOARD (beat the weakest)", _json(_champions(toolbox))),
+        _Section(
+            "champions",
+            "CHAMPION BOARD (beat the weakest; one slot per family)",
+            _json(_champions(toolbox)),
+        ),
         _Section("ledger", "ALREADY TRIED THIS SESSION", _json(_ledger_tail(ledger))),
         _Section(
             "memory", "MEMORY (advisory)", _json({"findings": findings, "dead_ends": dead_ends})
@@ -362,8 +372,15 @@ def _spend_context(toolbox: Any, window: Mapping[str, Any] | None) -> dict[str, 
     return out
 
 
-def _champions(toolbox: Any) -> list[dict[str, Any]]:
-    return digests.champion_digest(toolbox.registry)
+def _champions(toolbox: Any) -> dict[str, Any]:
+    """The board a candidate must beat, plus the rule that decides whether it may try at all:
+    the crowned families (whose re-tunes the ``family_slot`` gate rejects) and the honest path
+    out — a new name through the full funnel. Gate-facing, so it is never trimmed."""
+    return {
+        "rule": digests.ONE_SLOT_PER_FAMILY,
+        "crowned_families": digests.crowned_families(toolbox.registry),
+        "board": digests.champion_digest(toolbox.registry),
+    }
 
 
 def _library(toolbox: Any) -> list[dict[str, Any]]:
