@@ -95,8 +95,8 @@ mid-session downgrade. The full commented config file:
 [docs/configuration.md](docs/configuration.md)
 
 Once it's running: `noctis status` (mode, market state, champions), `noctis runs` (the run
-board), `noctis run-record latest` (one run's whole record), `noctis report` (close-of-day
-report), `noctis research -v` (watch one research session live). Every command:
+board), `noctis run-record latest` (one run's whole record), `noctis report latest`
+(close-of-day report), `noctis research -v` (watch one research session live). Every command:
 [docs/cli.md](docs/cli.md)
 
 ## Steering it — the mandate is your input surface
