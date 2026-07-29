@@ -94,9 +94,10 @@ mid-session downgrade. The full commented config file:
 [config.example.yaml](config.example.yaml) · every knob explained:
 [docs/configuration.md](docs/configuration.md)
 
-Once it's running: `noctis status` (mode, market state, champions), `noctis report`
-(close-of-day report), `noctis research -v` (watch one research session live). Every
-command: [docs/cli.md](docs/cli.md)
+Once it's running: `noctis status` (mode, market state, champions), `noctis runs` (the run
+board), `noctis run-record latest` (one run's whole record), `noctis report` (close-of-day
+report), `noctis research -v` (watch one research session live). Every command:
+[docs/cli.md](docs/cli.md)
 
 ## Steering it — the mandate is your input surface
 
@@ -134,6 +135,37 @@ which universe it starts from — and the flagship knob, the election metric.
 Secrets (LLM/vendor keys, the `ALLOW_LIVE` gate) go in `.env` — see
 [docs/configuration.md](docs/configuration.md).
 
+## Try it: one brief, one hour, one record
+
+Give it a brief and an hour. Research runs while the market is closed; when it opens, the
+same loop trades the champions that survived.
+
+```bash
+uv run python -m noctis run -v --time-limit-hours 1 \
+  --directive "find a mean-reversion strategy on very volatile stocks; high risk appetite"
+```
+
+Then read what the night produced — the board, the record, the report:
+
+```bash
+uv run python -m noctis runs                                  # id, label, status, segments
+uv run python -m noctis run-record latest | jq .performance   # the paper account's numbers
+uv run python -m noctis report latest                         # the close-of-day report
+```
+
+`run-record` prints the whole `run.json`, which is why piping it into `jq` works at all: the
+record has no sidecars, so `.performance` sits in the same document as the config that run
+froze, its engine identity, and every candidate with the gate evidence behind its verdict.
+It reads `null` until the run has actually traded — a night of pure research reports no
+performance rather than a flat zero. The report is a file too: it lives beside the record, at
+`workspace/runs/<run_id>/reports/YYYY-MM-DD.md`.
+
+The hour bounds the **process, not the experiment**: `noctis run --resume latest` picks the
+same run back up tomorrow and keeps accumulating into the same record, under the config that
+run froze at creation. And a brief worth keeping graduates from a flag into a file — write it
+to `mandate/MANDATE.md`, set `research.mandate: MANDATE` in `config.yaml`, and every run reads
+it without being asked.
+
 ## How it works
 
 **Research — market closed.** Noctis continuously generates new strategies (one
@@ -146,7 +178,8 @@ tuning ever saw — emitting paper orders through a simulated exchange under ris
 → [docs/architecture.md](docs/architecture.md)
 
 **Close.** It writes the daily report, syncs its data catalog, tidies its own memory,
-and loops back to research — day after day, until its configured time limit.
+rewrites the run's own record, and loops back to research — day after day, until its
+configured time limit. → [docs/run-record.md](docs/run-record.md)
 
 ## Safety
 
