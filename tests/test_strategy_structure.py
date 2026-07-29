@@ -182,6 +182,161 @@ def test_the_good_gate_fixture_is_structurally_clean():
     assert check_structure(GOOD_SOURCE) is None
 
 
+# ── dead state ────────────────────────────────────────────────────────────────────────────
+DEAD_STATE = '''"""on_bar branches on a flag that on_start pins to 0 and nothing ever moves."""
+
+
+class Probe:
+    def on_start(self, ctx):
+        self._pos = 0
+
+    def on_bar(self, ctx, bar):
+        if self._pos == 1:
+            ctx.set_target(1)
+        ctx.set_target(0)
+'''
+
+
+def test_state_only_ever_assigned_a_literal_in_on_start_is_refused():
+    msg = check_structure(DEAD_STATE)
+    assert msg is not None
+    assert "_pos" in msg  # the REPAIR loop needs the offending attribute by name
+    assert "\n" not in msg
+
+
+def test_a_params_derived_read_only_attribute_passes():
+    # Derived config is legitimately assigned once and read forever — only a *literal* pin
+    # makes the branches that read it unreachable.
+    source = '''"""A read-only attribute derived from Params."""
+
+
+class Probe:
+    def on_start(self, ctx):
+        self._floor = self.params.threshold * 2
+
+    def on_bar(self, ctx, bar):
+        ctx.set_target(1 if bar.close > self._floor else 0)
+'''
+    assert check_structure(source) is None
+
+
+def test_a_collection_mutated_by_a_method_call_passes():
+    source = '''"""A deque fed by .append every bar — mutation the assignment can't show."""
+
+from collections import deque
+
+
+class Probe:
+    def on_start(self, ctx):
+        self._closes = deque(maxlen=20)
+
+    def on_bar(self, ctx, bar):
+        self._closes.append(bar.close)
+        ctx.set_target(1 if len(self._closes) == 20 else 0)
+'''
+    assert check_structure(source) is None
+
+
+def test_an_attribute_reassigned_in_on_bar_passes():
+    # The seed hysteresis pattern: pinned to 0 in on_start, moved by on_bar itself.
+    source = '''"""Hysteresis on a position flag that on_bar drives."""
+
+
+class Probe:
+    def on_start(self, ctx):
+        self._pos = 0
+
+    def on_bar(self, ctx, bar):
+        if self._pos == 0 and bar.close > 100:
+            self._pos = 1
+        elif self._pos == 1 and bar.close < 90:
+            self._pos = 0
+        ctx.set_target(self._pos)
+'''
+    assert check_structure(source) is None
+
+
+def test_an_aug_assigned_counter_passes():
+    source = '''"""A bar counter that moves by += only."""
+
+
+class Probe:
+    def on_start(self, ctx):
+        self._n = 0
+
+    def on_bar(self, ctx, bar):
+        self._n += 1
+        ctx.set_target(1 if self._n > 10 else 0)
+'''
+    assert check_structure(source) is None
+
+
+def test_an_attribute_assigned_outside_on_start_passes():
+    source = '''"""A flag reset by a helper the strategy calls elsewhere."""
+
+
+class Probe:
+    def on_start(self, ctx):
+        self._pos = 0
+
+    def reset(self):
+        self._pos = 0
+
+    def on_bar(self, ctx, bar):
+        ctx.set_target(self._pos)
+'''
+    assert check_structure(source) is None
+
+
+def test_an_attribute_this_class_never_assigns_passes():
+    # Assigned by a base class, or by the engine: nothing in this file says it is dead.
+    source = '''"""Reads an attribute the base class owns."""
+
+
+class Probe:
+    def on_bar(self, ctx, bar):
+        ctx.set_target(1 if bar.close > self.entry_price else 0)
+'''
+    assert check_structure(source) is None
+
+
+def test_a_literal_attribute_on_bar_never_reads_passes():
+    # Unread state is inert, not a lie about a branch; the lint speaks only to what on_bar
+    # actually decides on.
+    source = '''"""A pinned attribute nothing reads."""
+
+
+class Probe:
+    def on_start(self, ctx):
+        self._pos = 0
+
+    def on_bar(self, ctx, bar):
+        ctx.set_target(0)
+'''
+    assert check_structure(source) is None
+
+
+def test_duplicate_definitions_are_reported_before_dead_state():
+    # Fixed order: dead-state analysis over a class whose defs shadow each other reports
+    # findings about code that never runs.
+    source = '''"""Both defects at once."""
+
+
+class Probe:
+    def on_start(self, ctx):
+        self._pos = 0
+
+    def on_bar(self, ctx, bar):
+        ctx.set_target(self._pos)
+
+    def on_bar(self, ctx, bar):
+        ctx.set_target(0)
+'''
+    msg = check_structure(source)
+    assert msg is not None
+    assert "duplicate definition of 'on_bar'" in msg
+
+
 # ── the wiring: both validation paths refuse, and nothing lands on disk ────────────────────
 DUPLICATE_ON_BAR_SOURCE = GOOD_SOURCE.replace(
     "    @classmethod\n    def param_space(cls):",
@@ -206,6 +361,28 @@ def test_the_in_process_gate_refuses_the_same_source(tmp_path):
     path.write_text(DUPLICATE_ON_BAR_SOURCE, encoding="utf-8")
     with pytest.raises(StrategyValidationError, match="duplicate definition of 'on_bar'"):
         validate_in_process(path, "probe")
+
+
+DEAD_STATE_SOURCE = GOOD_SOURCE.replace(
+    "        self._closes = deque(maxlen=self.params.lookback)",
+    "        self._closes = deque(maxlen=self.params.lookback)\n        self._pos = 0",
+    1,
+).replace(
+    "        ctx.set_target(0 if mean is None else int(bar.close > mean * self.params.edge))",
+    "        if self._pos == 1:\n            ctx.set_target(1)\n            return\n"
+    "        ctx.set_target(0 if mean is None else int(bar.close > mean * self.params.edge))",
+    1,
+)
+
+
+def test_write_strategy_refuses_dead_state_through_the_subprocess_gate(tmp_path, families):
+    # This file imports, replays and passes its own scenarios — the dead branch only ever
+    # fails to fire — so the subprocess gate is the only thing standing between it and the
+    # library (#158).
+    with pytest.raises(StrategyValidationError, match="_pos"):
+        write_strategy(tmp_path, "probe", DEAD_STATE_SOURCE, families)
+    assert strategy_path(tmp_path, "probe") is None
+    assert "probe" not in families
 
 
 def test_the_lint_refuses_before_the_module_is_imported(tmp_path):
