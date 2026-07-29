@@ -155,7 +155,9 @@ to the state dir's `specs.json` and re-registered at startup.
 metrics + activity/turnover). `src/noctis/champions/promotion.py` is a **pure** decision function over
 scorecards (see rule 2 for the gate order); `src/noctis/champions/registry.py` persists the board to
 the state dir's `champions.json`. Promotion compares on a scale-free footing and treats a champion scored
-under a *different* metric as "stale" (displaceable), because cross-metric numbers aren't comparable.
+under a *different* metric as "stale" (displaceable), because cross-metric numbers aren't comparable —
+but the one-slot-per-family gate runs *before* that, so a stale champion is never displaced by its own
+family's re-tune, only by a different strategy.
 
 **The run is an entity, and it writes one file.** Every `noctis run` mints a run id
 (`observability/debug/runid.py` — identity is minted, never derived from the config) and opens

@@ -53,7 +53,7 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `promotion.annualization_cap`, `max_period_ratio`, `max_reverse_gap`, `max_test_metric` | Metric-robustness caps + degeneracy backstops (sub-daily Sharpe inflation, too-good-to-be-true OOS) |
 | `backtest.fee_bps`, `backtest.slippage_bps` | Simulated fill costs **per side** (default `1.0`/`1.0` — a 4bp round trip). One value threaded to the pre-filter, validation, the agent's cost hint, and paper fills. Enforced minimum `1.0` each — see **Fill costs** below |
 | `ideation` | The legacy StrategySpec path |
-| `champion_count` | Champion board size |
+| `champion_count` | Champion board size — and since the `family_slot` gate allows **one slot per strategy family**, it is also the number of distinct families the board can hold ([validation.md](validation.md)) |
 | `time_limit_hours` | Global stop from any phase — bounds **one process** (how long tonight lasts); the run stays resumable |
 | `run_limit_hours` | Compute cap on the **whole run**, in hours of cumulative runtime across every stop/resume (`--run-limit-hours`, frozen at creation). At the cap the loop stops between phases and the run is marked `completed` — terminal, so it refuses resume. `null` = uncapped. See [cli.md](cli.md#bounding-a-run----run-limit-hours-and---finish) |
 | `embed_all_sources` | Embed **every** candidate's strategy source in the run record, not just the champions' (`--embed-all-sources`, frozen at creation). Default `false`: champions are embedded in full, every other candidate is a run-relative path plus a content hash. See [cli.md](cli.md#archiving-a-run-whole----embed-all-sources) |

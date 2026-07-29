@@ -220,7 +220,8 @@ The gate order:
 7. beat the weakest current champion
 
 Comparison is on a scale-free footing, and a champion scored under a *different* metric is
-treated as "stale" (displaceable) because cross-metric numbers aren't comparable. A candidate
+treated as "stale" (displaceable) because cross-metric numbers aren't comparable — but gate 6
+runs first, so a stale champion is never displaced by its own family's re-tune. A candidate
 that fails is a signal, not a bug: the answer is a better thesis or an honest
 `reject_strategy` — never a loosened gate.
 

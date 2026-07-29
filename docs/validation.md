@@ -78,7 +78,12 @@ fixed sequence of **quality gates**, and only then is it measured against the bo
 2. **Overfit-gap guard** (`promotion.max_gap`, default `1.0`). The train−test gap
    (`avg_train_metric − avg_test_metric`, both panel means on the election metric) must stay
    within bounds. A large gap is the fingerprint of overfitting — caught before any holdout is
-   even consulted.
+   even consulted. Two degeneracy backstops run with it, in `GATE_ORDER` and in the record's
+   `gates[]` evidence, both **off by default** (`0.0`) and configured rather than enumerated
+   here: `reverse_gap` (`promotion.max_reverse_gap`) rejects a test metric that *exceeds* train
+   by more than the bound — the mirror image of overfitting, and usually a degenerate window —
+   and `magnitude_cap` (`promotion.max_test_metric`) rejects an implausibly large |test metric|
+   ([configuration.md](configuration.md)).
 3. **Forward temporal holdout** (`promotion.min_holdout_metric`). When a temporal holdout was
    reserved, its metric must clear the bar: the candidate has to work on the most-recent bars
    the search never touched.

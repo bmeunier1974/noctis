@@ -308,7 +308,10 @@ On promotion the file is **moved** out of `__tmp/` into `champions/`, the tuned 
 back as the `Params` defaults, and the header is stamped `status: champion`. On rejection the file
 stays in `__tmp/` stamped `status: rejected` (kept for local inspection, out of the repo). A
 champion file is immutable — to improve one, author a new name; `write_strategy` refuses to
-overwrite the crown.
+overwrite the crown. Promotion enforces the same rule from the other side: the `family_slot`
+gate rejects a challenger whose family already holds a slot, however well it scored, so a
+re-tune can never take a second seat. The new name runs the whole funnel and may legitimately
+displace its own crowned sibling by beating the weakest champion.
 
 A draft that reaches neither verdict has a third exit: **archive**. A prune-on-start sweep — run
 at the top of each research session — **moves** every still-undecided (`draft`/`candidate`)

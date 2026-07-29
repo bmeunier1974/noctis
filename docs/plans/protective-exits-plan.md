@@ -120,8 +120,11 @@ stance — the prefilter filters, validation arbitrates. Document it in
 stops vectorially (that is how lookahead bugs are born).
 
 Gate interaction check (rule 2 of AGENTS.md): exits change *candidate behavior*, not
-gate thresholds. The activity floor, gap guard, holdouts, and consistency gates apply
-to exit-bearing candidates unchanged. No gate is loosened, no new gate is needed.
+gate thresholds. The activity floor, gap guard, holdouts, consistency and the
+one-slot-per-family gates apply to exit-bearing candidates unchanged — and declaring a
+stop is not a new thesis, so an exit-bearing re-tune of a crowned family is still
+rejected at `family_slot`, exactly like any other re-tune. No gate is loosened, no new
+gate is needed by this plan.
 
 ### 0e. Comparability and rollout posture
 
