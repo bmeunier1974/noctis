@@ -398,3 +398,127 @@ def test_the_lint_refuses_before_the_module_is_imported(tmp_path):
     path.write_text(source, encoding="utf-8")
     with pytest.raises(StrategyValidationError, match="duplicate definition of 'on_bar'"):
         validate_in_process(path, "probe")
+
+
+# ── regression: the champion that got crowned with both defects (#158, #161) ───────────────
+# Run 20260729T015052Z-267084 promoted ``daily_momentum_trend`` carrying BOTH defects at once:
+# a second ``on_bar`` appended after ``scenarios()`` that silently replaced the authored one,
+# and a ``self._pos`` pinned to 0 in ``on_start``, read by ``on_bar``, never moved. The file
+# below is that shape — a plausible champion, header to scenarios — kept here so the write gate
+# can never let it through again. It is refused for the *first* defect in check order; the
+# variant beneath it carries only the dead ``_pos`` and is refused for that.
+DEAD_POS_CHAMPION = '''"""DAILY MOMENTUM THESIS:
+
+Hold long while the daily close sits above a medium-term moving average; go flat when it
+crosses back below. The edge is multi-day trend continuation in liquid large-cap US names,
+where daily drift clears the 4bp round-trip cost by a comfortable multiple.
+
+status: champion
+style: momentum
+symbols: AAPL NVDA SPY UNH
+tuned: 2026-07-29
+"""
+
+from collections import deque
+from dataclasses import dataclass
+
+from noctis.strategies import indicators as ind
+from noctis.strategies import scenarios as sc
+from noctis.strategies.base import Bar, Context, ParamSpec, TraderStrategy
+
+
+class DailyMomentumTrend(TraderStrategy):
+    name = "daily_momentum_trend"
+    timeframe = "1d"
+
+    @dataclass(frozen=True)
+    class Params:
+        lookback: int = 20
+        threshold: float = 1.0
+
+    params_cls = Params
+
+    def on_start(self, ctx: Context) -> None:
+        """Reset ALL incremental state."""
+        self._closes: deque[float] = deque(maxlen=self.params.lookback)
+        self._pos = 0
+
+    def on_bar(self, ctx: Context, bar: Bar) -> None:
+        """Enter long above the mean while flat; exit on a confirmed breakdown."""
+        self._closes.append(bar.close)
+        ma = ind.sma(self._closes, self.params.lookback)
+        if ma is None:
+            ctx.set_target(0)
+            return
+        if bar.close > ma * self.params.threshold and self._pos == 0:
+            ctx.set_target(1)
+        elif self._pos != 0 and bar.close < ma:
+            ctx.set_target(0)
+
+    @classmethod
+    def warmup_bars(cls, params) -> int:
+        return params.lookback
+
+    @classmethod
+    def param_space(cls) -> list[ParamSpec]:
+        return [
+            ParamSpec("lookback", "int", low=10, high=60, step=2),
+            ParamSpec("threshold", "float", low=0.98, high=1.05, step=0.005),
+        ]
+
+    @classmethod
+    def scenarios(cls) -> list[sc.Scenario]:
+        """Known-outcome tapes the write gate replays against this code."""
+        warm = cls.params_cls().lookback
+        return [
+            sc.Scenario(
+                "rally_pulls_us_long",
+                segments=[sc.flat(warm + 5), sc.trend(40, 0.15)],
+                expect=[sc.flat_until(warm), sc.long_within(warm + 5, warm + 30)],
+            ),
+            sc.Scenario(
+                "steady_decline_stays_flat",
+                segments=[sc.flat(warm + 5), sc.selloff(50, 0.30)],
+                expect=[sc.always_flat()],
+            ),
+        ]
+'''
+
+# The shadowing definition landed at the very end of the class body, after ``scenarios()`` —
+# far enough from the original that a human skim of the diff never saw the two together.
+_SHADOWING_ON_BAR = '''
+    def on_bar(self, ctx: Context, bar: Bar) -> None:
+        """React to one daily bar."""
+        self._closes.append(bar.close)
+        ma = ind.sma(self._closes, self.params.lookback)
+        ctx.set_target(0 if ma is None else int(bar.close > ma * self.params.threshold))
+'''
+
+DEFECTIVE_CHAMPION = DEAD_POS_CHAMPION + _SHADOWING_ON_BAR
+
+
+def test_the_defective_champion_shape_is_refused_at_write_time(tmp_path, families):
+    # End-to-end through the real subprocess gate: this file imports, replays and passes its own
+    # scenarios, so the structural lint is the only thing that ever stood between it and a crown.
+    with pytest.raises(StrategyValidationError) as excinfo:
+        write_strategy(tmp_path, "daily_momentum_trend", DEFECTIVE_CHAMPION, families)
+    message = str(excinfo.value)
+    # Both defects are present; check order says the shadowed definition is the one reported,
+    # because dead-state findings about a body that never runs would only mislead the repair.
+    assert "duplicate definition of 'on_bar'" in message
+    assert "\n" not in message
+    assert strategy_path(tmp_path, "daily_momentum_trend") is None
+    assert "daily_momentum_trend" not in families
+
+
+def test_the_dead_pos_variant_of_the_champion_is_refused_at_write_time(tmp_path, families):
+    # The same champion with a single ``on_bar``: the drift mechanism on its own — a position
+    # flag branched on and never updated — is refused by the dead-state check.
+    with pytest.raises(StrategyValidationError) as excinfo:
+        write_strategy(tmp_path, "daily_momentum_trend", DEAD_POS_CHAMPION, families)
+    message = str(excinfo.value)
+    assert "dead state '_pos'" in message
+    assert "unreachable" in message
+    assert "\n" not in message
+    assert strategy_path(tmp_path, "daily_momentum_trend") is None
+    assert "daily_momentum_trend" not in families
