@@ -78,7 +78,12 @@ fixed sequence of **quality gates**, and only then is it measured against the bo
 2. **Overfit-gap guard** (`promotion.max_gap`, default `1.0`). The train−test gap
    (`avg_train_metric − avg_test_metric`, both panel means on the election metric) must stay
    within bounds. A large gap is the fingerprint of overfitting — caught before any holdout is
-   even consulted.
+   even consulted. Two degeneracy backstops run with it, in `GATE_ORDER` and in the record's
+   `gates[]` evidence, both **off by default** (`0.0`) and configured rather than enumerated
+   here: `reverse_gap` (`promotion.max_reverse_gap`) rejects a test metric that *exceeds* train
+   by more than the bound — the mirror image of overfitting, and usually a degenerate window —
+   and `magnitude_cap` (`promotion.max_test_metric`) rejects an implausibly large |test metric|
+   ([configuration.md](configuration.md)).
 3. **Forward temporal holdout** (`promotion.min_holdout_metric`). When a temporal holdout was
    reserved, its metric must clear the bar: the candidate has to work on the most-recent bars
    the search never touched.
@@ -90,14 +95,22 @@ fixed sequence of **quality gates**, and only then is it measured against the bo
 **Then the slot logic** — how a survivor takes a seat on the board of `champion_count` (default
 `3`):
 
-6. **Free slot.** If the board isn't full, the candidate is crowned as long as it clears the
+6. **One slot per family.** If a current champion is of the candidate's family, the candidate is
+   rejected — whatever it scored, and even with the board half empty. A champion file is
+   immutable, so a better draw of a crowned family is not an improvement to it: crowning it too
+   would fill the board with one strategy (which is exactly what a night of re-tuning the
+   incumbent once did). The honest move is a new name, judged on its own thesis. This is a rule
+   about the *board*, not a lifetime ban: a family demoted off it may compete again. Not
+   configurable.
+7. **Free slot.** If the board isn't full, the candidate is crowned as long as it clears the
    minimum bar (`promotion.min_test_metric`).
-7. **Stale champion first.** A champion scored under a *different* election metric than the
+8. **Stale champion first.** A champion scored under a *different* election metric than the
    candidate is **stale**: its number is in incomparable units, so rather than defend its seat
    with a value that can't be compared, it is displaced like a free slot (again gated only by
    `min_test_metric`). This is a deliberate `metric_name` *string* check, not a cross-metric
-   numeric comparison.
-8. **Beat the weakest.** Otherwise the candidate must beat the weakest current champion's
+   numeric comparison. Rule 6 runs first, so a stale champion is never displaced by its own
+   family's re-tune — only by a different strategy.
+9. **Beat the weakest.** Otherwise the candidate must beat the weakest current champion's
    panel-mean test metric to take its slot. Because that comparison is a panel mean on a shared
    election metric, champions with different fit sets still compare on a **scale-free footing**.
 
@@ -106,7 +119,7 @@ The election metric itself (`promotion.metric` — `sharpe`, `sortino`, or `tota
 can never loosen a gate. The thresholds themselves are **refused** by the mandate overlay —
 deliberately refused rather than clamped "tighten-only", because in the metric's own units a
 `max_gap` of `0.5` is not tighter than a Sharpe-units `1.0` once the same mandate also moves
-`metric`. That is the same incomparability rule 7 above is built on. A refused key is fatal at
+`metric`. That is the same incomparability rule 8 above is built on. A refused key is fatal at
 startup, with the reason printed
 ([configuration.md](configuration.md#the-mandate-overlay)).
 

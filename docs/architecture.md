@@ -69,7 +69,7 @@ warning (see [development.md](development.md)).
 | 🧬 StrategySpec engine | `src/noctis/strategies/spec` | Strategy-as-data (legacy ideation): a JSON graph compiles to a registerable family whose `signals()`/`on_bar()` share one rule evaluator; persists to the state dir's `specs.json` and re-registers at startup |
 | 🏦 Broker | `src/noctis/broker` | Paper broker (a SimulatedExchange: fills, slippage, fees, P&L); event simulator; gated live stub |
 | ⏪ Backtest | `src/noctis/backtest` | Two-stage pipeline: vectorbt-style pre-filter → walk-forward validation → `Scorecard` |
-| 🏆 Champions | `src/noctis/champions` | Persistent registry + pure promotion rules (OOS metric, train−test gap guard) |
+| 🏆 Champions | `src/noctis/champions` | Persistent registry + pure promotion rules (OOS metric, train−test gap guard, one slot per family) |
 | ⚙️ Engine | `src/noctis/engine` | Market clock, state machine, research loop, close orchestration, runtime |
 | 📡 Live | `src/noctis/live` | Trading loop + risk manager |
 | 📊 Reporting | `src/noctis/reporting` | Close-of-day report, Markdown + structured JSON (`<run>/reports/<date>.md` / `.json`) + the run record/store |
@@ -201,7 +201,8 @@ fills. It keeps its coarse selection-filter role unchanged; the event-driven wal
 authoritative for the `Scorecard` and every promotion gate — prices exits exactly. Stops are
 **never approximated vectorially**; that is where lookahead bugs are born. Gate interaction:
 exits change *candidate behavior*, not thresholds — the activity floor, gap guard, holdouts,
-and consistency gates apply to exit-bearing candidates unchanged.
+consistency and one-slot-per-family gates apply to exit-bearing candidates unchanged (declaring
+a stop is not a new thesis, so it never buys a crowned family a second slot).
 
 **Rollout posture.** Exits are **opt-in by declaration, and that is the only switch** — there
 is no config kill-switch, because a knob that silently ignores declared stops would make

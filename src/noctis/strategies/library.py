@@ -13,9 +13,10 @@ subclass and carries its research record in a structured module-docstring header
 
 The header is convention plus the tiny parser here, not a new format. The loader mirrors
 ``noctis/strategies/spec/strategy.py``'s ``load_and_register``; :func:`write_strategy` is the
-validation gate — import in a **fresh interpreter** (via the swappable :data:`validator`
-seam), a smoke replay on the synthetic fixture, and a replay of the file's declared
-known-outcome scenarios (``noctis.strategies.scenarios``) — folded into the write so an
+validation gate — a structural lint on the raw source (``noctis.strategies.structure``), then
+import in a **fresh interpreter** (via the swappable :data:`validator` seam), a smoke replay on
+the synthetic fixture, and a replay of the file's declared known-outcome scenarios
+(``noctis.strategies.scenarios``) — folded into the write so an
 invalid strategy can never exist on disk (grid-mng's ``validate_spec``, made structural).
 :func:`set_header` is the mechanical header stamp (rejections); the approval-time hand-off
 is :func:`plan_promotion` → :meth:`PromotionPlan.commit`: the winning parameters become the
@@ -54,6 +55,7 @@ from noctis.strategies.scenario_spec import (
     spec_from_json,
     spec_to_json,
 )
+from noctis.strategies.structure import check_structure
 
 logger = logging.getLogger("noctis.library")
 
@@ -983,6 +985,13 @@ def _validate_file(
     require_scenarios: bool = True,
     spec: SpecSuite | None = None,
 ) -> None:
+    source = Path(path).read_text(encoding="utf-8")
+    # Structural lint first, on the raw text: a file that is incoherent as source (a method
+    # defined twice, so half of it never runs) imports and replays perfectly, so nothing below
+    # can see it (#159).
+    structural = check_structure(source)
+    if structural:
+        raise StrategyValidationError(structural)
     module = _load_module(path)
     cls = _find_strategy_class(module)
     if cls.name != expected_name:
@@ -997,7 +1006,7 @@ def _validate_file(
         raise StrategyValidationError(
             f"timeframe {cls.timeframe!r} unsupported; want one of {sorted(TIMEFRAMES)}"
         )
-    header = parse_header(Path(path).read_text(encoding="utf-8"))
+    header = parse_header(source)
     if header.status not in VALID_STATUSES:
         raise StrategyValidationError(
             f"header status {header.status!r} invalid; want one of {VALID_STATUSES}"

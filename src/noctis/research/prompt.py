@@ -239,6 +239,7 @@ def build_system_prompt(
 
     index = digests.library_index(toolbox.strategies_dir)
     champions = digests.champion_digest(toolbox.registry)
+    crowned = digests.crowned_families(toolbox.registry)
     findings, rejected = digests.memory_block(toolbox.memory, prefix_trim=prefix_trim)
 
     state = (
@@ -246,6 +247,8 @@ def build_system_prompt(
         f"Strategy library (rejected entries stubbed; list_strategies/get_strategy show any "
         f"in full): {json.dumps(index, default=str)}\n"
         f"Champion board ({toolbox.registry.capacity} slots): {json.dumps(champions)}\n"
+        f"Crowned families (cannot re-promote): {json.dumps(crowned)}\n"
+        f"{digests.ONE_SLOT_PER_FAMILY}\n"
         f"Memory — findings: {json.dumps(findings)}\n"
         f"Memory — known dead ends (do not re-mine): {json.dumps(rejected)}\n"
     )

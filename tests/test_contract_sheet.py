@@ -12,8 +12,18 @@ from __future__ import annotations
 import importlib
 import inspect
 
+from noctis.champions import PromotionRules, decide
 from noctis.research import contract_sheet as cs
 from noctis.strategies import scenarios
+from tests.test_champions import make_scorecard
+
+# The vocabulary the family_slot rejection message speaks; the sheet must not invent its own.
+_FAMILY_SLOT_PHRASES = (
+    "already holds a champion slot",
+    "a champion file is immutable",
+    "author an improvement under a new name",
+    "one slot per family",
+)
 
 
 # ── the rendered sheet is deterministic and covers the whole surface ──────────────────────
@@ -77,6 +87,26 @@ def test_sheet_states_exit_fields_as_fractions_of_entry():
     sheet = cs.CONTRACT_SHEET
     assert "ExitRules(stop_pct=None, take_profit_pct=None, trail_pct=None)" in sheet
     assert "fraction" in sheet.lower() and "entry" in sheet.lower()
+
+
+# ── one slot per family: what the file it authors will face at promotion (story #163) ─────
+def test_sheet_states_the_one_slot_per_family_rule_and_the_honest_path():
+    sheet = cs.CONTRACT_SHEET
+    assert "one slot per family" in sheet  # the rule
+    assert "under a new name" in sheet  # the honest path: a new name...
+    assert "full funnel" in sheet  # ...through the whole funnel
+    assert "immutable" in sheet  # why a re-tune of a crowned family cannot land
+
+
+def test_sheet_one_slot_wording_matches_the_family_slot_rejection_message():
+    # The gate's message is the string the research loop reads most; the sheet echoes it rather
+    # than competing with it, so a wording change on either side fails here.
+    card = make_scorecard("crowned_fam", test_metric=1.0, train_metric=1.1)
+    rules = PromotionRules(champion_count=3, max_gap=1.0, min_test_metric=0.0)
+    rationale = decide(card, [card], rules).rationale
+    for phrase in _FAMILY_SLOT_PHRASES:
+        assert phrase in rationale, f"the gate no longer says {phrase!r}"
+        assert phrase in cs.CONTRACT_SHEET, f"the sheet invented a dialect for {phrase!r}"
 
 
 # ── the drift guard: every declared name/signature must match the live modules ────────────

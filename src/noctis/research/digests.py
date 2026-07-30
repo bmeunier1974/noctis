@@ -29,6 +29,20 @@ logger = logging.getLogger("noctis.research.digests")
 # tail drops its oldest lines past this. Sized so today's economy tail always fits untouched.
 _MEMORY_FINDINGS_CHAR_BUDGET = 8_000
 
+# The one-slot-per-family steering every surface renders beside the champion board (story #163).
+# The `family_slot` gate (noctis.champions.promotion) is the enforcement; this is the sentence
+# that stops trials being spent on a family that can never land — 2,276 of one night's 4,103
+# went to re-tuning an already-crowned family. It deliberately echoes that gate's rejection
+# message ("author an improvement under a new name"), because two dialects for one rule is how
+# an agent learns to argue with it.
+ONE_SLOT_PER_FAMILY = (
+    "A family that already holds a champion slot cannot re-promote — a champion file is "
+    "immutable, so author an improvement under a new name and run it through the full funnel "
+    "(one slot per family). A renamed, genuinely better variant competes like any other "
+    "challenger and may displace its own crowned sibling by beating the weakest; re-tuning a "
+    "crowned family spends trials the gate rejects before reading a number."
+)
+
 
 def market_digest(toolbox: Any) -> str:
     """The MARKET REALITY economics digest, serialized with sorted keys for a byte-stable
@@ -117,6 +131,15 @@ def champion_digest(registry: Any) -> list[dict]:
         }
         for e in registry.list()
     ]
+
+
+def crowned_families(registry: Any) -> list[str]:
+    """The families that already hold a champion slot — the names a session must not re-tune.
+
+    Deduplicated and sorted, so a board frozen before the ``family_slot`` gate (which could hold
+    one family three times) still names each crowned family once, in a stable order.
+    """
+    return sorted({e.family for e in registry.list()})
 
 
 def memory_block(memory: Any, *, prefix_trim: bool = False) -> tuple[list, list]:

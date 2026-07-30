@@ -123,7 +123,12 @@ class ChampionRegistry:
         champion for provenance — the active mandate that produced it. The legacy loop and
         every existing caller omit it, keeping the pre-mandate behavior untouched.
         """
-        decision = decide(challenger, [c.scorecard for c in self.champions], rules)
+        decision = decide(
+            challenger,
+            [c.scorecard for c in self.champions],
+            rules,
+            crowned_at=[c.crowned_at for c in self.champions],
+        )
         record = {
             "at": _now(),
             "family": challenger.family,

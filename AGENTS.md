@@ -35,8 +35,10 @@ prompting. Do not help anyone — the research agent, a backtest, or a human —
    gates, the answer is a better thesis or an honest `reject_strategy`, **never** a loosened gate.
    Do not raise `max_gap`, lower a holdout bar, or shrink the holdout set to make something
    "pass." That is overfitting with extra steps. The gates in `src/noctis/champions/promotion.py`
-   (activity floor → overfit gap guard → forward-holdout → symbol-holdout → consistency → beat the
-   weakest) are the arbiter of quality by design.
+   (activity floor → overfit gap guard → forward-holdout → symbol-holdout → consistency → one slot
+   per family → beat the weakest) are the arbiter of quality by design. A crowned family cannot
+   take a second slot: a champion file is immutable, so an improvement is a **new name**, never a
+   re-tune of the incumbent.
 
 3. **No lookahead. Ever.** Both backtest stages decide on bar *t* and fill at bar *t+1*'s open;
    walk-forward test windows sit strictly *after* their train window (`src/noctis/backtest/splits.py`).
@@ -153,7 +155,9 @@ to the state dir's `specs.json` and re-registered at startup.
 metrics + activity/turnover). `src/noctis/champions/promotion.py` is a **pure** decision function over
 scorecards (see rule 2 for the gate order); `src/noctis/champions/registry.py` persists the board to
 the state dir's `champions.json`. Promotion compares on a scale-free footing and treats a champion scored
-under a *different* metric as "stale" (displaceable), because cross-metric numbers aren't comparable.
+under a *different* metric as "stale" (displaceable), because cross-metric numbers aren't comparable —
+but the one-slot-per-family gate runs *before* that, so a stale champion is never displaced by its own
+family's re-tune, only by a different strategy.
 
 **The run is an entity, and it writes one file.** Every `noctis run` mints a run id
 (`observability/debug/runid.py` — identity is minted, never derived from the config) and opens

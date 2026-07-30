@@ -46,7 +46,7 @@ from typing import Literal, NamedTuple
 
 # The behavioural contract version. Plain, incrementing, not semantic, and NOT
 # ``noctis.__version__`` (see the module docstring). Bump it in the PR that changes behaviour.
-ENGINE_VERSION = 2
+ENGINE_VERSION = 3
 
 # The one line between the judge and the searcher: a change to these two invalidates every
 # cross-run champion comparison, so they — not the declared version — bind the comparable key.

@@ -244,7 +244,7 @@ things at once — a **declared** version and a **computed** per-component finge
 
 | Field | Type | Notes |
 |---|---|---|
-| `engine_version` | int | The declared behavioural contract version — **2** today. A plain incrementing integer, deliberately decoupled from the package version: a release that changes no behaviour must not fragment comparison buckets, and a one-line gate change that ships in no release must |
+| `engine_version` | int | The declared behavioural contract version — **3** today. A plain incrementing integer, deliberately decoupled from the package version: a release that changes no behaviour must not fragment comparison buckets, and a one-line gate change that ships in no release must |
 | `engine_epoch` | int | `1` on every run; moved only by a deliberate `--allow-engine-upgrade` |
 | `noctis_version` | string | The package version the run was created under |
 | `fingerprint` | object | `{component: digest or null}` over the eight components below |
@@ -372,7 +372,7 @@ The structured evidence `champions/promotion.py` produced, in gate order:
 
 | Field | Type | Notes |
 |---|---|---|
-| `gate` | string | one of, and appended in this order: `validated`, `activity_floor`, `overfit_gap`, `reverse_gap`, `magnitude_cap`, `forward_holdout`, `symbol_holdout`, `symbol_consistency`, then **either** `minimum_bar` (a free or stale slot was open) **or** `beat_weakest` (a full board) |
+| `gate` | string | one of, and appended in this order: `validated`, `activity_floor`, `overfit_gap`, `reverse_gap`, `magnitude_cap`, `forward_holdout`, `symbol_holdout`, `symbol_consistency`, `family_slot`, then **either** `minimum_bar` (a free or stale slot was open) **or** `beat_weakest` (a full board) |
 | `passed` | bool | |
 | `observed` | number \| null | `null` where the gate had nothing numeric to compare (`validated`), or the scorecard carried no such metric |
 | `threshold` | number \| null | as above |
@@ -823,8 +823,8 @@ list ends at the failure, because a rejection short-circuits:
 }
 ```
 
-The two gates it never reached — `symbol_consistency`, and then whichever of `minimum_bar` /
-`beat_weakest` the board would have applied — are simply **absent**, which is what "not reached"
+The three gates it never reached — `symbol_consistency`, `family_slot`, and then whichever of
+`minimum_bar` / `beat_weakest` the board would have applied — are simply **absent**, which is what "not reached"
 looks like. `magnitude_cap` is present with a note because a gate that *could not bite* still has
 to be on the record, or a funnel's denominators stop being honest.
 

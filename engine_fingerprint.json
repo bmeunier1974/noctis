@@ -13,11 +13,11 @@
       "note": null
     },
     "gates": {
-      "digest": "0fb6148041c95608",
+      "digest": "0e0c8e03392f374a",
       "files": {
         "src/noctis/backtest/scorecard.py": "4d4ae86c6d4c4531",
         "src/noctis/backtest/splits.py": "1e0d5162d148eb4b",
-        "src/noctis/champions/promotion.py": "2d6206e2dcf4ef5a"
+        "src/noctis/champions/promotion.py": "7181f5d30b950e68"
       },
       "note": null
     },
@@ -42,13 +42,13 @@
       "note": null
     },
     "prompts": {
-      "digest": "14eb169506a6b5aa",
+      "digest": "db11b09727377e8f",
       "files": {
-        "src/noctis/research/briefings.py": "e30b8d6f2f4bac2e",
-        "src/noctis/research/contract_sheet.py": "10cc92dd4c7516f0",
-        "src/noctis/research/digests.py": "f9015cd66e862356",
+        "src/noctis/research/briefings.py": "5765117e4194f2ce",
+        "src/noctis/research/contract_sheet.py": "a94270514c15a554",
+        "src/noctis/research/digests.py": "c731ffae918e9574",
         "src/noctis/research/ideation.py": "4369b45a31a4b04c",
-        "src/noctis/research/prompt.py": "c4b5f82b108b2602"
+        "src/noctis/research/prompt.py": "fc3b7c95147c1f28"
       },
       "note": null
     },
@@ -81,7 +81,7 @@
       "note": null
     }
   },
-  "engine_version": 2,
+  "engine_version": 3,
   "kind": "noctis.engine_fingerprint",
   "regenerate_with": "uv run python scripts/engine_fingerprint.py --write"
 }

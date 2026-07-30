@@ -17,6 +17,7 @@ reach the reporting package that consumes it.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -132,8 +133,9 @@ def test_the_gate_that_failed_is_the_last_one_and_the_only_one_that_failed():
 
 
 def test_the_gate_order_is_the_documented_one_for_every_case():
-    """Activity floor → overfit gap → forward holdout → symbol holdout → consistency → beat the
-    weakest. Every decision's evidence is a prefix of that order, whatever its outcome."""
+    """Activity floor → overfit gap → forward holdout → symbol holdout → consistency → family
+    slot → beat the weakest. Every decision's evidence is a prefix of that order, whatever its
+    outcome."""
     for case in cases():
         decision = decide(case.challenger, case.champions, case.rules)
         emitted = [result.gate for result in decision.gates]
@@ -178,6 +180,50 @@ def test_the_final_gate_names_which_slot_the_challenger_was_judged_for():
     assert free["minimum_bar"].observed == 1.5 and "free slot" in str(free["minimum_bar"].note)
     assert (beat["beat_weakest"].observed, beat["beat_weakest"].threshold) == (0.9, 0.5)
     assert "minimum_bar" not in beat
+
+
+def test_a_family_slot_rejection_still_records_every_honesty_gate_it_cleared():
+    """The re-tune is turned away, but *how it scored* is still on the record — which is the whole
+    reason the family gate sits after the honesty gates rather than in front of them."""
+    decision = decide(
+        card("vol_breakout", test=1.4, train=1.7, holdout=0.8, symbol_holdout=0.6),
+        [card("vol_breakout", test=1.0)],
+        rules(min_holdout_metric=0.1, min_symbol_holdout_metric=0.1),
+    )
+
+    assert decision.promote is False
+    assert [result.gate for result in decision.gates] == list(GATE_ORDER)
+    assert all(result.passed for result in decision.gates[:-1])
+    failed = decision.gates[-1]
+    assert (failed.gate, failed.passed, failed.observed, failed.threshold) == (
+        "family_slot",
+        False,
+        None,
+        None,
+    )
+    measured = {result.gate: result.observed for result in decision.gates}
+    assert measured["forward_holdout"] == 0.8 and measured["symbol_holdout"] == 0.6
+
+
+def test_the_family_gate_names_the_incumbent_holding_the_slot():
+    """``crowned_at`` is evidence, not an input to the verdict: the board hands it over so the
+    note can say who holds the slot; a caller with none simply gets a shorter note."""
+    board = [card("champ_a", test=1.0), card("vol_breakout", test=0.5)]
+
+    named = decide(card("vol_breakout"), board, rules(), crowned_at=[None, "2026-07-29T01:50:52Z"])
+    anonymous = decide(card("vol_breakout"), board, rules())
+
+    assert "2026-07-29T01:50:52Z" in str(named.gates[-1].note)
+    assert "'lookback': 40" in str(named.gates[-1].note)  # the incumbent's params
+    assert named.rationale == anonymous.rationale
+    assert "crowned" not in str(anonymous.gates[-1].note)
+
+
+def test_a_board_with_no_incumbent_of_the_family_records_the_gate_as_cleared():
+    gates = _gates(card("vol_breakout", test=1.5), [card("champ_a", test=1.0)])
+
+    assert gates["family_slot"].passed is True
+    assert "vol_breakout" in str(gates["family_slot"].note)
 
 
 def test_a_stale_board_is_judged_on_the_minimum_bar_and_says_so():
@@ -259,6 +305,48 @@ def test_no_module_on_the_promotion_path_names_the_reporting_package(module: str
     } | {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
 
     assert not [name for name in named if name.startswith("noctis.reporting")], source
+
+
+# ── the canonical prose is held to the ladder it describes ─────────────────────────────────
+
+
+def _ladder() -> list[tuple[str, str]]:
+    """The promotion module docstring's numbered gate ladder: each step's title and its prose."""
+    from noctis.champions import promotion
+
+    steps = re.split(r"^\d+\. ", promotion.__doc__ or "", flags=re.MULTILINE)[1:]
+    return [(step.split("**")[1], step) for step in steps]
+
+
+def test_the_module_docstring_ladder_is_the_order_the_gates_run():
+    """The ladder is this project's canonical prose about promotion — an operator, the research
+    agent's contract sheet and the docs all read it, so a gate that moves in code and not here
+    would leave the authoritative description wrong."""
+    assert [title for title, _ in _ladder()] == [
+        "Activity floor",
+        "Gap guard",
+        "Forward-holdout gate",
+        "Symbol-holdout gate",
+        "Consistency gate (optional)",
+        "One slot per family",
+        "Free slot",
+        "Stale champions lose first",
+        "Beat the weakest",
+    ]
+
+
+def test_the_docstring_ladder_is_numbered_consecutively():
+    from noctis.champions import promotion
+
+    numbered = re.findall(r"^(\d+)\. \*\*", promotion.__doc__ or "", flags=re.MULTILINE)
+    assert [int(n) for n in numbered] == list(range(1, len(numbered) + 1))
+
+
+def test_the_docstring_explains_that_the_family_gate_precedes_stale_displacement():
+    """The one interaction a reader cannot infer from the order alone: a stale champion is
+    displaceable, but never by its own family's re-tune."""
+    stale = dict(_ladder())["Stale champions lose first"]
+    assert "family" in stale and "own" in stale
 
 
 def test_promotion_rules_still_map_from_settings_unchanged():

@@ -16,12 +16,18 @@ row's true signature, no second copy of the API surface. A drift-guard test
 (``tests/test_contract_sheet.py``) walks every row and asserts its signature against the live
 modules via :func:`inspect.signature`, so the sheet — and every hint rendered from it — can never
 silently rot away from the code it grades against.
+
+The sheet closes with the one promotion rule that decides whether the authored file may compete
+at all — one slot per family (story #163), rendered from the shared steering sentence so the
+prompt, the briefings and the ``family_slot`` rejection all say it the same way.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+
+from noctis.research.digests import ONE_SLOT_PER_FAMILY
 
 # Sentinel: a parameter that has no default (drift guard compares this to inspect's `empty`).
 REQUIRED: object = object()
@@ -351,6 +357,24 @@ def _tape_shape_block() -> str:
     )
 
 
+def _one_slot_block() -> str:
+    """The promotion rule the authored file will face, stated in the gate's own words.
+
+    The sheet grades the code; this states what the *board* will do with it, so a session never
+    authors a re-tune of a crowned family. The sentence itself is the shared steering
+    (:data:`~noctis.research.digests.ONE_SLOT_PER_FAMILY`), rendered here rather than restated —
+    one dialect for the rule across every prompt surface and the ``family_slot`` rejection.
+    """
+    return "\n".join(
+        [
+            "One slot per family (the promotion gate, not a style note):",
+            f"  {ONE_SLOT_PER_FAMILY}",
+            "  So: an improvement to a crowned family is a NEW file under a NEW name (its own "
+            "thesis, its own scenarios), never a rewrite of the crowned one.",
+        ]
+    )
+
+
 def render_contract_sheet() -> str:
     """Render the data table into the deterministic prompt block folded into the coder's system.
 
@@ -368,6 +392,7 @@ def render_contract_sheet() -> str:
         _TAIL_FUNCTIONS.render(),
         _STATE_CLASSES.render(),
         _EXIT_RULES.render(),
+        _one_slot_block(),
     ]
     return "\n\n".join(blocks)
 
