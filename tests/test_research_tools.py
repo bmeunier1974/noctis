@@ -156,6 +156,7 @@ def _make_toolbox(
     coder_fallback_model: str | None = None,
     max_escalations: int | None = None,
     on_event=None,
+    capture=None,
 ):
     strategies_dir = tmp_path / "strategies"
     agent = {
@@ -176,6 +177,7 @@ def _make_toolbox(
     settings = Settings(
         strategies_dir=str(strategies_dir),
         state_dir=str(tmp_path / "state"),
+        qa_dir=str(tmp_path / "qa"),  # the run's QA area — the capture sidecars' home
         universe=["AAA", "BBB", "CCC", "DDD"],
         research={
             "min_trials": min_trials,
@@ -203,6 +205,7 @@ def _make_toolbox(
         coder_client=coder_client,
         coder_fallback_client=coder_fallback_client,
         on_event=on_event,
+        capture=capture,
     )
     # Author through the toolbox's own tier paths (seeds + workspace tiers), exactly as a
     # session's write_strategy tool would.
@@ -2102,3 +2105,107 @@ def test_no_fallback_client_configured_never_escalates(tmp_path):
     assert "error" in out and "validation failed" in out["error"]
     assert not out.get("escalated")
     assert box.escalations == 0
+
+
+# ── coder-site capture: the brief + compiled spec suite as qa/ sidecars (#184) ─────────────────
+def test_capture_store_is_rooted_under_the_run_qa_area(toolbox, tmp_path):
+    """The capture area belongs to the run that produced it: sidecars land under ``qa/capture``,
+    never beside the strategy library or in a shared workspace folder."""
+    assert toolbox.capture.root == tmp_path / "qa" / "capture"
+
+
+def test_capture_brief_lands_the_brief_body_and_returns_its_hash(toolbox):
+    """The brief a coder job is given is persisted, not dropped: ``capture_brief`` hands back the
+    content hash a ledger row records, and the body reads back from the store by that hash."""
+    captured = toolbox.capture_brief(BRIEF_ARGS)
+
+    digest = captured["brief_sha256"]
+    body = toolbox.capture.read("author-brief", digest)
+    assert body is not None
+    assert json.loads(body) == BRIEF_ARGS  # what was asked for, verbatim
+
+
+def test_capture_brief_captures_the_compiled_spec_suite_beside_the_brief(toolbox):
+    """When a fixed oracle was stamped, the compiled spec suite is captured beside the brief — and
+    reconstructs to the very suite the write gate was given."""
+    from noctis.strategies.scenario_spec import spec_from_json
+
+    suite = _oracle_suite()
+
+    captured = toolbox.capture_brief(BRIEF_ARGS, suite)
+
+    assert set(captured) == {"brief_sha256", "spec_sha256"}
+    body = toolbox.capture.read("author-spec", captured["spec_sha256"])
+    assert body is not None
+    assert spec_from_json(body) == suite
+
+
+def test_capture_brief_omits_the_spec_hash_when_no_oracle_was_stamped(toolbox):
+    """A spec-less authoring job (a hand-authored ``scenarios()``) captures a brief and nothing
+    else — an absent spec is an absent field, never an empty sidecar."""
+    captured = toolbox.capture_brief(BRIEF_ARGS)
+
+    assert set(captured) == {"brief_sha256"}
+    assert list(toolbox.capture.root.iterdir()) == [toolbox.capture.root / "author-brief"]
+
+
+def test_a_latched_capture_store_omits_the_hashes_and_never_raises(toolbox, caplog, monkeypatch):
+    """Capture is strictly secondary: with the store latched off (an injected write failure) the
+    call returns no hashes at all — so the ledger omits the fields rather than naming bodies that
+    were never written — warns exactly once, and never raises into the authoring path."""
+    import logging
+    from pathlib import Path
+
+    real = Path.write_text
+
+    def failing(self: Path, *args: object, **kwargs: object):
+        if str(self).startswith(str(toolbox.capture.root)):
+            raise OSError("simulated disk failure on the capture store's write")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+    with caplog.at_level(logging.WARNING, logger="noctis.observability.capture"):
+        first = toolbox.capture_brief(BRIEF_ARGS, _oracle_suite())
+        second = toolbox.capture_brief(BRIEF_ARGS, _oracle_suite())
+
+    assert first == {} and second == {}
+    warnings = [r for r in caplog.records if r.name == "noctis.observability.capture"]
+    assert len(warnings) == 1
+
+
+def test_a_brief_authored_under_a_latched_capture_store_still_lands(tmp_path, caplog, monkeypatch):
+    """The write gate is untouched by capture: with capture latched off the coder still authors a
+    validated file, and the session carries on."""
+    import logging
+    from pathlib import Path
+
+    box, _ = _coder_box(tmp_path, [_fenced(_named("brief_probe"))])
+    real = Path.write_text
+
+    def failing(self: Path, *args: object, **kwargs: object):
+        if str(self).startswith(str(box.capture.root)):
+            raise OSError("simulated disk failure on the capture store's write")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+    with caplog.at_level(logging.WARNING, logger="noctis.observability.capture"):
+        captured = box.capture_brief(BRIEF_ARGS)
+        out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    assert captured == {}
+    assert out.get("ok") is True
+    assert library.strategy_path(box.strategies_dir, "brief_probe") is not None
+
+
+def test_an_injected_capture_store_is_the_one_the_toolbox_uses(tmp_path):
+    """The store is a constructor seam (the composition root wires it; later capture sites reuse
+    the same instance), so an injected store is where every captured body lands."""
+    from noctis.observability.capture import CaptureStore
+
+    store = CaptureStore(tmp_path / "elsewhere")
+    box = _make_toolbox(tmp_path, capture=store)
+
+    captured = box.capture_brief(BRIEF_ARGS)
+
+    assert box.capture is store
+    assert store.read("author-brief", captured["brief_sha256"]) is not None

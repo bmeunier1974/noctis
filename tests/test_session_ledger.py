@@ -166,6 +166,54 @@ def test_stage_transition_round_trips(ledger):
     assert stage.at
 
 
+def test_author_stage_row_carries_the_captured_brief_and_spec_hashes(ledger):
+    """Coder-site capture (#184): the AUTHOR row references the captured brief (and the compiled
+    spec suite when one was stamped) by content hash, so the body stays findable in ``qa/`` while
+    the ledger line stays small."""
+    brief_sha = "a" * 64
+    spec_sha = "b" * 64
+    ledger.record_stage(
+        "author",
+        strategy="momo_1",
+        detail={"oracle": ["rally", "grind"]},
+        brief_sha256=brief_sha,
+        spec_sha256=spec_sha,
+    )
+
+    (stage,) = ledger.stages()
+    assert stage.brief_sha256 == brief_sha
+    assert stage.spec_sha256 == spec_sha
+    assert stage.detail == {"oracle": ["rally", "grind"]}  # the existing detail is untouched
+
+
+def test_stage_row_omits_capture_hashes_that_were_never_captured(ledger):
+    """A latched-off capture store returns no hash, so the row simply omits the field rather than
+    naming a body that was never written."""
+    ledger.record_stage("author", strategy="momo_1", detail={"oracle": ["rally"]})
+
+    (stage,) = ledger.stages()
+    assert stage.brief_sha256 is None
+    assert stage.spec_sha256 is None
+    (record,) = ledger.records()
+    assert "brief_sha256" not in record and "spec_sha256" not in record
+
+
+def test_stage_row_without_capture_fields_reads_as_not_carried(ledger):
+    """A stage line written before #184 keeps parsing: the fields read as ``None`` — *not
+    carried* — which a tolerant read tells apart from a line that carried an empty one."""
+    pre_184 = {"event": "stage", "at": "t", "stage": "author", "strategy": "momo_1"}
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(pre_184) + "\n" + json.dumps({**pre_184, "brief_sha256": ""}) + "\n",
+        encoding="utf-8",
+    )
+
+    old, empty = ledger.stages()
+    assert old.brief_sha256 is None  # the field was never carried
+    assert empty.brief_sha256 == ""  # the line carried an empty one — a different fact
+    assert old.stage == "author" and old.strategy == "momo_1"  # the rest still parses
+
+
 def test_episode_round_trips_typed(ledger):
     ledger.record_episode(
         stage="decide",

@@ -23,9 +23,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pandas as pd
 
@@ -39,6 +40,7 @@ from noctis.data.aggregate import (
     validate_timeframe,
 )
 from noctis.data.types import ns_to_date, ns_to_timestamp, to_ns, to_ns_end_inclusive
+from noctis.observability.capture import CAPTURE_DIRNAME, CaptureStore
 from noctis.observability.events import Event, render_plain
 from noctis.research import websearch
 from noctis.research.author import AuthoringError, StrategyAuthor, StrategyBrief
@@ -51,7 +53,7 @@ from noctis.research.symbols import BANDS, SymbolScreener, screen, validate_prof
 from noctis.strategies import library
 from noctis.strategies.base import ParamSpec
 from noctis.strategies.families import FamilyRegistry
-from noctis.strategies.scenario_spec import SpecSuite, describe_spec
+from noctis.strategies.scenario_spec import SpecSuite, describe_spec, spec_to_json
 
 if TYPE_CHECKING:
     from noctis.data.seam import MarketData
@@ -111,6 +113,44 @@ def _tool(name: str, description: str, properties: dict | None = None, required=
             "required": list(required or []),
         },
     }
+
+
+# The two capture kinds the coder site writes (story #184, epic #168) — the sidecar subfolders a
+# post-mortem looks in for "what was asked for" beside the failed-attempt store's "what came back".
+BRIEF_CAPTURE_KIND = "author-brief"
+SPEC_CAPTURE_KIND = "author-spec"
+
+
+def capture_author_inputs(
+    store: CaptureStore, brief: Mapping[str, Any], spec: SpecSuite | None = None
+) -> dict[str, str]:
+    """Capture one authoring job's inputs and return the hashes a ledger row records (#184).
+
+    The brief is captured as canonical JSON and the compiled spec suite — the FIXED oracle the
+    write gate stamps, when one was stamped — as its own pure round-trip serialization
+    (:func:`~noctis.strategies.scenario_spec.spec_to_json`), so a post-mortem or a future
+    benchmark reconstructs exactly what the coder was asked for, not a prose rendering of it.
+
+    Returns ``{"brief_sha256": …}`` plus ``"spec_sha256"`` when a spec was captured. A hash the
+    store did not return — nothing was stamped, or capture has latched off — is simply **absent**
+    from the mapping, so the caller records no name for a body that is not on disk. Never raises:
+    capture is strictly secondary to authoring (the store's own fail-safe latch guarantees it).
+    """
+    captured: dict[str, str] = {}
+    brief_sha256 = store.store(BRIEF_CAPTURE_KIND, _canonical_json(brief))
+    if brief_sha256:
+        captured["brief_sha256"] = brief_sha256
+    if spec is not None:
+        spec_sha256 = store.store(SPEC_CAPTURE_KIND, spec_to_json(spec))
+        if spec_sha256:
+            captured["spec_sha256"] = spec_sha256
+    return captured
+
+
+def _canonical_json(payload: Mapping[str, Any]) -> str:
+    """A deterministic, readable rendering of a captured mapping — sorted keys, so the same brief
+    always hashes to the same sidecar however the dict was built."""
+    return json.dumps(dict(payload), sort_keys=True, indent=2, default=str)
 
 
 class _CoderCallCounter:
@@ -190,6 +230,7 @@ class ResearchToolbox:
         coder_client=None,
         coder_fallback_client=None,
         on_event=None,
+        capture: CaptureStore | None = None,
     ):
         self.settings = settings
         self.lake = lake
@@ -279,6 +320,14 @@ class ResearchToolbox:
         # oldest over its cap so observability never grows unbounded. Only the coder path reaches
         # it (the engine's per-attempt seam is the sole caller); source-based writes never do.
         self.failed_store = FailedAttemptStore(self.strategies_dir.tmp / "failed")
+        # The other half of that record (#184): the capped, content-addressed sidecar area holding
+        # what each call site was ASKED for, so a post-mortem shows the brief beside the attempt it
+        # produced. One store serves every capture site — the kinds are its subfolders — and it is
+        # a constructor seam so the composition root (or a test) can point it elsewhere; the
+        # default roots it in the run's own gitignored ``qa/`` area, like every other artifact a
+        # run owns. Capture never raises into a session: a latched store returns no hash and the
+        # caller omits the field.
+        self.capture = capture or CaptureStore(Path(settings.qa_dir) / CAPTURE_DIRNAME)
         self.state_dir = Path(settings.state_dir)
         # The durable evidence record every gate reads — see noctis.research.journal.
         self.journal = ExperimentJournal(self.state_dir)
@@ -599,6 +648,22 @@ class ResearchToolbox:
         budget can fund at least one more authoring attempt, ``False`` once it is spent.
         """
         return self._author_budget_block() is None
+
+    def capture_brief(
+        self, brief: Mapping[str, Any], spec: SpecSuite | None = None
+    ) -> dict[str, str]:
+        """Persist one authoring job's inputs and return the hashes its ledger row records (#184).
+
+        The coder-site capture seam the episodic driver calls at the AUTHOR boundary, so the brief
+        the job was given — and the compiled spec suite it is gated against, when the fixed oracle
+        was stamped — survive as ``qa/`` sidecars instead of being built, passed and dropped. The
+        driver writes the returned hashes onto the AUTHOR stage row, which is what makes the bodies
+        findable from the ledger without growing it.
+
+        Absent keys mean nothing was captured (no spec, or capture latched off), and the ledger
+        then omits those fields rather than naming a body that was never written.
+        """
+        return capture_author_inputs(self.capture, brief, spec)
 
     # ── tool definitions (Anthropic tool-use schema) ─────────────────────────
     def tool_specs(self) -> list[dict]:

@@ -42,10 +42,15 @@ import logging
 import re
 from pathlib import Path
 
-__all__ = ["DEFAULT_CAP", "CaptureStore"]
+__all__ = ["CAPTURE_DIRNAME", "DEFAULT_CAP", "CaptureStore"]
 
 # The module logger the fail-safe latch warns through, once, when it trips.
 logger = logging.getLogger(__name__)
+
+# The capture area's folder name under a run's ``qa/`` directory. Named here, once, so every call
+# site that builds a store for a run reaches the same tree — and so the debug recorder's
+# run-id-shaped folders (which the QA pruner owns) stay clearly separate from captured bodies.
+CAPTURE_DIRNAME = "capture"
 
 # Keep roughly the last N sidecars across every kind, oldest evicted. Generous on purpose: bodies
 # are tens of KB and a session emits dozens, so this bounds disk without ever binding a real run.

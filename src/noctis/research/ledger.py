@@ -3,7 +3,8 @@
 ``state/sessions/<session_id>.jsonl`` holds one JSON line per session event: the session
 opening (``session_start`` — mandate, budgets, models), one motivating idea per formulate
 (``thesis``, with the same ``parent_thesis`` / ``pivot_rationale`` lineage the experiment
-journal records), each stage transition (``stage``), one line per model judgment
+journal records), each stage transition (``stage`` — the AUTHOR one also referencing the brief
+and compiled spec suite it captured, by content hash), one line per model judgment
 (``episode`` — stage, model, tokens, misfires, outcome, escalated, plus per-misfire
 diagnostics when any fired, #102), each spent verdict
 (``verdict``, carrying the class-level lesson), and the closing rollup (``session_end``).
@@ -115,12 +116,21 @@ class StageTransition:
 
     ``detail`` is an optional structured payload a stage may carry (e.g. the deterministic MATCH
     stage records its screened ``profile``, ``fit`` set, and ``reserved_holdout``); it stays an
-    empty dict for the stages that carry none, so a reader never branches on presence."""
+    empty dict for the stages that carry none, so a reader never branches on presence.
+
+    ``brief_sha256`` / ``spec_sha256`` are the coder site's capture references (#184): the content
+    hashes of the brief the authoring job was given and of the compiled spec suite it was gated
+    against, whose bodies live as sidecars in the run's ``qa/`` capture area
+    (:class:`~noctis.observability.capture.CaptureStore`). Both are ``None`` on a line that carried
+    none — an older line, a stage that captures nothing, or a run whose capture store latched off —
+    which is a different fact from a line that recorded an empty one."""
 
     at: str
     stage: str
     strategy: str | None = None
     detail: dict[str, Any] = field(default_factory=dict)
+    brief_sha256: str | None = None
+    spec_sha256: str | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> StageTransition:
@@ -129,6 +139,8 @@ class StageTransition:
             stage=str(record.get("stage", "")),
             strategy=_opt_str(record.get("strategy")),
             detail=dict(record.get("detail") or {}),
+            brief_sha256=_carried_str(record.get("brief_sha256")),
+            spec_sha256=_carried_str(record.get("spec_sha256")),
         )
 
 
@@ -603,16 +615,28 @@ class SessionLedger:
         *,
         strategy: str | None = None,
         detail: dict[str, Any] | None = None,
+        brief_sha256: str | None = None,
+        spec_sha256: str | None = None,
     ) -> None:
         """One stage-transition line. ``detail`` is an optional structured payload the stage
         carries (e.g. MATCH's screened profile / fit set / reserved holdout); an absent detail is
         omitted from the record rather than written as an empty object, so a tolerant read
-        distinguishes "no detail" from a stored empty one."""
+        distinguishes "no detail" from a stored empty one.
+
+        ``brief_sha256`` / ``spec_sha256`` are the AUTHOR stage's capture references (#184) — the
+        content hashes of the captured brief and compiled spec suite, whose bodies sit in the run's
+        ``qa/`` capture area. A hash the capture store never returned (nothing captured, or the
+        store latched off) is simply omitted, so the ledger never names a body that is not on disk.
+        """
         record: dict[str, Any] = {"event": "stage", "at": _now_iso(), "stage": stage}
         if strategy is not None:
             record["strategy"] = strategy
         if detail:
             record["detail"] = dict(detail)
+        if brief_sha256:
+            record["brief_sha256"] = str(brief_sha256)
+        if spec_sha256:
+            record["spec_sha256"] = str(spec_sha256)
         self._append(record)
 
     def record_episode(

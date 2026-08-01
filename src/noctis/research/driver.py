@@ -62,7 +62,10 @@ involvement.
   and committed through ``toolbox.tool_write_strategy(brief=…)``; the coder author engine,
   fresh-subprocess validation, and thesis journaling all live behind that one gated method. (Brief
   authoring needs the coder engine — ``research.agent.coder_model``; without it the write is
-  refused and the strategy is skipped, exactly like any other author failure.)
+  refused and the strategy is skipped, exactly like any other author failure.) The brief and the
+  compiled fixed oracle are **captured** before the job is spent (#184) — sidecar bodies in the
+  run's ``qa/`` capture area, referenced from the AUTHOR ledger row by content hash — so a
+  post-mortem reads what was asked for beside the attempt that came back.
 * **OPTIMIZE** — the v1 multi-fidelity tuning recipe (#70), run with **zero LLM calls** entirely
   through the gated toolbox methods (:func:`_optimize_stage`): a full-panel **baseline** backtest →
   a **cheap** exploration sweep (a subset of the fit panel at a truncated recent window) → a
@@ -2009,11 +2012,25 @@ def run_episodic_research(
         # canonical identity from the FORMULATE spec (never a second rendering).
         oracle = [s.name for s in fo.scenario_spec.scenarios]
         emit_stage(AUTHOR, name, oracle=oracle)
-        ledger.record_stage(AUTHOR, strategy=name, detail={"oracle": oracle})
+        # What the coder is ASKED for is captured before it is spent (#184): the brief and the
+        # compiled fixed oracle land as sidecars in the run's qa/ capture area and the AUTHOR row
+        # references them by content hash, so a post-mortem reads the brief beside the attempt it
+        # produced (the failed-attempt store's "what came back"). Captured up front, so a job that
+        # never lands still leaves its brief on disk. A hash the store did not return — capture
+        # latched off — is simply absent, and the row omits the field.
+        brief = _brief_from_formulate(fo, symbols)
+        captured = toolbox.capture_brief(brief, fo.scenario_spec)
+        ledger.record_stage(
+            AUTHOR,
+            strategy=name,
+            detail={"oracle": oracle},
+            brief_sha256=captured.get("brief_sha256"),
+            spec_sha256=captured.get("spec_sha256"),
+        )
         write = _invoke(
             toolbox.tool_write_strategy,
             name=name,
-            brief=_brief_from_formulate(fo, symbols),
+            brief=brief,
             class_tag=fo.class_tag,
             thesis=fo.thesis,
             parent_thesis=fo.parent_thesis,

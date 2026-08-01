@@ -305,8 +305,13 @@ class FakeToolbox:
         sweep_results=None,
         exhausted=(),
         max_author_calls=12,
+        capture=None,
     ):
         self.exhausted = FakeExhausted(exhausted)
+        # The coder-site capture store (#184), or None — the latched-off case, where nothing is
+        # captured and the AUTHOR row carries no hashes.
+        self.capture = capture
+        self.captured: list[tuple] = []
         self.promotions = 0
         self.rejections = 0
         self.author_calls = 0
@@ -352,6 +357,16 @@ class FakeToolbox:
         new brief could still start. Mirrors the real toolbox — the negation of the ceiling the
         write gate refuses a brief on."""
         return self.author_calls < self.max_author_calls
+
+    def capture_brief(self, brief, spec=None):
+        """The coder-site capture seam the driver's AUTHOR stage calls (#184). Runs the REAL
+        capture logic over an injected store — only the store is faked — so the hashes the ledger
+        row records are the ones production would record. With no store (the default) it captures
+        nothing and returns no hashes, exactly like a store whose fail-safe latch has tripped."""
+        from noctis.research.tools import capture_author_inputs
+
+        self.captured.append((brief, spec))
+        return {} if self.capture is None else capture_author_inputs(self.capture, brief, spec)
 
     def result_brief(self, result):
         """The gate-facing slice the driver's tool-line emitter prints — a small honest subset of
@@ -759,6 +774,69 @@ def test_candidate_trail_surfaces_the_gated_oracle(tmp_path):
     trail = ledger.candidate_trails()[0]
     assert trail.oracle == ("rally", "selloff_flat")
     assert trail.to_dict()["oracle"] == ["rally", "selloff_flat"]
+
+
+# ── 1c. coder-site capture: the brief + spec suite persisted, the AUTHOR row names them (#184) ─
+def test_author_stage_row_references_the_captured_brief_and_spec(tmp_path):
+    # A post-mortem can show what was ASKED for beside what came back: the AUTHOR ledger row
+    # carries the brief's content hash, and that hash fetches the exact brief the write tool was
+    # given from the run's qa/ capture area — with the compiled fixed oracle captured beside it.
+    from noctis.observability.capture import CaptureStore
+    from noctis.strategies.scenario_spec import spec_from_json
+
+    store = CaptureStore(tmp_path / "qa" / "capture")
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox(capture=store)
+    ledger = SessionLedger(tmp_path, "s-capture")
+
+    _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    author_stage = next(s for s in ledger.stages() if s.stage == "author")
+    body = store.read("author-brief", author_stage.brief_sha256)
+    assert body is not None
+    assert json.loads(body) == box.writes[0]["brief"]  # the very brief the coder was briefed with
+    spec_body = store.read("author-spec", author_stage.spec_sha256)
+    assert spec_body is not None
+    assert spec_from_json(spec_body) == _SPEC_SUITE  # the fixed oracle it was gated against
+    assert author_stage.detail.get("oracle") == ["rally", "selloff_flat"]  # unchanged
+
+
+def test_a_failed_authoring_job_still_leaves_its_brief_on_disk(tmp_path):
+    # The post-mortem case that motivates the story: the write gate rejected the draft, so the
+    # brief is exactly what an operator needs — and it is captured whatever the outcome.
+    from noctis.observability.capture import CaptureStore
+
+    store = CaptureStore(tmp_path / "qa" / "capture")
+    episodes = Episodes([formulate_ok()], [])
+    rejected = {"error": "validation failed: bad scenario window"}
+    box = FakeToolbox(write_result=rejected, capture=store)
+    ledger = SessionLedger(tmp_path, "s-capture-failed")
+
+    _drive(episodes, box, max_episodes=1, ledger=ledger)
+
+    author_stage = next(s for s in ledger.stages() if s.stage == "author")
+    body = store.read("author-brief", author_stage.brief_sha256)
+    assert json.loads(body) == box.writes[0]["brief"]
+
+
+def test_latched_capture_leaves_the_author_stage_unharmed(tmp_path):
+    # Capture is strictly secondary: with the store latched off (nothing captured) authoring runs
+    # exactly as before and the AUTHOR row simply omits the hashes — never a name for a body that
+    # was never written.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()  # no capture store ⇒ capture_brief captures nothing, like a latched store
+    ledger = SessionLedger(tmp_path, "s-capture-off")
+
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    author_stage = next(s for s in ledger.stages() if s.stage == "author")
+    assert author_stage.brief_sha256 is None and author_stage.spec_sha256 is None
+    (record,) = [r for r in ledger.records() if r.get("stage") == "author"]
+    assert "brief_sha256" not in record and "spec_sha256" not in record
+    # The authoring job itself is untouched: the file was written and the candidate reached a
+    # verdict exactly as it does with capture on.
+    assert box.writes and box.rejects
+    assert summary.rejections == 1
 
 
 def test_warmup_too_large_ends_the_strategy_in_a_refined_brief(tmp_path):
