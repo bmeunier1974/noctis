@@ -5,7 +5,9 @@
 (``sweep_complete``), the class a ``write_strategy`` declared (``class_tag``), the
 motivating idea it authored (``thesis`` — the prose plus optional ``parent_thesis`` /
 ``pivot_rationale`` lineage a later session or report can walk instead of re-parsing the
-file), and every verdict spent (``verdict``). The journal — never the agent's context — is
+file), the compact Scorecard the promotion gates arbitrated on (``scorecard``, written for a
+refusal exactly as for a promotion), and every verdict spent (``verdict``). The journal —
+never the agent's context — is
 the ground truth the research discipline reads: the exhaustion gate counts distinct
 journaled param sets, the symbol-holdout taint check scans journaled trial symbols, and
 ``reject_strategy`` recovers the best-observed params from journaled trials. That is why the
@@ -276,6 +278,20 @@ class ExperimentJournal:
         if pivot_rationale is not None:
             record["pivot_rationale"] = pivot_rationale
         self._append(name, record)
+
+    def record_scorecard(self, name: str, card: Scorecard) -> None:
+        """Journal the whole compact :class:`~noctis.backtest.Scorecard` the gates arbitrated on.
+
+        The ``trial`` record keeps six flattened aggregates — enough to rank, far short of
+        replaying a promotion decision, and a refused candidate's card was never written down
+        at all. This is the evidence record: the same ``compact()`` serialization the champion
+        registry persists (mean split per fit symbol; every value the gates read reproduces
+        exactly), written at arbitration time whether the gates said yes or no, so the decision
+        stays gradeable long after the session that made it.
+        """
+        self._append(
+            name, {"event": "scorecard", "at": _now_iso(), "scorecard": card.compact().to_dict()}
+        )
 
     def record_approval(
         self,

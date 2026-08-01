@@ -1746,6 +1746,10 @@ class ResearchToolbox:
             }
         card = self._evaluate(name, resolved, bars, symbol_holdout=symbol_holdout)
         decision = self.registry.consider(card, self.rules, mandate_source=self.mandate_source)
+        # Evidence before verdict: the arbitrated card is journaled on BOTH outcomes, so a
+        # refused candidate — the one the champion board never keeps — is as replayable as a
+        # crowned one. Observability only; it reads the decision, never shapes it.
+        self.journal.record_scorecard(name, card)
         self.journal.record_approval(
             name,
             promoted=decision.promote,

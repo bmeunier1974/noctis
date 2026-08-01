@@ -440,6 +440,88 @@ def test_approval_promotes_and_writes_back_into_file(toolbox):
     assert "probe" not in toolbox.undecided
 
 
+def _scorecard_records(box, name):
+    return [r for r in _journal_lines(box, name) if r.get("event") == "scorecard"]
+
+
+# ── gate-time scorecard journaling ───────────────────────────────────────────────────────
+def test_promoted_arbitration_journals_the_compact_scorecard(toolbox):
+    """The DECIDE site writes its evidence: one scorecard record carrying the whole compact
+    card the gates arbitrated on — the same serialization the champion board persists."""
+    toolbox.dispatch("run_sweep", {"name": "probe", "symbols": ["AAA", "BBB"], "n_trials": 3})
+    out = toolbox.dispatch(
+        "evaluate_vs_champion",
+        {"name": "probe", "symbols": ["AAA", "BBB"], "params": {"lookback": 18}},
+    )
+    assert out.get("promoted") is True, out
+
+    records = _scorecard_records(toolbox, "probe")
+    assert len(records) == 1  # exactly one per arbitration
+    (entry,) = toolbox.registry.list()
+    assert records[0]["scorecard"] == entry.to_dict()["scorecard"]
+    assert records[0]["at"]
+
+
+def test_refused_arbitration_journals_its_scorecard_too(toolbox):
+    """A candidate the gates turned away is the case the journal never held: its card is
+    written exactly as a winner's, so a refusal stays replayable (AGENTS.md rule 2)."""
+    from noctis.backtest.scorecard import Scorecard
+
+    toolbox.dispatch("run_sweep", {"name": "probe", "symbols": ["AAA", "BBB"], "n_trials": 3})
+    # An unreachable bar: the gates refuse, nothing is crowned.
+    toolbox.rules = PromotionRules(
+        champion_count=3,
+        max_gap=1e9,
+        min_test_metric=1e9,
+        min_holdout_metric=-1e9,
+        min_symbol_holdout_metric=-1e9,
+    )
+    out = toolbox.dispatch(
+        "evaluate_vs_champion",
+        {"name": "probe", "symbols": ["AAA", "BBB"], "params": {"lookback": 18}},
+    )
+    assert out.get("promoted") is False, out
+    assert toolbox.registry.is_empty()
+
+    records = _scorecard_records(toolbox, "probe")
+    assert len(records) == 1
+    card = Scorecard.from_dict(records[0]["scorecard"])
+    assert card.family == "probe"
+    assert card.params == {"lookback": 18, "edge": 1.0}  # resolved, reproducible
+    assert card.fit_symbols == ["AAA", "BBB"]
+    assert round(card.avg_test_metric, 4) == out["avg_test_metric"]
+    assert round(card.avg_train_metric, 4) == out["avg_train_metric"]
+    assert round(card.gap, 4) == out["gap"]
+    assert card.symbol_holdout_metric is not None
+    # The refusal's verdict line still sits beside its evidence.
+    assert _journal_lines(toolbox, "probe")[-1]["event"] == "verdict"
+
+
+def test_reject_strategy_journals_no_scorecard(toolbox):
+    """reject_strategy never builds a card, so it never writes one — the absence is honest,
+    not a gap to paper over."""
+    toolbox.dispatch("run_sweep", {"name": "probe", "symbols": ["AAA"], "n_trials": 3})
+    out = toolbox.dispatch("reject_strategy", {"name": "probe", "reason": "no edge"})
+    assert out.get("ok") is True
+    assert _scorecard_records(toolbox, "probe") == []
+
+
+def test_scorecard_records_leave_the_experiment_log_unchanged(toolbox):
+    """The journal-backed surfaces the agent reads are blind to the new record kind."""
+    toolbox.dispatch("run_sweep", {"name": "probe", "symbols": ["AAA", "BBB"], "n_trials": 3})
+    before = toolbox.dispatch("get_experiment_log", {"name": "probe"})
+    toolbox.dispatch(
+        "evaluate_vs_champion",
+        {"name": "probe", "symbols": ["AAA", "BBB"], "params": {"lookback": 18}},
+    )
+    assert _scorecard_records(toolbox, "probe")
+    after = toolbox.dispatch("get_experiment_log", {"name": "probe"})
+    assert after["n_trials"] == before["n_trials"]
+    assert after["n_distinct_params"] == before["n_distinct_params"]
+    assert after["top_trials"] == before["top_trials"]
+    assert toolbox.journal.touched_symbols("probe") == {"AAA", "BBB"}
+
+
 def test_reject_strategy_refuses_a_current_champion(toolbox):
     # Seat "probe" as a champion, then try to reject it: the guard must refuse so the file's
     # status and the registry can't split-brain (the bug that stamped live champions rejected).

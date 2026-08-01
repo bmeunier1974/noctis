@@ -9,7 +9,43 @@ from types import SimpleNamespace
 
 import pytest
 
+from noctis.backtest.scorecard import Metrics, Scorecard, SplitScore, SymbolScore
 from noctis.research.journal import ExperimentJournal, Thesis, Trial
+
+
+def _metrics(value: float) -> Metrics:
+    return Metrics(
+        total_return=value,
+        sharpe=value,
+        sortino=value,
+        max_drawdown=-0.1,
+        win_rate=0.5,
+        turnover=0.2,
+        exposure=0.6,
+    )
+
+
+def _scorecard(family: str = "probe") -> Scorecard:
+    """A real panel Scorecard with multiple splits per symbol — so ``compact()`` has work to do."""
+    return Scorecard(
+        family=family,
+        params={"lookback": 18},
+        symbols={
+            "AAA": SymbolScore(
+                splits=[
+                    SplitScore(0, _metrics(1.4), _metrics(1.0)),
+                    SplitScore(1, _metrics(1.6), _metrics(1.2)),
+                ],
+                holdout_metric=0.9,
+            ),
+            "BBB": SymbolScore(
+                splits=[SplitScore(0, _metrics(1.2), _metrics(0.8))],
+                holdout_metric=0.7,
+            ),
+        },
+        holdout_metric=0.8,
+        symbol_holdout_metric=0.6,
+    )
 
 
 def _card(train=1.5, test=1.0, holdout=0.8, stage="validated", metric_name="sharpe"):
@@ -197,6 +233,63 @@ def test_verdicts_surface_verbatim(journal):
     assert approve["verdict"] == "approve" and approve["promoted"] is True
     assert approve["holdout_symbols"] == ["ZZZ"]
     assert reject["verdict"] == "reject" and reject["best_params"] == {"lookback": 10}
+
+
+def test_scorecard_record_carries_the_compact_card_verbatim(journal):
+    """The gate-time evidence: the whole compact Scorecard, in the registry's own shape."""
+    card = _scorecard()
+    journal.record_scorecard("probe", card)
+    (record,) = journal.records("probe")
+    assert record["event"] == "scorecard"
+    assert record["at"]
+    assert record["scorecard"] == card.compact().to_dict()
+    # Compact, not raw: each symbol's splits are collapsed to one mean split, so the journal
+    # stays KB-sized while every aggregate the gates read reproduces exactly.
+    assert record["scorecard"] != card.to_dict()
+    assert [len(s["splits"]) for s in record["scorecard"]["symbols"].values()] == [1, 1]
+    restored = Scorecard.from_dict(record["scorecard"])
+    assert restored.avg_test_metric == pytest.approx(card.avg_test_metric)
+    assert restored.gap == pytest.approx(card.gap)
+    assert restored.symbol_holdout_metric == card.symbol_holdout_metric
+    # Written like every other record: one sorted line.
+    line = journal.path("probe").read_text(encoding="utf-8").splitlines()[0]
+    assert line == json.dumps(json.loads(line), sort_keys=True)
+
+
+def test_scorecard_records_leave_every_existing_reader_untouched(journal):
+    """A new record kind is additive: the trial/verdict/thesis views read straight past it."""
+    journal.record_trial(
+        "probe",
+        source="backtest",
+        symbols=["AAA"],
+        params={"lookback": 12},
+        window={},
+        card=_card(),
+    )
+    journal.record_thesis("probe", "an idea")
+    journal.record_class_tag("probe", "momentum")
+    journal.record_scorecard("probe", _scorecard())
+    journal.record_approval(
+        "probe",
+        promoted=False,
+        rationale="does not beat the weakest champion",
+        params={"lookback": 12},
+        symbols=["AAA"],
+        holdout_symbols=["CCC"],
+    )
+
+    stats = journal.stats("probe")
+    assert (stats.n_trials, stats.n_distinct_params, stats.sweep_completed) == (1, 1, False)
+    totals = journal.totals()
+    assert totals is not None and totals.n_trials == 1 and totals.n_distinct_params == 1
+    assert len(journal.trials("probe")) == 1
+    assert [t.test for t in journal.trials_by_test("probe")] == [1.0]
+    assert len(journal.verdicts("probe")) == 1
+    assert journal.verdicts("probe")[0]["promoted"] is False
+    assert journal.thesis("probe").text == "an idea"
+    assert journal.class_tag("probe") == "momentum"
+    assert journal.touched_symbols("probe") == {"AAA"}
+    assert len(journal.records("probe")) == 5
 
 
 def test_max_bars_marks_exploration_fidelity(journal):
