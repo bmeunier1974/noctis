@@ -32,7 +32,7 @@ dependencies = [
     # Ceiling, not preference: on py3.11 the engine extra can only use
     # nautilus_trader 1.221.0 (1.222+ needs py>=3.12), which caps pandas <3.
     # Bumping this floor to 3.x makes the locked resolution unsatisfiable.
-    "pandas>=2.2.3",
+    "pandas>=3.0.5",
     "pyarrow>=25.0.0",
 ]
 
@@ -40,7 +40,7 @@ dependencies = [
 engine = ["nautilus_trader>=1.221.0"]
 # vectorbt 1.1.0 requires pandas>=3.0.3, which collides with the engine extra's
 # pandas<3 ceiling above; 1.0 is the newest that co-resolves with it.
-research = ["vectorbt>=1.0", "optuna>=4.9.0", "quantstats-lumi>=1.1.5"]
+research = ["vectorbt>=1.1.0", "optuna>=4.9.0", "quantstats-lumi>=1.1.5"]
 data = [
     "databento>=0.82.0",
     "yfinance>=1.5.2",
@@ -50,11 +50,11 @@ data = [
 ]
 # fastapi/orjson: not ours — litellm's gpt-5.x Responses-API bridge (stream + tools +
 # reasoning_effort) imports both at runtime without declaring them ("No module named …" otherwise).
-llm = ["anthropic>=0.120.0", "litellm>=1.93.0", "fastapi>=0.140.0", "orjson>=3.11.9"]
+llm = ["anthropic>=0.120.2", "litellm>=1.94.0", "fastapi>=0.141.0", "orjson>=3.11.9"]
 # Richer per-segment hardware facts for the run record (CPU model, physical cores, RAM).
 # Deliberately an extra and never a core dependency: the environment block degrades to the
 # stdlib subset (platform + os.cpu_count) with `psutil` listed as a degraded seam.
-hardware = ["psutil>=7.0.0"]
+hardware = ["psutil>=7.2.2"]
 
 # Dev tooling lives in a PEP 735 dependency-group (not an optional extra) so a bare
 # `uv sync` installs the test-suite-ready environment by default. The runtime seams
@@ -63,7 +63,7 @@ hardware = ["psutil>=7.0.0"]
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
-    "hypothesis>=6.161.5",
+    "hypothesis>=6.163.0",
     "ruff>=0.16.0",
     "mypy>=2.3.0",
     "pre-commit>=4.6.1",
