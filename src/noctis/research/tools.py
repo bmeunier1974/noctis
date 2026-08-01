@@ -120,6 +120,12 @@ def _tool(name: str, description: str, properties: dict | None = None, required=
 BRIEF_CAPTURE_KIND = "author-brief"
 SPEC_CAPTURE_KIND = "author-spec"
 
+# The two the episodic site writes (story #185): the rendered briefing an episode was actually
+# sent, and the knob configuration that shaped the call. Together with the emit contract the row
+# names, they are what makes a past episode replayable bit-identically as a benchmark case.
+BRIEFING_CAPTURE_KIND = "episode-briefing"
+KNOBS_CAPTURE_KIND = "episode-knobs"
+
 
 def capture_author_inputs(
     store: CaptureStore, brief: Mapping[str, Any], spec: SpecSuite | None = None
@@ -144,6 +150,32 @@ def capture_author_inputs(
         spec_sha256 = store.store(SPEC_CAPTURE_KIND, spec_to_json(spec))
         if spec_sha256:
             captured["spec_sha256"] = spec_sha256
+    return captured
+
+
+def capture_episode_inputs(
+    store: CaptureStore, briefing: str, knobs: Mapping[str, Any]
+) -> dict[str, str]:
+    """Capture one episode's inputs and return the hashes its ledger row records (#185).
+
+    The briefing is stored **verbatim** — the exact string handed to the episode runner, not a
+    rendering of the pieces it was built from — because a benchmark replay is only honest if it
+    replays the bytes the model saw. The knobs (the call's model, output ceiling, retry bound and
+    context window) go in as canonical sorted-key JSON, so two episodes under the same
+    configuration hash to one sidecar however their snapshot dict was built.
+
+    Returns ``{"input_sha256": …, "knobs_sha256": …}``; a hash the store did not return — capture
+    has latched off — is simply **absent**, so the caller records no name for a body that is not
+    on disk. Never raises: capture is strictly secondary to the episode (the store's own fail-safe
+    latch guarantees it).
+    """
+    captured: dict[str, str] = {}
+    input_sha256 = store.store(BRIEFING_CAPTURE_KIND, briefing)
+    if input_sha256:
+        captured["input_sha256"] = input_sha256
+    knobs_sha256 = store.store(KNOBS_CAPTURE_KIND, _canonical_json(knobs))
+    if knobs_sha256:
+        captured["knobs_sha256"] = knobs_sha256
     return captured
 
 
@@ -664,6 +696,19 @@ class ResearchToolbox:
         then omits those fields rather than naming a body that was never written.
         """
         return capture_author_inputs(self.capture, brief, spec)
+
+    def capture_episode(self, briefing: str, knobs: Mapping[str, Any]) -> dict[str, str]:
+        """Persist one episode's inputs and return the hashes its ledger row records (#185).
+
+        The episodic-site capture seam the driver calls around every judgment episode: the
+        rendered briefing lands verbatim and the knob snapshot beside it, so an episode row that
+        today says only how a judgment went also names exactly what was asked, under which
+        configuration — the pair a benchmark replay needs.
+
+        Absent keys mean nothing was captured (capture latched off), and the ledger then omits
+        those fields rather than naming a body that was never written.
+        """
+        return capture_episode_inputs(self.capture, briefing, knobs)
 
     # ── tool definitions (Anthropic tool-use schema) ─────────────────────────
     def tool_specs(self) -> list[dict]:

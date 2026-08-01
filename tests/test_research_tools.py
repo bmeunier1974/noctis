@@ -2209,3 +2209,55 @@ def test_an_injected_capture_store_is_the_one_the_toolbox_uses(tmp_path):
 
     assert box.capture is store
     assert store.read("author-brief", captured["brief_sha256"]) is not None
+
+
+# ── episodic-site capture: the rendered briefing + the knob snapshot (#185) ────────────────────
+_KNOBS = {"context_window": 32768, "max_tokens": 2048, "model": "local/qwen", "retries": 2}
+
+
+def test_capture_episode_lands_the_briefing_verbatim_and_returns_its_hash(toolbox):
+    """The briefing an episode was actually sent is persisted BYTE FOR BYTE — not a summary of it
+    — so the hash on the ledger row fetches the exact string the runner received."""
+    briefing = "## MARKET ECONOMICS\nround trip 4bp\n\n## YOUR TASK\npropose one thesis.\n"
+
+    captured = toolbox.capture_episode(briefing, _KNOBS)
+
+    assert toolbox.capture.read("episode-briefing", captured["input_sha256"]) == briefing
+
+
+def test_capture_episode_stores_the_knob_snapshot_as_canonical_json(toolbox):
+    """The knobs in force ride their own sidecar, as sorted-key JSON — attribution, not a config
+    dump: an explicit allowlist of run-shaping fields, and never a credential."""
+    captured = toolbox.capture_episode("a briefing", _KNOBS)
+
+    body = toolbox.capture.read("episode-knobs", captured["knobs_sha256"])
+    assert json.loads(body) == _KNOBS
+    assert body == json.dumps(_KNOBS, sort_keys=True, indent=2)
+
+
+def test_identical_knobs_dedupe_to_one_sidecar(toolbox):
+    """Content addressing does the deduping: two episodes under the same knobs name one body, so
+    a session of many episodes leaves one knob sidecar, not one per call."""
+    first = toolbox.capture_episode("first briefing", dict(_KNOBS))
+    second = toolbox.capture_episode("second briefing", dict(reversed(list(_KNOBS.items()))))
+
+    assert first["knobs_sha256"] == second["knobs_sha256"]  # insertion order cannot matter
+    assert len(list((toolbox.capture.root / "episode-knobs").iterdir())) == 1
+    assert first["input_sha256"] != second["input_sha256"]  # …while the briefings stay distinct
+
+
+def test_a_latched_store_omits_the_episode_capture_hashes_and_never_raises(toolbox, monkeypatch):
+    """Capture is strictly secondary: a latched store returns no hashes at all, so the episode row
+    omits the fields rather than naming bodies that were never written."""
+    from pathlib import Path
+
+    real = Path.write_text
+
+    def failing(self: Path, *args: object, **kwargs: object):
+        if str(self).startswith(str(toolbox.capture.root)):
+            raise OSError("simulated disk failure on the capture store's write")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+
+    assert toolbox.capture_episode("a briefing", _KNOBS) == {}

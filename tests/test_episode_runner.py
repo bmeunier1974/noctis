@@ -583,6 +583,24 @@ def test_max_tokens_default_and_per_call_override_thread_to_the_completion():
     assert client2.calls[0]["max_tokens"] == 99
 
 
+def test_knobs_snapshot_names_what_the_call_resolves_to(monkeypatch):
+    """The knob snapshot a caller captures beside an episode (#185) is the runner's own answer to
+    "under which configuration?" — an explicit three-field allowlist resolved exactly as ``run``
+    resolves it, so the snapshot can never describe a different call than the one made. It names
+    run-shaping values only: no client, no credential (AGENTS.md rule 6)."""
+    client = FakeClient([emit_turn({"action": "hold", "confidence": 0.5})])
+    client.api_key = "sk-must-never-be-captured"  # a secret on the client is never a knob
+    runner = EpisodeRunner(client=client, retries=3, max_tokens=1234)
+
+    assert runner.knobs() == {"model": "fake/model", "max_tokens": 1234, "retries": 3}
+    # A per-call override snapshots what that call actually uses …
+    assert runner.knobs(model="other/model", max_tokens=99)["max_tokens"] == 99
+    # … and what `run` sends is the same resolution, not a parallel one.
+    runner.run(contract=CONTRACT, system="SYS", briefing="a", max_tokens=99)
+    assert client.calls[0]["max_tokens"] == runner.knobs(max_tokens=99)["max_tokens"]
+    assert "sk-must-never-be-captured" not in str(runner.knobs())
+
+
 def test_episode_retries_config_knob_default_and_override():
     assert AgentResearchConfig().episode_retries == 2
     assert AgentResearchConfig(episode_retries=5).episode_retries == 5

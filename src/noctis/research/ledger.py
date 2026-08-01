@@ -6,7 +6,8 @@ opening (``session_start`` — mandate, budgets, models), one motivating idea pe
 journal records), each stage transition (``stage`` — the AUTHOR one also referencing the brief
 and compiled spec suite it captured, by content hash), one line per model judgment
 (``episode`` — stage, model, tokens, misfires, outcome, escalated, plus per-misfire
-diagnostics when any fired, #102), each spent verdict
+diagnostics when any fired, #102, and the question it was asked: the captured briefing's hash,
+the emit contract, and the knob snapshot's hash, #185), each spent verdict
 (``verdict``, carrying the class-level lesson), and the closing rollup (``session_end``).
 
 The cross-strategy story that today lives in a conversation transcript lives *here* instead,
@@ -164,7 +165,16 @@ class Episode:
     ``model`` is the model this episode *asked* for (a config alias); ``served_model`` is the id
     the provider said actually answered it (#181), or ``None`` on a line that carried none — a
     line written before the field existed, or one whose backend reported no served id. The two
-    together are what make a same-alias/different-served-model event visible from the ledger."""
+    together are what make a same-alias/different-served-model event visible from the ledger.
+
+    ``input_sha256`` / ``contract`` / ``knobs_sha256`` name the *question* this episode was asked
+    (#185): the content hash of the rendered briefing the runner received, the emit contract it was
+    answered through, and the content hash of the knob snapshot (model, output ceiling, retry
+    bound, context window) in force — the briefing and snapshot bodies living as sidecars in the
+    run's ``qa/`` capture area (:class:`~noctis.observability.capture.CaptureStore`). Together they
+    are what makes a past episode replayable as a benchmark case. Each is ``None`` on a line that
+    carried none — an older line, or a run whose capture store latched off — which is a different
+    fact from a line that carried an empty one."""
 
     at: str
     stage: str
@@ -178,6 +188,9 @@ class Episode:
     note: str | None = None
     usage: dict[str, int] | None = None
     served_model: str | None = None
+    input_sha256: str | None = None
+    contract: str | None = None
+    knobs_sha256: str | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Episode:
@@ -197,6 +210,9 @@ class Episode:
             note=_opt_str(record.get("note")),
             usage=_read_usage(usage),
             served_model=_carried_str(record.get("served_model")),
+            input_sha256=_carried_str(record.get("input_sha256")),
+            contract=_carried_str(record.get("contract")),
+            knobs_sha256=_carried_str(record.get("knobs_sha256")),
         )
 
 
@@ -653,6 +669,9 @@ class SessionLedger:
         note: str | None = None,
         usage: Mapping[str, int] | None = None,
         served_model: str | None = None,
+        input_sha256: str | None = None,
+        contract: str | None = None,
+        knobs_sha256: str | None = None,
     ) -> None:
         """One episode line. ``checks`` is the optional driver-side sanity-check payload (story
         #71) — a list of ``{"check", "result"}`` entries for the checks that fired on this
@@ -665,9 +684,12 @@ class SessionLedger:
         run record derives spend from the ledger instead of from a counter. ``served_model`` is the
         id the provider said actually answered this episode (#181), recorded beside the ``model``
         alias that was requested, so a same-alias/different-served-model event is detectable from
-        the ledger alone. Every absent/empty optional is omitted from the record rather than
-        written as an empty field, so a tolerant read distinguishes "nothing carried" from a
-        stored empty one."""
+        the ledger alone. ``input_sha256`` / ``contract`` / ``knobs_sha256`` name the question the
+        episode was asked (#185) — the captured briefing's content hash, the emit contract that
+        answered it, and the hash of the knob snapshot in force — which is what lets a past episode
+        be replayed as a benchmark case. Every absent/empty optional is omitted from the record
+        rather than written as an empty field, so a tolerant read distinguishes "nothing carried"
+        from a stored empty one."""
         record: dict[str, Any] = {
             "event": "episode",
             "at": _now_iso(),
@@ -686,6 +708,12 @@ class SessionLedger:
             record["note"] = note
         if served_model:
             record["served_model"] = str(served_model)
+        if input_sha256:
+            record["input_sha256"] = str(input_sha256)
+        if contract:
+            record["contract"] = str(contract)
+        if knobs_sha256:
+            record["knobs_sha256"] = str(knobs_sha256)
         if usage is not None:
             record["usage"] = {name: int(usage.get(name, 0) or 0) for name in USAGE_FIELDS}
         self._append(record)

@@ -236,6 +236,23 @@ def test_agent_loop_plays_full_protocol(tmp_path):
     }
 
 
+def test_the_conversation_loop_captures_no_episodic_sidecars(tmp_path):
+    """Episodic capture is the episodic driver's (#185), and only its: the conversation loop's
+    input is accumulated transcript state, not a briefing rebuilt from disk, so there is nothing
+    here that a content hash could make replayable. A whole protocol session therefore leaves the
+    episodic kinds of the run's capture area untouched — no briefing, no knob snapshot."""
+    toolbox = _make_toolbox(tmp_path)
+
+    summary = run_agent_research(
+        toolbox=toolbox, client=FakeLLM(_script()), budget_minutes=60.0, max_iterations=20
+    )
+
+    assert summary.stopped_reason == "agent_done"  # the session really ran the whole protocol
+    root = toolbox.capture.root
+    assert not (root / "episode-briefing").exists()
+    assert not (root / "episode-knobs").exists()
+
+
 def test_summary_tokens_total_sums_every_completions_usage(tmp_path):
     """The conversation loop fills ``summary.tokens_total`` from the four neutral usage fields it
     already accumulates — one comparable spend axis the parity harness reads (story #75). A

@@ -2848,6 +2848,95 @@ def test_end_to_end_episode_rows_record_the_served_model_beside_the_alias(tmp_pa
     ]
 
 
+def _capture_session(tmp_path, session_id: str):
+    """One real end-to-end episodic session (formulate → … → decide) through the production
+    ``make_episodes`` wiring, returning the toolbox, the ledger, the client, and the summary — the
+    harness the episodic-site capture assertions (#185) read."""
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    ledger = SessionLedger(box.state_dir, session_id=session_id)
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide, _discover = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+    return box, ledger, client, summary
+
+
+def test_end_to_end_episode_rows_reference_the_rendered_briefing_and_its_contract(tmp_path):
+    """Episodic-site capture (#185): every judgment episode leaves the briefing it was actually
+    sent on disk, and its row names both that body (by content hash) and the emit contract that
+    answered it — so a past episode is replayable as a benchmark case rather than a summary of
+    one."""
+    box, ledger, client, _ = _capture_session(tmp_path, "ep-capture")
+
+    rows = ledger.episodes()
+    assert [(e.stage, e.contract) for e in rows] == [
+        ("formulate", _FORMULATE_TOOL),
+        ("decide", _DECIDE_TOOL),
+    ]
+    # Round trip: the hash on the row fetches the EXACT string the runner handed the client.
+    sent = [messages[0]["content"] for messages in client.calls]
+    assert [box.capture.read("episode-briefing", e.input_sha256) for e in rows] == sent
+    assert "MARKET ECONOMICS" in sent[0]  # a real rendered briefing, not a placeholder
+
+
+def test_end_to_end_episodes_under_identical_knobs_share_one_knob_sidecar(tmp_path):
+    """The knob snapshot is content-addressed, so a session's episodes under one configuration
+    name ONE body: the row attributes the call without a per-episode config dump — and the
+    snapshot is an explicit allowlist of run-shaping fields, never a serialized Settings (no
+    secret can reach a captured body, AGENTS.md rule 6)."""
+    box, ledger, _, _ = _capture_session(tmp_path, "ep-knobs")
+
+    hashes = {e.knobs_sha256 for e in ledger.episodes()}
+    assert len(hashes) == 1  # two episodes, identical knobs …
+    assert len(list((box.capture.root / "episode-knobs").iterdir())) == 1  # … one sidecar
+    body = box.capture.read("episode-knobs", hashes.pop())
+    assert json.loads(body) == {
+        "context_window": 10_000_000,
+        "max_tokens": 2048,
+        "model": "fake/model",
+        "retries": 2,
+    }
+
+
+def test_end_to_end_latched_capture_leaves_the_episodes_unharmed(tmp_path, monkeypatch):
+    """Capture is strictly secondary: with the store latched off the session still formulates,
+    authors, optimizes and reaches a gated verdict, and the rows simply omit the capture fields —
+    never a name for a body that was never written."""
+    real = Path.write_text
+    capture_root = tmp_path / "qa" / "capture"
+
+    def failing(self: Path, *args: object, **kwargs: object):
+        if str(self).startswith(str(capture_root)):
+            raise OSError("simulated disk failure on the capture store's write")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+    box, ledger, _, summary = _capture_session(tmp_path, "ep-capture-off")
+
+    assert box.capture.root == capture_root and box.capture.disabled
+    rows = ledger.episodes()
+    assert [e.stage for e in rows] == ["formulate", "decide"]
+    assert all(e.input_sha256 is None and e.knobs_sha256 is None for e in rows)
+    for record in [r for r in ledger.records() if r.get("event") == "episode"]:
+        assert not {"input_sha256", "knobs_sha256"} & set(record)
+    # The session itself is untouched: a real candidate reached a real gated verdict.
+    assert summary.rejections == 1 and summary.undecided == []
+
+
 def test_end_to_end_digit_leading_class_tag_reaches_the_gate_with_a_valid_name(tmp_path):
     # The parity-run defect (#92): a thesis whose class tag LEADS WITH A DIGIT derived to a
     # gate-invalid name and burned every coder attempt on "invalid strategy name". Now the driver

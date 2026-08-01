@@ -327,6 +327,57 @@ def test_episode_served_model_rides_beside_the_requested_model(ledger):
     assert "served_model" not in [r for r in ledger.records() if r["stage"] == "author"][0]
 
 
+def test_episode_row_carries_its_briefing_hash_contract_and_knob_snapshot(ledger):
+    """Episodic-site capture (#185): the row names the exact question — the rendered briefing's
+    content hash, the emit contract it was answered through, and the hash of the knob snapshot in
+    force — so a past episode can be found on disk and replayed as a benchmark case."""
+    briefing_sha = "c" * 64
+    knobs_sha = "d" * 64
+    ledger.record_episode(
+        stage="formulate",
+        model="openai/gpt-5",
+        outcome="ok",
+        input_sha256=briefing_sha,
+        contract="emit_formulation",
+        knobs_sha256=knobs_sha,
+    )
+
+    (episode,) = ledger.episodes()
+    assert episode.input_sha256 == briefing_sha
+    assert episode.contract == "emit_formulation"
+    assert episode.knobs_sha256 == knobs_sha
+    assert episode.model == "openai/gpt-5"  # the existing fields are untouched
+
+
+def test_episode_row_omits_capture_fields_that_were_never_captured(ledger):
+    """A latched-off capture store returns no hash, so the row omits the field rather than naming
+    a body that was never written — and an episode nobody captured reads as carrying none."""
+    ledger.record_episode(stage="decide", model="openai/gpt-5", outcome="ok")
+
+    (episode,) = ledger.episodes()
+    assert episode.input_sha256 is None
+    assert episode.contract is None
+    assert episode.knobs_sha256 is None
+    (record,) = ledger.records()
+    assert not {"input_sha256", "contract", "knobs_sha256"} & set(record)
+
+
+def test_episode_without_the_capture_fields_reads_as_not_carried(ledger):
+    """A ledger line written before #185 keeps parsing: the fields read as ``None`` — *not
+    carried* — which a tolerant read tells apart from a line that carried an empty one."""
+    pre_185 = {"event": "episode", "at": "t", "stage": "decide", "model": "m", "outcome": "ok"}
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(pre_185) + "\n" + json.dumps({**pre_185, "contract": ""}) + "\n",
+        encoding="utf-8",
+    )
+
+    old, empty = ledger.episodes()
+    assert old.contract is None and old.input_sha256 is None  # never carried
+    assert empty.contract == ""  # the line carried an empty one — a different fact
+    assert old.model == "m" and old.outcome == "ok"  # the rest of the line still parses
+
+
 def test_episode_without_a_served_model_field_reads_as_not_carried(ledger):
     """A ledger line written before #181 keeps parsing: the field reads as ``None`` — *not
     carried* — which a tolerant read tells apart from a line that carried an empty one."""
