@@ -1,0 +1,42 @@
+# Prompt changelog
+
+What each LLM call site's prompt has been told to do, and when it changed. This is the human half
+of the prompt-asset fingerprint: `prompt_fingerprint.json` (repo root) holds one content hash per
+site, and every hash in it reads back to an entry here. See
+[development.md → The prompt fingerprint ratchet](development.md#the-prompt-fingerprint-ratchet)
+for the rule and the commands.
+
+**Newest entry first.** One entry per change, heading first, `sites:` naming every call site whose
+assets moved — that list is read by `noctis.observability.prompt_ratchet`, so it has to be on the
+heading line and spelled exactly as the site is named in `prompt_id.SITE_ASSETS`:
+
+```text
+## <YYYY-MM-DD> — sites: <site>[, <site>…]
+
+<what changed, and why — one short paragraph or a few bullets>
+```
+
+The sites, and the assets each one's hash covers:
+
+| Site | What it is | Assets |
+|---|---|---|
+| `author` | the coder site: the authoring brief and the contract sheet it must satisfy | `research/author.py`, `research/contract_sheet.py`, `research/digests.py` |
+| `briefings` | the rendered briefings that are the episodic stages' user turns | `research/briefings.py`, `research/digests.py` |
+| `conversation` | the conversation loop's system prompt | `research/prompt.py`, `research/digests.py` |
+| `distill` | the memory distiller's one summarization prompt | `research/distill.py` |
+| `episodic` | the episodic driver's per-stage system texts and emit contracts | `research/driver.py`, `research/digests.py` |
+| `ideation` | the seeded-idea prompt, web search included | `research/ideation.py` |
+
+`research/digests.py` renders the facts (market digest, library index, champion board, memory
+block) that four of those prompts embed, so it is listed under each of them: editing it moves all
+four hashes at once. That over-partitions on purpose — a site whose assembled text changed must
+never keep its old identity.
+
+---
+
+## 2026-08-01 — sites: author, briefings, conversation, distill, episodic, ideation
+
+Baseline. The first committed prompt-asset fingerprint (#183): every site's hash records the
+prompt text as it stands today, with no change to any of them. From here on a prompt edit is a
+visible event — the ratchet fails until the site is named in a new entry above this one, and
+`--write` refuses to record a change the changelog does not declare.

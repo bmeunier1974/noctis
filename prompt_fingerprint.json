@@ -1,0 +1,66 @@
+{
+  "changelog": {
+    "declares": [
+      "author",
+      "briefings",
+      "conversation",
+      "distill",
+      "episodic",
+      "ideation"
+    ],
+    "digest": "8a43720034ab1350",
+    "heading": "2026-08-01 \u2014 sites: author, briefings, conversation, distill, episodic, ideation",
+    "path": "docs/prompt-changelog.md"
+  },
+  "kind": "noctis.prompt_fingerprint",
+  "regenerate_with": "uv run python scripts/prompt_fingerprint.py --write",
+  "sites": {
+    "author": {
+      "digest": "d734910da24f174a",
+      "files": {
+        "src/noctis/research/author.py": "66968753203923fb",
+        "src/noctis/research/contract_sheet.py": "a94270514c15a554",
+        "src/noctis/research/digests.py": "c731ffae918e9574"
+      },
+      "note": null
+    },
+    "briefings": {
+      "digest": "a19fd389d34985b2",
+      "files": {
+        "src/noctis/research/briefings.py": "5765117e4194f2ce",
+        "src/noctis/research/digests.py": "c731ffae918e9574"
+      },
+      "note": null
+    },
+    "conversation": {
+      "digest": "39305345c1269682",
+      "files": {
+        "src/noctis/research/digests.py": "c731ffae918e9574",
+        "src/noctis/research/prompt.py": "fc3b7c95147c1f28"
+      },
+      "note": null
+    },
+    "distill": {
+      "digest": "ecd4397f4892b896",
+      "files": {
+        "src/noctis/research/distill.py": "c4dfd2a1a34b535f"
+      },
+      "note": null
+    },
+    "episodic": {
+      "digest": "8029a4492ed38d0d",
+      "files": {
+        "src/noctis/research/digests.py": "c731ffae918e9574",
+        "src/noctis/research/driver.py": "ba72f3bcc041ca06"
+      },
+      "note": null
+    },
+    "ideation": {
+      "digest": "2e3367acdd172fd6",
+      "files": {
+        "src/noctis/research/ideation.py": "765299073e318ffb"
+      },
+      "note": null
+    }
+  }
+}
