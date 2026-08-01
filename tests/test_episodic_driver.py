@@ -2527,13 +2527,14 @@ class FakeHugeWarmupCoder:
         return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
 
 
-def _emit(name: str, payload: dict) -> Turn:
+def _emit(name: str, payload: dict, *, served_model: str = "") -> Turn:
     call = ToolCall(id="c", name=name, arguments=payload)
     return Turn(
         text="",
         tool_calls=[call],
         stop_reason="tool_use",
         usage={"input_tokens": 6, "output_tokens": 4},
+        served_model=served_model,
     )
 
 
@@ -2730,6 +2731,43 @@ def test_end_to_end_episodic_session_produces_a_gated_verdict_and_a_complete_led
     verdicts = ledger.verdicts()
     assert len(verdicts) == 1 and verdicts[0].verdict == "reject"
     assert ledger.session_end() is not None
+
+
+def test_end_to_end_episode_rows_record_the_served_model_beside_the_alias(tmp_path):
+    """Served-model provenance end to end (#181): the seam reports which model answered each
+    completion, and every episode row the driver writes carries it beside the requested alias —
+    so a session served by two different models under one alias is detectable from the ledger
+    alone, with no other artifact."""
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    ledger = SessionLedger(box.state_dir, session_id="ep-served-model")
+    client = FakeEpisodeClient(
+        [
+            _emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD, served_model="gpt-5-2026-04-01"),
+            _emit(_DECIDE_TOOL, _REJECT_PAYLOAD, served_model="gpt-5-2026-06-14"),
+        ]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide, _discover = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+
+    rows = [(e.stage, e.model, e.served_model) for e in ledger.episodes()]
+    assert rows == [
+        ("formulate", "fake/model", "gpt-5-2026-04-01"),
+        ("decide", "fake/model", "gpt-5-2026-06-14"),
+    ]
 
 
 def test_end_to_end_digit_leading_class_tag_reaches_the_gate_with_a_valid_name(tmp_path):

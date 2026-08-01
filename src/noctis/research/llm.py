@@ -86,6 +86,12 @@ class Turn:
     # sometimes write their tool call as literal markup in here instead of the native tool-call
     # channel — the loop needs to see that to tell a misfire from a deliberate conclusion.
     reasoning: str = ""
+    # The model id the provider says actually served this completion (#181). We request an *alias*
+    # ("openai/gpt-5", a local server's served name); what answers is a dated snapshot the provider
+    # may move under us. Recording the served id beside the requested one is what makes a result
+    # reproducible — and what makes a silent mid-session model swap visible after the fact. Empty
+    # when the provider reported none: absence is never back-filled from the alias we asked for.
+    served_model: str = ""
 
 
 class LLMClient(Protocol):
@@ -204,6 +210,9 @@ def _turn_from_openai(resp) -> Turn:
         usage=_usage_from_openai(getattr(resp, "usage", None)),
         assistant_message=assistant_message,
         reasoning=getattr(msg, "reasoning_content", None) or "",
+        # The served model id, where the provider reports one (LiteLLM puts it on ``resp.model``);
+        # a backend that names none degrades to empty rather than echoing the requested alias.
+        served_model=str(getattr(resp, "model", None) or ""),
     )
 
 

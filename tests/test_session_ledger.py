@@ -251,6 +251,50 @@ def test_episode_usage_split_round_trips_and_is_absent_when_never_measured(ledge
     assert "usage" not in [r for r in ledger.records() if r["stage"] == "decide"][0]
 
 
+def test_episode_served_model_rides_beside_the_requested_model(ledger):
+    """Served-model provenance (#181): the row records what actually answered beside the alias
+    that was asked for, so a same-alias/different-served-model event is detectable from the
+    ledger alone. Absent/empty is omitted from the record, never stored as an empty field."""
+    ledger.record_episode(
+        stage="formulate",
+        model="openai/gpt-5",
+        outcome="ok",
+        served_model="gpt-5-2026-04-01",
+    )
+    ledger.record_episode(
+        stage="decide",
+        model="openai/gpt-5",  # the same requested alias …
+        outcome="ok",
+        served_model="gpt-5-2026-06-14",  # … a different model served it
+    )
+    ledger.record_episode(stage="author", model="local/coder", outcome="ok")  # none reported
+
+    formulate_ep, decide_ep, author_ep = ledger.episodes()
+    assert (formulate_ep.model, formulate_ep.served_model) == ("openai/gpt-5", "gpt-5-2026-04-01")
+    assert (decide_ep.model, decide_ep.served_model) == ("openai/gpt-5", "gpt-5-2026-06-14")
+    # One alias, two served models — visible without any other artifact.
+    served = {e.served_model for e in ledger.episodes() if e.model == "openai/gpt-5"}
+    assert served == {"gpt-5-2026-04-01", "gpt-5-2026-06-14"}
+    assert author_ep.served_model is None
+    assert "served_model" not in [r for r in ledger.records() if r["stage"] == "author"][0]
+
+
+def test_episode_without_a_served_model_field_reads_as_not_carried(ledger):
+    """A ledger line written before #181 keeps parsing: the field reads as ``None`` — *not
+    carried* — which a tolerant read tells apart from a line that carried an empty one."""
+    pre_181 = {"event": "episode", "at": "t", "stage": "decide", "model": "m", "outcome": "ok"}
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(pre_181) + "\n" + json.dumps({**pre_181, "served_model": ""}) + "\n",
+        encoding="utf-8",
+    )
+
+    old, empty = ledger.episodes()
+    assert old.served_model is None  # the field was never carried
+    assert empty.served_model == ""  # the line carried an empty one — a different fact
+    assert old.model == "m" and old.outcome == "ok"  # the rest of the line still parses
+
+
 def test_usage_totals_sum_the_episodes_that_recorded_a_split(ledger):
     """What the episodic driver reads back for its summary — summed off the ledger, not counted."""
     ledger.record_episode(

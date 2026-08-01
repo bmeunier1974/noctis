@@ -44,6 +44,17 @@ def _opt_str(value: Any) -> str | None:
     return str(value) if value else None
 
 
+def _carried_str(value: Any) -> str | None:
+    """A tolerant read that keeps "not carried" and "carried empty" apart: a line that never held
+    the field reads ``None``, a line that held an empty one reads ``""``.
+
+    :func:`_opt_str` collapses both to ``None``, which is right for prose a writer may legitimately
+    leave blank. It is wrong for provenance: "no served model was recorded" (an older line, or one
+    whose provider never reported one) is a different fact from "this line recorded an empty served
+    model", and a reader auditing which model answered must be able to tell them apart."""
+    return None if value is None else str(value)
+
+
 def new_session_id(now: datetime | None = None) -> str:
     """A clock-derived default session id — a pure function of ``now`` (defaults to wall clock).
 
@@ -136,7 +147,12 @@ class Episode:
 
     ``usage`` is the four-field token split behind ``tokens`` (#140), or ``None`` on a line that
     recorded none — *unknown*, never zero. :func:`episode_usage` is the one place that tells an
-    unknown split apart from an episode that honestly spent nothing."""
+    unknown split apart from an episode that honestly spent nothing.
+
+    ``model`` is the model this episode *asked* for (a config alias); ``served_model`` is the id
+    the provider said actually answered it (#181), or ``None`` on a line that carried none — a
+    line written before the field existed, or one whose backend reported no served id. The two
+    together are what make a same-alias/different-served-model event visible from the ledger."""
 
     at: str
     stage: str
@@ -149,6 +165,7 @@ class Episode:
     misfire_details: list[dict[str, Any]] = field(default_factory=list)
     note: str | None = None
     usage: dict[str, int] | None = None
+    served_model: str | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Episode:
@@ -167,6 +184,7 @@ class Episode:
             ],
             note=_opt_str(record.get("note")),
             usage=_read_usage(usage),
+            served_model=_carried_str(record.get("served_model")),
         )
 
 
@@ -610,6 +628,7 @@ class SessionLedger:
         misfire_details: list[dict[str, Any]] | None = None,
         note: str | None = None,
         usage: Mapping[str, int] | None = None,
+        served_model: str | None = None,
     ) -> None:
         """One episode line. ``checks`` is the optional driver-side sanity-check payload (story
         #71) — a list of ``{"check", "result"}`` entries for the checks that fired on this
@@ -619,9 +638,12 @@ class SessionLedger:
         diagnosable from the ledger — and ``note`` the episode's last misfire/error text (the
         API-error reason when no misfire detail exists). ``usage`` is the optional four-field token
         split behind ``tokens`` (#140) — the shape a price table can bill, journaled here so the
-        run record derives spend from the ledger instead of from a counter. Every absent/empty
-        optional is omitted from the record rather than written as an empty field, so a tolerant
-        read distinguishes "nothing carried" from a stored empty one."""
+        run record derives spend from the ledger instead of from a counter. ``served_model`` is the
+        id the provider said actually answered this episode (#181), recorded beside the ``model``
+        alias that was requested, so a same-alias/different-served-model event is detectable from
+        the ledger alone. Every absent/empty optional is omitted from the record rather than
+        written as an empty field, so a tolerant read distinguishes "nothing carried" from a
+        stored empty one."""
         record: dict[str, Any] = {
             "event": "episode",
             "at": _now_iso(),
@@ -638,6 +660,8 @@ class SessionLedger:
             record["misfire_details"] = [dict(d) for d in misfire_details]
         if note:
             record["note"] = note
+        if served_model:
+            record["served_model"] = str(served_model)
         if usage is not None:
             record["usage"] = {name: int(usage.get(name, 0) or 0) for name in USAGE_FIELDS}
         self._append(record)

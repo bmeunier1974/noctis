@@ -64,14 +64,25 @@ CONTRACT: EmitContract[Decision] = EmitContract(
 
 
 # ── Turn builders and a scripted fake client ─────────────────────────────────────────────
-def emit_turn(payload: dict, *, usage: dict | None = None) -> Turn:
+def emit_turn(payload: dict, *, usage: dict | None = None, served_model: str = "") -> Turn:
     """A clean forced tool call carrying ``payload`` — the compliant-backend transport."""
     call = ToolCall(id="e1", name=TOOL_NAME, arguments=payload)
-    return Turn(text="", tool_calls=[call], stop_reason="tool_use", usage=usage or {})
+    return Turn(
+        text="",
+        tool_calls=[call],
+        stop_reason="tool_use",
+        usage=usage or {},
+        served_model=served_model,
+    )
 
 
 def text_turn(
-    text: str, *, stop_reason: str = "end_turn", usage: dict | None = None, reasoning: str = ""
+    text: str,
+    *,
+    stop_reason: str = "end_turn",
+    usage: dict | None = None,
+    reasoning: str = "",
+    served_model: str = "",
 ) -> Turn:
     """A plain-text answer — the JSON-in-text fallback transport, or a misfire."""
     return Turn(
@@ -80,6 +91,7 @@ def text_turn(
         stop_reason=stop_reason,
         usage=usage or {},
         reasoning=reasoning,
+        served_model=served_model,
     )
 
 
@@ -502,6 +514,41 @@ def test_result_carries_the_four_field_usage_split_summed_across_attempts(tmp_pa
         usage=result.usage,
     )
     assert ledger.episodes()[0].usage == result.usage
+
+
+def test_result_carries_the_served_model_of_the_completion_that_answered(tmp_path):
+    """Served-model provenance (#181): the seam reports which model actually answered, the result
+    carries it beside the requested alias, and the ledger line records both — so a silent
+    alias→model swap mid-session is visible in the ledger afterwards."""
+    result, _ = _run(
+        [
+            text_turn("<tool_call>x</tool_call>", served_model="gpt-5-2026-04-01"),  # one misfire
+            emit_turn({"action": "promote", "confidence": 0.8}, served_model="gpt-5-2026-06-14"),
+        ]
+    )
+
+    assert result.model == "fake/model"  # the requested alias, unchanged
+    assert result.served_model == "gpt-5-2026-06-14"  # the completion that produced the value
+
+    ledger = SessionLedger(tmp_path, "s1")
+    ledger.record_episode(
+        stage="decide",
+        model=result.model,
+        outcome=result.outcome,
+        served_model=result.served_model,
+    )
+    episode = ledger.episodes()[0]
+    assert (episode.model, episode.served_model) == ("fake/model", "gpt-5-2026-06-14")
+
+
+def test_a_backend_that_reports_no_served_model_leaves_it_empty():
+    """A backend that names no served model degrades to empty — never back-filled from the alias.
+    A transport outage before any completion is empty too (nothing served it)."""
+    result, _ = _run([emit_turn({"action": "hold", "confidence": 0.5})])
+    assert result.served_model == ""
+
+    outage, _ = _run([ConnectionError("backend unreachable")])
+    assert outage.outcome == API_ERROR and outage.served_model == ""
 
 
 def test_a_backend_that_reports_no_usage_at_all_contributes_a_real_zero_split():

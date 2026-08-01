@@ -1925,6 +1925,10 @@ def run_episodic_research(
             # the shape the price table bills, journaled so spend is derived from the ledger and
             # never from a counter.
             usage=result.usage,
+            # What actually answered, beside the alias that was asked for (#181): the provider may
+            # move a dated snapshot under one alias mid-session, and the ledger is where that
+            # becomes visible. Empty (a backend that names none) records nothing at all.
+            served_model=result.served_model or None,
         )
 
     while True:

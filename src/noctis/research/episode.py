@@ -130,6 +130,11 @@ class EpisodeResult(Generic[T]):
     as (story #140) — the only shape a price table can turn into dollars. It is always present
     from this runner (a backend that reports no usage contributes an honest four zeros); ``None``
     exists for the hand-built results of callers that measured nothing.
+
+    ``model`` is the alias the episode *asked* for; ``served_model`` is the id the provider said
+    actually answered — the last completion to report one, i.e. the completion whose payload the
+    episode returned (#181). Empty when no completion named one (a backend that reports none, or
+    an outage that never reached one), never back-filled from the alias.
     """
 
     outcome: str
@@ -140,6 +145,7 @@ class EpisodeResult(Generic[T]):
     note: str = ""
     misfire_details: tuple[dict[str, str], ...] = ()
     usage: dict[str, int] | None = None
+    served_model: str = ""
 
     @property
     def ok(self) -> bool:
@@ -277,6 +283,10 @@ class EpisodeRunner:
         # never disagree about what this episode spent.
         usage = dict.fromkeys(_USAGE_FIELDS, 0)
         misfires = 0
+        # The served model of the most recent completion that named one (#181) — on a successful
+        # episode that is the completion whose payload is returned. Stays empty when no completion
+        # reported one; a later silent one never erases an earlier reported id.
+        served_model = ""
         note = ""
         # One bounded {"note", "raw"} per misfire, in attempt order — what each rejected attempt
         # actually saw, persisted with the episode line so an exhausted episode is diagnosable
@@ -317,6 +327,7 @@ class EpisodeRunner:
                         misfires=misfires,
                         note=_reason(exc),
                         misfire_details=tuple(details),
+                        served_model=served_model,
                     )
                 misfires += 1
                 note = stumble.note
@@ -325,6 +336,7 @@ class EpisodeRunner:
                 continue
 
             _accumulate_usage(usage, turn.usage)
+            served_model = turn.served_model or served_model
             self._emit_turn(turn)  # tee think/usage/say for the operator feed (#73)
             payload = _payload_from_turn(turn, contract.name)
             if payload is not None:
@@ -343,6 +355,7 @@ class EpisodeRunner:
                         usage=dict(usage),
                         misfires=misfires,
                         misfire_details=tuple(details),
+                        served_model=served_model,
                     )
             else:
                 # No emit on either transport: the truncation/markup/thinking-only stumbles land
@@ -367,6 +380,7 @@ class EpisodeRunner:
             misfires=misfires,
             note=note,
             misfire_details=tuple(details),
+            served_model=served_model,
         )
 
     def _emit_turn(self, turn: Turn) -> None:
