@@ -10,6 +10,18 @@ thesis, the class tag, the journaled verdicts, the holdout-taint symbol set and 
 — plus the session-ledger tail the briefing folds in beside it. The two blocks are named in
 :data:`ASK_KEYS`, and :func:`ask` is the view a re-run renders from.
 
+**The ask is cut at the decision point, on both streams.** A candidate's journal outlives the
+verdict that decided it, and the record of that verdict — carrying the gates' own ``promoted`` flag
+— sits in the same file as the evidence it answered. Freezing the whole slice would hand a re-run
+the label through the front door: production, at the moment it asked, could not have shown a record
+that did not exist yet. So the frozen ask stops **strictly before** the graded verdict's event —
+journal lines by their position (:func:`_before_index`), the deciding session's lines by their
+instant (:func:`_before`), the two streams meeting on the timestamps the verdict sequence is already
+merged on. Everything that genuinely predates the decision stays, verdicts included: an earlier
+ask's proposal was on the evidence the re-ask really read. The trial counts and the exhaustion
+stats are read off that same slice, because "how much searching stood behind this verdict" is a
+question about the searching that had happened.
+
 **The label is recorded provenance, not an oracle answer.** A case carries no expected output — the
 eval core refuses one by name — and the block this module writes under
 :data:`OUTCOME_KEY` is not one: it is *what happened*, the disposition the promotion gates handed a
@@ -255,19 +267,27 @@ def decide_case_document(
     champions: Sequence[Scorecard] = (),
 ) -> dict[str, Any] | None:
     """The plain-data case document — what a corpus file holds — or ``None`` when there is no
-    outcome to record. :func:`build_decide_case` is this, validated."""
+    outcome to record. :func:`build_decide_case` is this, validated.
+
+    The ask blocks are built from the records that existed **before** the graded verdict; the
+    outcome block and the replayed arbitration are built from all of them, because the arbitration
+    is what happened next and is the label rather than the ask.
+    """
     records = [dict(record) for record in journal_records]
     session = [dict(record) for record in ledger_records]
-    outcome = _recorded_outcome(strategy, records, session)
-    if outcome is None:
+    decided = _decided(strategy, records, session)
+    if decided is None:
         return None
+    outcome = decided.outcome
     decision = replayed_decision(records, rules=rules, champions=champions, label=outcome.label)
-    stats = _stats(records)
+    asked = _before_index(records, decided.index)
+    tail = _before(session, decided.at)
+    stats = _stats(asked)
     return {
         "site_id": SITE_ID,
         "payload": {
-            EVIDENCE_KEY: _evidence(strategy, records, min_trials=min_trials, stats=stats),
-            LEDGER_TAIL_KEY: _ledger_tail(session),
+            EVIDENCE_KEY: _evidence(strategy, asked, min_trials=min_trials, stats=stats),
+            LEDGER_TAIL_KEY: _ledger_tail(tail),
             OUTCOME_KEY: outcome.to_document(),
         },
         "provenance": f"mined:{run_id}",
@@ -333,12 +353,25 @@ class _Event:
     record: Mapping[str, Any] | None = None
 
 
-def _recorded_outcome(
+@dataclass(frozen=True)
+class _Decided:
+    """One decided candidate: what history recorded, and where the decision sits in that history.
+
+    ``index`` is the graded verdict's position among the journal lines and ``at`` the instant it was
+    stamped with — one coordinate per record stream, which is all the cut needs.
+    """
+
+    outcome: RecordedOutcome
+    index: int
+    at: str
+
+
+def _decided(
     strategy: str,
     journal_records: Sequence[Mapping[str, Any]],
     ledger_records: Sequence[Mapping[str, Any]],
-) -> RecordedOutcome | None:
-    """The verdict sequence and label, or ``None`` when no verdict was ever spent."""
+) -> _Decided | None:
+    """The verdict sequence, its label and its position, or ``None`` when no verdict was spent."""
     revises, final_ask = _revise_events(strategy, ledger_records)
     events = sorted(
         [*revises, *_verdict_events(journal_records)],
@@ -348,13 +381,17 @@ def _recorded_outcome(
     if not verdicts:
         return None
     eventual = verdicts[-1]
-    return RecordedOutcome(
-        eventual_verdict=eventual.kind,
-        verdict_sequence=tuple(event.kind for event in events),
-        revises=len(events) - len(verdicts),
-        revise_flip=_revise_flip(events, eventual.kind),
-        final_ask=final_ask,
-        label=_label(eventual),
+    return _Decided(
+        outcome=RecordedOutcome(
+            eventual_verdict=eventual.kind,
+            verdict_sequence=tuple(event.kind for event in events),
+            revises=len(events) - len(verdicts),
+            revise_flip=_revise_flip(events, eventual.kind),
+            final_ask=final_ask,
+            label=_label(eventual),
+        ),
+        index=eventual.index,
+        at=eventual.at,
     )
 
 
@@ -478,6 +515,31 @@ def _evidence_depth(n_distinct_params: int, min_trials: int) -> str:
     return ABOVE_FLOOR
 
 
+# ── the cut: what each stream held before the verdict was spent ──────────────────────────────
+
+
+def _before_index(records: Sequence[Mapping[str, Any]], index: int) -> list[Mapping[str, Any]]:
+    """The journal lines that stood before the graded verdict's own line.
+
+    Position, not timestamp: a journal is append-only and per strategy, so its order *is* the order
+    things happened in — and an older line that never recorded an instant still sits where it was
+    written. The verdict's own record is excluded, which is the whole point of the cut.
+    """
+    return list(records[:index])
+
+
+def _before(records: Sequence[Mapping[str, Any]], at: str) -> list[Mapping[str, Any]]:
+    """The session lines stamped strictly before ``at`` — the ledger's side of the cut.
+
+    Two streams meet only on their timestamps, the same footing the verdict sequence is merged on.
+    The comparison is strict, so a line stamped at the very instant of the verdict is left out: it
+    cannot be shown to predate the decision, and a tail entry that may post-date it is exactly the
+    leak this cut closes. A verdict that recorded no instant at all therefore places nothing before
+    itself — an empty tail, rather than one nobody can date.
+    """
+    return [record for record in records if str(record.get("at", "")) < at]
+
+
 # ── the frozen evidence: the briefing's own reads, over records instead of files ──────────────
 
 
@@ -492,7 +554,9 @@ def _evidence(
 
     The production builder reads a journal object; this reads the lines that journal holds, through
     the journal's own typed views, so the two produce the same mapping for the same history — the
-    property ``tests/test_eval_decide_case.py`` asserts rather than assumes.
+    property ``tests/test_eval_decide_case.py`` asserts rather than assumes. ``records`` is the
+    slice as of the ask (see :func:`_before_index`), so the history the two agree on is the one the
+    session was really answering from.
     """
     trials = _trials_by_test(records)[:_TOP_TRIALS]
     thesis = _thesis(records)
@@ -524,7 +588,11 @@ def _evidence(
 def _ledger_tail(ledger_records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """The "already tried this session" narrative the briefing folds in: each journaled thesis
     paired with the verdict outcome and class-level lesson it earned — the same shape, and the same
-    latest-verdict-per-strategy rule, as :func:`noctis.research.briefings._ledger_tail`."""
+    latest-verdict-per-strategy rule, as :func:`noctis.research.briefings._ledger_tail`.
+
+    ``ledger_records`` is the session as of the ask (see :func:`_before`), so "the latest verdict"
+    means the latest one *then* — this candidate's own verdict, spent an instant later, is not one
+    of them."""
     latest: dict[str, Verdict] = {}
     for record in ledger_records:
         if record.get("event") == "verdict":

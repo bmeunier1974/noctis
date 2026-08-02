@@ -359,6 +359,28 @@ def test_the_session_ledger_tail_of_the_deciding_session_is_frozen_onto_the_case
     )
 
 
+def test_a_mined_case_freezes_nothing_the_verdict_it_is_graded_against_left_behind(tmp_path):
+    """The whole trail of one spent verdict — its journal record and the ledger line an instant
+    later — post-dates the ask it answered, so re-mining a real run tree yields a case whose ask
+    side carries neither (#212)."""
+    workspace = _workspace(tmp_path)
+    run_dir = _run(workspace)
+    ledger = _ledger(run_dir)
+    ledger.record_stage("decide", strategy=STRATEGY)
+    ledger.record_thesis(STRATEGY, "volatility compresses before it expands")
+    _refused_candidate(run_dir)
+    ledger.record_verdict(
+        STRATEGY, verdict="approve", lesson="the holdout gave way", promoted=False
+    )
+
+    (case,) = _mine(workspace).cases
+
+    assert case.payload["evidence"]["verdicts"] == ()
+    assert case.payload["ledger_tail"] == (
+        {"strategy": STRATEGY, "thesis": "volatility compresses before it expands"},
+    )
+
+
 # ── mining: the boundary ─────────────────────────────────────────────────────────────────────
 
 

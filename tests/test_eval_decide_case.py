@@ -557,10 +557,13 @@ def test_an_unknown_exhaustion_floor_leaves_evidence_depth_not_applicable(tmp_pa
 # ── the payload IS the briefing's evidence ───────────────────────────────────────────────────
 
 
-def test_the_payload_carries_exactly_the_evidence_the_decide_briefing_reads(tmp_path):
-    """A copy that drifted would benchmark a prompt nobody ships, so it is asserted equal."""
+def test_the_payload_carries_exactly_the_evidence_the_decide_briefing_read_at_the_ask(tmp_path):
+    """A copy that drifted would benchmark a prompt nobody ships, so it is asserted equal — against
+    the production builder's own reading *at the moment of the ask*, taken before the verdict that
+    answered it was ever journaled."""
     journal = _journal(tmp_path)
     _sweep(journal, trials=12)
+    at_the_ask = _decide_evidence(_Toolbox(journal, MIN_TRIALS), STRATEGY)
     _approve(journal, promoted=True)
 
     document = decide_case_document(
@@ -571,9 +574,7 @@ def test_the_payload_carries_exactly_the_evidence_the_decide_briefing_reads(tmp_
         rules=rules(),
     )
 
-    assert document["payload"]["evidence"] == _decide_evidence(
-        _Toolbox(journal, MIN_TRIALS), STRATEGY
-    )
+    assert document["payload"]["evidence"] == at_the_ask
 
 
 def test_the_payload_carries_the_session_ledger_tail_the_briefing_folds_in(tmp_path):
@@ -606,6 +607,124 @@ def test_the_ask_a_site_is_re_rendered_from_never_carries_the_recorded_outcome(t
     case = _case(journal)
 
     assert set(ask(case)) == {"evidence", "ledger_tail"}
+
+
+# ── the ask is cut at the decision point (#212) ──────────────────────────────────────────────
+
+
+def test_the_frozen_evidence_stops_strictly_before_the_verdict_being_graded(tmp_path):
+    """The record of the graded verdict did not exist when the ask was made — it *is* the answer to
+    it — so a case that froze it would show a re-run the label."""
+    journal = _journal(tmp_path)
+    _sweep(journal)
+    _approve(journal, promoted=True)
+
+    case = _case(journal)
+
+    assert case.payload["evidence"]["verdicts"] == ()
+
+
+def test_a_verdict_from_an_earlier_ask_stays_in_the_evidence_exactly_as_production_showed_it():
+    """The cut is at the graded verdict, not at every verdict: the proposal a revise superseded was
+    genuinely on the evidence the re-ask was answered from."""
+    earlier = _verdict_record(
+        "2026-07-20T14:00:00+00:00", "approve", promoted=False, rationale="ship it"
+    )
+    graded = _verdict_record("2026-07-20T14:20:00+00:00", "reject", reason="dead end")
+
+    document = decide_case_document(
+        STRATEGY,
+        run_id=RUN_ID,
+        journal_records=[earlier, graded],
+        ledger_records=[
+            _decide_stage_record("2026-07-20T13:50:00+00:00"),
+            _revise_record("2026-07-20T14:10:00+00:00"),
+        ],
+        min_trials=MIN_TRIALS,
+        rules=rules(),
+    )
+
+    assert document["payload"]["evidence"]["verdicts"] == [earlier]
+
+
+def test_the_frozen_exhaustion_stats_count_only_the_trials_that_predate_the_verdict(tmp_path):
+    """A later session kept tuning this name; the decision could not have counted those trials."""
+    journal = _journal(tmp_path)
+    _sweep(journal, trials=MIN_TRIALS)
+    _approve(journal, promoted=True)
+    _sweep(journal, trials=MIN_TRIALS * 2)
+
+    evidence = _case(journal).payload["evidence"]
+
+    assert evidence["n_trials"] == MIN_TRIALS
+    assert evidence["n_distinct_params"] == MIN_TRIALS
+
+
+def test_evidence_depth_is_bucketed_on_the_searching_that_stood_behind_the_verdict(tmp_path):
+    """The axis reads the same slice the ask did: trials journaled afterwards deepen nothing."""
+    journal = _journal(tmp_path)
+    _sweep(journal, trials=MIN_TRIALS)
+    _approve(journal, promoted=True)
+    _sweep(journal, trials=MIN_TRIALS * 2)
+
+    case = _case(journal)
+
+    assert case.difficulty[EVIDENCE_DEPTH_AXIS] == AT_FLOOR
+
+
+def test_the_frozen_ledger_tail_stops_at_the_decision_so_the_candidates_own_verdict_is_absent(
+    tmp_path,
+):
+    """The session ledger records the spent verdict too, an instant after the journal does. At the
+    moment of the ask the tail carried this candidate's thesis and no outcome beside it."""
+    journal = _journal(tmp_path)
+    ledger = _ledger(tmp_path)
+    _sweep(journal)
+    ledger.record_thesis(STRATEGY, "volatility compresses before it expands")
+    _approve(journal, promoted=True)
+    ledger.record_verdict(STRATEGY, verdict="approve", lesson="the squeeze holds", promoted=True)
+
+    document = decide_case_document(
+        STRATEGY,
+        run_id=RUN_ID,
+        journal_records=journal.records(STRATEGY),
+        ledger_records=ledger.records(),
+        min_trials=MIN_TRIALS,
+        rules=rules(),
+    )
+
+    assert document["payload"]["ledger_tail"] == [
+        {"strategy": STRATEGY, "thesis": "volatility compresses before it expands"}
+    ]
+
+
+def test_cutting_the_ask_leaves_the_recorded_outcome_carrying_the_verdict_and_its_disposition(
+    tmp_path,
+):
+    """The label side is untouched by the cut: what the ask may not see, the record still states."""
+    journal = _journal(tmp_path)
+    ledger = _ledger(tmp_path)
+    _sweep(journal)
+    ledger.record_stage("decide", strategy=STRATEGY)
+    ledger.record_episode(
+        stage="decide",
+        model="haiku",
+        outcome="ok",
+        checks=[{"check": "revise_cap", "result": "reask"}],
+    )
+    journal.record_scorecard(STRATEGY, card(test=1.0, train=1.2))
+    _approve(journal, promoted=True)
+
+    case = _case(journal, ledger=ledger)
+
+    assert read_outcome(case) == RecordedOutcome(
+        eventual_verdict="approve",
+        verdict_sequence=("revise", "approve"),
+        revises=1,
+        revise_flip=True,
+        final_ask=False,
+        label=LABEL_PROMOTED,
+    )
 
 
 # ── the case as a corpus artifact ────────────────────────────────────────────────────────────

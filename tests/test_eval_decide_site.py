@@ -32,6 +32,7 @@ from noctis.eval.corpus import Corpus
 from noctis.eval.decide_case import (
     LABEL_PROMOTED,
     LABEL_REFUSED,
+    ask,
     build_decide_case,
 )
 from noctis.eval.decide_scorer import (
@@ -258,22 +259,55 @@ def test_the_briefing_rebuilt_from_a_frozen_case_is_byte_identical_to_the_produc
     tmp_path,
 ):
     """The property the whole re-run rests on: a case re-renders the very prompt it was mined
-    from, through the declared site's own renderer and the production builder behind it."""
+    from, through the declared site's own renderer and the production builder behind it.
+
+    The production side is captured *at the decision point* (#212) — before the verdict landed in
+    the journal and in the ledger — because that is the prompt the session was really answered
+    from: an ask that showed its own answer never existed."""
     journal = _journal(tmp_path)
     ledger = _ledger(tmp_path)
     _sweep(journal)
     ledger.record_thesis("earlier_idea", "gaps fade by lunch", pivot_rationale="the gap was small")
     ledger.record_verdict("earlier_idea", verdict="reject", lesson="gap fades are a dead end")
     ledger.record_thesis(STRATEGY, "volatility compresses before it expands")
-    _approve(journal, promoted=True)
     toolbox = _Toolbox(journal, market=MARKET, memory=_Memory(["momentum decays by lunch"]))
+    asked = decide_briefing(toolbox, ledger, STRATEGY, context_window=WINDOW)
+    _approve(journal, promoted=True)
+    ledger.record_verdict(STRATEGY, verdict="approve", lesson="the squeeze holds", promoted=True)
     case = _case(journal, ledger=ledger)
 
     rebuilt = DECIDE_SITE.render(
         decide_input(case, context_window=WINDOW, context=toolbox), HarnessSpec()
     )
 
-    assert rebuilt == decide_briefing(toolbox, ledger, STRATEGY, context_window=WINDOW)
+    assert rebuilt == asked
+
+
+def test_no_rendering_of_the_ask_reveals_the_disposition_the_gates_handed_the_graded_verdict(
+    tmp_path,
+):
+    """The leak #212 closed, asserted on the whole prompt rather than on one field of it: neither
+    the frozen ask nor the briefing rebuilt from it may carry the verdict being graded — its
+    ``promoted`` flag, the gates' disposition of it, or the rationale it was spent with."""
+    journal = _journal(tmp_path)
+    ledger = _ledger(tmp_path)
+    _sweep(journal)
+    ledger.record_thesis(STRATEGY, "volatility compresses before it expands")
+    _approve(journal, promoted=True)
+    ledger.record_verdict(STRATEGY, verdict="approve", lesson="the squeeze holds", promoted=True)
+    case = _case(journal, ledger=ledger)
+
+    rebuilt = DECIDE_SITE.render(decide_input(case, context_window=WINDOW), HarnessSpec())
+    frozen = json.dumps(ask(case), sort_keys=True, default=str)
+
+    for rendering in (rebuilt, frozen):
+        assert "promoted" not in rendering
+        assert LABEL_PROMOTED not in rendering and LABEL_REFUSED not in rendering
+        # The rationale and lesson the graded verdict was spent with — its fingerprint on both
+        # record streams — and the eventual verdict the ledger tail would otherwise have shown.
+        assert "the panel holds up out of sample" not in rendering
+        assert "the squeeze holds" not in rendering
+        assert '"verdict": "approve"' not in rendering
 
 
 def test_the_default_session_context_renders_the_blocks_a_case_never_froze_as_honestly_empty(
@@ -281,20 +315,24 @@ def test_the_default_session_context_renders_the_blocks_a_case_never_froze_as_ho
 ):
     """A case freezes the evidence and the ledger tail; the rest is the bench's to state. Stated
     as nothing by default — an empty market, no board, no memory, no library — never as a
-    fabricated one."""
+    fabricated one.
+
+    The production side is taken at the decision point (#212), for the reason the parity test
+    above states: the ask a session was answered from never carried its own answer."""
     journal = _journal(tmp_path)
     _sweep(journal)
+    empty = _Toolbox(journal)
+    asked = decide_briefing(
+        empty, SessionLedger(tmp_path / "empty", "none"), STRATEGY, context_window=WINDOW
+    )
     _approve(journal, promoted=True)
     case = _case(journal)
-    empty = _Toolbox(journal)
 
     rebuilt = DECIDE_SITE.render(
         decide_input(case, context_window=WINDOW, context=NEUTRAL_SESSION), HarnessSpec()
     )
 
-    assert rebuilt == decide_briefing(
-        empty, SessionLedger(tmp_path / "empty", "none"), STRATEGY, context_window=WINDOW
-    )
+    assert rebuilt == asked
 
 
 def test_the_rebuilt_briefing_carries_the_candidates_gate_facing_evidence(tmp_path):
