@@ -787,6 +787,19 @@ cases carry — so every site runs down one code path. A live ask goes through t
 seam and the site's declared emit contract; a site whose live ask is not declared is **refused**
 rather than asked under an invented system prompt.
 
+Once every job has answered, the run **scores itself through the site's declared scorers** and folds
+what they publish into the record's `harness.dials`. There is no flag: a scorer is part of a site's
+declaration, so a site that declares one publishes its reading and a site that declares none writes
+exactly the record it wrote before. For DECIDE that reading is the same block the retrospective
+miner publishes — the co-primary approval pair, the deferral figures, one row per case and the
+per-axis strata — computed from the verdicts this bench just earned against the labels the promotion
+gates recorded, and marked `answers: fresh` beside the baseline's `answers: recorded`. Three honesty
+rules hold it up: a case is the equal-weight unit, so every rep of one case folds into the single
+outcome it contributes (by strict majority of the verdicts that parsed); a reply the emit contract
+does not admit is a failed attempt and an `unreadable` exclusion, never a row in agreement's
+denominator; and a case whose reps hold no majority is counted `unsettled` rather than given a
+verdict nobody emitted.
+
 Refusals come from the machinery and are rendered as one line: an undeclared `--site` names every
 site that is declared, an absent corpus names the directory it looked in, a `--split` word that
 names no half lists the three it accepts, and a live run with no buildable client names the model

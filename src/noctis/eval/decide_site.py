@@ -41,6 +41,29 @@ the only deferral it can record is its own: ``revised`` is true exactly when the
 ``revise``, and a re-run can never record a revise *flip* — history's revise count belongs to the
 mined case, not to the attempt being scored.
 
+**The same scorer is the site's declared scoring pass (#213), and its reading is the retrospective
+one.** :meth:`DecideAgreementScorer.read` is what the bench runner calls once every job has
+answered, and it publishes the block :func:`~noctis.eval.decide_miner.retrospective_dials`
+publishes — the co-primary pair, the deferral figures, one row per case and the per-axis strata —
+because the two paths share the shaping functions below (:func:`scored_block`, :func:`case_row`,
+:func:`strata_block`) rather than agreeing by convention. What differs is stated at the top of the
+block and nowhere else: ``answers`` is :data:`ANSWERS_FRESH` here and :data:`ANSWERS_RECORDED`
+there.
+
+Three honesty rules govern that fold:
+
+* **One outcome per case, whatever a bench asked it.** The case is the eval core's equal-weight
+  unit, so every answer one case gave — each rep, under each configuration — folds into the single
+  outcome it contributes, by strict majority of the verdicts that were readable. A bench comparing
+  two configurations compares two *records* (:func:`~noctis.eval.record.side_by_side`); it never
+  hides two populations inside one reading.
+* **A reply nobody can read decides nothing.** It is a failed attempt (the record already says so)
+  and lands in :data:`UNREADABLE_KEY`, never in agreement's denominator, exactly as an unlabelled
+  approval lands in ``unlabeled_approvals``.
+* **A case whose answers hold no majority is unsettled, not guessed.** It is counted under
+  :data:`UNSETTLED_KEY` and contributes no verdict, because inventing one would publish an answer no
+  rep gave.
+
 **Two imports are deferred to call time, and that is structural.** The DECIDE declaration names this
 module's scorer in its ``scorers`` slot, and the frozen case reads its site id off that same
 declaration — a declaration that carries its scorer, a scorer that reads its case, a case that names
@@ -51,13 +74,22 @@ import.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from noctis.eval.case import Case
-from noctis.eval.decide_scorer import REVISE, DecideOutcome, GateLabel
+from noctis.eval.decide_scorer import (
+    REVISE,
+    ApprovalPair,
+    DecideMetrics,
+    DecideOutcome,
+    GateLabel,
+    score_decide_batch,
+)
 from noctis.eval.metrics import AttemptOutcome
+from noctis.eval.site import AnsweredCase
 from noctis.research.driver import DECIDE_CONTRACT, DECIDE_FINAL_CONTRACT, DecideOutput
 from noctis.research.episode import EmitContract, _extract_json_object
 from noctis.research.journal import JournalStats, Thesis, Trial
@@ -69,18 +101,45 @@ if TYPE_CHECKING:  # the cycle-closing imports, for annotations only — see the
     from noctis.eval.episodic_sites import DecideSiteInput
 
 __all__ = [
+    "ANSWERS_FRESH",
+    "ANSWERS_RECORDED",
+    "DECIDE_DIALS_KEY",
     "DECIDE_SCORER",
     "NEUTRAL_SESSION",
     "NO_LIBRARY",
+    "NO_MAJORITY",
+    "NO_VERDICT",
+    "UNREADABLE_KEY",
+    "UNSETTLED_KEY",
     "DecideAgreementScorer",
     "NeutralSession",
     "ScoredReply",
     "UnreadableReply",
+    "case_row",
     "contract_for",
     "decide_input",
     "decide_site_input",
+    "pair_block",
     "parse_reply",
+    "scored_block",
+    "strata_block",
 ]
+
+#: The key the whole DECIDE reading rides under, inside the dials subtree a record quotes verbatim.
+DECIDE_DIALS_KEY = "decide"
+
+#: What ``dials.answers`` says on a bench that really asked a model, and on one that re-read
+#: history. One vocabulary, so the two records are diffable rather than merely similar.
+ANSWERS_FRESH = "fresh"
+ANSWERS_RECORDED = "recorded"
+
+#: The two exclusion counts a live reading carries beside the pair — the n/a side, named.
+UNREADABLE_KEY = "unreadable"
+UNSETTLED_KEY = "unsettled"
+
+#: Why a case carries no verdict. Spelled once, so the row and its test read the same words.
+NO_VERDICT = "no reply this case gave carried a verdict the emit contract admits"
+NO_MAJORITY = "the case's answers settled on no single verdict, and none is invented for it"
 
 #: The strategy library a re-run reads when the bench states no session context: a path no checkout
 #: has, so the index comes back empty. An *empty stated* library, never somebody else's real one.
@@ -407,14 +466,181 @@ class ScoredReply:
         return replace(base, passed=self.parsed, error=self.error)
 
 
+# ── the reading: one shape, published by the live pass and the retrospective miner alike ────
+
+
+def scored_block(metrics: DecideMetrics) -> dict[str, Any]:
+    """One scored batch as record data — the pair first, never a bare agreement beside it."""
+    return {
+        "approval": pair_block(metrics.approval),
+        "revise_rate": metrics.revise_rate,
+        "revise_flip_rate": metrics.revise_flip_rate,
+        "revises": metrics.revises,
+        "revise_flips": metrics.revise_flips,
+        "rejections": metrics.rejections,
+    }
+
+
+def pair_block(approval: ApprovalPair) -> dict[str, Any]:
+    """The co-primary value, whole: agreement is never published without the rate it cost."""
+    return {
+        "agreement": approval.agreement,
+        "approval_rate": approval.approval_rate,
+        "decided": approval.decided,
+        "approvals": approval.approvals,
+        "labeled_approvals": approval.labeled_approvals,
+        "unlabeled_approvals": approval.unlabeled_approvals,
+        "promoted": approval.promoted,
+    }
+
+
+def case_row(
+    case: Case,
+    *,
+    verdict: str | None,
+    label: str | None,
+    revises: int,
+    revise_flip: bool,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """One case as a DECIDE reading lists it — the same keys whoever computed the verdict.
+
+    ``error`` is an absent *key* when there is none, the way #207's outcome block spells an absent
+    label: "this one was readable" is better read off a missing key than off a null to interpret.
+    """
+    from noctis.eval.decide_case import DIFFICULTY_AXES, NOT_APPLICABLE
+
+    row: dict[str, Any] = {
+        "case_id": case.case_id,
+        "run_id": case.provenance.mined_from,
+        "verdict": verdict,
+        "label": label,
+        "revises": revises,
+        "revise_flip": revise_flip,
+        "difficulty": {axis: case.difficulty.get(axis, NOT_APPLICABLE) for axis in DIFFICULTY_AXES},
+    }
+    if error is not None:
+        row["error"] = error
+    return row
+
+
+def strata_block(cases: Sequence[Case], outcomes: Sequence[DecideOutcome]) -> dict[str, Any]:
+    """Each difficulty axis's levels, each scored by the same batch scorer as the whole.
+
+    Stratified numbers are the reason the axes exist: an agreement figure that is one thing on
+    near-margin cases and another on comfortable ones is two findings, not one.
+    """
+    from noctis.eval.decide_case import DIFFICULTY_AXES, NOT_APPLICABLE
+
+    levels = {case.case_id: dict(case.difficulty) for case in cases}
+    stratified: dict[str, Any] = {}
+    for axis in DIFFICULTY_AXES:
+        grouped: dict[str, list[DecideOutcome]] = {}
+        for outcome in outcomes:
+            level = levels.get(outcome.case_id, {}).get(axis, NOT_APPLICABLE)
+            grouped.setdefault(level, []).append(outcome)
+        stratified[axis] = {
+            level: scored_block(score_decide_batch(grouped[level])) for level in sorted(grouped)
+        }
+    return stratified
+
+
+@dataclass(frozen=True)
+class _CaseReading:
+    """One case's whole contribution to a live reading: its folded outcome, or why it has none."""
+
+    case: Case
+    outcome: DecideOutcome | None = None
+    error: str | None = None
+
+    @property
+    def unreadable(self) -> bool:
+        """Whether no answer this case gave was a verdict any contract admitted."""
+        return self.error == NO_VERDICT
+
+    @property
+    def unsettled(self) -> bool:
+        """Whether its readable answers held no majority, so no verdict is recorded for it."""
+        return self.error == NO_MAJORITY
+
+    def row(self) -> dict[str, Any]:
+        """This case as the reading lists it — the retrospective row's own keys."""
+        outcome = self.outcome
+        return case_row(
+            self.case,
+            verdict=None if outcome is None else outcome.verdict,
+            label=None if outcome is None or not outcome.labeled else outcome.label.value,
+            revises=0 if outcome is None else int(outcome.revised),
+            revise_flip=False if outcome is None else outcome.revise_flipped,
+            error=self.error,
+        )
+
+
 @dataclass(frozen=True)
 class DecideAgreementScorer:
     """The decide site's scorer: one reply, read through production's contract and graded against
     what the promotion gates recorded doing with that very candidate.
 
     Stateless and pure over (case, reply) — a scored batch is reproducible from the corpus and the
-    retained replies alone, which is what makes a published agreement figure checkable.
+    retained replies alone, which is what makes a published agreement figure checkable. The same
+    object is the site's declared scoring *pass* (:meth:`read`): the runner hands it every answered
+    case and folds the block it returns into the record's dials.
     """
+
+    def read(self, answered: Sequence[AnsweredCase]) -> Mapping[str, Any] | None:
+        """The whole DECIDE reading over one live bench's answers — see the module docstring.
+
+        ``None`` for a bench that answered nothing: a reading over no answers is not a measured
+        zero, it is an absence, and publishing empty figures beside real dials would read as one.
+        """
+        if not answered:
+            return None
+        readings = self._readings(answered)
+        outcomes = tuple(one.outcome for one in readings if one.outcome is not None)
+        return {
+            # The three facts that distinguish this record from a retrospective one, stated up
+            # front and in that record's own vocabulary.
+            "retrospective": False,
+            "answers": ANSWERS_FRESH,
+            "attempt_calls": sum(len(one.replies) for one in answered),
+            DECIDE_DIALS_KEY: {
+                **scored_block(score_decide_batch(outcomes)),
+                UNREADABLE_KEY: sum(1 for one in readings if one.unreadable),
+                UNSETTLED_KEY: sum(1 for one in readings if one.unsettled),
+                "cases": [one.row() for one in readings],
+                "strata": strata_block([one.case for one in readings], outcomes),
+            },
+        }
+
+    def _readings(self, answered: Sequence[AnsweredCase]) -> tuple[_CaseReading, ...]:
+        """Every case this bench asked, folded once, in case-id order."""
+        grouped: dict[str, list[AnsweredCase]] = {}
+        for one in answered:
+            grouped.setdefault(one.case.case_id, []).append(one)
+        return tuple(self._fold(grouped[case_id]) for case_id in sorted(grouped))
+
+    def _fold(self, jobs: Sequence[AnsweredCase]) -> _CaseReading:
+        """One case's answers as the single outcome it contributes — a strict majority, or none.
+
+        Every job's *settled* reply is scored (the runner stops retrying at a pass, so that is the
+        answer the job ended on) and the verdicts that parsed are counted. A verdict held by more
+        than half of them is this case's; anything else is unreadable or unsettled, and the case
+        contributes nothing to a denominator it did not answer.
+        """
+        case = jobs[0].case
+        readable = [
+            scored.outcome
+            for scored in (self.score(case, job.settled) for job in jobs)
+            if scored.outcome is not None
+        ]
+        if not readable:
+            return _CaseReading(case=case, error=NO_VERDICT)
+        verdict, held = Counter(one.verdict for one in readable).most_common(1)[0]
+        if held * 2 <= len(readable):
+            return _CaseReading(case=case, error=NO_MAJORITY)
+        return _CaseReading(
+            case=case, outcome=next(one for one in readable if one.verdict == verdict)
+        )
 
     def score(self, case: Case, reply: str | None) -> ScoredReply:
         """One reply, parsed and scored — never raising, because a bad reply is a result."""

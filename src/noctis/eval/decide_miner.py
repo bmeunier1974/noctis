@@ -78,21 +78,25 @@ from noctis.eval.case import Case, parse_case
 from noctis.eval.case_provider import CASE_SUFFIX, YamlCaseProvider
 from noctis.eval.corpus import Corpus
 from noctis.eval.decide_case import (
-    DIFFICULTY_AXES,
     LABEL_PROMOTED,
     LABEL_REFUSED,
-    NOT_APPLICABLE,
     SITE_ID,
     decide_case_document,
     decide_case_id,
     read_outcome,
 )
 from noctis.eval.decide_scorer import (
-    ApprovalPair,
     DecideMetrics,
     DecideOutcome,
     GateLabel,
     score_decide_batch,
+)
+from noctis.eval.decide_site import (
+    ANSWERS_RECORDED,
+    DECIDE_DIALS_KEY,
+    case_row,
+    scored_block,
+    strata_block,
 )
 from noctis.eval.identity import SiteIdentity, site_identity
 from noctis.eval.metrics import AttemptOutcome, CaseResult
@@ -517,72 +521,31 @@ def retrospective_dials(
     return {
         # The three facts that distinguish this record from a live bench, stated up front.
         "retrospective": True,
-        "answers": "recorded",
+        "answers": ANSWERS_RECORDED,
         "attempt_calls": 0,
-        "decide": {
-            **_scored(metrics),
+        DECIDE_DIALS_KEY: {
+            **scored_block(metrics),
             "cases": [_case_row(case) for case in sorted(cases, key=lambda one: one.case_id)],
-            "strata": _strata(cases, outcomes),
+            "strata": strata_block(cases, outcomes),
         },
     }
 
 
-def _scored(metrics: DecideMetrics) -> dict[str, Any]:
-    """One scored batch as record data — the pair first, never a bare agreement beside it."""
-    return {
-        "approval": _pair(metrics.approval),
-        "revise_rate": metrics.revise_rate,
-        "revise_flip_rate": metrics.revise_flip_rate,
-        "revises": metrics.revises,
-        "revise_flips": metrics.revise_flips,
-        "rejections": metrics.rejections,
-    }
-
-
-def _pair(approval: ApprovalPair) -> dict[str, Any]:
-    """The co-primary value, whole: agreement is never published without the rate it cost."""
-    return {
-        "agreement": approval.agreement,
-        "approval_rate": approval.approval_rate,
-        "decided": approval.decided,
-        "approvals": approval.approvals,
-        "labeled_approvals": approval.labeled_approvals,
-        "unlabeled_approvals": approval.unlabeled_approvals,
-        "promoted": approval.promoted,
-    }
-
-
 def _case_row(case: Case) -> dict[str, Any]:
-    """One mined case as the record lists it: where it came from, and what history said."""
-    recorded = read_outcome(case)
-    return {
-        "case_id": case.case_id,
-        "run_id": case.provenance.mined_from,
-        "verdict": None if recorded is None else recorded.eventual_verdict,
-        "label": None if recorded is None else recorded.label,
-        "revises": 0 if recorded is None else recorded.revises,
-        "revise_flip": False if recorded is None else recorded.revise_flip,
-        "difficulty": {axis: case.difficulty.get(axis, NOT_APPLICABLE) for axis in DIFFICULTY_AXES},
-    }
+    """One mined case as the record lists it: where it came from, and what history said.
 
-
-def _strata(cases: Sequence[Case], outcomes: Sequence[DecideOutcome]) -> dict[str, Any]:
-    """Each difficulty axis's levels, each scored by the same batch scorer as the whole.
-
-    Stratified numbers are the reason the axes exist: an agreement figure that is one thing on
-    near-margin cases and another on comfortable ones is two findings, not one.
+    The row itself is shaped by :func:`~noctis.eval.decide_site.case_row`, which the live scoring
+    pass shapes its rows with too — the two readings share their keys structurally rather than by
+    a convention that would drift the first time one of them grew a field.
     """
-    levels = {case.case_id: dict(case.difficulty) for case in cases}
-    stratified: dict[str, Any] = {}
-    for axis in DIFFICULTY_AXES:
-        grouped: dict[str, list[DecideOutcome]] = {}
-        for outcome in outcomes:
-            level = levels.get(outcome.case_id, {}).get(axis, NOT_APPLICABLE)
-            grouped.setdefault(level, []).append(outcome)
-        stratified[axis] = {
-            level: _scored(score_decide_batch(grouped[level])) for level in sorted(grouped)
-        }
-    return stratified
+    recorded = read_outcome(case)
+    return case_row(
+        case,
+        verdict=None if recorded is None else recorded.eventual_verdict,
+        label=None if recorded is None else recorded.label,
+        revises=0 if recorded is None else recorded.revises,
+        revise_flip=False if recorded is None else recorded.revise_flip,
+    )
 
 
 def _graded_runs(cases: Sequence[Case], outcomes: Sequence[DecideOutcome]) -> tuple[CaseRun, ...]:
