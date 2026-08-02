@@ -26,7 +26,9 @@ the invariant is cheapest to hold from the first commit — it carries only decl
 :mod:`noctis.eval.site` (``AgentSite``, one frozen record per LLM judgment site),
 :mod:`noctis.eval.knobs` (``SiteKnobs``, the typed knob set an override is checked against),
 :mod:`noctis.eval.harness` (``HarnessSpec``, the eval-only prompt-composition overlay that
-production config has no word for) and :mod:`noctis.eval.registry` (the plain id→site lookup the
-declarations populate as code). The five site declarations and the runner that invokes them arrive
-in later stories; nothing here runs anything yet.
+production config has no word for), :mod:`noctis.eval.registry` (the plain id→site lookup the
+declarations populate as code) and :mod:`noctis.eval.identity` (the one bridge to the engine's
+prompt-asset hashes: a site's declared version paired with the hash of the prompt it is asked
+with, which is what makes two results comparable). The runner that invokes the declarations
+arrives in a later story; nothing here runs anything yet.
 """
