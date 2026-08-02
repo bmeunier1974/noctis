@@ -1,0 +1,49 @@
+# Edge — the broad end of the parameter axis: seven tuned knobs, every one of which must appear in
+# param_space() with an honest range, and a warmup taken from the deepest of them rather than the
+# first one written.
+site_id: coder
+payload:
+  thesis: >-
+    Every filter a breakout carries is a parameter somebody has to defend. A trend gate keeps the
+    entry on the right side of the tape, a volatility floor keeps it out of ranges too tight to
+    pay the round trip, and a bracket plus a holding cap bound what one trade can cost. The claim
+    is that the combination survives out of sample; the file's job is to declare the whole space
+    honestly so the search can falsify that.
+  entry_exit: >-
+    Enter and hold a full long when the close breaks above the highest high of the prior
+    `channel` bars while the close is above the `trend` average AND the ATR over `atr_period`
+    bars is at least `atr_floor` of price. Hold until the protective bracket fires, the close
+    falls back below the trend average, or the position has been held `max_hold` bars. Declare
+    the stop and trailing fractions alongside the target with ExitRules. Long only.
+  param_space: >-
+    trend average 50-250 bars (default 150), breakout channel 10-80 bars (default 40), ATR period
+    10-40 bars (default 20), ATR floor 0.002-0.02 of price (default 0.006), stop fraction
+    0.01-0.08 (default 0.03), trailing fraction 0.02-0.12 (default 0.06) and maximum holding
+    horizon 20-250 bars (default 100). Seven tuned parameters — all of them declared, none of
+    them hard-coded.
+  scenarios: >-
+    filtered_breakout_goes_long: a flat pad, a 150-bar rally with enough range to clear the
+    volatility floor, then a 90-bar selloff — long inside the rally, flat again by the end of the
+    selloff. steady_decline_never_longs: a flat pad then a 200-bar decline — never long, because
+    a monotone decline never prints a new channel high, so the entry is falsified rather than
+    merely quiet. Derive the warmup from the deepest default among the lookbacks — the 150-bar
+    trend average, not the 40-bar channel or the 20-bar ATR — and open every directional window
+    strictly after it.
+  style: breakout
+  symbols:
+    - SPY
+    - QQQ
+    - XLE
+    - NVDA
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+difficulty:
+  composition_mode: scratch
+  oracle_mode: authored
+  warmup_arithmetic: composed
+  state_complexity: latched
+  no_trade_tape: falsified
+  param_space_breadth: broad
+  api_surface: exits
+split: tuning

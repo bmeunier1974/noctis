@@ -1,0 +1,41 @@
+# Edge — deep warmup arithmetic: a chained indicator, whose lookbacks ADD instead of taking a max.
+site_id: coder
+payload:
+  thesis: >-
+    Trend persistence pays only while volatility is contracting: a market whose true range has
+    fallen below its own smoothed baseline trends in orderly steps, while an expanding one gives
+    the move back on the way out. Reading the baseline through a second smoothing is what makes
+    the regime slow enough to hold a position through.
+  entry_exit: >-
+    Hold a full long while the close is above the long trend average AND the ATR is below its own
+    smoothed baseline — the moving average taken over the ATR series itself, not over price. Go
+    flat whenever either half fails. Long only.
+  param_space: >-
+    ATR period 50-150 bars (default 100), the smoothing applied to the ATR series 20-100 bars
+    (default 60), and the trend average 100-300 bars (default 200). Three tuned parameters.
+  scenarios: >-
+    contraction_trend_goes_long: a long flat pad, a 100-bar orderly rally, then a 60-bar selloff
+    — long inside the rally once every chained lookback has warmed, flat by the end of the
+    selloff. steady_decline_never_longs: a flat pad then a 150-bar decline — never long, because
+    the close sits below the trend average on every bar of it. The warmup here is not the largest
+    single default: the smoothed baseline needs the ATR period first AND its own smoothing on top
+    of that before it exists at all, so budget the deeper of (ATR period + smoothing - 1) and the
+    trend average, and open every directional window strictly after it.
+  style: vol-regime
+  symbols:
+    - SPY
+    - TLT
+    - GLD
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:deep-warmup
+difficulty:
+  composition_mode: scratch
+  oracle_mode: authored
+  warmup_arithmetic: composed
+  state_complexity: rolling
+  no_trade_tape: falsified
+  param_space_breadth: moderate
+  api_surface: indicators
+split: holdout

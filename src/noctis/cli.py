@@ -2173,5 +2173,31 @@ def bench_report(
     report_bench(bench_id, config=config)
 
 
+@bench_app.command("corpus")
+def bench_corpus(
+    site: str = typer.Option(
+        ..., "--site", help="Site id whose corpus to read, as the registry declares it."
+    ),
+    config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
+) -> None:
+    """Validate one site's corpus and print its stratification and split balance.
+
+    Every case file is loaded through that site's own reader first — the coder's bucket-partitioned
+    provider and coder schema, the generic flat provider for everybody else — so a file that no
+    longer parses is refused naming the file and the defect, and nothing is counted over a corpus
+    that only half loaded. What then prints is the population: how many cases per bucket (where the
+    site has them) and per difficulty-axis level, and the tuning/holdout counts and shares overall,
+    per bucket and per level.
+
+    Refusal-first like `bench report`: a share over an empty group prints `n/a` and never `0`, a
+    bucket or axis level the site declares but no case represents is named as such rather than left
+    out, and a case whose file declares no `split:` is counted `unstamped` — it was dealt in memory
+    at load time and can still move. Reading a corpus writes nothing at all.
+    """
+    from noctis.eval.cli import report_corpus  # deferred by contract — see the note above
+
+    report_corpus(site, config=config)
+
+
 if __name__ == "__main__":
     app()

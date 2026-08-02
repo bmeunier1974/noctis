@@ -1,0 +1,36 @@
+# Canary — the sma_crossover seed with one rule changed: the crossover is read as mean reversion.
+site_id: coder
+payload:
+  thesis: >-
+    The same two averages read the other way round: a fast average below a slow one says price
+    has been pushed under its own longer-run baseline, and the claim under test is that the
+    gap closes rather than widens.
+  entry_exit: >-
+    Hold a full long while the fast SMA of closes is strictly below the slow SMA; go flat
+    whenever it is not. Long only, no shorting.
+  param_space: >-
+    fast SMA lookback 3-30 bars (default 10) and slow SMA lookback 20-100 bars (default 30),
+    the fast leg always below the slow one. Two tuned parameters.
+  scenarios: >-
+    dip_buy_then_release: a flat pad, a 40-bar decline, then a 40-bar recovery — long inside
+    the decline and flat again by the end of the recovery. steady_rally_never_longs: a flat
+    pad then a 60-bar rally — never long, because on a monotone rally the fast average can
+    never fall below the slow one.
+  style: mean-reversion
+  symbols:
+    - AAPL
+    - MSFT
+provenance: authored:2026-08-02
+tags:
+  - bucket:canary
+  - adapts:sma_crossover
+  - rule:inverted-comparison
+difficulty:
+  composition_mode: scratch
+  oracle_mode: authored
+  warmup_arithmetic: composed
+  state_complexity: rolling
+  no_trade_tape: trivial
+  param_space_breadth: narrow
+  api_surface: indicators
+split: tuning

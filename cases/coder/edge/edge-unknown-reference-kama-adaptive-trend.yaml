@@ -1,0 +1,45 @@
+# Edge — an UNKNOWN reference: the brief names a strategy plausible enough for a driver to have
+# emitted and absent from every library tier. The honest outcome is a refusal BEFORE any coder
+# completion is spent — StrategyAuthor resolves brief.reference against the library first and
+# raises a StrategyValidationError naming it, because an unknown reference is a bad brief, not a
+# coder failure. The case schema deliberately does not check the library (it is pure, and a corpus
+# is not a workspace), so this case is what keeps that refusal path measured.
+site_id: coder
+payload:
+  thesis: >-
+    An adaptive trend filter that speeds up while price is moving directionally and slows down
+    while it is chopping should hold a trend leg longer than a fixed-span average and give back
+    less of it in the chop between legs. The efficiency ratio over a long window is the standard
+    way to express that, and the referenced strategy is said to already implement it.
+  entry_exit: >-
+    Adapt the referenced adaptive-trend strategy: hold a full long while the close is above the
+    adaptive average AND that average has risen over the last `slope` bars; go flat whenever
+    either half fails. Long only.
+  param_space: >-
+    efficiency-ratio window 20-120 bars (default 60), fast span 2-10 (default 2), slow span 20-60
+    (default 30) and slope lookback 3-20 bars (default 5). Four tuned parameters.
+  scenarios: >-
+    adaptive_trend_goes_long: a flat pad, a 120-bar rally, then an 80-bar selloff — long inside
+    the rally, flat again by the end of the selloff. steady_decline_never_longs: a flat pad then
+    a 150-bar decline — never long, because the close sits below the adaptive average on every
+    bar of a monotone decline. Warmup is the efficiency-ratio window plus the slope lookback the
+    rise is measured over.
+  reference: kama_adaptive_trend
+  style: momentum
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:unknown-reference
+difficulty:
+  composition_mode: reference
+  oracle_mode: authored
+  warmup_arithmetic: composed
+  state_complexity: rolling
+  no_trade_tape: falsified
+  param_space_breadth: moderate
+  api_surface: indicators
+split: tuning

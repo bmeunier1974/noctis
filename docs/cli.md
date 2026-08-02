@@ -764,6 +764,7 @@ python -m noctis bench run --site decide --dry-run    # preflight only: print th
 python -m noctis bench run --site decide [--split tuning|holdout|all] [--reps N] [--workers N] \
                            [--model <provider/model>] [--label <name>]
 python -m noctis bench report <bench-id>   # one bench record's reading, straight to stdout
+python -m noctis bench corpus --site coder # validate one site's corpus; print its stats and balance
 ```
 
 The bench area is workspace-level (`<workspace>/bench/<bench_id>/bench.json`), run-neutral like the
@@ -818,3 +819,20 @@ Refusal-first, like everything else that publishes a number here: an unmeasured 
 and never `0`, a record the schema validator has problems with is refused with **every** problem
 rather than half-rendered, and an id nothing answers is refused naming the bench root it looked in.
 Reading a bench writes nothing at all.
+
+`bench corpus` asks about the **input** rather than about a run over it: what is in a site's corpus,
+whether all of it still loads, and how it is divided. Validation is the first half and it is total —
+every case file goes through that site's own reader (the coder's bucket-walking provider and coder
+schema; the generic flat provider for everybody else, chosen by a lookup in
+`src/noctis/eval/bootstrap.py`'s `SITE_CORPORA`, so a second corpus reports down the same code
+path) — and a file that no longer parses, a case labelled with an axis nobody declares or a bucket
+directory nobody named is a refusal naming the file and the defect, with nothing counted.
+
+What prints is the population: the case count and the corpus digest, then the tuning/holdout counts
+and shares overall, per bucket (where the site has buckets — one that does not says so rather than
+printing an empty table) and per difficulty-axis level. A bucket or level the site *declares* but no
+case represents is named as exactly that, because an absence dropped from a table is an absence
+nobody can act on; a share over an empty group prints `n/a` and never `0`; and a case whose file
+declares no `split:` is counted **unstamped** — it was dealt in memory at load time and can still
+move when the corpus grows, which is the curator's cue to freeze it. Reading a corpus writes
+nothing: no split is stamped, no file repaired, no index touched.

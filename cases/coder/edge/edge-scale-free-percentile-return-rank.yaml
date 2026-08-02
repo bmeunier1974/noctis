@@ -1,0 +1,45 @@
+# Edge — a scale-free percentile rule that cannot be falsified at all on its own: the rank of a
+# return is top-decile even on a monotone decline, so the rule needs an absolute sign gate to have
+# a reliable no-trade tape, and the brief says so rather than leaving the coder to discover it.
+site_id: coder
+payload:
+  thesis: >-
+    Cross-sectional momentum has a single-name analogue: rank the current multi-bar return
+    against the distribution of that same return over its own trailing history, and take only the
+    top of the distribution. Ranking rather than thresholding is what keeps one rule usable
+    across names whose typical move differs by an order of magnitude.
+  entry_exit: >-
+    On each bar compute the `lookback`-bar return, keep a rolling window of the last
+    `rank_window` such returns, and take the percentile rank of the current one inside it. Hold a
+    full long while that rank is at or above `enter_pct` AND the return itself is strictly
+    positive; go flat whenever either half fails. Long only.
+  param_space: >-
+    return lookback 5-40 bars (default 20), rank window 60-250 bars (default 120) and entry rank
+    0.70-0.98 (default 0.85). Three tuned parameters.
+  scenarios: >-
+    top_decile_return_goes_long: a flat pad, a 120-bar rally, then an 80-bar selloff — long
+    inside the rally, flat again by the end of the selloff. steady_decline_never_longs: a flat
+    pad then a 150-bar monotone decline — never long, and the SIGN gate is the only reason that
+    is provable: on a monotone decline the least-negative bar still ranks at the top of its own
+    window, so the rank half fires freely and no amplitude can silence it, while the return
+    itself is negative on every bar and falsifies the entry outright. Warmup adds up rather than
+    maxing out: the rank window is a window of returns, each of which already costs `lookback`
+    bars, so the first honest rank exists only after lookback + rank_window - 1 bars.
+  style: momentum
+  symbols:
+    - SPY
+    - QQQ
+    - EFA
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:scale-free-percentile
+difficulty:
+  composition_mode: scratch
+  oracle_mode: authored
+  warmup_arithmetic: composed
+  state_complexity: rolling
+  no_trade_tape: scale_free
+  param_space_breadth: moderate
+  api_surface: indicators
+split: tuning

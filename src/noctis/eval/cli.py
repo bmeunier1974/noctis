@@ -19,6 +19,12 @@ model client and written nothing at all. Nothing in it names a site: the corpus 
 workspace's cases root through the generic provider, and how a case becomes the site's renderer
 input is a lookup in the ask table, so a second site runs down the same path.
 
+``corpus`` is the verb that answers a question about the *input* rather than about a run: it loads
+every case a site declares through that site's own reader — another lookup, so the coder's
+bucket-partitioned corpus and a flat mined one report down one path — and prints what validated,
+how the cases stratify, and how the tuning/holdout split falls across them. It spends nothing, asks
+nothing, and writes nothing.
+
 The refusals are the interesting part, and they are all **first**:
 
 * a bench id nothing answers refuses *naming the bench root it looked in*, because "not found" is
@@ -51,11 +57,14 @@ from noctis.eval.bootstrap import (
     build_bench_runner,
     cases_root,
     configs_for,
+    corpus_provider,
     live_attempt,
     load_corpus,
     select_split,
+    site_vocabulary,
 )
 from noctis.eval.case_provider import MissingCorpus
+from noctis.eval.corpus_report import read_corpus, render_corpus_report
 from noctis.eval.record import validate
 from noctis.eval.registry import UnknownSite
 from noctis.eval.runner import (
@@ -67,7 +76,7 @@ from noctis.eval.runner import (
     bench_root,
 )
 
-__all__ = ["report_bench", "run_bench"]
+__all__ = ["report_bench", "report_corpus", "run_bench"]
 
 # Every refusal a bench assembly can raise, rendered as one clean line rather than a traceback: an
 # undeclared site, an absent or malformed corpus, a knob the site does not accept, an id that would
@@ -150,6 +159,32 @@ def _never_asked(request: AttemptRequest) -> Attempt:
     raise LiveModelUnavailable(
         f"a dry run asked {request.case.case_id!r} — a preflight spends nothing by construction"
     )
+
+
+def report_corpus(
+    site_id: str, *, config: str | None = None, seams: BenchSeams | None = None
+) -> None:
+    """Validate one site's corpus and print what is in it: the stats, and how it is divided.
+
+    Validation is not a step here, it is the whole first half: every case file is loaded through the
+    site's own reader (the lookup in :func:`~noctis.eval.bootstrap.corpus_provider`), so a file that
+    no longer parses, a case labelled with an axis nobody declares and a bucket directory nobody
+    named are refusals naming the file and the defect — never a count quietly taken over the files
+    that happened to load. Only once every case is admitted is anything printed.
+
+    Reading a corpus **writes nothing**: no split is stamped, no file is repaired, no index is
+    touched. A corpus is the evidence a benchmark number is computed over, and a reader that edited
+    its subject would be the one way a corpus stops being that.
+    """
+    settings = load_settings(config_path=config)
+    injected = seams if seams is not None else BenchSeams()
+    root = cases_root(settings.workspace_dir)
+    try:
+        provider = corpus_provider(site_id, cases_root=root, registry=injected.registry)
+        reading = read_corpus(site_id, provider.load(site_id), vocabulary=site_vocabulary(site_id))
+    except _REFUSALS as refusal:
+        _refuse(f"CORPUS: {refusal}")
+    typer.echo(render_corpus_report(reading, source=root / site_id, loader=type(provider).__name__))
 
 
 def report_bench(bench_id: str, *, config: str | None = None) -> None:

@@ -1,0 +1,75 @@
+# Edge — a FIXED oracle whose entry leg is a chop stretch before the trend: the coder cannot read
+# the tape back from its own output, and the brief's scenarios field is the spec's own rendering.
+site_id: coder
+payload:
+  thesis: >-
+    A stop set as a flat percentage is a different bet in a quiet market than in a violent one.
+    Sizing the protective distance off recent true range keeps the risk per trade comparable
+    across regimes, so the same rule survives volatility the fit window never contained — and a
+    breakout out of a compressed range is exactly where that difference decides the trade.
+  entry_exit: >-
+    Enter and hold a full long when the close breaks above the upper band of an ATR envelope
+    around the trend average; hold until the close falls back through the trend average or the
+    bracket fires. Declare the bracket alongside the target with ExitRules whose stop fraction is
+    the current ATR times `atr_mult` expressed as a fraction of price, clamped into the declared
+    range, plus a trailing fraction. Long only.
+  param_space: >-
+    trend average 40-160 bars (default 80), ATR period 10-40 bars (default 20), ATR stop multiple
+    1.5-5.0 (default 3.0) and trailing fraction 0.02-0.12 (default 0.06). Four tuned parameters,
+    with the deepest default kept modest so the fixed tape's setup pad stays inside the ceiling.
+  scenarios: >-
+    expansion_long: chop(60) then trend(90) — enter long during leg 1; exit_on_reversal: trend(80)
+    then selloff(70) then flat(30) — be flat by the end of leg 1; quiet_grind_down_never_longs:
+    selloff(100) then chop(40) — stay flat throughout (never trade)
+  scenario_spec:
+    scenarios:
+      - name: expansion_long
+        legs:
+          - kind: chop
+            bars: 60
+            amplitude: 0.01
+            period: 10
+          - kind: trend
+            bars: 90
+            pct: 0.12
+        behavior: enter_long_during_leg
+        leg: 1
+      - name: exit_on_reversal
+        legs:
+          - kind: trend
+            bars: 80
+            pct: 0.10
+          - kind: selloff
+            bars: 70
+            pct: 0.12
+          - kind: flat
+            bars: 30
+        behavior: flat_by_end_of_leg
+        leg: 1
+      - name: quiet_grind_down_never_longs
+        legs:
+          - kind: selloff
+            bars: 100
+            pct: 0.18
+          - kind: chop
+            bars: 40
+            amplitude: 0.005
+            period: 8
+        behavior: never_trade
+  style: vol-regime
+  symbols:
+    - QQQ
+    - NVDA
+    - XOP
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+difficulty:
+  composition_mode: scratch
+  oracle_mode: fixed_spec
+  warmup_arithmetic: composed
+  state_complexity: latched
+  no_trade_tape: falsified
+  param_space_breadth: moderate
+  api_surface: exits
+split: holdout

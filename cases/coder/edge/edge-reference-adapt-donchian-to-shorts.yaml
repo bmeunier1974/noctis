@@ -1,0 +1,46 @@
+# Edge — reference adaptation: the named strategy IS in the committed seed library, so its whole
+# source is folded into the prompt as proven structure to translate — onto the side it was never
+# written for. The no-trade tape has to falsify the level condition, and for a short-only rule that
+# means a monotone RALLY, which is the inverse of the reflex the seed teaches.
+site_id: coder
+payload:
+  thesis: >-
+    The channel breakout that works long works short with the sign reversed and nothing else: a
+    close below everything the market paid in the last N bars is the same evidence of fresh flow,
+    read the other way. Mirroring a file that already survives the gate is cheaper than
+    re-deriving it, and it keeps the no-lookahead channel read intact by construction.
+  entry_exit: >-
+    Adapt the referenced strategy's channel structure to the short side. Enter and hold a full
+    short when the close falls below the lowest low of the prior `channel` bars — the channel
+    excludes the current bar, exactly as the reference reads it — and cover to flat when the
+    close rises back above the highest high of the prior `channel` bars. Short only: the mirror
+    image of the reference, never both sides at once.
+  param_space: >-
+    the single channel lookback 5-60 bars (default 20), exactly as the reference declares it. One
+    tuned parameter, and no second lookback is added.
+  scenarios: >-
+    breakdown_holds_short: a flat pad, a 60-bar decline, then a 60-bar recovery — short inside
+    the decline and flat again by the end of the recovery. steady_rally_never_shorts: a flat pad
+    then a 90-bar rally — never short. Build that no-trade tape by falsifying the level
+    condition, not by hoping quiet chop stays above it: on a monotone rally no close is ever
+    below the prior 20-bar low, so the entry provably cannot fire. Warmup is the channel lookback
+    itself — the extremes return None until the window holds that many bars.
+  reference: donchian_breakout
+  style: breakout
+  symbols:
+    - SPY
+    - QQQ
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - adapts:donchian_breakout
+  - shape:falsified-no-trade
+difficulty:
+  composition_mode: reference
+  oracle_mode: authored
+  warmup_arithmetic: single
+  state_complexity: latched
+  no_trade_tape: falsified
+  param_space_breadth: narrow
+  api_surface: indicators
+split: tuning

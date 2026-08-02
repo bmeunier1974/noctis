@@ -50,6 +50,16 @@ mandate/references/*
 # re-include it below by name, one line per directory — an explicit act, never a default.
 cases/*
 !cases/README.md
+# The coder corpus (#218) is the first reviewed one: its README and its two CURATED buckets
+# ship to every user, while the two HARVESTED buckets stay local — cases/coder/field/ and
+# cases/coder/replay/ carry an operator's own briefs, symbols and run ids, and are covered by
+# the deny-by-default 'cases/coder/*' below rather than named. A loose case beside the buckets
+# is ignored too, so filing one wrongly leaks nothing.
+!cases/coder/
+cases/coder/*
+!cases/coder/README.md
+!cases/coder/edge/
+!cases/coder/canary/
 
 # ── Byte-code & tool caches ──────────────────────────────────────────────────
 __pycache__/

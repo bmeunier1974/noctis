@@ -1,0 +1,57 @@
+# Edge — a stateless rule on raw bars alone: nothing is kept between bars and no indicator helper
+# is wired, so the declared warmup is one number and that number is zero. A file that declares a
+# warmup it does not need fails the warmup-honesty invariant just as loudly as one that under-
+# declares, which is what makes the easy-looking case a real test.
+site_id: coder
+payload:
+  thesis: >-
+    Where a bar closes inside its own high-low range is a one-bar read on who won the session: a
+    close pinned to the high, on a range wide enough to matter, says buyers absorbed everything
+    that was offered. It needs no history at all, so it holds nothing between bars and carries no
+    lookback to warm up.
+  entry_exit: >-
+    Using only the current bar's open, high, low and close — no rolling window, no accumulator,
+    no state carried across bars — go long when the close sits at or above `close_frac` of the
+    way from the bar's low to its high AND the bar's high-low range is at least `min_range_pct`
+    of its open; go flat on every other bar. Long only, and the target is re-decided from scratch
+    on every bar.
+  param_space: >-
+    close fraction 0.5-0.95 (default 0.8) and minimum range 0.002-0.02 of the open (default
+    0.005). Two tuned parameters, and no lookback at all — the warmup this file declares is zero.
+  scenarios: >-
+    strong_closes_go_long: flat(30) then trend(80) — enter long during leg 1;
+    steady_selloff_never_longs: selloff(100) — stay flat throughout (never trade)
+  scenario_spec:
+    scenarios:
+      - name: strong_closes_go_long
+        legs:
+          - kind: flat
+            bars: 30
+          - kind: trend
+            bars: 80
+            pct: 0.06
+        behavior: enter_long_during_leg
+        leg: 1
+      - name: steady_selloff_never_longs
+        legs:
+          - kind: selloff
+            bars: 100
+            pct: 0.20
+        behavior: never_trade
+  style: momentum
+  symbols:
+    - SPY
+    - AAPL
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:falsified-no-trade
+difficulty:
+  composition_mode: scratch
+  oracle_mode: fixed_spec
+  warmup_arithmetic: single
+  state_complexity: stateless
+  no_trade_tape: falsified
+  param_space_breadth: narrow
+  api_surface: bars_only
+split: tuning

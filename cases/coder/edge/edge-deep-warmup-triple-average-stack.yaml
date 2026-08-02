@@ -1,0 +1,42 @@
+# Edge — deep warmup arithmetic: three stacked lookbacks whose deepest default is 250 bars.
+site_id: coder
+payload:
+  thesis: >-
+    A trend worth paying round-trip costs for is visible at three horizons at once: fast demand
+    above the intermediate baseline, and that baseline above the long-run one. The stack is a
+    slow, low-turnover regime read, so the move captured per trade is a whole trend leg rather
+    than a few bars of noise.
+  entry_exit: >-
+    Hold a full long while the fast SMA of closes is strictly above the intermediate SMA and the
+    intermediate SMA is strictly above the slow SMA on the same bar; go flat as soon as either
+    pair inverts. Long only — the claim is trend persistence, not symmetry.
+  param_space: >-
+    fast SMA 5-50 bars (default 20), intermediate SMA 50-150 bars (default 100) and slow SMA
+    150-300 bars (default 250), with fast kept below intermediate and intermediate below slow.
+    Three tuned parameters.
+  scenarios: >-
+    stack_aligns_then_breaks: a long flat pad, a 120-bar rally, then a 90-bar selloff — long
+    inside the rally and flat again by the end of the selloff. steady_decline_never_longs: a
+    flat pad then a 150-bar decline — never long, because a monotone decline cannot lift the
+    fast average above the intermediate one, let alone put the whole stack in order. Derive the
+    warmup from the Params defaults before placing any window: the slow average is None until it
+    has seen 250 closes, so every directional expectation opens strictly after 250 bars and the
+    setup pad has to be sized for the deepest lookback, not the shallowest.
+  style: momentum
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:deep-warmup
+difficulty:
+  composition_mode: scratch
+  oracle_mode: authored
+  warmup_arithmetic: composed
+  state_complexity: rolling
+  no_trade_tape: falsified
+  param_space_breadth: moderate
+  api_surface: indicators
+split: tuning

@@ -18,6 +18,14 @@ payload, looked up by id — so the verb that drives a bench contains no site's 
 site with no entry runs through the same code path on :func:`payload_input`. Adding a site's
 adapter is editing this table, in a reviewable diff.
 
+**The site-corpus lookup, its twin one artifact earlier.** A corpus is *loaded* before it is asked,
+and not every site's cases sit in the same shape: most are a flat directory the generic provider
+reads, while the coder's are partitioned into bucket directories and labelled against a closed set
+of axis levels. :data:`SITE_CORPORA` is the declaration table for that — one row per site whose
+corpus is not the flat default, naming the reader that serves it and the vocabulary an *absence* is
+reported against — so :func:`load_corpus` has no branch on a site id in it and ``bench corpus``
+reports a coder corpus and a mined DECIDE one down one code path.
+
 **The live model call, and what it honestly is today.** A live bench asks the configured model
 through the engine's own provider-neutral seam: :func:`~noctis.research.llm.client_for` builds the
 client, :class:`~noctis.research.episode.EpisodeRunner` makes the forced structured-emit call, and
@@ -47,9 +55,10 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from noctis.eval.case import Case, Split
+from noctis.eval.case import Case, CaseProvider, Split
 from noctis.eval.case_provider import YamlCaseProvider
 from noctis.eval.corpus import Corpus
+from noctis.eval.corpus_report import CorpusVocabulary
 from noctis.eval.harness import HarnessSpec
 from noctis.eval.identity import SiteIdentity
 from noctis.eval.metrics import AttemptOutcome
@@ -74,20 +83,27 @@ __all__ = [
     "CORPUS_DIRNAME",
     "DEFAULT_CONFIG_ID",
     "SITE_ASKS",
+    "SITE_CORPORA",
     "SPLIT_WORDS",
     "BenchSeams",
     "LiveModelUnavailable",
     "SiteAsk",
+    "SiteCorpus",
     "bench_root",
     "build_bench_runner",
     "build_executor",
     "cases_root",
     "configs_for",
+    "corpus_provider",
+    "flat_provider",
     "live_attempt",
+    "load_cases",
     "load_corpus",
     "payload_input",
     "select_split",
     "site_ask",
+    "site_corpus",
+    "site_vocabulary",
 ]
 
 #: The workspace-level corpus root, beside ``bench/`` and the shared lake: cases are run-neutral
@@ -123,19 +139,130 @@ def cases_root(workspace_dir: Path | str) -> Path:
     return Path(workspace_dir) / CORPUS_DIRNAME
 
 
+def flat_provider(
+    cases_root: Path, registry: Mapping[str, AgentSite[Any, Any]] | None
+) -> CaseProvider:
+    """The default reader: one directory per site, one ``*.yaml`` per case, validated file by file.
+
+    A site whose corpus is a flat directory needs nothing else, which is what makes the corpus verbs
+    site-agnostic — the sites whose layout differs declare a reader in :data:`SITE_CORPORA`.
+    """
+    return YamlCaseProvider(cases_root=cases_root, registry=registry)
+
+
+@dataclass(frozen=True)
+class SiteCorpus:
+    """How one site's corpus is read, and what vocabulary its labels are declared against.
+
+    The corpus twin of :class:`SiteAsk`, and a **declaration table** for the same reason: most
+    corpora are a flat directory of YAML files that the generic provider reads, but the coder's is
+    bucket-partitioned (:class:`~noctis.eval.coder_corpus.CoderCaseProvider`) and its axes are a
+    closed vocabulary (:data:`~noctis.eval.coder_case.AXIS_LEVELS`). ``provider`` is a factory over
+    the cases root and the site registry; ``vocabulary`` is a factory (deferred, because the coder
+    row pulls in the author engine) returning what an absence is named against — a site with no row
+    gets the flat reader and no vocabulary at all, and reports over exactly what its cases carry.
+    """
+
+    provider: Callable[[Path, Mapping[str, AgentSite[Any, Any]] | None], CaseProvider] = (
+        flat_provider
+    )
+    vocabulary: Callable[[], CorpusVocabulary] = CorpusVocabulary
+
+
+def _coder_provider(
+    cases_root: Path, registry: Mapping[str, AgentSite[Any, Any]] | None
+) -> CaseProvider:
+    """The coder corpus's own reader: one directory per bucket, validated by the coder schema."""
+    from noctis.eval.coder_corpus import CoderCaseProvider
+
+    return CoderCaseProvider(cases_root=cases_root, registry=registry)
+
+
+def _coder_vocabulary() -> CorpusVocabulary:
+    """What the coder site declares its cases are labelled with: four buckets, seven axes.
+
+    The buckets are ordered what-ships-first (``edge``, ``canary``, then the two an operator mines
+    for themselves), because that is the order a reader of a *committed* corpus wants them in.
+    """
+    from noctis.eval.coder_case import AXIS_LEVELS, Axis
+    from noctis.eval.coder_corpus import COMMITTED_BUCKETS, LOCAL_BUCKETS, bucket_of
+
+    return CorpusVocabulary(
+        bucket_of=lambda case: bucket_of(case).value,
+        buckets=tuple(bucket.value for bucket in (*COMMITTED_BUCKETS, *LOCAL_BUCKETS)),
+        axis_levels={axis.value: AXIS_LEVELS[axis] for axis in Axis},
+    )
+
+
+#: One entry per site whose corpus is not a flat directory of cases labelled with free-form axes.
+#: A site absent from it is read by :class:`~noctis.eval.case_provider.YamlCaseProvider` and
+#: reported over the labels its own cases carry — adding a row is a reviewable diff, like
+#: :data:`SITE_ASKS` beside it.
+SITE_CORPORA: Mapping[str, SiteCorpus] = {
+    "coder": SiteCorpus(provider=_coder_provider, vocabulary=_coder_vocabulary),
+}
+
+
+def site_corpus(site_id: str, corpora: Mapping[str, SiteCorpus] | None = None) -> SiteCorpus:
+    """How ``site_id``'s corpus is read — its declared row, or the generic flat default.
+
+    The table is passed in rather than reached for globally, exactly as :func:`site_ask` takes its
+    own, so a harness can index a scratch set without a global to reset.
+    """
+    table = SITE_CORPORA if corpora is None else corpora
+    return table.get(site_id, SiteCorpus())
+
+
+def site_vocabulary(
+    site_id: str, corpora: Mapping[str, SiteCorpus] | None = None
+) -> CorpusVocabulary:
+    """The buckets and axis levels ``site_id`` declares — empty for a site that declares none."""
+    return site_corpus(site_id, corpora).vocabulary()
+
+
+def corpus_provider(
+    site_id: str,
+    *,
+    cases_root: Path | str,
+    registry: Mapping[str, AgentSite[Any, Any]] | None = None,
+    corpora: Mapping[str, SiteCorpus] | None = None,
+) -> CaseProvider:
+    """The reader that serves one site's corpus — the site's declared loader, or the generic one."""
+    return site_corpus(site_id, corpora).provider(Path(cases_root), registry)
+
+
+def load_cases(
+    site_id: str,
+    *,
+    cases_root: Path | str,
+    registry: Mapping[str, AgentSite[Any, Any]] | None = None,
+    corpora: Mapping[str, SiteCorpus] | None = None,
+) -> tuple[Case, ...]:
+    """Every case a site declares, validated file by file, exactly as its files assign them.
+
+    Undealt on purpose: this is what a reader wanting to know which cases carry their own
+    ``split:`` needs, and :func:`load_corpus` is the one line that turns it into a dealt corpus.
+    """
+    return corpus_provider(site_id, cases_root=cases_root, registry=registry, corpora=corpora).load(
+        site_id
+    )
+
+
 def load_corpus(
     site_id: str,
     *,
     cases_root: Path | str,
     registry: Mapping[str, AgentSite[Any, Any]] | None = None,
+    corpora: Mapping[str, SiteCorpus] | None = None,
 ) -> Corpus:
-    """One site's corpus, loaded through the provider and split once — for *any* site.
+    """One site's corpus, loaded through its provider and split once — for *any* site.
 
-    Deliberately the generic reader rather than a per-site one: mining writes the interchange
-    format, the provider validates it, and :class:`~noctis.eval.corpus.Corpus` deals the split, so
-    a mined DECIDE corpus and a hand-written one are admitted on exactly the same terms.
+    Which provider that is comes from :data:`SITE_CORPORA` rather than from a branch here, so a
+    mined DECIDE corpus, a hand-written flat one and the coder's bucket-partitioned one are all
+    admitted on the same terms: the site's own validation, then
+    :class:`~noctis.eval.corpus.Corpus` deals the split.
     """
-    cases = YamlCaseProvider(cases_root=Path(cases_root), registry=registry).load(site_id)
+    cases = load_cases(site_id, cases_root=cases_root, registry=registry, corpora=corpora)
     return Corpus(site_id=site_id, cases=cases)
 
 
