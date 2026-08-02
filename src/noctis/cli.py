@@ -5,7 +5,7 @@ legacy-layout move), ``run``, ``runs``/``run-record`` (the run board and one run
 ``status``, ``mandate`` (the steering preflight), ``engine`` (the
 engine's identity and comparability key), ``report``, ``backtest``, ``champions``, ``account``
 (the continuous paper account), ``research`` (one observable agent research session),
-``strategies`` (the authored library index), and the ``data`` sub-app.
+``strategies`` (the authored library index), and the ``data`` and ``bench`` sub-apps.
 """
 
 from __future__ import annotations
@@ -2087,6 +2087,47 @@ def data_ingest(
         cost = f"${res.padded_cost:.4f}" if res.padded_cost else "$0"
         line = f"{symbol}: {res.status} ({res.fetch_calls} fetches, {cost}) {res.detail}"
         typer.echo(line.rstrip())
+
+
+# --- bench sub-app (the eval layer's operator verbs) -------------------------------------
+#
+# The one place the engine's CLI names the eval layer, and it names it **lazily**. Each body below
+# is an argument list plus a single deferred import of ``noctis.eval.cli``, which does the work:
+# `noctis bench --help` therefore loads no benchmark code at all, and no production path — `run`,
+# `research`, `report` — can reach the eval layer even by accident, because nothing is imported
+# until an operator types `bench`. That shape is not a convention: ``noctis.eval.guard`` permits
+# exactly this one reach, only from this module, and only from inside a function body, and fails
+# the suite for anything wider (see its docstring for why a verb group earns the exemption when a
+# production module never could).
+
+bench_app = typer.Typer(
+    help="Benchmark the engine's LLM judgment sites (the eval layer). Never touches a run.",
+    no_args_is_help=True,
+)
+app.add_typer(bench_app, name="bench")
+
+
+@bench_app.command("report")
+def bench_report(
+    bench_id: str = typer.Argument(
+        ..., help="Bench id, as the bench area under `<workspace>/bench/` lists it."
+    ),
+    config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
+) -> None:
+    """Print one bench record's reading — the headline figures, then the per-axis breakdown.
+
+    The verb knows nothing about the site that was benched: it renders the reading the record
+    carries. A record whose harness dials publish a co-primary approval pair prints that pair —
+    agreement never without the approval rate it was bought at — and a record from another site
+    with entirely different strata prints those, through the same code path.
+
+    Refusal-first: an unmeasured figure prints ``n/a`` and never ``0``, a record the schema
+    validator has problems with is refused with every problem rather than half-rendered, and an id
+    nothing answers is refused naming the bench root it was looked for in. Reading writes nothing.
+    """
+    from noctis.eval.cli import report_bench  # deferred by contract — see the note above
+
+    report_bench(bench_id, config=config)
 
 
 if __name__ == "__main__":

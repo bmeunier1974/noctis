@@ -756,3 +756,25 @@ python -m noctis data sync                 # tail-only incremental catalog sync
 
 `--dry-run` prices an ingest without spending; every ingest is coverage-diffed and
 budget-gated — see [data.md](data.md).
+
+## Bench
+
+```bash
+python -m noctis bench report <bench-id>   # one bench record's reading, straight to stdout
+```
+
+The bench area is workspace-level (`<workspace>/bench/<bench_id>/bench.json`), run-neutral like the
+data lake, so a bench is addressed by the id it was minted with and never through a run.
+
+`bench report` prints the record's **own** reading: the identity block, the population it measured
+(n, reps per case, and the corpus cases it never scored), whatever the record's `harness.dials`
+publish, and the metrics block every bench record carries. The verb knows nothing about the site
+that was benched — a record whose dials carry a co-primary approval pair prints that pair
+(agreement is never printed without the approval rate it was bought at, and a block carrying one
+without the other is *refused* rather than half-printed), and a record from another site with
+entirely different strata prints those, through the same code path.
+
+Refusal-first, like everything else that publishes a number here: an unmeasured figure prints `n/a`
+and never `0`, a record the schema validator has problems with is refused with **every** problem
+rather than half-rendered, and an id nothing answers is refused naming the bench root it looked in.
+Reading a bench writes nothing at all.
