@@ -41,9 +41,12 @@ the document with :func:`~noctis.eval.record.validate`, and writes ``bench.json`
 it validates clean. An invalid document is refused, not written — the artifacts it was derived from
 stay on disk, because they are what an operator debugs the refusal with.
 
-**Sequential today, behind a seam.** :class:`SequentialExecutor` runs each job in order in this
-process and declares its one worker; the parallel pool is #203's, and it arrives as another
-:class:`JobExecutor` rather than as an edit here.
+**How the jobs are worked is a seam, not a fact about a bench.** :class:`SequentialExecutor` runs
+each job in order in this process and declares its one worker;
+:class:`~noctis.eval.pool.PooledExecutor` works them on a pool of forked workers and survives the
+pool's own failure modes. Both are :class:`JobExecutor`s, so widening a bench to a pool changed
+what is injected here rather than anything this module guarantees — the record a pooled bench
+writes is the record the sequential one writes.
 """
 
 from __future__ import annotations
@@ -290,7 +293,7 @@ _Done = TypeVar("_Done")
 
 
 class JobExecutor(Protocol):
-    """How a bench's jobs are worked through. Sequential today; #203 widens it to a pool.
+    """How a bench's jobs are worked through — one at a time here, or on a pool of workers.
 
     ``workers`` is the seam's own declaration of its width — one for the sequential executor, the
     configured count for the pool — so a record or a log can state how a bench was worked without
@@ -311,8 +314,9 @@ class SequentialExecutor:
 
     A bench's cost is dominated by a network round trip, so parallelism is worth having; it is also
     where a benchmark quietly stops being reproducible (interleaved writes, a shared working
-    directory, an ordering-dependent rate limit). This slice ships the boring one and puts the pool
-    behind the same interface, so #203 changes what is injected rather than what is guaranteed.
+    directory, an ordering-dependent rate limit). This is the executor that cannot get any of that
+    wrong, and it stays the default for exactly that reason: a bench that wants width says so by
+    injecting :class:`~noctis.eval.pool.PooledExecutor`.
     """
 
     workers: int = 1
