@@ -756,3 +756,65 @@ python -m noctis data sync                 # tail-only incremental catalog sync
 
 `--dry-run` prices an ingest without spending; every ingest is coverage-diffed and
 budget-gated — see [data.md](data.md).
+
+## Bench
+
+```bash
+python -m noctis bench run --site decide --dry-run    # preflight only: print the plan, spend nothing
+python -m noctis bench run --site decide [--split tuning|holdout|all] [--reps N] [--workers N] \
+                           [--model <provider/model>] [--label <name>]
+python -m noctis bench report <bench-id>   # one bench record's reading, straight to stdout
+```
+
+The bench area is workspace-level (`<workspace>/bench/<bench_id>/bench.json`), run-neutral like the
+data lake, so a bench is addressed by the id it was minted with and never through a run. Its corpus
+root sits beside it (`<workspace>/cases/<site>/*.yaml`) for the same reason — a corpus is a
+population, not one run's trajectory.
+
+`bench run` **always preflights**. It resolves the site through the registry, loads that site's
+corpus from the cases root, counts the jobs (cases × reps × configurations), prices their ceiling
+under the current pricing table, and prints that plan before anything is asked. A live run then
+hands the very same plan back as the acknowledgement the runner refuses to start without, so a
+spend nobody stated is unreachable through this verb, and `--dry-run` simply stops after the
+printing: no model client is built (no key and no `[llm]` extra are needed), no directory is made,
+nothing is spent. `--workers N` above 1 works the jobs on a pool; the printed `workers:` line states
+the width either way.
+
+The verb names no site. How a case becomes its site's renderer input is a lookup in the eval
+layer's ask table (`src/noctis/eval/bootstrap.py`) — DECIDE's frozen cases are reconstructed into
+the production briefing's own inputs, a site that declares no adapter is asked with the payload its
+cases carry — so every site runs down one code path. A live ask goes through the engine's own LLM
+seam and the site's declared emit contract; a site whose live ask is not declared is **refused**
+rather than asked under an invented system prompt.
+
+Once every job has answered, the run **scores itself through the site's declared scorers** and folds
+what they publish into the record's `harness.dials`. There is no flag: a scorer is part of a site's
+declaration, so a site that declares one publishes its reading and a site that declares none writes
+exactly the record it wrote before. For DECIDE that reading is the same block the retrospective
+miner publishes — the co-primary approval pair, the deferral figures, one row per case and the
+per-axis strata — computed from the verdicts this bench just earned against the labels the promotion
+gates recorded, and marked `answers: fresh` beside the baseline's `answers: recorded`. Three honesty
+rules hold it up: a case is the equal-weight unit, so every rep of one case folds into the single
+outcome it contributes (by strict majority of the verdicts that parsed); a reply the emit contract
+does not admit is a failed attempt and an `unreadable` exclusion, never a row in agreement's
+denominator; and a case whose reps hold no majority is counted `unsettled` rather than given a
+verdict nobody emitted.
+
+Refusals come from the machinery and are rendered as one line: an undeclared `--site` names every
+site that is declared, an absent corpus names the directory it looked in, a `--split` word that
+names no half lists the three it accepts, and a live run with no buildable client names the model
+and why. A finished run prints the bench id, the directory it landed in, and whether it completed —
+address it with `bench report` from there.
+
+`bench report` prints the record's **own** reading: the identity block, the population it measured
+(n, reps per case, and the corpus cases it never scored), whatever the record's `harness.dials`
+publish, and the metrics block every bench record carries. The verb knows nothing about the site
+that was benched — a record whose dials carry a co-primary approval pair prints that pair
+(agreement is never printed without the approval rate it was bought at, and a block carrying one
+without the other is *refused* rather than half-printed), and a record from another site with
+entirely different strata prints those, through the same code path.
+
+Refusal-first, like everything else that publishes a number here: an unmeasured figure prints `n/a`
+and never `0`, a record the schema validator has problems with is refused with **every** problem
+rather than half-rendered, and an id nothing answers is refused naming the bench root it looked in.
+Reading a bench writes nothing at all.
