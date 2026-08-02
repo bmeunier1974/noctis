@@ -21,14 +21,21 @@ runs it against ``src/noctis`` on every CI run and fails hard, naming the offend
 same posture as the engine-fingerprint ratchet and the config overlay's gate-subtree assertion,
 which raise rather than warn because a guard that warns is a guard that gets ignored.
 
-The package is deliberately thin. Beside the boundary and its guard — here from day one, because
-the invariant is cheapest to hold from the first commit — it carries only declarations:
-:mod:`noctis.eval.site` (``AgentSite``, one frozen record per LLM judgment site),
-:mod:`noctis.eval.knobs` (``SiteKnobs``, the typed knob set an override is checked against),
+The package is deliberately thin, and all but one module of it is **pure**. Beside the boundary and
+its guard — here from day one, because the invariant is cheapest to hold from the first commit — it
+carries the declarations: :mod:`noctis.eval.site` (``AgentSite``, one frozen record per LLM judgment
+site), :mod:`noctis.eval.knobs` (``SiteKnobs``, the typed knob set an override is checked against),
 :mod:`noctis.eval.harness` (``HarnessSpec``, the eval-only prompt-composition overlay that
 production config has no word for), :mod:`noctis.eval.registry` (the plain id→site lookup the
 declarations populate as code) and :mod:`noctis.eval.identity` (the one bridge to the engine's
 prompt-asset hashes: a site's declared version paired with the hash of the prompt it is asked
-with, which is what makes two results comparable). The runner that invokes the declarations
-arrives in a later story; nothing here runs anything yet.
+with, which is what makes two results comparable). Then the eval core, still without a directory or
+a clock in it: :mod:`noctis.eval.case` and :mod:`noctis.eval.corpus` (the ask, and the frozen
+tuning/holdout split over a pile of them), :mod:`noctis.eval.metrics`, :mod:`noctis.eval.taxonomy`
+and :mod:`noctis.eval.stats` (the arithmetic), and :mod:`noctis.eval.record` (``bench.json``: a pure
+builder, a pure validator, one comparable key).
+
+:mod:`noctis.eval.runner` is the one impure module — it mints a bench id, owns
+``<workspace>/bench/<bench_id>/`` and writes the record — and even it makes no model call of its
+own: the attempt is an injected callable, so a whole bench runs in the test suite with no network.
 """
