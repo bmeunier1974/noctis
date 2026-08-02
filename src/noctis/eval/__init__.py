@@ -21,7 +21,12 @@ runs it against ``src/noctis`` on every CI run and fails hard, naming the offend
 same posture as the engine-fingerprint ratchet and the config overlay's gate-subtree assertion,
 which raise rather than warn because a guard that warns is a guard that gets ignored.
 
-The package is deliberately thin for now: later stories in the epic add the ``AgentSite``
-declarations and the eval-runner-only ``HarnessSpec``. The one thing that is here from day one is
-the boundary and its guard, because the invariant is cheapest to hold from the first commit.
+The package is deliberately thin. Beside the boundary and its guard — here from day one, because
+the invariant is cheapest to hold from the first commit — it carries only declarations:
+:mod:`noctis.eval.site` (``AgentSite``, one frozen record per LLM judgment site),
+:mod:`noctis.eval.knobs` (``SiteKnobs``, the typed knob set an override is checked against),
+:mod:`noctis.eval.harness` (``HarnessSpec``, the eval-only prompt-composition overlay that
+production config has no word for) and :mod:`noctis.eval.registry` (the plain id→site lookup the
+declarations populate as code). The five site declarations and the runner that invokes them arrive
+in later stories; nothing here runs anything yet.
 """
