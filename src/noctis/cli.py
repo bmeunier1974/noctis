@@ -2113,8 +2113,13 @@ def bench_run(
     split: str = typer.Option(
         "all", "--split", help="Corpus half to measure: tuning, holdout, or all."
     ),
+    tier: str = typer.Option(
+        None, "--tier", help="Declared subset of the corpus to measure (coder: smoke)."
+    ),
     reps: int = typer.Option(1, "--reps", help="How many times each case is asked."),
-    workers: int = typer.Option(1, "--workers", help="Jobs in flight at once (1 = sequential)."),
+    workers: int = typer.Option(
+        None, "--workers", help="Jobs in flight at once (unset: 1, or the tier's own width)."
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Preflight only: print the plan, spend nothing."
     ),
@@ -2135,12 +2140,19 @@ def bench_run(
     generic provider, and how a case becomes that site's renderer input is a lookup in the eval
     layer's ask table, so every site runs down the same path. An undeclared site is refused naming
     the ones that are declared, and an absent corpus naming the directory it looked in.
+
+    `--tier <name>` measures a **declared** subset instead of the whole corpus — the coder's `smoke`
+    tier is twelve cases (every canary plus the six edge cases that complete the axis coverage), and
+    the tiers are data in the eval layer, so an unknown name is refused listing the ones that site
+    declares. A tier and a `--split` both name what to measure, so stating both is refused rather
+    than intersected. A tiered run with no `--workers` opens the pool the tier's size derives.
     """
     from noctis.eval.cli import run_bench  # deferred by contract — see the note above
 
     run_bench(
         site,
         split=split,
+        tier=tier,
         reps=reps,
         workers=workers,
         dry_run=dry_run,

@@ -37,6 +37,7 @@ from typer.testing import CliRunner
 from noctis.cli import app
 from noctis.eval.bootstrap import BenchSeams, cases_root
 from noctis.eval.cli import run_bench
+from noctis.eval.coder_case import Axis
 from noctis.eval.coder_detectors import PARAM_FLOOR_COLLAPSE, SEVERITY
 from noctis.eval.coder_distill_sites import CODER_SITE
 from noctis.eval.coder_scorer import (
@@ -44,7 +45,10 @@ from noctis.eval.coder_scorer import (
     CODER_DIALS_KEY,
     CODER_SCORER,
     FEEDBACK_LABEL,
+    NOT_APPLICABLE,
+    PASS_LABEL_KEY,
     RETRY_INFORMED_BLOCKS,
+    STRATA_KEY,
     PassRates,
     coder_block,
     score_coder_jobs,
@@ -336,6 +340,72 @@ def test_the_taxonomy_shares_are_n_a_rather_than_zero_when_no_internal_attempt_f
     assert all(row["share"] is None for row in block["failures"]["classes"].values())
 
 
+# ── the per-axis breakdown (#227) ─────────────────────────────────────────────────────────
+
+
+def _labelled(record: JobRecord, **axes: str) -> AnsweredCase:
+    """One scripted job as the answered case it came from, labelled on the axes given."""
+    return AnsweredCase(
+        case=_case(record.case_id, difficulty={**_document()["difficulty"], **axes}),
+        config_id="default",
+        rep=1,
+        replies=(json.dumps(record.document(), sort_keys=True),),
+    )
+
+
+def _strata(*answered: AnsweredCase) -> Mapping[str, Any]:
+    """The per-axis breakdown of a reading over cases labelled case by case."""
+    reading = CODER_SCORER.read(tuple(answered))
+    assert reading is not None
+    return reading[CODER_DIALS_KEY][STRATA_KEY]
+
+
+def test_the_reading_stratifies_its_pass_rates_by_every_difficulty_axis_the_site_declares():
+    strata = _strata(_labelled(_job("a", [True])))
+
+    assert set(strata) == {axis.value for axis in Axis}
+
+
+def test_a_stratum_reports_the_pass_pair_of_only_the_jobs_labelled_at_that_level():
+    strata = _strata(
+        _labelled(_job("a", [True]), api_surface="bars_only"),
+        _labelled(_job("b", [False, True]), api_surface="exits"),
+    )
+
+    by_level = strata["api_surface"]
+    assert by_level["bars_only"]["rates"]["first_attempt_pass_rate"] == 1.0
+    assert by_level["exits"]["rates"]["first_attempt_pass_rate"] == 0.0
+    assert by_level["exits"]["rates"]["job_pass_rate"] == 1.0
+
+
+def test_a_stratum_publishes_the_two_rates_together_exactly_as_the_headline_does():
+    """The pairing rule holds at every depth: a level's agreement-free half-truth is still one."""
+    stratum = _strata(_labelled(_job("a", [False, True])))["api_surface"]["indicators"]
+
+    assert set(PassRates.rate_fields()) <= set(stratum["rates"])
+    assert stratum["rates"][PASS_LABEL_KEY] == FEEDBACK_LABEL
+
+
+def test_a_level_no_case_in_the_batch_carries_is_absent_rather_than_a_confident_zero():
+    strata = _strata(_labelled(_job("a", [True]), api_surface="bars_only"))
+
+    assert set(strata["api_surface"]) == {"bars_only"}
+
+
+def test_every_axis_stratifies_the_same_jobs_so_each_axis_totals_the_headline():
+    answered = (
+        _labelled(_job("a", [True]), api_surface="bars_only"),
+        _labelled(_job("b", [False, True]), api_surface="exits"),
+        _labelled(_job("c", [False, False]), api_surface="exits"),
+    )
+    reading = CODER_SCORER.read(answered)
+    assert reading is not None
+
+    block = reading[CODER_DIALS_KEY]
+    for axis, levels in block[STRATA_KEY].items():
+        assert sum(level["jobs"] for level in levels.values()) == block["jobs"], axis
+
+
 # ── the failure taxonomy, with the knob each share points at ──────────────────────────────
 
 
@@ -485,6 +555,12 @@ def test_a_fresh_answer_is_spelled_the_same_word_the_decide_reading_spells_it():
     from noctis.eval.decide_site import ANSWERS_FRESH as DECIDE_FRESH
 
     assert ANSWERS_FRESH == DECIDE_FRESH
+
+
+def test_an_unlabelled_stratum_is_spelled_the_same_word_the_decide_reading_spells_it():
+    from noctis.eval.decide_case import NOT_APPLICABLE as DECIDE_NOT_APPLICABLE
+
+    assert NOT_APPLICABLE == DECIDE_NOT_APPLICABLE
 
 
 def test_the_block_builder_and_the_scoring_pass_publish_the_same_shape():

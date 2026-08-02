@@ -26,6 +26,17 @@ corpus is not the flat default, naming the reader that serves it and the vocabul
 reported against — so :func:`load_corpus` has no branch on a site id in it and ``bench corpus``
 reports a coder corpus and a mined DECIDE one down one code path.
 
+**The site-tier lookup, its third sibling: a named population, declared as data.** A whole corpus is
+the measurement; a **tier** is the faster question asked before spending on one. :data:`SITE_TIERS`
+is one row per site per named tier, and a tier *is* its case ids — a reviewable list rather than a
+predicate — so what ``--tier smoke`` selects can be read off the table without running anything and
+a tier that has quietly stopped being twelve cases fails a test rather than publishing its name over
+a different population. Two rules keep it honest: a tier is applied to an **already-dealt** corpus,
+so no case's tuning/holdout half moves by being asked about in a smaller group
+(:meth:`CaseTier.select`); and a tier and a ``--split`` are two ways of naming a population, so
+stating both is **refused** rather than intersected (:func:`select_population`) — filtering a
+declared twelve down to its holdout would publish the word ``smoke`` over something else entirely.
+
 **The live model call, and what it honestly is today.** A live bench asks the configured model
 through the engine's own provider-neutral seam: :func:`~noctis.research.llm.client_for` builds the
 client, :class:`~noctis.research.episode.EpisodeRunner` makes the forced structured-emit call, and
@@ -80,17 +91,25 @@ from noctis.research.pricing import USAGE_FIELDS
 
 __all__ = [
     "ALL_SPLITS",
+    "CODER_SMOKE_CASES",
     "CORPUS_DIRNAME",
     "DEFAULT_CONFIG_ID",
+    "SEQUENTIAL_WORKERS",
     "SITE_ASKS",
     "SITE_CORPORA",
+    "SITE_TIERS",
+    "SMOKE_TIER",
     "SPLIT_WORDS",
+    "TIER_WORKER_CAP",
     "BenchSeams",
+    "CaseTier",
     "LiveAsk",
     "LiveModelUnavailable",
+    "Population",
     "SiteAsk",
     "SiteCorpus",
     "bench_root",
+    "bench_width",
     "build_bench_runner",
     "build_executor",
     "cases_root",
@@ -101,9 +120,12 @@ __all__ = [
     "load_cases",
     "load_corpus",
     "payload_input",
+    "select_population",
     "select_split",
+    "select_tier",
     "site_ask",
     "site_corpus",
+    "site_tiers",
     "site_vocabulary",
 ]
 
@@ -282,6 +304,180 @@ def select_split(word: str | None) -> Split | None:
     raise ValueError(
         f"--split {word!r} names no half of a corpus — it takes {', '.join(SPLIT_WORDS)}"
     )
+
+
+# ── the declared tiers ────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CaseTier:
+    """A named subset of one site's corpus, declared by case id — a population, spelled out.
+
+    A tier is **data**: the ids are the selection rule, so what ``--tier smoke`` measures is read
+    off :data:`SITE_TIERS` rather than inferred from a predicate nobody can evaluate by eye, and
+    ``rationale`` says in prose why *these* cases (the table is the review). Two consequences are
+    deliberate:
+
+    * **the size is a promise.** A tier that names a case the corpus no longer holds is refused
+      naming it, because publishing a tier's name over eleven of its twelve cases would report one
+      population under another's label;
+    * **the split is not re-decided.** :meth:`select` takes cases out of an *already-dealt* corpus,
+      every one of which carries its frozen half, so the corpus it returns re-deals nothing (see
+      :mod:`noctis.eval.corpus` — a frozen case passes through the deal untouched). A tuning case
+      cannot become a holdout one by being asked about in a smaller group.
+    """
+
+    name: str
+    case_ids: tuple[str, ...]
+    rationale: str
+
+    def __len__(self) -> int:
+        """How many cases this tier declares."""
+        return len(self.case_ids)
+
+    def select(self, corpus: Corpus) -> Corpus:
+        """This tier's cases, out of a dealt corpus — or a refusal naming the ones that are gone."""
+        held = {case.case_id: case for case in corpus.cases}
+        missing = [case_id for case_id in self.case_ids if case_id not in held]
+        if missing:
+            raise ValueError(
+                f"--tier {self.name!r} declares {len(self)} case(s), and this corpus holds none "
+                f"named {', '.join(repr(case_id) for case_id in missing)} — a tier is a declared "
+                "population, so a partial one would publish its name over another measurement"
+            )
+        return Corpus(
+            site_id=corpus.site_id, cases=tuple(held[case_id] for case_id in self.case_ids)
+        )
+
+
+#: The coder smoke tier's twelve cases, and the rule that chose them: **every canary the corpus
+#: ships** (six briefs so plain that a red one indicts the harness rather than the model) **plus the
+#: smallest set of edge cases that, together with those canaries, exercises every level of all seven
+#: difficulty axes**. The canaries alone reach only the easy end (``scratch``/``authored``/
+#: ``rolling``/``trivial``/``narrow``/``indicators``), so each edge case below is here for the
+#: levels it is the cheapest cover for:
+#:
+#: * ``edge-reference-adapt-donchian-to-shorts`` — ``composition_mode: reference``, ``latched``;
+#: * ``edge-revision-shrink-warmup-for-fixed-oracle`` — ``composition_mode: revision``,
+#:   ``oracle_mode: fixed_spec``;
+#: * ``edge-higher-timeframe-daily-regime-filter`` — ``warmup_arithmetic: higher_timeframe``;
+#: * ``edge-stateless-bar-shape-close-strength`` — ``state_complexity: stateless``,
+#:   ``api_surface: bars_only``;
+#: * ``edge-scale-free-percentile-return-rank`` — ``no_trade_tape: scale_free`` (the feasibility
+#:   rules' hardest case), ``param_space_breadth: moderate``;
+#: * ``edge-broad-param-space-multi-filter-breakout`` — ``param_space_breadth: broad``,
+#:   ``api_surface: exits``.
+#:
+#: Twelve exactly, and the coverage claim is asserted over the committed corpus by enumeration
+#: (``tests/test_eval_bench_tier.py``), so a case whose labels move breaks the build rather than
+#: quietly thinning the tier.
+CODER_SMOKE_CASES: tuple[str, ...] = (
+    "canary-close-above-single-average",
+    "canary-ema-crossover",
+    "canary-high-price-crossover",
+    "canary-inverted-crossover",
+    "canary-long-short-crossover",
+    "canary-slower-slow-average",
+    "edge-broad-param-space-multi-filter-breakout",
+    "edge-higher-timeframe-daily-regime-filter",
+    "edge-reference-adapt-donchian-to-shorts",
+    "edge-revision-shrink-warmup-for-fixed-oracle",
+    "edge-scale-free-percentile-return-rank",
+    "edge-stateless-bar-shape-close-strength",
+)
+
+#: The coder's fast tier, as an operator names it on the command line.
+SMOKE_TIER = CaseTier(
+    name="smoke",
+    case_ids=CODER_SMOKE_CASES,
+    rationale=(
+        "every canary plus the six edge cases that complete the axis coverage — twelve jobs, the "
+        "smallest population that still touches every level of all seven difficulty axes"
+    ),
+)
+
+#: One row per site that declares tiers, keyed by the word ``--tier`` takes. A site absent from it
+#: has no tiers at all and says so rather than accepting a name it cannot honour.
+SITE_TIERS: Mapping[str, Mapping[str, CaseTier]] = {"coder": {SMOKE_TIER.name: SMOKE_TIER}}
+
+
+def site_tiers(
+    site_id: str, tiers: Mapping[str, Mapping[str, CaseTier]] | None = None
+) -> Mapping[str, CaseTier]:
+    """Every tier ``site_id`` declares — empty for a site that declares none."""
+    table = SITE_TIERS if tiers is None else tiers
+    return table.get(site_id, {})
+
+
+def select_tier(
+    site_id: str, name: str | None, tiers: Mapping[str, Mapping[str, CaseTier]] | None = None
+) -> CaseTier | None:
+    """The tier a word names for one site — ``None`` for no tier, a refusal for anything else.
+
+    The refusal names the tiers that site declares (or says it declares none), because "unknown
+    tier" is only useful beside the list an operator could have typed instead.
+    """
+    if name is None:
+        return None
+    declared = site_tiers(site_id, tiers)
+    if name in declared:
+        return declared[name]
+    if not declared:
+        raise ValueError(
+            f"--tier {name!r}: site {site_id!r} declares no tiers — drop --tier to measure its "
+            "whole corpus"
+        )
+    raise ValueError(
+        f"--tier {name!r} names no tier of site {site_id!r} — it declares "
+        f"{', '.join(sorted(declared))}"
+    )
+
+
+@dataclass(frozen=True)
+class Population:
+    """What one bench measures: a half of a corpus, or a declared tier of it — never both.
+
+    Both fields empty is the whole corpus, which is what a bench measured before tiers existed.
+    """
+
+    split: Split | None = None
+    tier: CaseTier | None = None
+
+    def of(self, corpus: Corpus) -> Corpus:
+        """The corpus this bench runs over — the tier's cases, or the loaded corpus unchanged.
+
+        The ``--split`` half is *not* applied here: the runner takes it as its own argument, so a
+        record still states which half it measured rather than inferring it from a case count.
+        """
+        return corpus if self.tier is None else self.tier.select(corpus)
+
+
+def select_population(
+    site_id: str,
+    *,
+    split: str | None,
+    tier: str | None,
+    tiers: Mapping[str, Mapping[str, CaseTier]] | None = None,
+) -> Population:
+    """Resolve the two flags that name a population into one value, refusing every ambiguity.
+
+    A ``--split`` word names a *half* of a corpus and a ``--tier`` names a *declared subset* of it:
+    two answers to one question, so stating both is refused naming both flags rather than silently
+    intersected. Intersecting them is the tempting move and the dishonest one — a twelve-case tier
+    filtered to its holdout is a handful of cases wearing the word ``smoke``, and the number that
+    came out would be compared against a tier nobody ran. The whole-corpus word
+    (:data:`ALL_SPLITS`, and the absence a bare invocation leaves) filters nothing, so it composes
+    with a tier freely.
+    """
+    named = select_tier(site_id, tier, tiers)
+    selected = select_split(split)
+    if named is not None and selected is not None:
+        raise ValueError(
+            f"--tier {named.name!r} and --split {selected.value!r} both name what to measure — "
+            f"a tier is a declared population of {len(named)} case(s), and filtering it to one "
+            "half would publish the tier's name over a different measurement. State one of them."
+        )
+    return Population(split=selected, tier=named)
 
 
 # ── how each site is asked ────────────────────────────────────────────────────────────────
@@ -580,6 +776,37 @@ def build_executor(workers: int) -> JobExecutor:
     return SequentialExecutor() if workers == 1 else PooledExecutor(workers=workers)
 
 
+#: What an untiered bench does when nobody states a width: one job at a time. A bench spends real
+#: money against somebody's rate limit, so widening it stays an explicit act.
+SEQUENTIAL_WORKERS = 1
+
+#: How wide a **tiered** run opens the pool when nobody states a width — the derivation, stated so
+#: it can be argued with rather than tuned. A tier exists to answer a question in minutes: the coder
+#: smoke tier is twelve independent jobs (one case, one rep, one configuration each), and a job is a
+#: provider round trip plus a fresh-subprocess write gate, so the wall clock is
+#: ``ceil(jobs / width) × slowest job``. At six, twelve jobs are **two waves** — a five-minute
+#: target therefore asks that one authoring job finish inside about two and a half minutes, which
+#: is the budget a job already has (per-attempt timeout × retry budget). The cap is not
+#: the job count on purpose: twelve concurrent completions is a rate-limit decision an operator
+#: should take deliberately with ``--workers``, and this is the width the shipped tier is sized at.
+TIER_WORKER_CAP = 6
+
+
+def bench_width(stated: int | None, population: Population, *, cases: int) -> int:
+    """How wide this bench's jobs are worked: what an operator stated, or what the tier derives.
+
+    A stated ``--workers`` always wins, including on a tiered run — the derivation is a default, not
+    a policy. Untiered and unstated stays :data:`SEQUENTIAL_WORKERS`, which is what a bench did
+    before tiers existed; a tier smaller than :data:`TIER_WORKER_CAP` opens only as many workers as
+    it has cases, because a pool wider than its work is idle processes and one more failure mode.
+    """
+    if stated is not None:
+        return stated
+    if population.tier is None:
+        return SEQUENTIAL_WORKERS
+    return max(SEQUENTIAL_WORKERS, min(cases, TIER_WORKER_CAP))
+
+
 def configs_for(model: str | None) -> tuple[ModelConfig, ...]:
     """The one configuration a single-model bench runs under — see :data:`DEFAULT_CONFIG_ID`."""
     return (ModelConfig(config_id=DEFAULT_CONFIG_ID, requested_model=model),)
@@ -597,6 +824,7 @@ class BenchSeams:
     attempt: AttemptFn | None = None
     registry: Mapping[str, AgentSite[Any, Any]] | None = None
     asks: Mapping[str, SiteAsk] | None = None
+    tiers: Mapping[str, Mapping[str, CaseTier]] | None = None
     identity: SiteIdentity | None = None
 
 

@@ -29,12 +29,19 @@ that cannot honestly supply it — never a fabricated number).**
   episode token sums. Coder-authoring completions run on a *separate* client and are excluded from
   both, so this is apples-to-apples. ``n/a`` when a loop reached zero verdicts (no division).
 
-* **validator first-attempt %** *(a gate-pass rate)* — of the strategies a session tried to author,
-  the fraction that passed the write gate on the first attempt. Episodic-only: the ledger rollup
-  derives ``validation_failures`` (author stages that never reached OPTIMIZE) from ``authored``
-  (stages that did), so the rate is ``authored / (authored + validation_failures)``. The
-  conversation loop writes no ledger and its summary carries no such split, so it is ``n/a`` — the
-  honest move, not an invented number. ``n/a`` too when there were no author attempts at all.
+* **validator job-pass %** *(a gate-pass rate)* — of the authoring **jobs** a session ran, the
+  fraction that ended with a file the write gate accepted. Episodic-only: the ledger rollup derives
+  ``validation_failures`` (author stages that never reached OPTIMIZE) from ``authored`` (stages that
+  did), so the rate is ``authored / (authored + validation_failures)``. It is **job-level, not
+  first-attempt**: the author engine retries privately inside one stage — re-asking the coder with
+  the gate's own rejection in the prompt — so a file that landed on its third try counts here just
+  like one that landed on its first, and nothing in a ledger distinguishes them. That is the same
+  definition the coder benchmark publishes as ``job_pass``
+  (:func:`noctis.eval.metrics.job_pass_rate`, the retry-informed half of that site's co-primary
+  pair), and the two are pinned equal over a shared fixture in ``tests/test_parity.py`` so the
+  layers cannot drift into meaning different things by one name. The conversation loop writes no
+  ledger and its summary carries no such split, so it is ``n/a`` — the honest move, not an invented
+  number. ``n/a`` too when there were no authoring jobs at all.
 
 * **promotion-gate reach %** *(a gate-pass rate)* — the fraction of strategies worked on that
   reached a gated verdict: ``verdicts / candidates``, where ``candidates`` is
@@ -106,7 +113,7 @@ class LoopMetrics:
     verdicts_per_session: float
     tokens_total: int
     tokens_per_verdict: float | None
-    validator_first_attempt_pct: float | None
+    validator_job_pass_pct: float | None
     promotion_gate_reach_pct: float | None
     undecided: int
     prose_stalls: int
@@ -116,7 +123,7 @@ def compute_loop_metrics(loop: str, sessions: Sequence[SessionPair]) -> LoopMetr
     """Aggregate one loop's ``(summary, rollup | None)`` session pairs into a :class:`LoopMetrics`.
 
     Pure and total: an empty session list yields honest zeros with the ratios ``n/a``, and a metric
-    a loop cannot supply (validator% without a ledger, any ratio with a zero denominator) is
+    a loop cannot supply (the validator rate without a ledger, any ratio with a zero denominator) is
     ``None`` — never a divide-by-zero and never an invented number."""
     n = len(sessions)
     summaries = [s for s, _ in sessions]
@@ -127,9 +134,11 @@ def compute_loop_metrics(loop: str, sessions: Sequence[SessionPair]) -> LoopMetr
     candidates = sum(len(s.candidates) for s in summaries)
     undecided = sum(len(s.undecided) for s in summaries)
 
+    # Job-level, not first-attempt: an author stage that reached OPTIMIZE landed a gate-clean file,
+    # however many private validator retries it took inside that one stage.
     authored = sum(int(r.get("authored", 0)) for r in rollups)
     validation_failures = sum(int(r.get("validation_failures", 0)) for r in rollups)
-    author_attempts = authored + validation_failures
+    author_jobs = authored + validation_failures
 
     return LoopMetrics(
         loop=loop,
@@ -138,9 +147,7 @@ def compute_loop_metrics(loop: str, sessions: Sequence[SessionPair]) -> LoopMetr
         verdicts_per_session=verdicts / n if n else 0.0,
         tokens_total=tokens_total,
         tokens_per_verdict=tokens_total / verdicts if verdicts else None,
-        validator_first_attempt_pct=(
-            100.0 * authored / author_attempts if author_attempts else None
-        ),
+        validator_job_pass_pct=100.0 * authored / author_jobs if author_jobs else None,
         promotion_gate_reach_pct=100.0 * verdicts / candidates if candidates else None,
         undecided=undecided,
         prose_stalls=sum(1 for s in summaries if s.stopped_reason == PROSE_STALL),
@@ -276,9 +283,9 @@ def render_comparison(conversation: LoopMetrics, episodic: LoopMetrics) -> str:
         ("Tokens (total)", conversation.tokens_total, episodic.tokens_total),
         ("Tokens / verdict", conversation.tokens_per_verdict, episodic.tokens_per_verdict),
         (
-            "Validator 1st-attempt %",
-            conversation.validator_first_attempt_pct,
-            episodic.validator_first_attempt_pct,
+            "Validator job-pass %",
+            conversation.validator_job_pass_pct,
+            episodic.validator_job_pass_pct,
         ),
         (
             "Promotion-gate reach %",

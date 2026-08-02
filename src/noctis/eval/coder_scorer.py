@@ -47,6 +47,15 @@ fit:
   :func:`~noctis.eval.failed_attempts.breakdown_of_errors` — the same counting a run's failure
   census uses, so a bench and a folder never disagree about the same errors.
 
+**The pair again, per difficulty axis.** The axes a coder case is labelled on exist to be split by:
+a job pass rate that is one thing on ``bars_only`` briefs and another on ``exits`` ones is two
+findings, not one. So the reading carries a :data:`STRATA_KEY` block — axis → level → the same
+co-primary pair over just those jobs, computed by the same arithmetic as the whole batch
+(:func:`strata_block`), exactly as :func:`noctis.eval.decide_site.strata_block` stratifies DECIDE's.
+A stratum publishes the **pass breakdown** and not a second copy of the spend and taxonomy blocks:
+those repeated across twenty levels are a wall nobody reads, while the pair is what an axis was
+invented to split. A level no case in the batch carries is absent rather than present at zero.
+
 **Detector warnings ride beside the scores and provably never inside them.** The degenerate-pass
 detectors (:mod:`noctis.eval.coder_detectors`) run at the end of a passing job and are stamped into
 its record; this module copies them into warning rows and reads them nowhere else. Every figure
@@ -71,6 +80,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
 
+from noctis.eval.case import Case
 from noctis.eval.metrics import (
     AttemptDistribution,
     AttemptOutcome,
@@ -97,8 +107,10 @@ __all__ = [
     "CODER_DIALS_KEY",
     "CODER_SCORER",
     "FEEDBACK_LABEL",
+    "NOT_APPLICABLE",
     "PASS_LABEL_KEY",
     "RETRY_INFORMED_BLOCKS",
+    "STRATA_KEY",
     "UNATTEMPTED_KEY",
     "UNREADABLE_KEY",
     "CoderMetrics",
@@ -108,6 +120,7 @@ __all__ = [
     "coder_block",
     "job_records",
     "score_coder_jobs",
+    "strata_block",
 ]
 
 #: The key the whole coder reading rides under, inside the dials subtree a record quotes verbatim.
@@ -132,6 +145,16 @@ RETRY_INFORMED_BLOCKS: tuple[str, ...] = ("rates", "effort", "escalation", "cost
 #: The two exclusion counts the reading carries beside the pair — the n/a side, named.
 UNREADABLE_KEY = "unreadable"
 UNATTEMPTED_KEY = "unattempted_jobs"
+
+#: The key the per-axis breakdown rides under. The word is DECIDE's (its reading publishes
+#: ``strata`` in the same place), so one generic reader renders both sites' breakdowns.
+STRATA_KEY = "strata"
+
+#: What a stratum is keyed by when a job's case carries no level on an axis. Every validated coder
+#: case is labelled on all seven, so this is a defensive spelling rather than an expected row; the
+#: word is DECIDE's (:data:`noctis.eval.decide_case.NOT_APPLICABLE`), spelled here rather than
+#: imported so this module stays free of another site's vocabulary; the suite pins the two equal.
+NOT_APPLICABLE = "n/a"
 
 
 # ── the co-primary pair ───────────────────────────────────────────────────────────────────
@@ -388,11 +411,14 @@ def coder_block(
     *,
     warnings: Sequence[Mapping[str, Any]] = (),
     unreadable: int = 0,
+    strata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One scored batch as record data — the pair whole, the cost beside it, no blended figure.
 
     ``warnings`` are the detector rows, carried verbatim and read by nothing above them;
-    ``unreadable`` counts the jobs whose retained output was not a job record at all.
+    ``unreadable`` counts the jobs whose retained output was not a job record at all; ``strata`` is
+    the per-axis breakdown of the pair (:func:`strata_block`), empty for a caller that computed
+    none — a batch nobody labelled has no axes, which is an absence and not a zero.
     """
     return {
         PASS_LABEL_KEY: FEEDBACK_LABEL,
@@ -405,8 +431,54 @@ def coder_block(
         "escalation": _escalation_block(metrics.escalation),
         "cost": _cost_block(metrics),
         "failures": _failures_block(metrics.failures),
+        STRATA_KEY: dict(strata or {}),
         "warnings": [dict(row) for row in warnings],
         "warned_jobs": len({(row["case_id"], row["rep"]) for row in warnings}),
+    }
+
+
+def strata_block(cases: Sequence[Case], records: Sequence[JobRecord]) -> dict[str, Any]:
+    """Each difficulty axis's levels, each carrying the co-primary pair over just those jobs.
+
+    Stratified pass rates are the reason the axes exist: a job pass rate that is one thing on
+    ``bars_only`` briefs and another on ``exits`` ones is two findings, not one. The arithmetic is
+    the whole batch's own (:func:`_pass_rates` over the same internal attempts), so a level's pair
+    and the headline pair can never be computed two different ways — DECIDE's
+    :func:`~noctis.eval.decide_site.strata_block` is stratified the same way for the same reason.
+
+    What a stratum publishes is deliberately the **pass breakdown** and not a second copy of the
+    whole reading: the spend, effort and taxonomy blocks repeated across twenty levels would be a
+    wall of numbers nobody reads, while the pair is exactly what an axis was invented to split. Both
+    halves ride together (:func:`_rates_block`), so the pairing rule holds at every depth.
+
+    A level no case in the batch carries is absent rather than present at zero — nothing was
+    measured there, and an empty row would read as a measurement.
+    """
+    # Deferred: the axis vocabulary pulls the author engine in for one enum, and every other caller
+    # of this module needs neither.
+    from noctis.eval.coder_case import Axis
+
+    levels = {case.case_id: dict(case.difficulty) for case in cases}
+    stratified: dict[str, Any] = {}
+    for axis in Axis:
+        grouped: dict[str, list[JobRecord]] = {}
+        for record in records:
+            level = levels.get(record.case_id, {}).get(axis.value, NOT_APPLICABLE)
+            grouped.setdefault(level, []).append(record)
+        stratified[axis.value] = {
+            level: _stratum_block(grouped[level]) for level in sorted(grouped)
+        }
+    return stratified
+
+
+def _stratum_block(records: Sequence[JobRecord]) -> dict[str, Any]:
+    """One level's jobs, as the pass breakdown the reading lists under its axis."""
+    rates = _pass_rates(records, _internal_results(records))
+    return {
+        "cases": rates.cases,
+        "jobs": rates.jobs,
+        UNATTEMPTED_KEY: rates.unattempted_jobs,
+        "rates": _rates_block(rates),
     }
 
 
@@ -564,13 +636,15 @@ class CoderReadingScorer:
         if not answered:
             return None
         read = job_records(answered)
+        records = [record for record, _ in read]
         return {
             "answers": ANSWERS_FRESH,
             "attempt_calls": sum(len(one.replies) for one in answered),
             CODER_DIALS_KEY: coder_block(
-                score_coder_jobs([record for record, _ in read]),
+                score_coder_jobs(records),
                 warnings=_warning_rows(read),
                 unreadable=len(answered) - len(read),
+                strata=strata_block([one.case for one in answered], records),
             ),
         }
 

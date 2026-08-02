@@ -763,6 +763,7 @@ budget-gated — see [data.md](data.md).
 python -m noctis bench run --site decide --dry-run    # preflight only: print the plan, spend nothing
 python -m noctis bench run --site decide [--split tuning|holdout|all] [--reps N] [--workers N] \
                            [--model <provider/model>] [--label <name>]
+python -m noctis bench run --site coder --tier smoke  # the declared 12-case tier, six at a time
 python -m noctis bench report <bench-id>   # one bench record's reading, straight to stdout
 python -m noctis bench corpus --site coder # validate one site's corpus; print its stats and balance
 ```
@@ -780,6 +781,31 @@ spend nobody stated is unreachable through this verb, and `--dry-run` simply sto
 printing: no model client is built (no key and no `[llm]` extra are needed), no directory is made,
 nothing is spent. `--workers N` above 1 works the jobs on a pool; the printed `workers:` line states
 the width either way.
+
+`--tier <name>` measures a **declared subset** of the corpus instead of all of it. A tier is data,
+not logic: `src/noctis/eval/bootstrap.py`'s `SITE_TIERS` names the cases by id, so what a tier
+selects is read off the table and reviewed in a diff. The coder ships one — `smoke`, **twelve
+cases**: every canary the corpus holds (briefs so plain that a red one indicts the harness) plus the
+six edge cases that complete the coverage, so the twelve together touch every level of all seven
+difficulty axes. An unknown name is refused listing the tiers that site declares; a site with no
+tiers says so rather than accepting a word it cannot honour; and a tier that names a case the corpus
+no longer holds is refused naming it, because a partial tier would publish its name over another
+population.
+
+**A tier and a `--split` both name what to measure, so stating both is refused** rather than
+intersected: filtering a declared twelve-case tier down to its holdout is a handful of cases wearing
+the word `smoke`, and the number would then be compared against a tier nobody ran. The whole-corpus
+word (`--split all`, and the absence a bare invocation leaves) filters nothing, so it composes with a
+tier freely. Selection happens *after* the corpus is dealt, so every case keeps the tuning/holdout
+half the whole corpus gave it — a tier never re-deals a split.
+
+**A tiered run sizes its own pool.** With no `--workers`, an untiered run stays sequential (what a
+bench has always done — widening it spends against somebody's rate limit and stays an explicit act),
+while a tiered one opens `min(cases, 6)` workers: the smoke tier's twelve independent jobs are two
+waves of six, so a five-minute smoke target asks that one authoring job finish in about two and a
+half minutes — the budget a job already has from its per-attempt timeout and retry budget. The cap is
+not the job count on purpose: twelve concurrent completions is a rate-limit decision an operator
+takes deliberately, and a stated `--workers` always wins.
 
 The verb names no site. How a case becomes its site's renderer input is a lookup in the eval
 layer's ask table (`src/noctis/eval/bootstrap.py`) — DECIDE's frozen cases are reconstructed into
@@ -814,6 +840,15 @@ outcome it contributes (by strict majority of the verdicts that parsed); a reply
 does not admit is a failed attempt and an `unreadable` exclusion, never a row in agreement's
 denominator; and a case whose reps hold no majority is counted `unsettled` rather than given a
 verdict nobody emitted.
+
+For the coder that reading is the **co-primary pass pair** — the first-attempt rate and the job-level
+one, published together or not at all, the job rate always under the words *pass@k with feedback*
+because its retries saw the gate's rejection — with the effort, escalation and spend that explain the
+gap between them, a **failure-taxonomy table** naming every declared class with the knob its share
+points at (a class stays on the screen at zero, because a class that stopped happening and one that
+stopped matching look identical the moment a row disappears), and the same pair broken down **per
+difficulty axis**, level by level, since a job pass rate that is one thing on `bars_only` briefs and
+another on `exits` ones is two findings rather than one.
 
 Refusals come from the machinery and are rendered as one line: an undeclared `--site` names every
 site that is declared, an absent corpus names the directory it looked in, a `--split` word that
