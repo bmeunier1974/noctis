@@ -1,28 +1,28 @@
 <div align="center">
 
-<img src="docs/assets/noctis.jpg" alt="Noctis — Research. Test. Reject. Repeat." width="800">
+<img src="docs/assets/hero.jpg" alt="Noctis: many faint candidate strategy paths fan out across a night sky and converge into a single bright equity curve climbing toward dawn — autonomous, paper-only trading research" width="800">
 
 <!-- Live workflow/coverage badges 404 on a private repo (GitHub's image proxy fetches anonymously).
-     At public release, restore the live CI badge and swap the static coverage badge for codecov:
-     [![CI](https://github.com/bmeunier1974/agent-trader/actions/workflows/ci.yml/badge.svg)](https://github.com/bmeunier1974/agent-trader/actions/workflows/ci.yml)
+     At public release, restore the live CI badge from
+     https://github.com/bmeunier1974/agent-trader/actions/workflows/ci.yml/badge.svg
+     and swap the static coverage badge for codecov.
      The static coverage number is real: `pytest --cov=noctis` → 93% (2026-07-15); re-measure before bumping. -->
 [![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white)](https://github.com/bmeunier1974/agent-trader/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/coverage-93%25-brightgreen)](docs/development.md)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230?logo=ruff)](https://docs.astral.sh/ruff/)
-[![Typed: mypy](https://img.shields.io/badge/types-mypy-2A6DB2)](https://mypy-lang.org/)
-[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
-[![Trading: paper only](https://img.shields.io/badge/trading-paper--only-orange)](docs/safety.md)
+
+[Quick start](#getting-started) • [How it works](#how-it-works) • [Documentation](#documentation) • [Safety model](docs/safety.md)
 
 </div>
 
-**Noctis** is an autonomous, **paper-only trading research system**. While the market is
-closed it designs and evaluates new trading strategies using an LLM, walk-forward
-validation, and out-of-sample testing. While the market is open it deploys only the
-strategies that survived, into a continuous paper account that builds a genuine forward
-performance record. At the close it publishes a report, updates its memory, and returns
-to research — looping day after day.
+# Noctis — autonomous, paper-only trading research
+
+Noctis is an autonomous, paper-only trading research system. While the market is closed it
+designs and evaluates new trading strategies using an LLM, walk-forward validation, and
+out-of-sample testing. While the market is open it deploys only the strategies that survived,
+into a continuous paper account that builds a genuine forward performance record. At the close
+it publishes a report, updates its memory, and returns to research — looping day after day.
 
 > [!WARNING]
 > **Paper-only by design.** Noctis cannot submit live orders unless two independent
@@ -31,14 +31,14 @@ to research — looping day after day.
 
 ## Why it's different
 
-- **The agent does real research.** It authors reviewable Python strategy files and must
-  earn every verdict through journaled experiments — discipline is enforced by structural
-  gates, not prompts.
-- **Out-of-sample on two axes.** A candidate must survive a temporal holdout *and* a
-  symbol holdout it never trained on before it can be promoted.
-- **A genuine forward track record.** Champions trade only bars no tuning ever saw, in
-  one continuous paper account that carries equity and positions across sessions.
-- **Provider-neutral seam, free where it can be.** The whole session — ideation, tool
+- **Real research, not prompting.** The agent authors reviewable Python strategy files and
+  earns every verdict through journaled experiments. Structural gates enforce that discipline,
+  not prompts.
+- **Out-of-sample on two axes.** A candidate must survive a temporal holdout *and* a symbol
+  holdout it never trained on before it can be promoted.
+- **A genuine forward track record.** Champions trade only bars no tuning ever saw, in one
+  continuous paper account that carries equity and positions across sessions.
+- **Provider-neutral, and free where it can be.** The whole session — ideation, tool
   orchestration and strategy authoring — runs on any hosted or local LLM, and a local backend
   is $0/token. Small models work because the episodic driver keeps every step inside a short
   context window. No model configured? A classic optimizer loop runs instead.
@@ -48,13 +48,12 @@ to research — looping day after day.
 You need three things:
 
 1. **Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).**
-2. **A [DataBento](https://databento.com) API key** — funds the research data lake; the
+2. **A [DataBento](https://databento.com) API key.** It funds the research data lake, and the
    free signup credit more than covers the default backfill.
-3. **A model for the research agent** — and it can be free: the optional local
+3. **A model for the research agent.** It can be free: the optional local
    [noctis-ollama](https://github.com/bmeunier1974/noctis-ollama) backend runs the whole
    session, strategy authoring included, at $0/token and needs no key. A hosted OpenAI or
-   Anthropic key works just as well if you'd rather not run your own. Model setup is a
-   paragraph below.
+   Anthropic key works just as well if you'd rather not run your own.
 
 ```bash
 uv sync --all-extras                # install everything, reproducible from uv.lock
@@ -62,17 +61,32 @@ uv run python -m noctis setup       # guided setup: keys, LLM wiring + live veri
 uv run python -m noctis run -v      # the day/night loop
 ```
 
-`setup` does the rest interactively: it scaffolds your local config, asks for the DataBento
-key if it's missing, connects the LLM (paste an API key, or it detects a local backend and
-writes the config for you), and proves the model answers with one real call before you
-commit to an overnight run. Re-run it any time — it never overwrites your edits — and
-`noctis setup --check` audits an existing install without changing anything.
+`setup` does the rest interactively. It scaffolds your local config, asks for the DataBento key
+if it's missing, and connects the LLM — paste an API key, or let it detect a local backend and
+write the config for you. It then proves the model answers with one real call, before you commit
+to an overnight run. Re-run it any time; it never overwrites your edits. To audit an existing
+install without changing anything, run `noctis setup --check`.
 
-**Model setup.** Local is the cheapest path and needs no key at all — one model runs the
-whole session, authoring included, at $0/token. Small backends are fine: a declared
-`context_window` of at most 32,768 flips research to the **episodic** driver, which works in
-short, structured steps instead of one long transcript, so a 14B model on a homelab box keeps
-up. `noctis setup` detects a running local server and writes this for you:
+Once it's running: `noctis status` (mode, market state, champions), `noctis runs` (the run
+board), `noctis run-record latest` (one run's whole record), `noctis report latest`
+(close-of-day report), `noctis research -v` (watch one research session live). Every command:
+[docs/cli.md](docs/cli.md)
+
+### Choosing a model
+
+Local is the cheapest path and needs no key at all: one model runs the whole session, authoring
+included, at $0/token. Small backends are fine. A declared `context_window` of at most 32,768
+flips research to the **episodic** driver, which works in short, structured steps instead of one
+long transcript, so a 14B model on a homelab box keeps up.
+
+A hosted model is the other option. Drop the key in `.env` — `OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY`, and the model's `provider/` prefix picks which — or paste it when `setup`
+asks. That one model then runs everything.
+
+<details>
+<summary>The fully local pairing, and splitting off a paid coder</summary>
+
+`noctis setup` detects a running local server and writes this for you:
 
 ```yaml
 # config.yaml — the fully local pairing, no API key
@@ -83,50 +97,50 @@ research:
     context_window: 32768 # the model's num_ctx — trims prompts, and flips loop:auto to episodic
 ```
 
-A hosted model is the other option: drop the key in `.env` (`OPENAI_API_KEY` or
-`ANTHROPIC_API_KEY` — the model's `provider/` prefix picks which), or paste it when `setup`
-asks, and that one model runs everything. You can also split the roles — keep the free local
-driver on the session and hand strategy authoring to a stronger paid **coder**
-(`research.agent.coder_model`; `anthropic/claude-haiku-4-5` and `openai/gpt-5.6-luna` are both
-affordable) — but that buys authoring quality, it is not a requirement. A configured coder
-whose key or `[llm]` extra is missing degrades loudly at startup — the driver writes source
-itself, never a silent mid-session downgrade. The full commented config file:
-[config.example.yaml](config.example.yaml) · every knob explained:
-[docs/configuration.md](docs/configuration.md)
+You can also split the roles: keep the free local driver on the session, and hand strategy
+authoring to a stronger paid **coder** (`research.agent.coder_model`). Both
+`anthropic/claude-haiku-4-5` and `openai/gpt-5.6-luna` are affordable. That buys authoring
+quality, but it is not a requirement. A configured coder whose key or `[llm]` extra is missing
+degrades loudly at startup — the driver writes source itself, never a silent mid-session
+downgrade.
 
-Once it's running: `noctis status` (mode, market state, champions), `noctis runs` (the run
-board), `noctis run-record latest` (one run's whole record), `noctis report latest`
-(close-of-day report), `noctis research -v` (watch one research session live). Every command:
-[docs/cli.md](docs/cli.md)
+</details>
+
+The full commented config file: [config.example.yaml](config.example.yaml) · every knob
+explained: [docs/configuration.md](docs/configuration.md)
 
 ## Steering it — the mandate is your input surface
 
-Noctis researches on its own, but **what it hunts for** is yours to set — and it lives in one
-place: the local `mandate/` folder `noctis setup` created (gitignored, so steering the agent
-never shows up as a repo change).
+Noctis researches on its own, but **what it hunts for** is yours to set. It lives in one place:
+the local `mandate/` folder `noctis setup` created. That folder is gitignored, so steering the
+agent never shows up as a repo change.
 
-A mandate is two things in one file. The **prose brief** tells the agent what kind of trader you
+A mandate is two things in one file. The prose brief tells the agent what kind of trader you
 want the system to be: style, risk appetite, horizon, which names to look at. The front-matter
-`config:` block **shapes the run** it steers: which model thinks, what one session may spend,
-which universe it starts from — and the flagship knob, the election metric.
+`config:` block shapes the run it steers — which model thinks, what one session may spend, which
+universe it starts from, and the flagship knob, the election metric.
 
-- **The election metric** (`promotion.metric`) — the risk dial every candidate is scored,
-  ranked, and promoted on: `sharpe` (penalizes all volatility), `sortino` (penalizes only
-  downside), or `total_return` (raw profit). It threads through the whole pipeline, and it is
-  the **one** `promotion.*` knob a mandate may bind — the thresholds beside it are read in its
-  units, so they stay yours. `config.yaml` sets the base every run starts from, which is what
-  an unmandated run — or an `auto` session, whose profile is picked too late to overlay —
-  scores on.
-- **Which mandate governs a run** (`research.mandate` in `config.yaml`) — a shipped profile
-  (`aggressive`, `conservative`, `long-term`, `short-term`, `sector-specialist`), your own brief
-  in `mandate/MANDATE.md` (selector `MANDATE`), `auto` to let the agent pick a personality each
-  session, or `null` for unconstrained research. `--mandate <name>` and `--directive "<text>"`
-  (mutually exclusive) override the selector for one session; on `--resume` they are refused,
-  because a run's steering is frozen at creation.
+- **The election metric** (`promotion.metric`) is the risk dial every candidate is scored,
+  ranked, and promoted on: `sharpe` penalizes all volatility, `sortino` only the downside, and
+  `total_return` is raw profit. It threads through the whole pipeline, and it is the *one*
+  `promotion.*` knob a mandate may bind. The thresholds beside it are read in its units, so they
+  stay yours. `config.yaml` sets the base every run starts from, which is what an unmandated run
+  scores on — as does an `auto` session, whose profile is picked too late to overlay.
+- **Which mandate governs a run** is `research.mandate` in `config.yaml`. Point it at one of:
+
+  - a shipped profile — `aggressive`, `conservative`, `long-term`, `short-term`,
+    `sector-specialist`
+  - your own brief in `mandate/MANDATE.md`, via the selector `MANDATE`
+  - `auto`, to let the agent pick a personality each session
+  - `null`, for unconstrained research
+
+  The flags `--mandate <name>` and `--directive "<text>"` are mutually exclusive, and override
+  the selector for one session. On `--resume` both are refused, because a run's steering is
+  frozen at creation.
 - **The run is yours, the arena is not.** A mandate can never loosen a validation gate. The
-  overlay allowlist is deny-by-default: the safety mode, the fill costs, every promotion
-  threshold but the metric, the holdout geometry, the state paths and the secrets are refused by
-  name, and a mandate that reaches for one doesn't start.
+  overlay allowlist is deny-by-default: it refuses the safety mode, the fill costs, every
+  promotion threshold but the metric, the holdout geometry, the state paths and the secrets — by
+  name. A mandate that reaches for one doesn't start.
 
 → [Authoring mandates](mandate/README.md) ·
 [the overlay surface, knob by knob](docs/configuration.md#the-mandate-overlay) ·
@@ -153,18 +167,18 @@ uv run python -m noctis run-record latest | jq .performance   # the paper accoun
 uv run python -m noctis report latest                         # the close-of-day report
 ```
 
-`run-record` prints the whole `run.json`, which is why piping it into `jq` works at all: the
-record has no sidecars, so `.performance` sits in the same document as the config that run
-froze, its engine identity, and every candidate with the gate evidence behind its verdict.
-It reads `null` until the run has actually traded — a night of pure research reports no
-performance rather than a flat zero. The report is a file too: it lives beside the record, at
+`run-record` prints the whole `run.json`, which is why piping it into `jq` works at all. The
+record has no sidecars: `.performance` sits in the same document as the config that run froze,
+its engine identity, and every candidate with the gate evidence behind its verdict. It reads
+`null` until the run has actually traded, so a night of pure research reports no performance
+rather than a flat zero. The report is a file too, living beside the record at
 `workspace/runs/<run_id>/reports/YYYY-MM-DD.md`.
 
-The hour bounds the **process, not the experiment**: `noctis run --resume latest` picks the
-same run back up tomorrow and keeps accumulating into the same record, under the config that
-run froze at creation. And a brief worth keeping graduates from a flag into a file — write it
-to `mandate/MANDATE.md`, set `research.mandate: MANDATE` in `config.yaml`, and every run reads
-it without being asked.
+The hour bounds the **process, not the experiment**. Run `noctis run --resume latest` and it
+picks the same run back up tomorrow, accumulating into the same record under the config that run
+froze at creation. A brief worth keeping graduates from a flag into a file: write it to
+`mandate/MANDATE.md`, set `research.mandate: MANDATE` in `config.yaml`, and every run reads it
+without being asked.
 
 ## How it works
 
@@ -194,9 +208,9 @@ The full model: [docs/safety.md](docs/safety.md)
 
 ## Project structure
 
-One contract: **committed files are input the engine treats as read-only; everything the
-engine writes lands under `workspace/`, which git never sees.** `noctis setup` scaffolds
-the local copies; editing them never shows in `git status`.
+One contract: committed files are input the engine treats as read-only, and everything the
+engine writes lands under `workspace/`, which git never sees. `noctis setup` scaffolds the local
+copies, so editing them never shows in `git status`.
 
 | Path | What |
 |---|---|
