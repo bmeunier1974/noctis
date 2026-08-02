@@ -5,8 +5,10 @@ implement ``complete`` and return :class:`~noctis.research.llm.Turn`."""
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +17,7 @@ from noctis.champions import ChampionRegistry, PromotionRules
 from noctis.config.settings import IdeationConfig, Settings
 from noctis.engine import run_research
 from noctis.memory import InMemoryMemory
+from noctis.observability.capture import CaptureStore
 from noctis.research import Capabilities, IdeationContext, Ideator, build_ideator, propose_specs
 from noctis.research.llm import ToolCall, Turn
 from noctis.strategies import Candidate, CandidateProposer
@@ -459,3 +462,136 @@ def test_ideation_disabled_by_config_switch(tmp_path, monkeypatch):
         state_dir=tmp_path,
     )
     assert ideator.client is None and ideator.run(0) == []
+
+
+# ── 8. Round-level capture: the assembled prompt as a qa/ sidecar (story #186) ──────────────
+IDEATION_PROMPT_KIND = "ideation-prompt"
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _fail_writes_under(monkeypatch, root):
+    """Make every write beneath ``root`` fail, so the capture store latches off on first use."""
+    real = Path.write_text
+
+    def failing(self: Path, *args: object, **kwargs: object):
+        if str(self).startswith(str(root)):
+            raise OSError("simulated disk failure on the capture store's write")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+
+
+def test_ideation_captures_the_assembled_prompt_verbatim(tmp_path):
+    """A seeded round's inputs survive the round: the prompt the model was actually shown lands
+    as a sidecar BYTE FOR BYTE, so its content hash fetches exactly what was sent."""
+    store = CaptureStore(tmp_path / "capture")
+    client = FakeClient([_valid_spec("minted_capture")])
+
+    specs = propose_specs(context=IdeationContext(), n=1, client=client, capture=store)
+
+    assert [s.id for s in specs] == ["minted_capture"]
+    sent = client.last_kwargs["messages"][0]["content"]
+    assert store.read(IDEATION_PROMPT_KIND, _sha256(sent)) == sent
+
+
+def test_ideation_captures_the_web_search_prompt_the_grounded_round_sent(tmp_path):
+    """The captured body is the prompt as assembled for THIS round — web-search guidance and
+    all — never a canonical rendering of the pieces it was built from."""
+    store = CaptureStore(tmp_path / "capture")
+    client = FakeClient(
+        [_valid_spec("minted_web_capture")], capabilities=Capabilities(server_web_search=True)
+    )
+
+    propose_specs(context=IdeationContext(), n=1, client=client, web_search=True, capture=store)
+
+    body = store.read(IDEATION_PROMPT_KIND, _sha256(client.last_kwargs["messages"][0]["content"]))
+    assert body is not None and "web_search tool" in body
+
+
+def test_ideation_captures_the_prompt_even_when_the_round_mints_nothing(tmp_path):
+    """Capture happens AT CALL TIME, before the exchange: a round whose provider blew up — the
+    one a post-mortem wants — still leaves the prompt it asked with on disk."""
+
+    class Boom:
+        capabilities = Capabilities()
+
+        def complete(self, **_kw):
+            raise RuntimeError("provider down")
+
+    store = CaptureStore(tmp_path / "capture")
+
+    assert propose_specs(context=IdeationContext(), n=1, client=Boom(), capture=store) == []
+
+    sidecars = list((store.root / IDEATION_PROMPT_KIND).iterdir())
+    assert len(sidecars) == 1
+    assert "emit_strategies" in sidecars[0].read_text(encoding="utf-8")
+
+
+def test_ideation_without_a_capture_store_writes_nothing(tmp_path):
+    """Capture is injected, never ambient: a call handed no store touches no disk at all."""
+    client = FakeClient([_valid_spec("minted_uncaptured")])
+
+    specs = propose_specs(context=IdeationContext(), n=1, client=client)
+
+    assert [s.id for s in specs] == ["minted_uncaptured"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ideator_captures_the_round_it_ran(tmp_path, families):
+    """The Ideator hands its store down, so an ordinary minting round leaves its prompt behind —
+    the sidecar's kind + hash is the lookup key (the legacy loop writes no ledger row)."""
+    store = CaptureStore(tmp_path / "capture")
+    client = FakeClient([_valid_spec("minted_by_round")])
+    ideator = Ideator(
+        client=client,
+        config=IdeationConfig(cadence=1, specs_per_round=1),
+        registry=_Reg(),
+        families=families,
+        proposer=CandidateProposer(families, seed=0),
+        memory=InMemoryMemory(),
+        state_dir=tmp_path,
+        capture=store,
+    )
+
+    assert ideator.run(0) == ["minted_by_round"]
+    sent = client.last_kwargs["messages"][0]["content"]
+    assert store.read(IDEATION_PROMPT_KIND, _sha256(sent)) == sent
+
+
+def test_build_ideator_roots_capture_in_the_run_qa_area(tmp_path):
+    """Captured bodies belong to the run that produced them: the default store sits under the
+    run's own gitignored ``qa/capture`` area, like every other artifact a run owns."""
+    settings = Settings()
+    ideator = build_ideator(
+        settings=settings,
+        registry=_Reg(),
+        families=FamilyRegistry(),
+        proposer=CandidateProposer(seed=0),
+        memory=InMemoryMemory(),
+        state_dir=tmp_path,
+    )
+
+    assert ideator.capture.root == Path(settings.qa_dir) / "capture"
+
+
+def test_a_latched_capture_store_leaves_ideation_unharmed(tmp_path, families, monkeypatch):
+    """Capture is strictly secondary: with the store latched off (an injected write failure) the
+    round still mints its families and never raises."""
+    store = CaptureStore(tmp_path / "capture")
+    _fail_writes_under(monkeypatch, store.root)
+    ideator = Ideator(
+        client=FakeClient([_valid_spec("minted_despite_latch")]),
+        config=IdeationConfig(cadence=1, specs_per_round=1),
+        registry=_Reg(),
+        families=families,
+        proposer=CandidateProposer(families, seed=0),
+        memory=InMemoryMemory(),
+        state_dir=tmp_path,
+        capture=store,
+    )
+
+    assert ideator.run(0) == ["minted_despite_latch"]
+    assert store.disabled  # the latch tripped, and nothing propagated out of the round

@@ -21,10 +21,18 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from noctis.observability.capture import CAPTURE_DIRNAME, CaptureStore
+
 if TYPE_CHECKING:
     from noctis.memory.base import Memory
 
 logger = logging.getLogger("noctis.research.distill")
+
+# The capture kind this site writes (story #186, epic #168): the prompt one distillation folded
+# the findings history with, stored verbatim as a ``qa/`` sidecar. Distillation runs at CLOSE,
+# outside the episodic ledger, and writes no observability row of its own — so the sidecar's kind
+# + content hash IS the lookup key that traces a compacted MEMORY.md back to what was shown.
+PROMPT_CAPTURE_KIND = "distill-prompt"
 
 # Session counter lives in the state dir, never in MEMORY.md (which the agent owns/edits).
 _COUNTER_FILE = "memory_distill.json"
@@ -80,13 +88,29 @@ def bump_research_session(state_dir: str | Path) -> int:
         return 0
 
 
-def distill_findings(memory: Memory, client, *, max_lines: int = _DISTILL_MAX_LINES) -> bool:
+def distill_findings(
+    memory: Memory,
+    client,
+    *,
+    max_lines: int = _DISTILL_MAX_LINES,
+    capture: CaptureStore | None = None,
+) -> bool:
     """One map-reduce call: full findings history in, ≤ ``max_lines`` lessons persisted via
-    ``memory.set_distilled``. Returns True only when a block was actually written."""
+    ``memory.set_distilled``. Returns True only when a block was actually written.
+
+    ``capture`` (story #186) is the run's sidecar area: given one, the rendered prompt — the
+    exact string the model is sent, findings and all — is persisted under
+    :data:`PROMPT_CAPTURE_KIND` *before* the call, so a compaction that failed or refused is as
+    diagnosable as one that landed. Capture is strictly secondary: no store, or a store latched
+    off after a write failure, changes nothing about the distillation."""
     findings = memory.findings()
     if len(findings) < _MIN_FINDINGS_TO_DISTILL:
         return False
     prompt = _PROMPT.format(max_lines=max_lines, findings="\n".join(findings))
+    # Capture BEFORE the call: the compaction a post-mortem cares about is the one that came back
+    # empty, and its prompt must outlive it. A latched store returns None and is simply ignored.
+    if capture is not None:
+        capture.store(PROMPT_CAPTURE_KIND, prompt)
     try:
         turn = client.complete(
             system="You compact research memory faithfully.",
@@ -126,13 +150,18 @@ def _distill_client(settings):
     return build_llm_client(settings)
 
 
-def maybe_distill(settings, memory: Memory, *, client=None) -> bool:
+def maybe_distill(
+    settings, memory: Memory, *, client=None, capture: CaptureStore | None = None
+) -> bool:
     """The periodic trigger: distill when ≥ ``research.memory_distill_every`` sessions have
     completed since the last distillation. Off (0/None knob) and no-client both degrade to
     stage-1 behavior; the counter resets only on a successful write, so a transient failure
     retries at the next close instead of silently skipping a cycle. When no ``client`` is passed,
     the model is chosen by :func:`_distill_client` — the paid coder-fallback when a key exists,
-    the local/default client otherwise (story #72)."""
+    the local/default client otherwise (story #72).
+
+    ``capture`` defaults to the run's own gitignored ``qa/capture`` area — the same tree every
+    other capture site in the run writes to, so one cap bounds the lot (story #186)."""
     every = int(getattr(settings.research, "memory_distill_every", 0) or 0)
     if every <= 0:
         return False
@@ -144,7 +173,8 @@ def maybe_distill(settings, memory: Memory, *, client=None) -> bool:
     if client is None:
         logger.info("memory distillation due but no LLM client; keeping stage-1 view")
         return False
-    if distill_findings(memory, client):
+    capture = capture or CaptureStore(Path(settings.qa_dir) / CAPTURE_DIRNAME)
+    if distill_findings(memory, client, capture=capture):
         _write_counter(state_dir, 0)
         logger.info("memory distilled into MEMORY.md (every %d sessions)", every)
         return True

@@ -3,8 +3,12 @@ the periodic trigger at close, and graceful degradation to the stage-1 view."""
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 from noctis.config.settings import ResearchConfig, Settings
 from noctis.memory import InMemoryMemory
+from noctis.observability.capture import CaptureStore
 from noctis.research.distill import (
     bump_research_session,
     distill_findings,
@@ -168,3 +172,84 @@ def test_distill_needs_history_and_bullets(tmp_path):
     memory2 = _memory()
     assert distill_findings(memory2, Boom()) is False
     assert memory2.distilled() == []
+
+
+# ── Round-level capture: the rendered distillation prompt as a qa/ sidecar (story #186) ──────
+DISTILL_PROMPT_KIND = "distill-prompt"
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_distill_captures_the_rendered_prompt_verbatim(tmp_path):
+    """A compacted MEMORY.md is traceable back to what the model was shown: the rendered prompt
+    lands as a sidecar BYTE FOR BYTE, so its content hash fetches exactly what was sent."""
+    store = CaptureStore(tmp_path / "capture")
+    memory = _memory()
+    client = FakeDistillClient("- a lesson")
+
+    assert distill_findings(memory, client, capture=store) is True
+
+    sent = client.calls[0]["messages"][0]["content"]
+    assert store.read(DISTILL_PROMPT_KIND, _sha256(sent)) == sent
+    assert "lesson 0" in sent and "lesson 11" in sent  # the full history that was folded
+
+
+def test_distill_captures_the_prompt_even_when_the_call_fails(tmp_path):
+    """Capture happens AT CALL TIME, before the exchange: a distillation whose provider blew up
+    still leaves the findings it asked to fold on disk."""
+
+    class Boom:
+        def complete(self, **_kw):
+            raise RuntimeError("network down")
+
+    store = CaptureStore(tmp_path / "capture")
+
+    assert distill_findings(_memory(), Boom(), capture=store) is False
+
+    sidecars = list((store.root / DISTILL_PROMPT_KIND).iterdir())
+    assert len(sidecars) == 1
+    assert "lesson 11" in sidecars[0].read_text(encoding="utf-8")
+
+
+def test_a_history_too_short_to_distill_captures_nothing(tmp_path):
+    """No call, no capture: the sidecar exists only where a prompt was actually sent."""
+    store = CaptureStore(tmp_path / "capture")
+
+    assert distill_findings(_memory(3), FakeDistillClient("- a lesson"), capture=store) is False
+    assert not store.root.exists()
+
+
+def test_maybe_distill_captures_into_the_run_qa_area(tmp_path):
+    """The close-phase trigger wires the run's own gitignored ``qa/capture`` area by default, so
+    an ordinary distillation at CLOSE is diagnosable with no extra plumbing."""
+    settings = Settings(state_dir=str(tmp_path), research={"memory_distill_every": 1})
+    memory = _memory()
+    client = FakeDistillClient("- a lesson")
+    bump_research_session(settings.state_dir)
+
+    assert maybe_distill(settings, memory, client=client) is True
+
+    sent = client.calls[0]["messages"][0]["content"]
+    folder = Path(settings.qa_dir) / "capture" / DISTILL_PROMPT_KIND
+    assert [p.read_text(encoding="utf-8") for p in folder.iterdir()] == [sent]
+
+
+def test_a_latched_capture_store_leaves_distillation_unharmed(tmp_path, monkeypatch):
+    """Capture is strictly secondary: with the store latched off (an injected write failure) the
+    lessons are still distilled into memory and nothing raises into the close phase."""
+    store = CaptureStore(tmp_path / "capture")
+    real = Path.write_text
+
+    def failing(self: Path, *args: object, **kwargs: object):
+        if str(self).startswith(str(store.root)):
+            raise OSError("simulated disk failure on the capture store's write")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+    memory = _memory()
+
+    assert distill_findings(memory, FakeDistillClient("- a lesson"), capture=store) is True
+    assert memory.distilled() == ["- a lesson"]
+    assert store.disabled
