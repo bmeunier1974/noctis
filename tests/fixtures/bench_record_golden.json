@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "kind": "noctis.bench",
+  "comparable_key": "engine_version=3|engine_fingerprint=0ab702d65ec8a507|site_id=coder|site_version=1|prompt_asset_hash=7c1f0d9a4b2e6f83|corpus_version=2026-07|corpus_hash=9f2c1d3e4b5a6c7d|harness_hash=0011223344556677|pricing_table_version=bench-1",
+  "bench": {
+    "bench_id": "20260801T090000Z-bench01",
+    "label": "coder-baseline",
+    "started_utc": "2026-08-01T09:00:00.000Z",
+    "finished_utc": "2026-08-01T09:41:12.500Z",
+    "complete": true,
+    "cases": 2,
+    "runs": 3,
+    "attempts": 5
+  },
+  "site": {
+    "site_id": "coder",
+    "site_version": "1",
+    "prompt_asset_hash": "7c1f0d9a4b2e6f83",
+    "prompt_asset_groups": [
+      "author"
+    ]
+  },
+  "corpus": {
+    "version": "2026-07",
+    "hash": "9f2c1d3e4b5a6c7d",
+    "case_count": 2,
+    "split": "tuning"
+  },
+  "harness": {
+    "hash": "0011223344556677",
+    "dials": {
+      "contract_sheet": true,
+      "worked_example": "as_shipped"
+    }
+  },
+  "engine": {
+    "engine_version": 3,
+    "noctis_version": "0.1.0",
+    "fingerprint": {
+      "gates": "f63d47b7b9604ab1",
+      "backtest": "3ba3e0bf1c97134f",
+      "prompts": "14eb169506a6b5aa"
+    },
+    "fingerprint_digest": "0ab702d65ec8a507"
+  },
+  "metrics": {
+    "first_attempt_pass_rate": 0.25,
+    "job_pass_rate": 0.5,
+    "mean_attempts_to_pass": 1.5,
+    "attempt_distribution": {
+      "passed_on": {
+        "1": 0.25,
+        "2": 0.25
+      },
+      "never": 0.5
+    },
+    "retry_yield": {
+      "2": 0.25
+    },
+    "cost": {
+      "tokens_total": 20000000,
+      "tokens_per_pass": 10000000.0,
+      "usd_total_estimate": 20.0,
+      "usd_per_pass_estimate": 10.0,
+      "pricing_table_version": "bench-1"
+    },
+    "latency": {
+      "p50_s": 3.0,
+      "p95_s": 3.9
+    }
+  },
+  "failures": {
+    "counts": {
+      "import_error": 1,
+      "inactive": 1,
+      "unclassified": 1
+    },
+    "shares": {
+      "import_error": 0.3333333333333333,
+      "inactive": 0.3333333333333333,
+      "unclassified": 0.3333333333333333
+    },
+    "total": 3,
+    "unclassified_share": 0.3333333333333333,
+    "failed_attempts": 3
+  },
+  "results": [
+    {
+      "case_id": "breakout",
+      "config_id": "primary",
+      "ran": true,
+      "first_attempt_passed": true,
+      "passed": true,
+      "attempts_to_pass": 1,
+      "latency_s": 2.0,
+      "attempts": [
+        {
+          "passed": true,
+          "model": "bench/oracle",
+          "served_model": "claude-opus-4-20260501",
+          "tokens": 4000000,
+          "usage": {
+            "input_tokens": 1000000,
+            "output_tokens": 1000000,
+            "cache_creation_input_tokens": 1000000,
+            "cache_read_input_tokens": 1000000
+          },
+          "latency_s": 2.0,
+          "error": null
+        }
+      ]
+    },
+    {
+      "case_id": "breakout",
+      "config_id": "primary",
+      "ran": true,
+      "first_attempt_passed": false,
+      "passed": true,
+      "attempts_to_pass": 2,
+      "latency_s": 4.0,
+      "attempts": [
+        {
+          "passed": false,
+          "model": "bench/oracle",
+          "served_model": "claude-opus-4-20260501",
+          "tokens": 4000000,
+          "usage": {
+            "input_tokens": 1000000,
+            "output_tokens": 1000000,
+            "cache_creation_input_tokens": 1000000,
+            "cache_read_input_tokens": 1000000
+          },
+          "latency_s": 2.0,
+          "error": "strategy did not import"
+        },
+        {
+          "passed": true,
+          "model": "bench/oracle",
+          "served_model": "claude-opus-4-20260501",
+          "tokens": 4000000,
+          "usage": {
+            "input_tokens": 1000000,
+            "output_tokens": 1000000,
+            "cache_creation_input_tokens": 1000000,
+            "cache_read_input_tokens": 1000000
+          },
+          "latency_s": 2.0,
+          "error": null
+        }
+      ]
+    },
+    {
+      "case_id": "meanrev",
+      "config_id": "primary",
+      "ran": true,
+      "first_attempt_passed": false,
+      "passed": false,
+      "attempts_to_pass": null,
+      "latency_s": null,
+      "attempts": [
+        {
+          "passed": false,
+          "model": "bench/oracle",
+          "served_model": "claude-opus-4-20260501",
+          "tokens": 4000000,
+          "usage": {
+            "input_tokens": 1000000,
+            "output_tokens": 1000000,
+            "cache_creation_input_tokens": 1000000,
+            "cache_read_input_tokens": 1000000
+          },
+          "latency_s": 2.0,
+          "error": "strategy traded twice in ten years"
+        },
+        {
+          "passed": false,
+          "model": "bench/oracle",
+          "served_model": "claude-opus-4-20260501",
+          "tokens": 4000000,
+          "usage": {
+            "input_tokens": 1000000,
+            "output_tokens": 1000000,
+            "cache_creation_input_tokens": 1000000,
+            "cache_read_input_tokens": 1000000
+          },
+          "latency_s": 2.0,
+          "error": "the model emitted no code block"
+        }
+      ]
+    }
+  ],
+  "provenance": {
+    "configs": [
+      {
+        "config_id": "primary",
+        "provider": "anthropic",
+        "requested_model": "claude-opus-4",
+        "served_models": [
+          "claude-opus-4-20260501"
+        ],
+        "served_unrecorded": 0,
+        "alias_drift": false,
+        "attempts": 5
+      }
+    ],
+    "client_stack": {
+      "litellm": "1.63.0",
+      "anthropic": "0.120.0"
+    },
+    "pricing_table_version": "bench-1"
+  }
+}
