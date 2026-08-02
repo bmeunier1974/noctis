@@ -56,6 +56,7 @@ __all__ = [
     "FailedAttempts",
     "MissingFailureFolder",
     "SkippedFile",
+    "breakdown_of_errors",
     "failure_breakdown",
     "read_failed_attempts",
     "render_breakdown",
@@ -196,15 +197,25 @@ def read_failed_attempts(folder: Path | str) -> FailedAttempts:
 
 
 def failure_breakdown(records: Iterable[FailedAttempt]) -> Breakdown:
-    """Count a batch of attempts into the coder vocabulary — every class, in precedence order.
+    """Count a batch of attempts read off disk into the coder vocabulary.
 
-    Pure and order-independent: each attempt's gate error is classified on its own. An empty
-    batch is all zeros rather than a division nobody can perform.
+    A thin projection onto :func:`breakdown_of_errors` — a gate error is the only thing counting
+    ever reads, and one counting implementation is what keeps a folder census and a benchmark
+    reading from disagreeing about the same errors.
+    """
+    return breakdown_of_errors(record.error for record in records)
+
+
+def breakdown_of_errors(errors: Iterable[str]) -> Breakdown:
+    """Count a batch of gate errors into the coder vocabulary — every class, in precedence order.
+
+    Pure and order-independent: each error is classified on its own. An empty batch is all zeros
+    rather than a division nobody can perform.
     """
     counts = dict.fromkeys((declared.name for declared in CODER_CLASSES), 0)
     total = 0
-    for record in records:
-        counts[classify_coder_failure(record.error)] += 1
+    for error in errors:
+        counts[classify_coder_failure(error)] += 1
         total += 1
     tallies = tuple(
         ClassTally(

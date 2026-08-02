@@ -35,6 +35,15 @@ retained record without the runner learning a word of this site's vocabulary. A 
 ``max_attempts`` above one would be asking the *same case* twice with a fresh library each time,
 which is a rep, not a retry — so the retry budget lives where production keeps it: on the engine.
 
+**The degenerate-pass detectors run here, once, at the end of a job that passed.** They ask the
+question the write gate cannot (*how* was this pass won — see :mod:`noctis.eval.coder_detectors`),
+and answering it needs the loaded class and a replay, which is state only the job still holds: the
+validated file lives in a throwaway library this job is about to abandon. So the run happens where
+the file is (bounded, per job, only on a pass) and the findings are **stamped into the**
+:class:`JobRecord`, which keeps the site scorer a pure function over retained records instead of a
+reader that re-imports strategy files. Nothing about a finding touches the verdict: a job that drew
+two warnings passed exactly as hard as one that drew none.
+
 **What a job retains, inside its own workdir.** The exact prompt the engine sent
 (:data:`PROMPT_NAME`, and :data:`ESCALATED_PROMPT_NAME` when the job escalated to the paid coder),
 every rejected attempt's source and gate error through production's own
@@ -64,6 +73,7 @@ from typing import Any
 
 from noctis.eval.case import Case
 from noctis.eval.coder_case import CoderPayload, coder_payload
+from noctis.eval.coder_detectors import DegenerateFinding, inspect_strategy
 from noctis.eval.coder_distill_sites import AuthoringJob, CoderKnobs, render_coder_prompt
 from noctis.eval.harness import AsShipped, HarnessSpec, WorkedExample
 from noctis.eval.metrics import AttemptOutcome
@@ -275,6 +285,10 @@ class JobRecord:
 
     The runner keeps this as the attempt's output, and the job keeps a copy beside its own
     artifacts, so the same document answers "what happened here?" from either end.
+
+    ``findings`` is what the degenerate-pass detectors said about the file this job landed — empty
+    for a job that landed none, and empty for a clean pass. They ride *beside* the verdict and
+    never in it: :attr:`passed` is the gate's, and nothing here consults a finding.
     """
 
     case_id: str
@@ -285,6 +299,7 @@ class JobRecord:
     path: str | None = None
     model: str | None = None
     seconds: float | None = None
+    findings: tuple[DegenerateFinding, ...] = ()
 
     @property
     def escalated(self) -> bool:
@@ -323,6 +338,14 @@ class JobRecord:
             "model": self.model,
             "seconds": self.seconds,
             "attempts": [one.document() for one in self.attempts],
+            "findings": [
+                {
+                    "detector": one.detector,
+                    "severity": one.severity,
+                    "summary": one.summary,
+                }
+                for one in self.findings
+            ],
         }
 
     def attempt(self) -> Attempt:
@@ -357,6 +380,16 @@ def job_record(document: Mapping[str, Any]) -> JobRecord:
         path=_text(document.get("path")),
         model=_text(document.get("model")),
         seconds=None if document.get("seconds") is None else float(document["seconds"]),
+        findings=tuple(_finding(entry) for entry in document.get("findings") or ()),
+    )
+
+
+def _finding(entry: Mapping[str, Any]) -> DegenerateFinding:
+    """One retained detector finding back as the advisory record it is."""
+    return DegenerateFinding(
+        detector=str(entry.get("detector") or ""),
+        severity=str(entry.get("severity") or ""),
+        summary=str(entry.get("summary") or ""),
     )
 
 
@@ -680,9 +713,25 @@ def run_authoring_job(
         path=landed,
         model=_model_of(records, model),
         seconds=seconds,
+        findings=_findings(name, families) if result is not None else (),
     )
     _keep(workdir / JOB_RECORD_NAME, json.dumps(record.document(), indent=2, default=str) + "\n")
     return record
+
+
+def _findings(name: str, families: FamilyRegistry) -> tuple[DegenerateFinding, ...]:
+    """What the degenerate-pass detectors say about the file this job just landed.
+
+    The class is the one the gate itself installed — ``write_strategy`` registers the validated
+    file into this job's own registry — so the detectors read exactly the artifact that passed,
+    with no second import and no path guessing. Nothing is caught here on purpose: every operation
+    :func:`~noctis.eval.coder_detectors.inspect_strategy` performs (``param_space()``,
+    ``params_cls()``, a replay over ``fixture_frame()``) is one the gate already performed on this
+    very file, so a raise would be a real defect rather than weather to swallow.
+    """
+    if name not in families:
+        return ()  # pragma: no cover - a landed file is registered by the gate that landed it
+    return inspect_strategy(families.get_class(name)).findings
 
 
 def _may_escalate(failure: Exception | None, fallback_client: Any, knobs: CoderKnobs) -> bool:

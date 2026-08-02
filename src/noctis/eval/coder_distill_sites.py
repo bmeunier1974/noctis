@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from noctis.eval.coder_scorer import CODER_SCORER
 from noctis.eval.harness import HarnessSpec
 from noctis.eval.knobs import SiteKnobs
 from noctis.eval.site import AgentSite
@@ -213,6 +214,9 @@ CODER_SITE: AgentSite[AuthoringJob, str] = AgentSite(
     contract=None,
     render=render_coder_prompt,
     knobs=CoderKnobs,
+    # The site's own reading over the retained job records: two co-primary pass rates, the effort
+    # and spend behind them, the failure taxonomy and the detectors' advisory rows (#226).
+    scorers=(CODER_SCORER,),
 )
 
 DISTILL_SITE: AgentSite[FindingsHistory, tuple[str, ...]] = AgentSite(
