@@ -787,6 +787,30 @@ def test_explicit_max_tokens_override_is_threaded_to_the_coder_completion(
     assert client.calls[0]["max_tokens"] == 8192
 
 
+def test_builtin_retry_budget_allows_initial_plus_two_completions(tmp_path, families, fast_gate):
+    # External behavior (#222): the engine's built-in private-retry budget — what the config knob
+    # research.agent.coder_retries defers to when unset — is initial + 2 ≤ 3 coder completions.
+    engine, client = _author(tmp_path, families, [fenced(BROKEN)] * 3)
+    with pytest.raises(AuthoringError):
+        engine.author("probe", BRIEF)
+
+    assert len(client.calls) == 3
+
+
+def test_explicit_retry_budget_changes_the_number_of_coder_completions(
+    tmp_path, families, fast_gate
+):
+    # External behavior: an explicit retries budget (the config's research.agent.coder_retries
+    # threads here) decides how many times a rejected attempt is shown its own gate error and
+    # asked again — the gate each attempt must pass is untouched.
+    client = FakeCoder([fenced(BROKEN)] * 5)
+    engine = StrategyAuthor(client=client, strategies_dir=tmp_path, families=families, retries=4)
+    with pytest.raises(AuthoringError):
+        engine.author("probe", BRIEF)
+
+    assert len(client.calls) == 5
+
+
 def test_thinking_client_gets_the_allowance_on_top_of_the_ceiling(tmp_path, families, fast_gate):
     # A client that runs provider thinking (its `thinking_enabled` is True — an Anthropic adaptive
     # pin, where thinking and text share max_tokens) is asked for the ceiling PLUS the thinking

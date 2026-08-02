@@ -317,9 +317,17 @@ class ResearchToolbox:
         # The coder client is wrapped so every completion the engine spends counts against the
         # author budget (retries included) — the accounting stays toolbox-side.
         # ``coder_max_tokens`` (the config's compat/sizing lever) is threaded only when set, so
-        # ``None`` keeps the engine's built-in output ceiling untouched.
-        coder_max_tokens = settings.research.agent.coder_max_tokens
-        author_kwargs = {} if coder_max_tokens is None else {"max_tokens": coder_max_tokens}
+        # ``None`` keeps the engine's built-in output ceiling untouched. ``coder_retries`` (#222)
+        # rides the same rule for the engine's private validator-retry budget: unset ⇒ the built-in
+        # budget, exactly today's attempt count; a number pins how many times a rejected attempt is
+        # shown its own gate error and asked again. Both engines below get the same kwargs, so an
+        # ablation moves the local and escalated authors together.
+        agent_cfg = settings.research.agent
+        author_kwargs: dict = {}
+        if agent_cfg.coder_max_tokens is not None:
+            author_kwargs["max_tokens"] = agent_cfg.coder_max_tokens
+        if agent_cfg.coder_retries is not None:
+            author_kwargs["retries"] = agent_cfg.coder_retries
         self.author_engine = (
             StrategyAuthor(
                 client=_CoderCallCounter(coder_client, self._bump_author_calls),

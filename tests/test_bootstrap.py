@@ -1052,6 +1052,83 @@ def test_coder_thinking_setting_off_pins_the_coder_client_off(tmp_path, monkeypa
     assert seen["kwargs"].get("deliberate") is True
 
 
+def test_coder_sampling_knobs_reach_the_coder_client(tmp_path, monkeypatch):
+    """#222: configured sampling knobs are handed to the shared client builder, which is the one
+    place that decides (per provider capability) whether they are actually sent."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    seen: dict = {}
+
+    def fake_client_for(settings, model, **kwargs):
+        seen["kwargs"] = kwargs
+        return _fake_coder()
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    settings = _session_settings(tmp_path, coder_model="ollama/qwen3-coder")
+    settings.research.agent.coder_temperature = 0.2
+    settings.research.agent.coder_seed = 7
+    build_research_session(
+        settings=settings,
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    assert seen["kwargs"].get("temperature") == 0.2
+    assert seen["kwargs"].get("seed") == 7
+
+
+def test_unset_coder_sampling_knobs_are_passed_through_as_unset(tmp_path, monkeypatch):
+    """Default (both unset): the builder is asked for no sampling at all, so the coder's request
+    is exactly today's on every provider."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    seen: dict = {}
+
+    def fake_client_for(settings, model, **kwargs):
+        seen["kwargs"] = kwargs
+        return _fake_coder()
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    build_research_session(
+        settings=_session_settings(tmp_path, coder_model="ollama/qwen3-coder"),
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    assert seen["kwargs"].get("temperature") is None
+    assert seen["kwargs"].get("seed") is None
+
+
+def test_coder_sampling_knobs_reach_the_escalated_fallback_client(tmp_path, monkeypatch):
+    """The paid escalation coder samples the same way the local one was told to: one coder
+    sampling policy per session, not two."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    seen: list = []
+
+    def fake_client_for(settings, model, **kwargs):
+        seen.append((model, kwargs))
+        return _fake_coder()
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    settings = _session_settings(
+        tmp_path,
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-sonnet-5",
+    )
+    settings.research.agent.coder_temperature = 0.4
+    settings.research.agent.coder_seed = 11
+    build_research_session(
+        settings=settings,
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    fallback = next(kw for model, kw in seen if model == "anthropic/claude-sonnet-5")
+    assert fallback.get("temperature") == 0.4
+    assert fallback.get("seed") == 11
+
+
 def test_coder_thinking_defaults_on(tmp_path):
     """The coder-thinking knob defaults ON (authoring is reasoning-heavy); the driver watch dial
     (``research.agent.thinking``) stays independently OFF by default (untouched by this story)."""

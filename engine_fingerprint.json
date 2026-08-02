@@ -29,9 +29,9 @@
       "note": null
     },
     "profiles": {
-      "digest": "6b0e047bd1dafb6d",
+      "digest": "35bea32283ef16d9",
       "files": {
-        "mandate/MANDATE.md.example": "032375f397521686",
+        "mandate/MANDATE.md.example": "96e3dfe2950fe2b6",
         "mandate/profiles/aggressive.md": "434077567e2c4bbb",
         "mandate/profiles/conservative.md": "40d593753bd39962",
         "mandate/profiles/long-term.md": "8aa17408c2bc6b4c",
@@ -53,13 +53,13 @@
       "note": null
     },
     "research": {
-      "digest": "7c82ed9e16156267",
+      "digest": "f2d7df1a2235f185",
       "files": {
         "src/noctis/research/agent.py": "2898ef78eed287cb",
         "src/noctis/research/driver.py": "ba72f3bcc041ca06",
         "src/noctis/research/episode.py": "1a713e01decf20ef",
         "src/noctis/research/sweep.py": "71c77c8174080c43",
-        "src/noctis/research/tools.py": "08e056100a44c976"
+        "src/noctis/research/tools.py": "692774566e75da52"
       },
       "note": null
     },

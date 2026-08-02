@@ -8,8 +8,9 @@ identical gated loop runs on OpenAI (default), Anthropic, or a local/OpenAI-comp
 The one structural normalization LiteLLM forces lives entirely behind this boundary: our
 Anthropic-native tool specs, message envelopes, and response shapes are mapped to the **OpenAI
 chat format** (``messages`` / ``tools`` / ``tool_calls``) once, here. Provider-specific levers
-(prompt caching, server-side web search, effort, thinking) are each gated on a capability flag,
-so a provider that lacks one no-ops cleanly rather than erroring.
+(prompt caching, server-side web search, effort, thinking, and the sampling knobs ``temperature``
+and ``seed``) are each gated on a capability flag, so a provider that lacks one no-ops cleanly
+rather than erroring: a false flag means the lever is simply not sent.
 
 LiteLLM is pinned behind the optional ``[llm]`` extra, never core — missing it degrades to no
 client (the runtime then falls back to the legacy loop), exactly like ``anthropic`` today.
@@ -62,6 +63,13 @@ class Capabilities:
     # the local/OpenAI-compatible class, whose streaming tool-call reassembly varies — a False
     # flag makes the loop run non-streaming (the completed Event still renders a moment later).
     streaming: bool = False
+    # The two sampling levers (#222). Off everywhere by default, and honest per provider: where a
+    # flag is False the caller's knob is simply **not sent** — the request is byte-identical to
+    # one that never carried it, never a 400 and never a silently ignored promise. Neither buys
+    # determinism even where it IS sent (see :func:`capabilities_for`); they narrow a sampler,
+    # and repetitions plus paired statistics remain the defence against run-to-run variance.
+    temperature: bool = False  # the ``temperature`` sampling dial
+    seed: bool = False  # the ``seed`` best-effort repeatability parameter
 
 
 @dataclass(frozen=True)
@@ -299,16 +307,32 @@ def capabilities_for(provider: str) -> Capabilities:
     param, which maps to a ``budget_tokens`` that Opus 4.8 rejects), so ``effort`` stays off here.
     ``openai`` has the native ``reasoning_effort`` dial (``effort=True``) and caches automatically
     (no breakpoints). Both hosted providers get ``streaming`` (P5) — LiteLLM's streaming +
-    ``stream_chunk_builder`` reassembly is well-exercised on them. A local / OpenAI-compatible
-    backend gets nothing provider-specific: streaming stays off there (its tool-call streaming
-    varies), so a $0 backend runs the same gated loop non-streaming."""
+    ``stream_chunk_builder`` reassembly is well-exercised on them.
+
+    The **sampling** flags (#222) invert that shape, because the sampler is exactly where the
+    hosted providers offer least. ``anthropic`` gets neither: its current models expose no ``seed``
+    parameter at all, and a ``temperature`` sent beside the thinking parameter this seam pins is a
+    400 — a lever that would error is not a capability. ``openai`` gets neither either: the GPT-5
+    reasoning family this seam runs on fixes temperature at its default, and what LiteLLM forwards
+    as ``seed`` there is unverified — an unverifiable lever is off, on purpose, because the whole
+    point of the flag is that a request never carries a parameter we cannot honour. The local /
+    OpenAI-compatible class (vLLM, Ollama, llama.cpp behind an OpenAI-compatible ``base_url``)
+    accepts both as first-class sampler controls, so it is the one seam where they are real —
+    which is also the seam a coder benchmark's sampling ablations actually run on. Even there a
+    seed is best-effort repeatability, never determinism (batching, kernel and quantization
+    nondeterminism, and a moved served snapshot all still move the output).
+
+    Otherwise a local / OpenAI-compatible backend gets nothing provider-specific: streaming stays
+    off there (its tool-call streaming varies), so a $0 backend runs the same gated loop
+    non-streaming."""
     if provider == "anthropic":
         return Capabilities(
             prompt_cache=True, server_web_search=True, effort=False, thinking=True, streaming=True
         )
     if provider == "openai":
         return Capabilities(effort=True, streaming=True)
-    return Capabilities()  # local / OpenAI-compatible: nothing provider-specific
+    # local / OpenAI-compatible: nothing provider-specific except the real sampler controls.
+    return Capabilities(temperature=True, seed=True)
 
 
 def _key_for(provider: str, settings) -> str | None:
@@ -380,7 +404,16 @@ class LiteLLMClient:
     """Realizes :class:`LLMClient` via ``litellm.completion`` (imported lazily, [llm] extra)."""
 
     def __init__(
-        self, *, model, capabilities, api_key=None, base_url=None, thinking=None, effort=None
+        self,
+        *,
+        model,
+        capabilities,
+        api_key=None,
+        base_url=None,
+        thinking=None,
+        effort=None,
+        temperature=None,
+        seed=None,
     ):
         self.model = model
         self.capabilities = capabilities
@@ -388,6 +421,10 @@ class LiteLLMClient:
         self._base_url = base_url
         self._thinking = thinking  # e.g. {"type": "disabled"} for Sonnet; None sends nothing
         self._effort = effort  # profile reasoning effort ("high"/"medium"); capability-gated
+        # The sampling knobs (#222), capability-gated below. ``None`` means *unset* — nothing is
+        # sent and the request is today's — while ``0.0`` is a real temperature and is sent.
+        self._temperature = temperature
+        self._seed = seed
         # Whether this client's pinned thinking parameter is an actual on-mode — an Anthropic
         # adaptive pin, not ``None`` (nothing sent) and not the Sonnet ``disabled`` pin. On
         # Anthropic models thinking and text share ``max_tokens``, so a caller sizing an output
@@ -431,6 +468,14 @@ class LiteLLMClient:
         # pinned (Sonnet: thinking off is the deliberate cheap path — effort would re-enable it).
         if self.capabilities.effort and self._effort and self._thinking is None:
             kwargs["reasoning_effort"] = self._effort
+        # Sampling (#222). Each lever needs BOTH a set knob and its own capability flag: unset
+        # (``None``) keeps the request byte-identical to a pre-#222 one, and an incapable provider
+        # drops the lever silently rather than sending a parameter it would reject or ignore. The
+        # ``is not None`` test is deliberate — ``temperature=0.0`` is a sampling choice, not unset.
+        if self.capabilities.temperature and self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        if self.capabilities.seed and self._seed is not None:
+            kwargs["seed"] = self._seed
         return kwargs
 
     def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
@@ -539,6 +584,8 @@ def client_for(
     thinking: str = "off",
     deliberate: bool = False,
     effort: str | None = None,
+    temperature: float | None = None,
+    seed: int | None = None,
 ):
     """Build a :class:`LiteLLMClient` for ``model`` (``provider/model`` grammar), or ``None``
     when the ``[llm]`` extra (litellm) is missing or the resolved provider needs a key that
@@ -549,7 +596,13 @@ def client_for(
 
     ``deliberate`` marks the coder's deliberate, budgeted thinking decision (issue #17): it opts a
     Sonnet-class coder into adaptive thinking under ``thinking="on"``, overriding the cheap-path
-    pin the observability watch dial defers to (see :func:`thinking_for`)."""
+    pin the observability watch dial defers to (see :func:`thinking_for`).
+
+    ``temperature``/``seed`` (#222) are the caller's sampling knobs. Both default to ``None`` =
+    send nothing, so every caller that omits them makes exactly today's request; a set knob is
+    forwarded only where :func:`capabilities_for` says the provider supports it, and is a clean
+    no-op elsewhere. Neither promises determinism — a seed is best-effort repeatability at most,
+    so repetitions and paired statistics stay the defence against run-to-run variance."""
     provider = provider_of(model)
     blocked = _client_blocked(provider, settings)
     if blocked is not None:
@@ -562,6 +615,8 @@ def client_for(
         base_url=getattr(settings.research, "base_url", None),
         thinking=thinking_for(model, thinking, deliberate=deliberate),
         effort=effort,
+        temperature=temperature,
+        seed=seed,
     )
 
 
