@@ -21,6 +21,7 @@ from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Any
 
+from noctis.eval.episodic_sites import EPISODIC_SITES
 from noctis.eval.site import AgentSite
 
 __all__ = [
@@ -32,10 +33,10 @@ __all__ = [
     "sites",
 ]
 
-# One entry per declared site, in declaration order. Empty until the site declarations land —
-# the coder, then the episodic sites (formulate, decide, discover) and distill — each of which is
-# a module-level constant appended here as plain code.
-DECLARED_SITES: tuple[AgentSite[Any, Any], ...] = ()
+# One entry per declared site, in declaration order: the episodic sites (formulate, decide,
+# discover) declared in :mod:`noctis.eval.episodic_sites`, with the coder and distill declarations
+# joining them here — each a module-level constant spliced in as plain code.
+DECLARED_SITES: tuple[AgentSite[Any, Any], ...] = (*EPISODIC_SITES,)
 
 
 class UnknownSite(KeyError):
