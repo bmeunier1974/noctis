@@ -115,7 +115,9 @@ def run_bench(
         runner = build_bench_runner(
             settings,
             site_id=site_id,
-            attempt=_attempt_for(settings, model=model, dry_run=dry_run, seams=injected),
+            attempt=_attempt_for(
+                settings, site_id=site_id, model=model, dry_run=dry_run, seams=injected
+            ),
             workers=workers,
             label=label,
             seams=injected,
@@ -138,7 +140,7 @@ def run_bench(
 
 
 def _attempt_for(
-    settings: Any, *, model: str | None, dry_run: bool, seams: BenchSeams
+    settings: Any, *, site_id: str, model: str | None, dry_run: bool, seams: BenchSeams
 ) -> AttemptFn:
     """The model call this invocation would make — injected, live, or a dry run's refusal.
 
@@ -146,12 +148,18 @@ def _attempt_for(
     called: the preflight asks nothing by construction, and the placeholder makes that a fact about
     the object instead of a promise about the control flow. It is also why ``--dry-run`` needs no
     key — :func:`~noctis.eval.bootstrap.live_attempt` is never reached.
+
+    The site is named on the way in because a bench measures exactly one, and a site whose live ask
+    is not a forced structured emit (the coder's is an authoring job) declares its own maker in the
+    ask table. Which one that is stays a lookup there, so this body names no site.
     """
     if seams.attempt is not None:
         return seams.attempt
     if dry_run:
         return _never_asked
-    return live_attempt(settings, model=model, registry=seams.registry, asks=seams.asks)
+    return live_attempt(
+        settings, site_id=site_id, model=model, registry=seams.registry, asks=seams.asks
+    )
 
 
 def _never_asked(request: AttemptRequest) -> Attempt:

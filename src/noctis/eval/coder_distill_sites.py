@@ -35,11 +35,13 @@ from noctis.eval.knobs import SiteKnobs
 from noctis.eval.site import AgentSite
 from noctis.research import distill
 from noctis.research.author import StrategyAuthor, StrategyBrief
+from noctis.strategies.library import StrategyValidationError
 from noctis.strategies.scenario_spec import SpecSuite
 
 __all__ = [
     "CODER_SITE",
     "DISTILL_SITE",
+    "NO_PROMPT",
     "AuthoringJob",
     "CoderKnobs",
     "DistillKnobs",
@@ -64,6 +66,11 @@ DISTILL_VERSION = "1"
 # transport sends them as separate fields (system, then one user message), so the adapter's whole
 # composition is this join, in that order — nothing is re-ordered, filtered or rewritten.
 _SYSTEM_USER_JOIN = "\n\n"
+
+#: What a rendered coder prompt says when the engine refused the brief before composing anything —
+#: an unresolvable ``reference``. Marked as a comment so nothing downstream mistakes it for a
+#: prompt, and followed by the engine's own refusal, which is the whole diagnosis.
+NO_PROMPT = "# no prompt was composed — the engine refused this brief before asking:"
 
 
 @dataclass(frozen=True)
@@ -104,14 +111,17 @@ class FindingsHistory:
 class CoderKnobs(SiteKnobs):
     """The coder-model settings family, exactly as ``research.agent`` declares it today.
 
-    Seven fields, seven existing knobs — model selection, the paid fallback and its escalation cap,
-    the two thinking dials, the output-token ceiling and the per-session author-call budget. The
-    defaults are the shipped ones, so an un-overridden knob set *is* production.
+    Ten fields, ten existing knobs — model selection, the paid fallback and its escalation cap, the
+    two thinking dials, the two sampling levers, the output-token ceiling, the private
+    validator-retry budget and the per-session author-call budget. The defaults are the shipped
+    ones, so an un-overridden knob set *is* production.
 
-    Notably absent: temperature, seed, and a retry count. The first two production has no word for
-    at any call site, and inventing them here would be a benchmark inventing a production knob; the
-    third is the author engine's private-retry budget (``_CODER_RETRIES``), a module constant this
-    declaration references by not promoting it.
+    Nothing here is invented: ``coder_temperature``, ``coder_seed`` and ``coder_retries`` are knobs
+    production grew (#222) — the sampling pair rides the shared client builder, the retry budget
+    pins what was a module constant — and a declaration follows the settings model rather than
+    leading it. A lever production still has no word for (a per-attempt timeout, say) stays a
+    parameter of whoever drives the engine and is *not* promoted here: the knob set is what a
+    benchmark override is validated against, and an override may only name a real one.
     """
 
     coder_model: str | None = None
@@ -120,6 +130,9 @@ class CoderKnobs(SiteKnobs):
     coder_thinking: Literal["off", "on"] = "on"
     coder_fallback_thinking: Literal["off", "on"] = "off"
     coder_max_tokens: int | None = None
+    coder_temperature: float | None = None
+    coder_seed: int | None = None
+    coder_retries: int | None = None
     max_author_calls: int | None = None
 
 
@@ -147,17 +160,29 @@ def render_coder_prompt(job: AuthoringJob, spec: HarnessSpec) -> str:
     reference/revision material resolved the way an authoring call resolves it. The two are joined
     in transport order; nothing is re-ordered, filtered or rewritten.
 
+    **A brief production refuses composes nothing, and this says so** (:data:`NO_PROMPT`). The
+    engine rejects a ``reference`` the library does not ship *before* it spends a completion — a bad
+    brief, not a coder failure — so there are no bytes to reproduce, and the corpus deliberately
+    ships such a case (its honest outcome is a refusal rather than a file). Returning the engine's
+    own refusal keeps this renderer total for every case a corpus can hold: inventing a prompt
+    production would never send would be the only worse answer, and raising would turn one case's
+    honest failure into a bench that never finished the other nineteen.
+
     ``spec`` is accepted and not read: the ablation dials are wired in the eval-runner epic (see
     the module docstring), so every :class:`~noctis.eval.harness.HarnessSpec` renders production's
     composition today.
     """
     del spec  # honestly inert until the ablation wiring lands
     author = job.author
+    try:
+        reference_source = author._reference_source(job.brief)
+    except StrategyValidationError as refusal:
+        return f"{NO_PROMPT}\n{refusal}\n"
     user = author._user_prompt(
         job.name,
         job.brief,
         job.prior,
-        reference_source=author._reference_source(job.brief),
+        reference_source=reference_source,
         current_source=author._current_source(job.name),
         spec=job.spec,
     )

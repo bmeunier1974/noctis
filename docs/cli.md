@@ -788,6 +788,20 @@ cases carry — so every site runs down one code path. A live ask goes through t
 seam and the site's declared emit contract; a site whose live ask is not declared is **refused**
 rather than asked under an invented system prompt.
 
+`--site coder` is the one site whose answer no emit contract types, and the ask table says so: its
+row declares its own live maker instead of a schema, because the coder's ask is a whole **authoring
+job** and its judge is the fresh-subprocess write gate. One runner attempt is one such job — the
+engine's private validator retries (and, when the escalation cap allows it, one fallback to the paid
+coder) happen *inside* it — and every internal attempt is recorded, so the job-level pass rate the
+record carries and the finer first-attempt reading a reader wants are both derivable from what was
+retained. Each job builds a throwaway three-tier strategy library inside its own working directory:
+the committed `strategies/` seeds are read in place (read-only input — a job authoring a seed's own
+name lands its file in its own `__tmp/` tier, exactly as a research session does), and the two
+writable tiers are fresh per job, so nothing one case writes is visible to the next and no run's
+library, board or state is touched at all. Beside the authored file the job keeps the exact prompt
+it sent and every rejected attempt's source and gate error, in the same `failed/` shape
+`noctis.eval.failed_attempts` already reads.
+
 Once every job has answered, the run **scores itself through the site's declared scorers** and folds
 what they publish into the record's `harness.dials`. There is no flag: a scorer is part of a site's
 declaration, so a site that declares one publishes its reading and a site that declares none writes

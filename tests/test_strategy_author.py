@@ -1173,8 +1173,10 @@ def test_the_retry_hint_ablation_leaves_the_raw_gate_error_alone_in_the_retry_pr
 # ── 9b. No production construction site drives the seam ────────────────────────────────────
 # The ablation dials and the per-attempt timeout are an EVAL-side lever: production composes the
 # shipped prompt and bounds a completion only through the transport. This scans every
-# StrategyAuthor(...) call in the shipped package, so a future wiring that quietly ablated a real
-# research session's prompt fails here.
+# StrategyAuthor(...) call in the shipped package — everywhere except the eval layer, which is the
+# declared driver of the seam (``noctis.eval.coder_site``, #225) and is not production by the same
+# one-way boundary that keeps the engine from importing it — so a future wiring that quietly
+# ablated a real research session's prompt fails here.
 _ABLATION_KWARGS = frozenset(
     {
         "include_contract_sheet",
@@ -1188,10 +1190,16 @@ _ABLATION_KWARGS = frozenset(
 
 
 def _production_author_call_sites() -> list[tuple[Path, frozenset[str]]]:
-    """Every ``StrategyAuthor(...)`` construction in ``src/noctis``, with the kwargs it passes."""
+    """Every ``StrategyAuthor(...)`` construction in production, with the kwargs it passes.
+
+    ``src/noctis`` minus its ``eval`` package: the benchmark layer exists to vary the composition,
+    so scanning it would assert the opposite of what this test is for.
+    """
     package = Path(__file__).resolve().parents[1] / "src" / "noctis"
     sites: list[tuple[Path, frozenset[str]]] = []
     for path in sorted(package.rglob("*.py")):
+        if path.is_relative_to(package / "eval"):
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             called = isinstance(node, ast.Call) and isinstance(node.func, ast.Name)

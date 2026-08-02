@@ -86,6 +86,7 @@ __all__ = [
     "SITE_CORPORA",
     "SPLIT_WORDS",
     "BenchSeams",
+    "LiveAsk",
     "LiveModelUnavailable",
     "SiteAsk",
     "SiteCorpus",
@@ -300,20 +301,43 @@ def payload_input(settings: Any) -> Callable[[Case], Any]:
 
 
 @dataclass(frozen=True)
+class LiveAsk:
+    """What a site's own live attempt maker is handed — the one place a bench's world is stated.
+
+    A frozen record rather than three arguments, for the reason :class:`SiteAsk` is one: the day an
+    attempt maker needs one more fact is a new field here, not a broken signature at the two places
+    that build one. ``client`` is the seam a test injects; ``None`` means the maker builds its own.
+    """
+
+    settings: Any
+    model: str | None = None
+    client: Any = None
+
+
+@dataclass(frozen=True)
 class SiteAsk:
-    """How one site is asked: the input adapter, and the framing a live call needs.
+    """How one site is asked: the input adapter, and what a live call needs.
 
     ``site_input`` is a factory over the resolved settings (the bench-wide facts an adapter closes
     over — DECIDE's context window, say) returning the per-case adapter the runner's ``site_input``
-    seam takes. ``system`` and ``contract`` are the live half: production's own role framing, and
-    the emit contract this case's reply is validated through (a callable, because DECIDE's frozen
-    cases choose between the primary and the revise-less final ask). Both ``None`` means the site
-    can be planned and rendered but not yet asked live — refused by name, never improvised.
+    seam takes. ``system`` and ``contract`` are the live half of a site whose answer a **forced
+    structured emit** carries: production's own role framing, and the emit contract this case's
+    reply is validated through (a callable, because DECIDE's frozen cases choose between the primary
+    and the revise-less final ask). All ``None`` means the site can be planned and rendered but not
+    yet asked live — refused by name, never improvised.
+
+    ``attempt`` is for the sites a forced emit is simply *not* how they are asked. The coder's ask
+    is an authoring job whose answer the fresh-subprocess write gate judges — no schema, no
+    contract, and a throwaway library to build first — so its row declares its own maker
+    (:func:`noctis.eval.coder_site.coder_attempt`) and :func:`live_attempt` hands the whole live
+    call over rather than approximating it. A row that declares one is asked through it and nothing
+    else; a row that does not takes the generic emit path exactly as before.
     """
 
     site_input: Callable[[Any], Callable[[Case], Any]] = payload_input
     system: str | None = None
     contract: Callable[[AgentSite[Any, Any], Case], EmitContract[Any] | None] | None = None
+    attempt: Callable[[LiveAsk], AttemptFn] | None = None
 
     def emit_contract(
         self, declaration: AgentSite[Any, Any], case: Case
@@ -349,10 +373,62 @@ def _decide_system() -> str:
     return _DECIDE_SYSTEM
 
 
+def _coder_input(settings: Any) -> Callable[[Case], Any]:
+    """The coder's adapter: one case as the authoring job the site's renderer takes.
+
+    The engine it carries reads the *committed* seed library (the shipped ``TEMPLATE.py`` and worked
+    example are half the coder's prompt), so a rendered preview is what a real install sends.
+    """
+    from noctis.eval.coder_site import coder_site_input
+
+    return coder_site_input(settings)
+
+
+def _coder_attempt(ask: LiveAsk) -> AttemptFn:
+    """The coder's live ask: one whole authoring job per attempt, judged by the write gate.
+
+    Assembled here, in this layer's composition root, exactly as the generic live call is: the
+    clients are built once per bench (with the coder's own dials — thinking, sampling — because a
+    bench asking the same model without them measures a configuration nobody ships), and the job
+    itself lives in :mod:`noctis.eval.coder_site`.
+    """
+    from noctis.eval.coder_site import coder_attempt, coder_clients
+
+    clients = coder_clients(ask.settings, model=ask.model, client=ask.client)
+    return coder_attempt(
+        ask.settings,
+        client=clients.client,
+        model=clients.model,
+        fallback_client=clients.fallback,
+        fallback_model=clients.fallback_model,
+    )
+
+
+def _coder_system() -> str:
+    """The coder's role framing, quoted from the engine that ships it rather than restated.
+
+    Declared for the same reason DECIDE's is — a site declaration carries its briefing renderer and
+    not the line of role framing above it — with one honest caveat: the coder's *live* ask composes
+    its whole system prompt inside the engine (role framing, contract sheet, feasibility rules,
+    template, worked example), so this is what the framing IS, never a second copy anything sends.
+    """
+    from noctis.research.author import _ROLE_RULES
+
+    return _ROLE_RULES
+
+
 #: One entry per site that needs more than its payload — the declaration table this module's
 #: docstring describes. A site absent from it is asked with :func:`payload_input` and cannot be
 #: asked live until its row lands here.
 SITE_ASKS: Mapping[str, SiteAsk] = {
+    "coder": SiteAsk(
+        site_input=_coder_input,
+        system=_coder_system(),
+        # No emit contract, on purpose: the write gate is this site's judge, so the coder declares
+        # its own live maker instead of a schema (see :class:`SiteAsk`).
+        contract=None,
+        attempt=_coder_attempt,
+    ),
     "decide": SiteAsk(site_input=_decide_input, system=_decide_system(), contract=_decide_contract),
 }
 
@@ -385,6 +461,7 @@ def _context_window(settings: Any) -> int:
 def live_attempt(
     settings: Any,
     *,
+    site_id: str | None = None,
     model: str | None = None,
     client: Any = None,
     registry: Mapping[str, AgentSite[Any, Any]] | None = None,
@@ -396,7 +473,15 @@ def live_attempt(
     can be built, so an operator learns that the ``[llm]`` extra is missing before a corpus is
     walked rather than once per case. ``client`` is the seam a test injects; production leaves it
     ``None`` and gets :func:`~noctis.research.llm.client_for`'s.
+
+    ``site_id`` is what a bench already knows — it measures exactly one site — and it is what lets a
+    site whose ask is not a forced structured emit declare its own maker (:attr:`SiteAsk.attempt`).
+    Left unstated, every case takes the generic emit path, resolved per case as before.
     """
+    if site_id is not None:
+        declared = site_ask(site_id, asks).attempt
+        if declared is not None:
+            return declared(LiveAsk(settings=settings, model=model, client=client))
     from noctis.research.llm import (
         _client_blocked,
         client_for,
