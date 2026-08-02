@@ -305,8 +305,13 @@ class FakeToolbox:
         sweep_results=None,
         exhausted=(),
         max_author_calls=12,
+        capture=None,
     ):
         self.exhausted = FakeExhausted(exhausted)
+        # The coder-site capture store (#184), or None — the latched-off case, where nothing is
+        # captured and the AUTHOR row carries no hashes.
+        self.capture = capture
+        self.captured: list[tuple] = []
         self.promotions = 0
         self.rejections = 0
         self.author_calls = 0
@@ -352,6 +357,16 @@ class FakeToolbox:
         new brief could still start. Mirrors the real toolbox — the negation of the ceiling the
         write gate refuses a brief on."""
         return self.author_calls < self.max_author_calls
+
+    def capture_brief(self, brief, spec=None):
+        """The coder-site capture seam the driver's AUTHOR stage calls (#184). Runs the REAL
+        capture logic over an injected store — only the store is faked — so the hashes the ledger
+        row records are the ones production would record. With no store (the default) it captures
+        nothing and returns no hashes, exactly like a store whose fail-safe latch has tripped."""
+        from noctis.research.tools import capture_author_inputs
+
+        self.captured.append((brief, spec))
+        return {} if self.capture is None else capture_author_inputs(self.capture, brief, spec)
 
     def result_brief(self, result):
         """The gate-facing slice the driver's tool-line emitter prints — a small honest subset of
@@ -759,6 +774,69 @@ def test_candidate_trail_surfaces_the_gated_oracle(tmp_path):
     trail = ledger.candidate_trails()[0]
     assert trail.oracle == ("rally", "selloff_flat")
     assert trail.to_dict()["oracle"] == ["rally", "selloff_flat"]
+
+
+# ── 1c. coder-site capture: the brief + spec suite persisted, the AUTHOR row names them (#184) ─
+def test_author_stage_row_references_the_captured_brief_and_spec(tmp_path):
+    # A post-mortem can show what was ASKED for beside what came back: the AUTHOR ledger row
+    # carries the brief's content hash, and that hash fetches the exact brief the write tool was
+    # given from the run's qa/ capture area — with the compiled fixed oracle captured beside it.
+    from noctis.observability.capture import CaptureStore
+    from noctis.strategies.scenario_spec import spec_from_json
+
+    store = CaptureStore(tmp_path / "qa" / "capture")
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox(capture=store)
+    ledger = SessionLedger(tmp_path, "s-capture")
+
+    _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    author_stage = next(s for s in ledger.stages() if s.stage == "author")
+    body = store.read("author-brief", author_stage.brief_sha256)
+    assert body is not None
+    assert json.loads(body) == box.writes[0]["brief"]  # the very brief the coder was briefed with
+    spec_body = store.read("author-spec", author_stage.spec_sha256)
+    assert spec_body is not None
+    assert spec_from_json(spec_body) == _SPEC_SUITE  # the fixed oracle it was gated against
+    assert author_stage.detail.get("oracle") == ["rally", "selloff_flat"]  # unchanged
+
+
+def test_a_failed_authoring_job_still_leaves_its_brief_on_disk(tmp_path):
+    # The post-mortem case that motivates the story: the write gate rejected the draft, so the
+    # brief is exactly what an operator needs — and it is captured whatever the outcome.
+    from noctis.observability.capture import CaptureStore
+
+    store = CaptureStore(tmp_path / "qa" / "capture")
+    episodes = Episodes([formulate_ok()], [])
+    rejected = {"error": "validation failed: bad scenario window"}
+    box = FakeToolbox(write_result=rejected, capture=store)
+    ledger = SessionLedger(tmp_path, "s-capture-failed")
+
+    _drive(episodes, box, max_episodes=1, ledger=ledger)
+
+    author_stage = next(s for s in ledger.stages() if s.stage == "author")
+    body = store.read("author-brief", author_stage.brief_sha256)
+    assert json.loads(body) == box.writes[0]["brief"]
+
+
+def test_latched_capture_leaves_the_author_stage_unharmed(tmp_path):
+    # Capture is strictly secondary: with the store latched off (nothing captured) authoring runs
+    # exactly as before and the AUTHOR row simply omits the hashes — never a name for a body that
+    # was never written.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()  # no capture store ⇒ capture_brief captures nothing, like a latched store
+    ledger = SessionLedger(tmp_path, "s-capture-off")
+
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    author_stage = next(s for s in ledger.stages() if s.stage == "author")
+    assert author_stage.brief_sha256 is None and author_stage.spec_sha256 is None
+    (record,) = [r for r in ledger.records() if r.get("stage") == "author"]
+    assert "brief_sha256" not in record and "spec_sha256" not in record
+    # The authoring job itself is untouched: the file was written and the candidate reached a
+    # verdict exactly as it does with capture on.
+    assert box.writes and box.rejects
+    assert summary.rejections == 1
 
 
 def test_warmup_too_large_ends_the_strategy_in_a_refined_brief(tmp_path):
@@ -2527,13 +2605,14 @@ class FakeHugeWarmupCoder:
         return Turn(text=block, tool_calls=[], stop_reason="end_turn", usage={})
 
 
-def _emit(name: str, payload: dict) -> Turn:
+def _emit(name: str, payload: dict, *, served_model: str = "") -> Turn:
     call = ToolCall(id="c", name=name, arguments=payload)
     return Turn(
         text="",
         tool_calls=[call],
         stop_reason="tool_use",
         usage={"input_tokens": 6, "output_tokens": 4},
+        served_model=served_model,
     )
 
 
@@ -2730,6 +2809,132 @@ def test_end_to_end_episodic_session_produces_a_gated_verdict_and_a_complete_led
     verdicts = ledger.verdicts()
     assert len(verdicts) == 1 and verdicts[0].verdict == "reject"
     assert ledger.session_end() is not None
+
+
+def test_end_to_end_episode_rows_record_the_served_model_beside_the_alias(tmp_path):
+    """Served-model provenance end to end (#181): the seam reports which model answered each
+    completion, and every episode row the driver writes carries it beside the requested alias —
+    so a session served by two different models under one alias is detectable from the ledger
+    alone, with no other artifact."""
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    ledger = SessionLedger(box.state_dir, session_id="ep-served-model")
+    client = FakeEpisodeClient(
+        [
+            _emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD, served_model="gpt-5-2026-04-01"),
+            _emit(_DECIDE_TOOL, _REJECT_PAYLOAD, served_model="gpt-5-2026-06-14"),
+        ]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide, _discover = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+
+    rows = [(e.stage, e.model, e.served_model) for e in ledger.episodes()]
+    assert rows == [
+        ("formulate", "fake/model", "gpt-5-2026-04-01"),
+        ("decide", "fake/model", "gpt-5-2026-06-14"),
+    ]
+
+
+def _capture_session(tmp_path, session_id: str):
+    """One real end-to-end episodic session (formulate → … → decide) through the production
+    ``make_episodes`` wiring, returning the toolbox, the ledger, the client, and the summary — the
+    harness the episodic-site capture assertions (#185) read."""
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    ledger = SessionLedger(box.state_dir, session_id=session_id)
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide, _discover = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+    return box, ledger, client, summary
+
+
+def test_end_to_end_episode_rows_reference_the_rendered_briefing_and_its_contract(tmp_path):
+    """Episodic-site capture (#185): every judgment episode leaves the briefing it was actually
+    sent on disk, and its row names both that body (by content hash) and the emit contract that
+    answered it — so a past episode is replayable as a benchmark case rather than a summary of
+    one."""
+    box, ledger, client, _ = _capture_session(tmp_path, "ep-capture")
+
+    rows = ledger.episodes()
+    assert [(e.stage, e.contract) for e in rows] == [
+        ("formulate", _FORMULATE_TOOL),
+        ("decide", _DECIDE_TOOL),
+    ]
+    # Round trip: the hash on the row fetches the EXACT string the runner handed the client.
+    sent = [messages[0]["content"] for messages in client.calls]
+    assert [box.capture.read("episode-briefing", e.input_sha256) for e in rows] == sent
+    assert "MARKET ECONOMICS" in sent[0]  # a real rendered briefing, not a placeholder
+
+
+def test_end_to_end_episodes_under_identical_knobs_share_one_knob_sidecar(tmp_path):
+    """The knob snapshot is content-addressed, so a session's episodes under one configuration
+    name ONE body: the row attributes the call without a per-episode config dump — and the
+    snapshot is an explicit allowlist of run-shaping fields, never a serialized Settings (no
+    secret can reach a captured body, AGENTS.md rule 6)."""
+    box, ledger, _, _ = _capture_session(tmp_path, "ep-knobs")
+
+    hashes = {e.knobs_sha256 for e in ledger.episodes()}
+    assert len(hashes) == 1  # two episodes, identical knobs …
+    assert len(list((box.capture.root / "episode-knobs").iterdir())) == 1  # … one sidecar
+    body = box.capture.read("episode-knobs", hashes.pop())
+    assert json.loads(body) == {
+        "context_window": 10_000_000,
+        "max_tokens": 2048,
+        "model": "fake/model",
+        "retries": 2,
+    }
+
+
+def test_end_to_end_latched_capture_leaves_the_episodes_unharmed(tmp_path, monkeypatch):
+    """Capture is strictly secondary: with the store latched off the session still formulates,
+    authors, optimizes and reaches a gated verdict, and the rows simply omit the capture fields —
+    never a name for a body that was never written."""
+    real = Path.write_text
+    capture_root = tmp_path / "qa" / "capture"
+
+    def failing(self: Path, *args: object, **kwargs: object):
+        if str(self).startswith(str(capture_root)):
+            raise OSError("simulated disk failure on the capture store's write")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+    box, ledger, _, summary = _capture_session(tmp_path, "ep-capture-off")
+
+    assert box.capture.root == capture_root and box.capture.disabled
+    rows = ledger.episodes()
+    assert [e.stage for e in rows] == ["formulate", "decide"]
+    assert all(e.input_sha256 is None and e.knobs_sha256 is None for e in rows)
+    for record in [r for r in ledger.records() if r.get("event") == "episode"]:
+        assert not {"input_sha256", "knobs_sha256"} & set(record)
+    # The session itself is untouched: a real candidate reached a real gated verdict.
+    assert summary.rejections == 1 and summary.undecided == []
 
 
 def test_end_to_end_digit_leading_class_tag_reaches_the_gate_with_a_valid_name(tmp_path):

@@ -62,7 +62,10 @@ involvement.
   and committed through ``toolbox.tool_write_strategy(brief=…)``; the coder author engine,
   fresh-subprocess validation, and thesis journaling all live behind that one gated method. (Brief
   authoring needs the coder engine — ``research.agent.coder_model``; without it the write is
-  refused and the strategy is skipped, exactly like any other author failure.)
+  refused and the strategy is skipped, exactly like any other author failure.) The brief and the
+  compiled fixed oracle are **captured** before the job is spent (#184) — sidecar bodies in the
+  run's ``qa/`` capture area, referenced from the AUTHOR ledger row by content hash — so a
+  post-mortem reads what was asked for beside the attempt that came back.
 * **OPTIMIZE** — the v1 multi-fidelity tuning recipe (#70), run with **zero LLM calls** entirely
   through the gated toolbox methods (:func:`_optimize_stage`): a full-panel **baseline** backtest →
   a **cheap** exploration sweep (a subset of the fit panel at a truncated recent window) → a
@@ -112,6 +115,15 @@ naming exactly what was wrong) before the stage's own failed-episode policy appl
 Each check's outcome rides the ledger's ``episode`` line (a ``checks`` payload of
 ``{check, result}`` — ``reask`` when it earned the correction, ``exhausted`` when it fired again),
 so which check fired and how its re-ask resolved is visible to reports.
+
+**Every episode records the question it was asked (#185).** The episode wiring
+(:func:`make_episodes`) captures the *rendered briefing verbatim* and a small knob snapshot
+(model, output ceiling, retry bound, context window) as sidecars in the run's ``qa/`` capture
+area before it spends the call, and the ``episode`` line names both by content hash beside the
+emit contract that answered it — so a past episode is replayable bit-identically as a benchmark
+case instead of surviving only as an outcome. Content addressing dedupes: a whole session under
+one configuration leaves one knob sidecar. Capture is strictly secondary — a latched store
+returns no hash, the row omits the fields, and the session is untouched.
 
 **The per-stage failed-episode policies (honest, documented, and deterministically tested).**
 
@@ -170,10 +182,10 @@ import json
 import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from noctis.data.types import ns_to_date, t1_boundary_ns
 from noctis.engine.research import ResearchSummary, StopEvent
@@ -943,6 +955,10 @@ FormulateEpisode = Callable[..., EpisodeResult[FormulateOutput]]
 DecideEpisode = Callable[..., EpisodeResult[DecideOutput]]
 DiscoverEpisode = Callable[..., EpisodeResult[DiscoverOutput]]
 
+# The emitted record one episode returns — bound per call by the shared capture-and-run helper
+# below, so it stays typed across all three episode kinds.
+T = TypeVar("T")
+
 
 def make_episodes(
     *,
@@ -957,7 +973,34 @@ def make_episodes(
     briefing builders. Each call rebuilds its prompt fresh from disk (the ledger tail + shared
     digests), so there is no accumulated transcript to overflow a small window. The runner (which
     holds the LLM client) is injected here, never in the driver — the driver only ever sees these
-    callables."""
+    callables.
+
+    This is also the one site where the *question* an episode asks is entirely in hand — the
+    rendered briefing, the emit contract, and the knobs in force — so it is where episodic capture
+    lives (#185): :func:`_run_captured` persists briefing and knob snapshot before the call and
+    stamps their hashes onto the result, which the driver's ``_record_episode`` writes to the
+    episode row. Capture is strictly secondary; a latched store simply leaves the fields empty."""
+
+    def _run_captured(contract: EmitContract[T], system: str, briefing: str) -> EpisodeResult[T]:
+        """Capture one episode's inputs, run it, and stamp the provenance onto its result.
+
+        Captured **before** the call, so an episode that misfires its whole retry budget (exactly
+        the one a post-mortem cares about) still leaves the briefing it was given on disk. The
+        briefing goes in verbatim — the bytes the runner receives, so a replay is bit-identical —
+        and the knob snapshot is the runner's own resolved :meth:`~EpisodeRunner.knobs` plus the
+        context window that shaped the briefing's budget. Identical knobs hash identically, so a
+        whole session's episodes reference one snapshot body.
+        """
+        captured = toolbox.capture_episode(
+            briefing, {**runner.knobs(), "context_window": int(context_window)}
+        )
+        result = runner.run(contract=contract, system=system, briefing=briefing)
+        return replace(
+            result,
+            contract=contract.name,
+            input_sha256=captured.get("input_sha256", ""),
+            knobs_sha256=captured.get("knobs_sha256", ""),
+        )
 
     def formulate(*, corrective: str | None = None) -> EpisodeResult[FormulateOutput]:
         briefing = formulate_briefing(
@@ -965,7 +1008,7 @@ def make_episodes(
         )
         if corrective:
             briefing = f"{briefing}\n\n{_FORMULATE_CORRECTIVE_HEADER}\n{corrective}"
-        return runner.run(contract=FORMULATE_CONTRACT, system=_FORMULATE_SYSTEM, briefing=briefing)
+        return _run_captured(FORMULATE_CONTRACT, _FORMULATE_SYSTEM, briefing)
 
     def decide(
         strategy: str, *, corrective: str | None = None, final: bool = False
@@ -978,7 +1021,7 @@ def make_episodes(
         if corrective:
             briefing = f"{briefing}\n\n{_CORRECTIVE_HEADER}\n{corrective}"
         contract = DECIDE_FINAL_CONTRACT if final else DECIDE_CONTRACT
-        return runner.run(contract=contract, system=_DECIDE_SYSTEM, briefing=briefing)
+        return _run_captured(contract, _DECIDE_SYSTEM, briefing)
 
     def discover(
         fo: FormulateOutput,
@@ -1002,7 +1045,7 @@ def make_episodes(
         )
         if corrective:
             briefing = f"{briefing}\n\n{_DISCOVER_CORRECTIVE_HEADER}\n{corrective}"
-        return runner.run(contract=DISCOVER_CONTRACT, system=_DISCOVER_SYSTEM, briefing=briefing)
+        return _run_captured(DISCOVER_CONTRACT, _DISCOVER_SYSTEM, briefing)
 
     return formulate, decide, discover
 
@@ -1925,6 +1968,18 @@ def run_episodic_research(
             # the shape the price table bills, journaled so spend is derived from the ledger and
             # never from a counter.
             usage=result.usage,
+            # What actually answered, beside the alias that was asked for (#181): the provider may
+            # move a dated snapshot under one alias mid-session, and the ledger is where that
+            # becomes visible. Empty (a backend that names none) records nothing at all.
+            served_model=result.served_model or None,
+            # What was ASKED, beside how it went (#185): the captured briefing's content hash, the
+            # emit contract that answered it, and the hash of the knob snapshot in force — the
+            # triple that makes this episode replayable as a benchmark case. Stamped by the
+            # capturing episode wiring (:func:`make_episodes`); empty on a hand-built result or a
+            # latched capture store, and then simply omitted from the row.
+            input_sha256=result.input_sha256 or None,
+            contract=result.contract or None,
+            knobs_sha256=result.knobs_sha256 or None,
         )
 
     while True:
@@ -2005,11 +2060,25 @@ def run_episodic_research(
         # canonical identity from the FORMULATE spec (never a second rendering).
         oracle = [s.name for s in fo.scenario_spec.scenarios]
         emit_stage(AUTHOR, name, oracle=oracle)
-        ledger.record_stage(AUTHOR, strategy=name, detail={"oracle": oracle})
+        # What the coder is ASKED for is captured before it is spent (#184): the brief and the
+        # compiled fixed oracle land as sidecars in the run's qa/ capture area and the AUTHOR row
+        # references them by content hash, so a post-mortem reads the brief beside the attempt it
+        # produced (the failed-attempt store's "what came back"). Captured up front, so a job that
+        # never lands still leaves its brief on disk. A hash the store did not return — capture
+        # latched off — is simply absent, and the row omits the field.
+        brief = _brief_from_formulate(fo, symbols)
+        captured = toolbox.capture_brief(brief, fo.scenario_spec)
+        ledger.record_stage(
+            AUTHOR,
+            strategy=name,
+            detail={"oracle": oracle},
+            brief_sha256=captured.get("brief_sha256"),
+            spec_sha256=captured.get("spec_sha256"),
+        )
         write = _invoke(
             toolbox.tool_write_strategy,
             name=name,
-            brief=_brief_from_formulate(fo, symbols),
+            brief=brief,
             class_tag=fo.class_tag,
             thesis=fo.thesis,
             parent_thesis=fo.parent_thesis,

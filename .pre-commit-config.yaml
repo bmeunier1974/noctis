@@ -42,6 +42,16 @@ repos:
         pass_filenames: false
         files: ^(src/noctis/|strategies/|mandate/|MEMORY\.seed\.md|engine_fingerprint\.json)
 
+      # The prompt-asset ratchet, its twin on a different clock: a prompt change fails until the
+      # newest docs/prompt-changelog.md entry names the site it moved. Scoped to the prompt-bearing
+      # modules plus the record and the changelog itself.
+      - id: prompt-fingerprint
+        name: prompt fingerprint (a prompt change needs a changelog entry)
+        entry: python scripts/prompt_fingerprint.py --check
+        language: system
+        pass_filenames: false
+        files: ^(src/noctis/research/|docs/prompt-changelog\.md|prompt_fingerprint\.json)
+
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v2.1.0
     hooks:

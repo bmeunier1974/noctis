@@ -54,5 +54,12 @@ jobs:
       - name: Engine fingerprint ratchet
         run: uv run --no-sync python scripts/engine_fingerprint.py --check
 
+      # The prompt-asset ratchet, a separate artifact on a separate clock: recompute the per-site
+      # prompt hashes and compare them with the committed prompt_fingerprint.json. Any site's drift
+      # FAILS here until the newest docs/prompt-changelog.md entry names that site, so a prompt
+      # change is a visible event. Exit code and message: noctis.observability.prompt_ratchet.
+      - name: Prompt fingerprint ratchet
+        run: uv run --no-sync python scripts/prompt_fingerprint.py --check
+
       - name: Build package
         run: uv build

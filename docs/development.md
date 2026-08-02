@@ -74,6 +74,10 @@ uv run pre-commit run --all-files # all quality gates at once
 uv run python scripts/engine_fingerprint.py          # the engine fingerprint ratchet (below)
 uv run python scripts/engine_fingerprint.py --write  # regenerate engine_fingerprint.json
                                                      # (refuses an undeclared arbiter move)
+
+uv run python scripts/prompt_fingerprint.py          # the prompt fingerprint ratchet (below)
+uv run python scripts/prompt_fingerprint.py --write  # regenerate prompt_fingerprint.json
+                                                     # (refuses an undeclared prompt change)
 ```
 
 ## The engine fingerprint ratchet
@@ -144,6 +148,73 @@ nothing to compare against, and that is how the baseline is created in the first
 
 Files outside the allowlist in `COMPONENT_PATHS` — docs, tests, the README, an operator's
 gitignored mandate — move no digest and never fire the check.
+
+## The prompt fingerprint ratchet
+
+`prompt_fingerprint.json` (repo root) is the same idea for what the model is *told*: one content
+hash per LLM call site, plus a digest per allowlisted file under it. The hashes come from
+`src/noctis/observability/prompt_id.py` (`site_digest(site)` is the pure read a future benchmark
+record's key uses); the check lives in `src/noctis/observability/prompt_ratchet.py` and runs in
+**CI** and in **pre-commit**, exactly like the engine one.
+
+It is a **separate artifact on a separate clock**, and deliberately so: prompts and arbiter
+behaviour drift independently, so a prompt rewrite must not read as "the judge moved" and a
+threshold change must not read as "the model was told something new".
+
+| Site | Assets |
+|---|---|
+| `author` — the coder site's brief and the contract sheet it must satisfy | `research/author.py`, `research/contract_sheet.py`, `research/digests.py` |
+| `briefings` — the rendered briefings that are the episodic stages' user turns | `research/briefings.py`, `research/digests.py` |
+| `conversation` — the conversation loop's system prompt | `research/prompt.py`, `research/digests.py` |
+| `distill` — the memory distiller's summarization prompt | `research/distill.py` |
+| `episodic` — the driver's per-stage system texts and emit contracts | `research/driver.py`, `research/digests.py` |
+| `ideation` — the seeded-idea prompt | `research/ideation.py` |
+
+`research/digests.py` renders facts four of those prompts embed, so it is listed under each of
+them and its edit moves all four hashes. Over-partitioning is the accepted direction; silence is
+the failure this ratchet exists to end. There is **no tier here** — every site is the same kind of
+thing, so every drift is the same kind of event, and nothing warns-and-passes.
+
+**The declared-change rule** has two halves and needs both: the newest entry in
+[`docs/prompt-changelog.md`](prompt-changelog.md) must *name the drifted site* on its heading line
+(`## 2026-08-01 — sites: author, ideation`), **and** that entry must have arrived after the
+committed record was written (the record stores the digest of the entry it was regenerated
+against). A nameless entry declares nothing, and yesterday's entry is a standing permission rather
+than a declaration.
+
+So, when you change a prompt:
+
+```bash
+# 1. add a dated entry at the top of docs/prompt-changelog.md naming the site(s) that moved,
+#    and what changed — the hash has to read back to a sentence
+# 2. regenerate the record, and commit it in the SAME PR
+uv run python scripts/prompt_fingerprint.py --write
+```
+
+**Step 1 is not optional, and `--write` enforces that**: regenerating rewrites every site at once,
+so it **refuses to regenerate** undeclared drift — it writes nothing, exits 1, and prints the
+declare-or-restore guidance plus its refusal.
+
+```text
+$ uv run python scripts/prompt_fingerprint.py --write
+FAIL  prompt fingerprint ratchet (prompt_fingerprint.json)
+  undeclared prompt drift: author. A prompt change must arrive with its explanation — add a dated
+  entry to the top of docs/prompt-changelog.md whose heading names the site(s), e.g.
+  "## 2026-08-01 — sites: author" — or restore the wording
+  author (UNDECLARED): 0a9c1e0f8b21d735 -> 7d45608deb971291
+      src/noctis/research/author.py
+  newest docs/prompt-changelog.md entry: 2026-07-14 — sites: distill
+  refusing to regenerate: --write cannot be the way an undeclared prompt change gets recorded
+```
+
+That last line is there because "I wrote an entry and it still fails" is the question this tool
+gets asked: it names the entry the check actually read, so a heading inside a code fence, a
+misspelled site or a `sites:` marker left off is visible rather than mystifying.
+
+Everything else stays a single command: drift the changelog declares (the record had simply not
+caught up), no drift at all, and a missing or unreadable record — that is how the baseline is
+created. A changelog edit on its own never fails the check: nothing the model is told has moved,
+and failing there would push you to regenerate, consuming the entry you had just written.
 
 ## Dev scripts
 

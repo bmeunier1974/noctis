@@ -24,6 +24,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from noctis.observability.capture import CAPTURE_DIRNAME, CaptureStore
 from noctis.research import websearch
 from noctis.research.llm import WEB_SEARCH_TOOL_TYPE, Turn, client_for, effective_web_search
 from noctis.strategies.base import replay_targets
@@ -44,6 +45,12 @@ logger = logging.getLogger("noctis.ideation")
 
 _TOOL_NAME = "emit_strategies"
 _MAX_TOKENS = 8000
+
+# The capture kind this site writes (story #186, epic #168): the prompt one ideation round
+# assembled, stored verbatim as a ``qa/`` sidecar. The legacy loop this round runs in writes no
+# ledger or journal row of its own, so the sidecar's kind + content hash IS the lookup key — a
+# batch of seeded theses is traced back to what the model was shown by reading it.
+PROMPT_CAPTURE_KIND = "ideation-prompt"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -269,6 +276,7 @@ def propose_specs(
     client,
     web_search: bool = False,
     max_web_searches: int = 5,
+    capture: CaptureStore | None = None,
 ) -> list[StrategySpec]:
     """Ask the LLM for ``n`` new specs; return only those that validate AND pass the parity gate.
 
@@ -280,7 +288,13 @@ def propose_specs(
     else) where the provider lacks the capability. Forcing the emit tool would skip the search,
     so with web search active the emit tool is *offered* (``tool_choice`` auto) and the prompt
     requires the agent to finish by calling it; if it never does, ``_extract_specs`` yields
-    ``[]``."""
+    ``[]``.
+
+    ``capture`` (story #186) is the run's sidecar area: given one, the assembled prompt is
+    persisted **verbatim** under :data:`PROMPT_CAPTURE_KIND` *before* the exchange, so a round
+    that mints nothing — a refusal, a provider outage — still leaves on disk exactly what the
+    model was shown. Capture is strictly secondary: no store, or a store latched off after a
+    write failure, changes nothing about the round."""
     if client is None or n <= 0:
         return []
     emit_tool = {
@@ -311,12 +325,17 @@ def propose_specs(
             )
         )
         tool_choice = None
+    prompt = _build_prompt(context, n, web_search=web_search_active or use_client_search)
+    # Capture BEFORE the exchange: the round a post-mortem cares about is the one that came back
+    # empty, and its prompt must outlive it. A latched store returns None and is simply ignored.
+    if capture is not None:
+        capture.store(PROMPT_CAPTURE_KIND, prompt)
     try:
         turn = _run_ideation_call(
             client,
             tools=tools,
             tool_choice=tool_choice,
-            prompt=_build_prompt(context, n, web_search=web_search_active or use_client_search),
+            prompt=prompt,
             max_web_searches=max_web_searches if use_client_search else 0,
         )
     except Exception as exc:  # noqa: BLE001 — ideation is best-effort; never crash research
@@ -367,7 +386,12 @@ class Ideator:
     ``run(iteration)`` proposes on the seed round (``iteration == 0``) and every ``cadence``
     iterations thereafter; each admitted spec is registered as a family (persisted to
     ``state/specs.json``), added to the proposer's rotation (so Optuna starts tuning it), and
-    noted in memory. Returns the family names minted this call (``[]`` when idle or clientless)."""
+    noted in memory. Returns the family names minted this call (``[]`` when idle or clientless).
+
+    ``capture`` is the sidecar area each round's assembled prompt lands in (#186) — a
+    constructor seam, like the toolbox's, so the composition root (or a test) points it
+    elsewhere; :func:`build_ideator` roots it in the run's own ``qa/`` area. ``None`` captures
+    nothing, which is what every pre-#186 constructor gets."""
 
     def __init__(
         self,
@@ -379,6 +403,7 @@ class Ideator:
         proposer,
         memory,
         state_dir: str | Path,
+        capture: CaptureStore | None = None,
     ) -> None:
         self.client = client
         self.config = config
@@ -387,6 +412,7 @@ class Ideator:
         self.proposer = proposer
         self.memory = memory
         self.state_dir = state_dir
+        self.capture = capture
 
     def _should_run(self, iteration: int) -> bool:
         if self.client is None or not getattr(self.config, "enabled", True):
@@ -413,6 +439,7 @@ class Ideator:
             client=self.client,
             web_search=bool(getattr(self.config, "web_search", True)),
             max_web_searches=int(getattr(self.config, "max_web_searches", 5)),
+            capture=self.capture,
         )
         minted: list[str] = []
         for spec in specs:
@@ -445,14 +472,25 @@ class Ideator:
 # Wiring helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def build_ideator(
-    *, settings, registry, families: FamilyRegistry, proposer, memory, state_dir: str | Path
+    *,
+    settings,
+    registry,
+    families: FamilyRegistry,
+    proposer,
+    memory,
+    state_dir: str | Path,
+    capture: CaptureStore | None = None,
 ) -> Ideator:
     """Construct the :class:`Ideator` from settings; clientless when no key/extra present.
 
     ``ideation.model`` rides the same provider seam grammar as ``research.model`` (#10): a bare
     id (``claude-opus-4-8``) or a ``provider/model`` string. Any provider works — the emit tool
     is an ordinary function tool — and web-search grounding auto-disables where the provider
-    lacks it (:func:`propose_specs`)."""
+    lacks it (:func:`propose_specs`).
+
+    ``capture`` defaults to the run's own gitignored ``qa/capture`` area — the same tree the
+    toolbox's store uses, so every capture site in a run writes to one place and one cap bounds
+    the lot (#186)."""
     config = settings.ideation
     client = client_for(settings, config.model) if config.enabled else None
     return Ideator(
@@ -463,4 +501,5 @@ def build_ideator(
         proposer=proposer,
         memory=memory,
         state_dir=state_dir,
+        capture=capture or CaptureStore(Path(settings.qa_dir) / CAPTURE_DIRNAME),
     )

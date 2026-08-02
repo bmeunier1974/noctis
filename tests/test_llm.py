@@ -14,6 +14,7 @@ from noctis.research.llm import (
     ClientStatus,
     LiteLLMClient,
     ToolCall,
+    Turn,
     _key_for,
     _turn_from_openai,
     _usage_from_openai,
@@ -209,6 +210,35 @@ def test_turn_surfaces_reasoning_content():
         choices=[SimpleNamespace(message=bare, finish_reason="stop")], usage=None
     )
     assert _turn_from_openai(resp).reasoning == ""
+
+
+def test_turn_carries_the_served_model_the_provider_reported():
+    """Provenance (#181): the alias we ask for ("openai/gpt-5") is not the model that answered.
+    LiteLLM reports the served id on ``resp.model``; it rides the neutral Turn so a caller can
+    record what actually served the completion beside what it requested."""
+    msg = SimpleNamespace(content="hi", tool_calls=None)
+    resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=msg, finish_reason="stop")],
+        usage=None,
+        model="gpt-5-2026-04-01",
+    )
+    assert _turn_from_openai(resp).served_model == "gpt-5-2026-04-01"
+
+
+def test_turn_served_model_degrades_to_empty_when_the_provider_reports_none():
+    """A backend that reports no served id (a local/OpenAI-compatible server) contributes an
+    empty string — absence is never guessed at from the requested alias."""
+    msg = SimpleNamespace(content="hi", tool_calls=None)
+    bare = SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=None)
+    assert _turn_from_openai(bare).served_model == ""
+
+    nulled = SimpleNamespace(
+        choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=None, model=None
+    )
+    assert _turn_from_openai(nulled).served_model == ""
+
+    # Additive and defaulted: a caller that builds a Turn without it is unaffected.
+    assert Turn(text="", tool_calls=[], stop_reason="end_turn", usage={}).served_model == ""
 
 
 def test_length_finish_is_not_masked():

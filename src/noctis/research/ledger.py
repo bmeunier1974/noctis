@@ -3,9 +3,11 @@
 ``state/sessions/<session_id>.jsonl`` holds one JSON line per session event: the session
 opening (``session_start`` — mandate, budgets, models), one motivating idea per formulate
 (``thesis``, with the same ``parent_thesis`` / ``pivot_rationale`` lineage the experiment
-journal records), each stage transition (``stage``), one line per model judgment
+journal records), each stage transition (``stage`` — the AUTHOR one also referencing the brief
+and compiled spec suite it captured, by content hash), one line per model judgment
 (``episode`` — stage, model, tokens, misfires, outcome, escalated, plus per-misfire
-diagnostics when any fired, #102), each spent verdict
+diagnostics when any fired, #102, and the question it was asked: the captured briefing's hash,
+the emit contract, and the knob snapshot's hash, #185), each spent verdict
 (``verdict``, carrying the class-level lesson), and the closing rollup (``session_end``).
 
 The cross-strategy story that today lives in a conversation transcript lives *here* instead,
@@ -42,6 +44,17 @@ def _now_iso() -> str:
 def _opt_str(value: Any) -> str | None:
     """A tolerant optional-text read: absent/empty stays ``None``, anything else stringifies."""
     return str(value) if value else None
+
+
+def _carried_str(value: Any) -> str | None:
+    """A tolerant read that keeps "not carried" and "carried empty" apart: a line that never held
+    the field reads ``None``, a line that held an empty one reads ``""``.
+
+    :func:`_opt_str` collapses both to ``None``, which is right for prose a writer may legitimately
+    leave blank. It is wrong for provenance: "no served model was recorded" (an older line, or one
+    whose provider never reported one) is a different fact from "this line recorded an empty served
+    model", and a reader auditing which model answered must be able to tell them apart."""
+    return None if value is None else str(value)
 
 
 def new_session_id(now: datetime | None = None) -> str:
@@ -104,12 +117,21 @@ class StageTransition:
 
     ``detail`` is an optional structured payload a stage may carry (e.g. the deterministic MATCH
     stage records its screened ``profile``, ``fit`` set, and ``reserved_holdout``); it stays an
-    empty dict for the stages that carry none, so a reader never branches on presence."""
+    empty dict for the stages that carry none, so a reader never branches on presence.
+
+    ``brief_sha256`` / ``spec_sha256`` are the coder site's capture references (#184): the content
+    hashes of the brief the authoring job was given and of the compiled spec suite it was gated
+    against, whose bodies live as sidecars in the run's ``qa/`` capture area
+    (:class:`~noctis.observability.capture.CaptureStore`). Both are ``None`` on a line that carried
+    none — an older line, a stage that captures nothing, or a run whose capture store latched off —
+    which is a different fact from a line that recorded an empty one."""
 
     at: str
     stage: str
     strategy: str | None = None
     detail: dict[str, Any] = field(default_factory=dict)
+    brief_sha256: str | None = None
+    spec_sha256: str | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> StageTransition:
@@ -118,6 +140,8 @@ class StageTransition:
             stage=str(record.get("stage", "")),
             strategy=_opt_str(record.get("strategy")),
             detail=dict(record.get("detail") or {}),
+            brief_sha256=_carried_str(record.get("brief_sha256")),
+            spec_sha256=_carried_str(record.get("spec_sha256")),
         )
 
 
@@ -136,7 +160,21 @@ class Episode:
 
     ``usage`` is the four-field token split behind ``tokens`` (#140), or ``None`` on a line that
     recorded none — *unknown*, never zero. :func:`episode_usage` is the one place that tells an
-    unknown split apart from an episode that honestly spent nothing."""
+    unknown split apart from an episode that honestly spent nothing.
+
+    ``model`` is the model this episode *asked* for (a config alias); ``served_model`` is the id
+    the provider said actually answered it (#181), or ``None`` on a line that carried none — a
+    line written before the field existed, or one whose backend reported no served id. The two
+    together are what make a same-alias/different-served-model event visible from the ledger.
+
+    ``input_sha256`` / ``contract`` / ``knobs_sha256`` name the *question* this episode was asked
+    (#185): the content hash of the rendered briefing the runner received, the emit contract it was
+    answered through, and the content hash of the knob snapshot (model, output ceiling, retry
+    bound, context window) in force — the briefing and snapshot bodies living as sidecars in the
+    run's ``qa/`` capture area (:class:`~noctis.observability.capture.CaptureStore`). Together they
+    are what makes a past episode replayable as a benchmark case. Each is ``None`` on a line that
+    carried none — an older line, or a run whose capture store latched off — which is a different
+    fact from a line that carried an empty one."""
 
     at: str
     stage: str
@@ -149,6 +187,10 @@ class Episode:
     misfire_details: list[dict[str, Any]] = field(default_factory=list)
     note: str | None = None
     usage: dict[str, int] | None = None
+    served_model: str | None = None
+    input_sha256: str | None = None
+    contract: str | None = None
+    knobs_sha256: str | None = None
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Episode:
@@ -167,6 +209,10 @@ class Episode:
             ],
             note=_opt_str(record.get("note")),
             usage=_read_usage(usage),
+            served_model=_carried_str(record.get("served_model")),
+            input_sha256=_carried_str(record.get("input_sha256")),
+            contract=_carried_str(record.get("contract")),
+            knobs_sha256=_carried_str(record.get("knobs_sha256")),
         )
 
 
@@ -585,16 +631,28 @@ class SessionLedger:
         *,
         strategy: str | None = None,
         detail: dict[str, Any] | None = None,
+        brief_sha256: str | None = None,
+        spec_sha256: str | None = None,
     ) -> None:
         """One stage-transition line. ``detail`` is an optional structured payload the stage
         carries (e.g. MATCH's screened profile / fit set / reserved holdout); an absent detail is
         omitted from the record rather than written as an empty object, so a tolerant read
-        distinguishes "no detail" from a stored empty one."""
+        distinguishes "no detail" from a stored empty one.
+
+        ``brief_sha256`` / ``spec_sha256`` are the AUTHOR stage's capture references (#184) — the
+        content hashes of the captured brief and compiled spec suite, whose bodies sit in the run's
+        ``qa/`` capture area. A hash the capture store never returned (nothing captured, or the
+        store latched off) is simply omitted, so the ledger never names a body that is not on disk.
+        """
         record: dict[str, Any] = {"event": "stage", "at": _now_iso(), "stage": stage}
         if strategy is not None:
             record["strategy"] = strategy
         if detail:
             record["detail"] = dict(detail)
+        if brief_sha256:
+            record["brief_sha256"] = str(brief_sha256)
+        if spec_sha256:
+            record["spec_sha256"] = str(spec_sha256)
         self._append(record)
 
     def record_episode(
@@ -610,6 +668,10 @@ class SessionLedger:
         misfire_details: list[dict[str, Any]] | None = None,
         note: str | None = None,
         usage: Mapping[str, int] | None = None,
+        served_model: str | None = None,
+        input_sha256: str | None = None,
+        contract: str | None = None,
+        knobs_sha256: str | None = None,
     ) -> None:
         """One episode line. ``checks`` is the optional driver-side sanity-check payload (story
         #71) — a list of ``{"check", "result"}`` entries for the checks that fired on this
@@ -619,9 +681,15 @@ class SessionLedger:
         diagnosable from the ledger — and ``note`` the episode's last misfire/error text (the
         API-error reason when no misfire detail exists). ``usage`` is the optional four-field token
         split behind ``tokens`` (#140) — the shape a price table can bill, journaled here so the
-        run record derives spend from the ledger instead of from a counter. Every absent/empty
-        optional is omitted from the record rather than written as an empty field, so a tolerant
-        read distinguishes "nothing carried" from a stored empty one."""
+        run record derives spend from the ledger instead of from a counter. ``served_model`` is the
+        id the provider said actually answered this episode (#181), recorded beside the ``model``
+        alias that was requested, so a same-alias/different-served-model event is detectable from
+        the ledger alone. ``input_sha256`` / ``contract`` / ``knobs_sha256`` name the question the
+        episode was asked (#185) — the captured briefing's content hash, the emit contract that
+        answered it, and the hash of the knob snapshot in force — which is what lets a past episode
+        be replayed as a benchmark case. Every absent/empty optional is omitted from the record
+        rather than written as an empty field, so a tolerant read distinguishes "nothing carried"
+        from a stored empty one."""
         record: dict[str, Any] = {
             "event": "episode",
             "at": _now_iso(),
@@ -638,6 +706,14 @@ class SessionLedger:
             record["misfire_details"] = [dict(d) for d in misfire_details]
         if note:
             record["note"] = note
+        if served_model:
+            record["served_model"] = str(served_model)
+        if input_sha256:
+            record["input_sha256"] = str(input_sha256)
+        if contract:
+            record["contract"] = str(contract)
+        if knobs_sha256:
+            record["knobs_sha256"] = str(knobs_sha256)
         if usage is not None:
             record["usage"] = {name: int(usage.get(name, 0) or 0) for name in USAGE_FIELDS}
         self._append(record)

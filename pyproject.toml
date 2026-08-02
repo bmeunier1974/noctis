@@ -32,7 +32,7 @@ dependencies = [
     # Ceiling, not preference: on py3.11 the engine extra can only use
     # nautilus_trader 1.221.0 (1.222+ needs py>=3.12), which caps pandas <3.
     # Bumping this floor to 3.x makes the locked resolution unsatisfiable.
-    "pandas>=3.0.5",
+    "pandas>=2.2.3",
     "pyarrow>=25.0.0",
 ]
 
@@ -40,7 +40,7 @@ dependencies = [
 engine = ["nautilus_trader>=1.221.0"]
 # vectorbt 1.1.0 requires pandas>=3.0.3, which collides with the engine extra's
 # pandas<3 ceiling above; 1.0 is the newest that co-resolves with it.
-research = ["vectorbt>=1.1.0", "optuna>=4.9.0", "quantstats-lumi>=1.1.5"]
+research = ["vectorbt>=1.0", "optuna>=4.9.0", "quantstats-lumi>=1.1.5"]
 data = [
     "databento>=0.82.0",
     "yfinance>=1.5.2",

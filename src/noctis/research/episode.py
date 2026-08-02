@@ -130,6 +130,19 @@ class EpisodeResult(Generic[T]):
     as (story #140) — the only shape a price table can turn into dollars. It is always present
     from this runner (a backend that reports no usage contributes an honest four zeros); ``None``
     exists for the hand-built results of callers that measured nothing.
+
+    ``model`` is the alias the episode *asked* for; ``served_model`` is the id the provider said
+    actually answered — the last completion to report one, i.e. the completion whose payload the
+    episode returned (#181). Empty when no completion named one (a backend that reports none, or
+    an outage that never reached one), never back-filled from the alias.
+
+    ``contract`` / ``input_sha256`` / ``knobs_sha256`` describe the *question*, not the answer
+    (#185): the emit contract the episode was answered through, and the content hashes of the
+    captured briefing and knob snapshot behind it. They are stamped by the caller that captured
+    those inputs — the episodic driver's ``make_episodes``, the one site where the rendered
+    briefing and the knobs in force are both in hand — never by this runner, so a hand-built
+    result (a test fake, a caller that captures nothing) simply carries the empty defaults and
+    its ledger row omits the fields.
     """
 
     outcome: str
@@ -140,6 +153,10 @@ class EpisodeResult(Generic[T]):
     note: str = ""
     misfire_details: tuple[dict[str, str], ...] = ()
     usage: dict[str, int] | None = None
+    served_model: str = ""
+    contract: str = ""
+    input_sha256: str = ""
+    knobs_sha256: str = ""
 
     @property
     def ok(self) -> bool:
@@ -252,6 +269,22 @@ class EpisodeRunner:
         # on top, because each completion is already counted here exactly once.
         self.completions = 0
 
+    def knobs(self, *, model: str | None = None, max_tokens: int | None = None) -> dict[str, Any]:
+        """The knobs one :meth:`run` under these arguments would resolve to — the runner's own
+        answer to "what configuration produced this call?" (#185).
+
+        An explicit, deliberately small allowlist — the requested model alias, the output ceiling,
+        and the retry bound — resolved exactly as :meth:`run` resolves them, so the snapshot a
+        caller captures beside an episode can never drift from the call it describes. It is
+        attribution, not a config dump, and it names only run-shaping values: no client, no
+        credential, nothing a captured body must not hold (AGENTS.md rule 6).
+        """
+        return {
+            "model": model if model is not None else str(getattr(self._client, "model", "")),
+            "max_tokens": int(max_tokens or self._max_tokens),
+            "retries": self._retries,
+        }
+
     def run(
         self,
         *,
@@ -271,12 +304,20 @@ class EpisodeRunner:
         ``model`` labels the ledger line (defaults to the client's own ``model``); ``max_tokens``
         overrides the runner default for this call (a small-context backend compatibility lever).
         """
-        resolved_model = model if model is not None else str(getattr(self._client, "model", ""))
+        # The knobs this call resolves to, read from the one place that resolves them — so the
+        # snapshot a caller captures beside the episode (#185) describes the very call it made.
+        knobs = self.knobs(model=model, max_tokens=max_tokens)
+        resolved_model = str(knobs["model"])
+        resolved_max_tokens = int(knobs["max_tokens"])
         # The episode's running token split — four fields, because they bill at four rates. The
         # total every caller already knows is derived from it (:func:`_total`), so the two can
         # never disagree about what this episode spent.
         usage = dict.fromkeys(_USAGE_FIELDS, 0)
         misfires = 0
+        # The served model of the most recent completion that named one (#181) — on a successful
+        # episode that is the completion whose payload is returned. Stays empty when no completion
+        # reported one; a later silent one never erases an earlier reported id.
+        served_model = ""
         note = ""
         # One bounded {"note", "raw"} per misfire, in attempt order — what each rejected attempt
         # actually saw, persisted with the episode line so an exhausted episode is diagnosable
@@ -301,7 +342,7 @@ class EpisodeRunner:
                     system=system,
                     tools=tools,
                     messages=messages,
-                    max_tokens=max_tokens or self._max_tokens,
+                    max_tokens=resolved_max_tokens,
                     tool_choice=tool_choice,
                 )
             except Exception as exc:  # noqa: BLE001 — an episode never crashes the driver
@@ -317,6 +358,7 @@ class EpisodeRunner:
                         misfires=misfires,
                         note=_reason(exc),
                         misfire_details=tuple(details),
+                        served_model=served_model,
                     )
                 misfires += 1
                 note = stumble.note
@@ -325,6 +367,7 @@ class EpisodeRunner:
                 continue
 
             _accumulate_usage(usage, turn.usage)
+            served_model = turn.served_model or served_model
             self._emit_turn(turn)  # tee think/usage/say for the operator feed (#73)
             payload = _payload_from_turn(turn, contract.name)
             if payload is not None:
@@ -343,6 +386,7 @@ class EpisodeRunner:
                         usage=dict(usage),
                         misfires=misfires,
                         misfire_details=tuple(details),
+                        served_model=served_model,
                     )
             else:
                 # No emit on either transport: the truncation/markup/thinking-only stumbles land
@@ -367,6 +411,7 @@ class EpisodeRunner:
             misfires=misfires,
             note=note,
             misfire_details=tuple(details),
+            served_model=served_model,
         )
 
     def _emit_turn(self, turn: Turn) -> None:
