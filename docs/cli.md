@@ -760,11 +760,38 @@ budget-gated — see [data.md](data.md).
 ## Bench
 
 ```bash
+python -m noctis bench run --site decide --dry-run    # preflight only: print the plan, spend nothing
+python -m noctis bench run --site decide [--split tuning|holdout|all] [--reps N] [--workers N] \
+                           [--model <provider/model>] [--label <name>]
 python -m noctis bench report <bench-id>   # one bench record's reading, straight to stdout
 ```
 
 The bench area is workspace-level (`<workspace>/bench/<bench_id>/bench.json`), run-neutral like the
-data lake, so a bench is addressed by the id it was minted with and never through a run.
+data lake, so a bench is addressed by the id it was minted with and never through a run. Its corpus
+root sits beside it (`<workspace>/cases/<site>/*.yaml`) for the same reason — a corpus is a
+population, not one run's trajectory.
+
+`bench run` **always preflights**. It resolves the site through the registry, loads that site's
+corpus from the cases root, counts the jobs (cases × reps × configurations), prices their ceiling
+under the current pricing table, and prints that plan before anything is asked. A live run then
+hands the very same plan back as the acknowledgement the runner refuses to start without, so a
+spend nobody stated is unreachable through this verb, and `--dry-run` simply stops after the
+printing: no model client is built (no key and no `[llm]` extra are needed), no directory is made,
+nothing is spent. `--workers N` above 1 works the jobs on a pool; the printed `workers:` line states
+the width either way.
+
+The verb names no site. How a case becomes its site's renderer input is a lookup in the eval
+layer's ask table (`src/noctis/eval/bootstrap.py`) — DECIDE's frozen cases are reconstructed into
+the production briefing's own inputs, a site that declares no adapter is asked with the payload its
+cases carry — so every site runs down one code path. A live ask goes through the engine's own LLM
+seam and the site's declared emit contract; a site whose live ask is not declared is **refused**
+rather than asked under an invented system prompt.
+
+Refusals come from the machinery and are rendered as one line: an undeclared `--site` names every
+site that is declared, an absent corpus names the directory it looked in, a `--split` word that
+names no half lists the three it accepts, and a live run with no buildable client names the model
+and why. A finished run prints the bench id, the directory it landed in, and whether it completed —
+address it with `bench report` from there.
 
 `bench report` prints the record's **own** reading: the identity block, the population it measured
 (n, reps per case, and the corpus cases it never scored), whatever the record's `harness.dials`

@@ -2107,6 +2107,49 @@ bench_app = typer.Typer(
 app.add_typer(bench_app, name="bench")
 
 
+@bench_app.command("run")
+def bench_run(
+    site: str = typer.Option(..., "--site", help="Site id to bench, as the registry declares it."),
+    split: str = typer.Option(
+        "all", "--split", help="Corpus half to measure: tuning, holdout, or all."
+    ),
+    reps: int = typer.Option(1, "--reps", help="How many times each case is asked."),
+    workers: int = typer.Option(1, "--workers", help="Jobs in flight at once (1 = sequential)."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preflight only: print the plan, spend nothing."
+    ),
+    model: str = typer.Option(
+        None, "--model", help="provider/model alias to ask (config default)."
+    ),
+    label: str = typer.Option(None, "--label", help="Nickname recorded on the bench record."),
+    config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
+) -> None:
+    """Bench one site's corpus: preflight the spend, print the plan, then run it.
+
+    The plan is always computed and printed first — the cases, the reps, the attempt ceiling and
+    the priced ceiling under the current table — and a live run executes exactly that plan, because
+    the runner refuses to start on a spend nobody acknowledged. `--dry-run` stops after the plan:
+    no model client is built, nothing is written, nothing is spent.
+
+    The verb names no site: the corpus is loaded from `<workspace>/cases/<site>/` through the
+    generic provider, and how a case becomes that site's renderer input is a lookup in the eval
+    layer's ask table, so every site runs down the same path. An undeclared site is refused naming
+    the ones that are declared, and an absent corpus naming the directory it looked in.
+    """
+    from noctis.eval.cli import run_bench  # deferred by contract — see the note above
+
+    run_bench(
+        site,
+        split=split,
+        reps=reps,
+        workers=workers,
+        dry_run=dry_run,
+        model=model,
+        label=label,
+        config=config,
+    )
+
+
 @bench_app.command("report")
 def bench_report(
     bench_id: str = typer.Argument(

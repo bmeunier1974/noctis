@@ -271,6 +271,13 @@ is measured end-to-end by the parity harness instead — see [parity.md](parity.
 for a benchmark record — its hand-bumped `version` plus its prompt-asset hash — comes from
 `src/noctis/eval/identity.py`, the one bridge between the registry and the prompt ratchet above.
 
+**The layer has its own composition root.** `src/noctis/bootstrap.py` may never import the eval
+layer, so the eval layer assembles its own sessions in `src/noctis/eval/bootstrap.py` — the bench
+area and cases root, the execution seam a `--workers` count selects, the site-input adapter table
+(`SITE_ASKS`), and the live attempt callable that asks the configured model through the engine's
+own LLM seam. Assemble a bench there, not in a verb body — the same rule `bootstrap.py` holds the
+engine's entrypoints to, on the other side of the line.
+
 ## Dev scripts
 
 `scripts/` holds dev tools that are deliberately *not* CLI subcommands. One is the ratchet
