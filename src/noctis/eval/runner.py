@@ -35,6 +35,16 @@ acknowledging two cases must not authorize two hundred. The estimate inherits
 :mod:`noctis.research.pricing`'s posture whole — a model the table cannot price yields ``None``
 (rendered ``n/a``), never a confident zero.
 
+**The site scores its own bench, and the runner names no site.** Once every job has answered, the
+runner hands the whole set of :class:`~noctis.eval.site.AnsweredCase`\\ s to each scorer the *site's
+declaration* carries and folds what comes back into ``harness.dials`` — the one subtree a record
+quotes verbatim. That is the whole integration: a site with no scorers writes exactly the record it
+wrote before scoring existed, a site with one publishes its reading beside the composed dials, and
+neither this module nor the ``bench`` verbs contain a line of any site's vocabulary. A reading that
+would overwrite a dial the harness composed is refused (:class:`ConflictingReading`) rather than
+merged, because a record whose ``is_production`` came from a scorer is a record that lies about what
+was asked.
+
 **The record is the pure builder's, or there is no record.** The runner collects
 :class:`~noctis.eval.record.BenchArtifacts`, hands them to :func:`~noctis.eval.record.build`, checks
 the document with :func:`~noctis.eval.record.validate`, and writes ``bench.json`` atomically only if
@@ -75,7 +85,7 @@ from noctis.eval.record import (
     validate,
 )
 from noctis.eval.registry import site
-from noctis.eval.site import AgentSite
+from noctis.eval.site import AgentSite, AnsweredCase
 from noctis.eval.taxonomy import FailureTaxonomy
 from noctis.observability.debug.runid import new_run_id
 from noctis.observability.engine_id import fingerprint
@@ -99,12 +109,14 @@ __all__ = [
     "BenchRun",
     "BenchRunner",
     "CaseArtifacts",
+    "ConflictingReading",
     "InvalidBenchRecord",
     "JobExecutor",
     "SequentialExecutor",
     "SpendPlan",
     "SpendUnacknowledged",
     "UnsafeArtifactName",
+    "WorkedJob",
     "bench_root",
     "engine_stamp",
     "harness_dials",
@@ -163,6 +175,15 @@ class InvalidBenchRecord(ValueError):
 
 class UnsafeArtifactName(ValueError):
     """A case or configuration id that would not stay inside its own directory."""
+
+
+class ConflictingReading(ValueError):
+    """A site's scorer published a dial the harness composition already publishes.
+
+    Refused rather than merged in either direction: the composed dials say what the model was
+    asked, a reading says what its answers earned, and a record in which one silently overwrote the
+    other would misdescribe the very thing it exists to make comparable.
+    """
 
 
 # ── identity and the bench area ───────────────────────────────────────────────────────────
@@ -449,6 +470,20 @@ class BenchJob:
 
 
 @dataclass(frozen=True)
+class WorkedJob:
+    """One job as the executor finished it: the scored run, and the answers it collected.
+
+    The replies travel *beside* the scored run rather than inside it because
+    :class:`~noctis.eval.record.CaseRun` is the metrics module's input type and nothing else —
+    widening it to carry answer text would put a benchmark's evidence in the arithmetic's way. Both
+    halves are plain values, so a pooled worker returns one across the call queue intact.
+    """
+
+    run: CaseRun
+    replies: tuple[str | None, ...] = ()
+
+
+@dataclass(frozen=True)
 class BenchRun:
     """What one finished bench run is: its identity, its directory, its plan and its record."""
 
@@ -572,16 +607,18 @@ class BenchRunner:
         directory = Path(self.bench_root) / bench_id
         directory.mkdir(parents=True)
         jobs = self._jobs(directory, _selected(corpus, split), tuple(configs), reps)
-        runs = self.executor.run(self._work, jobs)
+        worked = self.executor.run(self._work, jobs)
         finished = self.clock()
 
+        runs = tuple(one.run for one in worked)
         # A partial bench must never pass for a whole one: every job worked, and every one of them
         # recorded an attempt. An errored attempt still ran; a job that produced none did not.
-        complete = len(runs) == len(jobs) and all(run.result.ran for run in runs)
+        complete = len(worked) == len(jobs) and all(run.result.ran for run in runs)
         record = self._record(
             corpus,
             bench_id=bench_id,
             runs=runs,
+            answered=_answered(jobs, worked),
             complete=complete,
             configs=tuple(configs),
             split=split,
@@ -600,7 +637,7 @@ class BenchRunner:
 
     # ── one job ──────────────────────────────────────────────────────────────────────────
 
-    def _work(self, job: BenchJob) -> CaseRun:
+    def _work(self, job: BenchJob) -> WorkedJob:
         """Ask one case, keep every artifact it produced, and score nothing.
 
         A raising attempt callable becomes a failed attempt carrying its exception text, never a
@@ -619,6 +656,7 @@ class BenchRunner:
 
         outcomes: list[AttemptOutcome] = []
         served: list[str | None] = []
+        replies: list[str | None] = []
         index: list[Mapping[str, Any]] = []
         for number in range(1, self.max_attempts + 1):
             request = AttemptRequest(
@@ -633,6 +671,7 @@ class BenchRunner:
             answer = self._ask(request)
             outcomes.append(answer.outcome)
             served.append(answer.served_model)
+            replies.append(answer.output)
             index.append(_keep_attempt(job.directory, number, answer))
             if answer.outcome.passed:
                 break
@@ -647,10 +686,13 @@ class BenchRunner:
                 "attempts": list(index),
             },
         )
-        return CaseRun(
-            result=CaseResult(case_id=job.case.case_id, attempts=tuple(outcomes)),
-            config_id=job.config.config_id,
-            served_models=tuple(served),
+        return WorkedJob(
+            run=CaseRun(
+                result=CaseResult(case_id=job.case.case_id, attempts=tuple(outcomes)),
+                config_id=job.config.config_id,
+                served_models=tuple(served),
+            ),
+            replies=tuple(replies),
         )
 
     def _ask(self, request: AttemptRequest) -> Attempt:
@@ -711,6 +753,7 @@ class BenchRunner:
         *,
         bench_id: str,
         runs: Sequence[CaseRun],
+        answered: Sequence[AnsweredCase],
         complete: bool,
         configs: Sequence[ModelConfig],
         split: Split | None,
@@ -729,7 +772,7 @@ class BenchRunner:
                 split=WHOLE_CORPUS if split is None else split.value,
             ),
             harness_hash=harness_hash(self.harness),
-            harness_dials=harness_dials(self.harness),
+            harness_dials=self._dials(corpus, answered),
             runs=tuple(runs),
             label=self.label,
             started_utc=_stamp(started),
@@ -781,6 +824,30 @@ class BenchRunner:
             unpriced_models=_unpriced(table, configs, usage),
         )
 
+    def _dials(self, corpus: Corpus, answered: Sequence[AnsweredCase]) -> dict[str, object]:
+        """The composed harness dials, plus every reading the site's declared scorers add.
+
+        The site-agnostic scoring pass, and the whole of it: each declared scorer is handed every
+        answered case and whatever mapping it returns is folded in verbatim. Nothing here knows what
+        a reading contains — that is the site's business — so a second site's scorer lands in the
+        record the day its declaration carries one, with no edit to this module.
+        """
+        dials = harness_dials(self.harness)
+        for scorer in self._declaration(corpus).scorers:
+            reading = scorer.read(answered)
+            if reading is None:
+                continue
+            clash = sorted(set(reading) & set(dials))
+            if clash:
+                raise ConflictingReading(
+                    f"a scorer of site {corpus.site_id!r} would overwrite the harness dial(s) "
+                    f"{', '.join(repr(name) for name in clash)} — the composition says what was "
+                    "asked and a reading says what the answers earned, so neither may rewrite the "
+                    "other"
+                )
+            dials.update(reading)
+        return dials
+
     def _declaration(self, corpus: Corpus) -> AgentSite[Any, Any]:
         """The site this corpus measures, resolved through the declarations registry."""
         return site(corpus.site_id, self.registry)
@@ -793,6 +860,25 @@ class BenchRunner:
 
 
 # ── the arithmetic and the I/O helpers ────────────────────────────────────────────────────
+
+
+def _answered(jobs: Sequence[BenchJob], worked: Sequence[WorkedJob]) -> tuple[AnsweredCase, ...]:
+    """Every job paired with the answers it collected — the scoring pass's whole input.
+
+    Paired positionally because that is the execution seam's contract: every
+    :class:`JobExecutor` returns results *in job order*, so index ``i`` is job ``i``'s. A short
+    tuple (an executor that dropped work) simply scores what really came back, which is the same
+    posture ``complete`` takes over the same tuple.
+    """
+    return tuple(
+        AnsweredCase(
+            case=job.case,
+            config_id=job.config.config_id,
+            rep=job.rep,
+            replies=one.replies,
+        )
+        for job, one in zip(jobs, worked, strict=False)
+    )
 
 
 def _acknowledge(plan: SpendPlan, acknowledged: SpendPlan | None) -> None:

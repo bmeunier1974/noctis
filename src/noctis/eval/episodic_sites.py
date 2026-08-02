@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from noctis.eval.decide_site import DECIDE_SCORER
 from noctis.eval.harness import HarnessSpec
 from noctis.eval.knobs import SiteKnobs
 from noctis.eval.site import AgentSite
@@ -223,13 +224,16 @@ FORMULATE_SITE: AgentSite[FormulateSiteInput, FormulateOutput] = AgentSite(
 # once the revise budget is spent, is the same site asking the same question with a narrower
 # answer set, so it rides this declaration's ``version``: a change to *either* contract's shape
 # bumps it. Both are named together in :data:`DECIDE_CONTRACTS`.
+#
+# The one filled ``scorers`` slot today: approval-side agreement over a re-run's verdict, scored
+# against what the promotion gates recorded doing with that candidate (#209).
 DECIDE_SITE: AgentSite[DecideSiteInput, DecideOutput] = AgentSite(
     id="decide",
     version=_INITIAL_VERSION,
     contract=DECIDE_CONTRACT,
     render=render_decide,
     knobs=DecideKnobs,
-    scorers=(),
+    scorers=(DECIDE_SCORER,),
 )
 
 # Every contract the decide site's version covers, primary first — the driver's own objects, so a

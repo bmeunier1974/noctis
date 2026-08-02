@@ -19,6 +19,7 @@ import importlib
 import inspect
 from typing import Any
 
+from noctis.eval.decide_site import DECIDE_SCORER
 from noctis.eval.knobs import SiteKnobs
 from noctis.eval.registry import DECLARED_SITES, SITES, site, sites
 from noctis.research.driver import DECIDE_CONTRACT, DISCOVER_CONTRACT, FORMULATE_CONTRACT
@@ -37,6 +38,11 @@ EXPECTED_CONTRACTS: dict[str, EmitContract[Any] | None] = {
     "discover": DISCOVER_CONTRACT,
     "distill": None,
 }
+
+# What each declared site's ``scorers`` slot must carry, by identity — a site absent from here
+# declares none. Filling a slot is the deliberate edit adding a scorer takes: a site that starts
+# scoring itself without a line here is a benchmark growing a judge nobody reviewed.
+EXPECTED_SCORERS: dict[str, tuple[Any, ...]] = {"decide": (DECIDE_SCORER,)}
 
 
 def _registry_docstring() -> str:
@@ -111,7 +117,8 @@ def test_every_declared_site_resolves_end_to_end_against_the_objects_it_binds() 
         assert issubclass(declaration.knobs, SiteKnobs), site_id
         assert declaration.knobs is not SiteKnobs, site_id
 
-        # Scorers arrive with the eval core; today every slot is honestly empty.
-        assert declaration.scorers == (), site_id
+        # Scorers arrive per site, with the epic that can honestly score one. Decide's is the
+        # agreement scorer (#209); every other slot is still honestly empty.
+        assert declaration.scorers == EXPECTED_SCORERS.get(site_id, ()), site_id
 
     assert seen == DECLARED_SITE_IDS

@@ -18,8 +18,10 @@ import sys
 from pathlib import Path
 
 import noctis.eval
+from noctis.eval import guard
 from noctis.eval.guard import (
     EVAL_PACKAGE,
+    LAYER_NAME,
     BoundaryViolation,
     default_package_root,
     eval_layer_importers,
@@ -93,6 +95,71 @@ def test_a_relative_import_of_the_eval_layer_is_a_violation(tmp_path: Path) -> N
     violations = eval_layer_importers(package)
 
     assert [violation.module for violation in violations] == ["noctis.research.tools"]
+
+
+# ── the one exemption: the operator's verb group, deferred (#211) ────────────────────────────
+
+
+def test_the_cli_may_name_the_bench_verb_group_from_inside_a_function_body(tmp_path: Path) -> None:
+    """The whole exemption: one importer, one target, and only where production never loads it."""
+    package = _tree(
+        tmp_path,
+        {"cli.py": "def bench_report() -> None:\n    from noctis.eval.cli import report_bench\n"},
+    )
+
+    assert eval_layer_importers(package) == ()
+
+
+def test_a_module_level_import_of_the_verb_group_in_the_cli_is_still_a_violation(
+    tmp_path: Path,
+) -> None:
+    """Deferred is the point: a top-level import makes every `noctis run` load the eval layer."""
+    package = _tree(tmp_path, {"cli.py": "from noctis.eval.cli import report_bench\n"})
+
+    violations = eval_layer_importers(package)
+
+    assert [violation.module for violation in violations] == ["noctis.cli"]
+
+
+def test_the_cli_may_not_name_any_other_eval_module_even_deferred(tmp_path: Path) -> None:
+    package = _tree(
+        tmp_path, {"cli.py": "def go() -> None:\n    from noctis.eval.runner import BenchRunner\n"}
+    )
+
+    violations = eval_layer_importers(package)
+
+    assert [violation.imported for violation in violations] == ["noctis.eval.runner"]
+
+
+def test_another_engine_module_may_not_name_the_verb_group_even_deferred(tmp_path: Path) -> None:
+    package = _tree(
+        tmp_path,
+        {"research/agent.py": "def go() -> None:\n    from noctis.eval.cli import report_bench\n"},
+    )
+
+    violations = eval_layer_importers(package)
+
+    assert [violation.module for violation in violations] == ["noctis.research.agent"]
+
+
+def test_the_exemption_names_the_module_it_permits_so_the_layer_itself_is_not_reachable(
+    tmp_path: Path,
+) -> None:
+    """``from noctis.eval import cli`` reaches the *layer* first, and the layer is never exempt."""
+    package = _tree(tmp_path, {"cli.py": "def go() -> None:\n    from noctis.eval import cli\n"})
+
+    violations = eval_layer_importers(package)
+
+    assert [violation.imported for violation in violations] == ["noctis.eval"]
+
+
+def test_the_guard_states_the_one_exemption_and_the_shape_it_must_take() -> None:
+    """The rule lives where it would be broken: a contributor reads it in the guard itself."""
+    docstring = " ".join((guard.__doc__ or "").lower().split())
+
+    assert "exempt" in docstring
+    assert f"{EVAL_PACKAGE}.cli" in docstring
+    assert guard.DEFERRED_EXEMPTIONS == {"cli": f"{LAYER_NAME}.cli"}
 
 
 def test_a_module_inside_the_eval_layer_may_import_the_eval_layer(tmp_path: Path) -> None:

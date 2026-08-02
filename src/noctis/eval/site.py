@@ -20,7 +20,9 @@ harness has nothing to look up. This type is that sentence, and nothing more:
   produces, because then production and benchmark would stop exercising the same code.
 * ``knobs`` — the :class:`~noctis.eval.knobs.SiteKnobs` subclass this site accepts, so a harness
   can refuse a bad override before spending money.
-* ``scorers`` — per-site, never shared. Empty until the eval core lands (see :class:`Scorer`).
+* ``scorers`` — per-site, never shared: the site's own reading of a finished bench (see
+  :class:`Scorer`). Empty is the honest default — a site whose answers only the emit contract judges
+  publishes the eval core's figures and adds nothing of its own.
 
 **Declaration-only, and frozen.** Constructing an ``AgentSite`` runs nothing and changes nothing;
 a site is data a harness reads. That is also what keeps the door open for a future DSPy-style
@@ -29,36 +31,73 @@ prompt optimizer: sites as data need no further engine change to become an optim
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeVar
+from typing import Any, Generic, Protocol, TypeVar
 
+from noctis.eval.case import Case
 from noctis.eval.harness import HarnessSpec
 from noctis.eval.knobs import SiteKnobs
 from noctis.research.episode import EmitContract
 
-__all__ = ["AgentSite", "Scorer", "SiteInput", "SiteOutput"]
+__all__ = ["AgentSite", "AnsweredCase", "Scorer", "SiteInput", "SiteOutput"]
 
 # The two halves of a site's shape: what it is asked (a briefing, a brief, a findings history) and
 # what it answers with (the typed record its contract parses, or source text for the coder).
 SiteInput = TypeVar("SiteInput")
 SiteOutput = TypeVar("SiteOutput")
 
-# The placeholder protocol's own parameters. They are covariant because a protocol with no members
-# places no constraint on either half; the real variance is a decision for whoever states the
-# scoring signature (plan 03), which is exactly the decision this story declines to make.
+# The scoring protocol's own parameters. They stay covariant because neither appears in its one
+# member: a scoring pass reads *answers*, which are text a contract has yet to be applied to, so it
+# constrains neither half of the site's shape.
 ScoredInput_co = TypeVar("ScoredInput_co", covariant=True)
 ScoredOutput_co = TypeVar("ScoredOutput_co", covariant=True)
 
 
-class Scorer(Protocol[ScoredInput_co, ScoredOutput_co]):
-    """Forward declaration only — the generic eval core (plan 03) owns and will replace this.
+@dataclass(frozen=True)
+class AnsweredCase:
+    """One finished bench job as a scoring pass sees it: the case asked, and what came back.
 
-    It exists so a site's ``scorers`` slot can be *typed* today while shipping empty: the first
-    real scorers arrive with the DECIDE and coder epics, and their protocol is theirs to state.
-    Deliberately memberless: guessing a scoring signature here would be a decision made in the
-    wrong epic.
+    ``replies`` is one entry per attempt, in the order the runner made them, carrying the answer
+    text it retained (``None`` for an attempt that produced none — a provider that fell over). The
+    retry loop stops at the first pass, so :attr:`settled` — the last of them — is the answer this
+    job actually ended on, and it is the one a scorer grades.
+
+    Deliberately plain values rather than the runner's own types: a pooled bench returns its work
+    across a pickle boundary, and a scoring surface that could not cross one would quietly make
+    ``--workers`` mean something different from ``--workers 1``.
     """
+
+    case: Case
+    config_id: str | None = None
+    rep: int = 1
+    replies: tuple[str | None, ...] = ()
+
+    @property
+    def settled(self) -> str | None:
+        """The reply this job ended on, or ``None`` when it never produced one."""
+        return self.replies[-1] if self.replies else None
+
+
+class Scorer(Protocol[ScoredInput_co, ScoredOutput_co]):
+    """One site's own reading of a finished bench — the numbers only that site knows how to compute.
+
+    The eval core scores what every site shares: whether the ask emitted at all, in how many
+    attempts, at what cost. A *site's* scorer is the other half — DECIDE's approval-side agreement
+    against the labels the promotion gates recorded — and it is per-site, never shared, because that
+    arithmetic is meaningless anywhere else.
+
+    **The one member, and why it is stated here (#213).** This slot shipped memberless as a forward
+    declaration: guessing a scoring signature before a real scorer existed would have been a
+    decision made in the wrong epic. There is now one real scorer and one caller, so the protocol
+    states exactly what that caller needs and nothing more — every answered case in, the reading a
+    record quotes under ``harness.dials`` out, or ``None`` from a scorer with nothing to say. The
+    runner folds whatever comes back into the dials without interpreting it, which is what keeps the
+    bench verbs free of any site's vocabulary.
+    """
+
+    def read(self, answered: Sequence[AnsweredCase]) -> Mapping[str, Any] | None:
+        """This site's reading over one bench's answers, or ``None`` when it has none to add."""
 
 
 @dataclass(frozen=True)

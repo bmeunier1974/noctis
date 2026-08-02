@@ -247,6 +247,15 @@ noctis.research.agent imports noctis.eval.sites (noctis/research/agent.py:12)
 If you are on the wrong side of it, the fix is never an import. Either the thing belongs in the
 engine — move it there and have the eval layer import *it* — or the engine does not need it.
 
+**One exemption, whose shape is checked too.** `noctis.cli` may name `noctis.eval.cli` — the bodies
+behind the operator's `bench` verb group — and only from *inside a function body*
+(`guard.DEFERRED_EXEMPTIONS`). The rule protects production *behaviour*, and a CLI verb group is an
+operator typing a word, not behaviour a research session can reach: deferred, nothing is imported
+until somebody types `bench`, so `noctis run` still loads no benchmark code at all. A module-level
+import in `cli.py`, a deferred one in any other engine module, and a deferred one naming any other
+eval module (including `from noctis.eval import cli`, which reaches the *layer* first) are all still
+violations — the suite asserts each of them.
+
 **The registry is five sites, pinned.** `src/noctis/eval/registry.py` declares `coder`,
 `formulate`, `decide`, `discover` and `distill` as plain module-level constants (no runtime
 registration: a registry whose contents depend on import order is a benchmark nobody can
@@ -261,6 +270,13 @@ is measured end-to-end by the parity harness instead — see [parity.md](parity.
 **onboarding-verify**, which is a liveness check rather than an agent judgment. A site's identity
 for a benchmark record — its hand-bumped `version` plus its prompt-asset hash — comes from
 `src/noctis/eval/identity.py`, the one bridge between the registry and the prompt ratchet above.
+
+**The layer has its own composition root.** `src/noctis/bootstrap.py` may never import the eval
+layer, so the eval layer assembles its own sessions in `src/noctis/eval/bootstrap.py` — the bench
+area and cases root, the execution seam a `--workers` count selects, the site-input adapter table
+(`SITE_ASKS`), and the live attempt callable that asks the configured model through the engine's
+own LLM seam. Assemble a bench there, not in a verb body — the same rule `bootstrap.py` holds the
+engine's entrypoints to, on the other side of the line.
 
 ## Dev scripts
 
