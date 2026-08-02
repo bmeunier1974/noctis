@@ -11,6 +11,29 @@ The lookups take the registry they read as an argument (defaulting to the shippe
 harness can index a scratch set of declarations without a global to reset — the same posture as
 the strategy-family registry, which every session builds its own of rather than sharing one.
 
+**The set is five, and it is pinned.** ``coder``, ``formulate``, ``decide``, ``discover``,
+``distill`` — every engine call site that can honestly be *component*-benchmarked: one ask, one
+answer, rendered from a prompt that is a function of the inputs and the files on disk.
+``tests/test_eval_closure.py`` pins exactly those ids, so growing or renaming the set is a
+deliberate edit in a reviewable diff rather than something that happens to a benchmark suite.
+
+**What is deliberately left out, and why — stated here, because an absence nobody wrote down
+reads as an oversight.** Two of the engine's LLM call sites are **not sites**:
+
+* the **conversation loop** (:mod:`noctis.research.prompt`) is not a site. Its input is an
+  accumulated transcript — every prior turn, tool result and correction of the session so far —
+  not a pure function of disk, so two renderings of "the same" ask are never the same ask and a
+  per-site score would be measuring the transcript rather than the prompt. It is measured
+  end-to-end instead, by the parity harness (``scripts/parity_harness.py``, see
+  ``docs/parity.md``), which compares whole session against whole session — the honest unit for a
+  loop whose state is its own history;
+* **onboarding-verify** (:func:`noctis.onboarding.verify_llm`) is not a site either. It spends a
+  handful of tokens proving the configured endpoint, key and model id answer at all: a liveness
+  check, not an agent judgment. There is no quality to score — the verdict is "it replied".
+
+Declaring either would let the registry claim a component benchmark the platform cannot honestly
+run, which is the one failure a registry of judgment sites must not have.
+
 Nothing in the engine reads this module, and nothing may: the import-isolation guard
 (:mod:`noctis.eval.guard`) fails the build if an engine module ever imports the eval layer.
 """

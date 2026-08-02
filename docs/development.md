@@ -216,6 +216,52 @@ caught up), no drift at all, and a missing or unreadable record — that is how 
 created. A changelog edit on its own never fails the check: nothing the model is told has moved,
 and failing there would push you to regenerate, consuming the entry you had just written.
 
+## The eval boundary and its import guard
+
+The third guard in this family enforces a *direction* rather than a hash: **the eval layer
+(`src/noctis/eval/`) imports the engine, and the engine never imports the eval layer.** The eval
+layer is benchmark infrastructure — one `AgentSite` declaration per LLM judgment site, the
+`HarnessSpec` that names the prompt-composition ablations, the per-site knob sets — and a
+benchmark exists to measure production, so production must not be able to notice that it exists.
+
+Why it is a rule and not a preference: the moment an engine module can import `noctis.eval`, a
+bench-only ablation ("run FORMULATE with the contract sheet off, to see what it is worth") becomes
+reachable from a real research session, and every run afterwards is a run whose prompt composition
+nobody can state from the record alone. That is the platform's invariant *production behaviour never
+depends on benchmark infrastructure*, and it is held structurally: `HarnessSpec` is not a settings
+field and no mandate overlay path can bind it, because production config has no word for it.
+
+Enforcement is a static, stdlib-only scan (`src/noctis/eval/guard.py`) that returns every module
+*outside* the package which imports it — `import noctis.eval`, `from noctis import eval`, a
+submodule import, or the relative spelling. `tests/test_eval_boundary.py` runs it against
+`src/noctis` on every CI run and **fails hard**, naming the offending module, file and line:
+
+```bash
+uv run pytest tests/test_eval_boundary.py -q   # the eval import-isolation guard
+```
+
+```text
+noctis.research.agent imports noctis.eval.sites (noctis/research/agent.py:12)
+```
+
+If you are on the wrong side of it, the fix is never an import. Either the thing belongs in the
+engine — move it there and have the eval layer import *it* — or the engine does not need it.
+
+**The registry is five sites, pinned.** `src/noctis/eval/registry.py` declares `coder`,
+`formulate`, `decide`, `discover` and `distill` as plain module-level constants (no runtime
+registration: a registry whose contents depend on import order is a benchmark nobody can
+reproduce), and `tests/test_eval_closure.py` pins that id set and resolves each declaration against
+the production objects it binds — the episodic driver's own emit contracts *by identity*, an
+importable renderer, a `SiteKnobs` subclass. A renamed briefing builder or a copied contract
+therefore breaks the build, not the first benchmark run.
+
+Two LLM call sites are **deliberately undeclared**, and the registry's docstring says so: the
+**conversation loop**, whose input is an accumulated transcript rather than a function of disk (it
+is measured end-to-end by the parity harness instead — see [parity.md](parity.md)), and
+**onboarding-verify**, which is a liveness check rather than an agent judgment. A site's identity
+for a benchmark record — its hand-bumped `version` plus its prompt-asset hash — comes from
+`src/noctis/eval/identity.py`, the one bridge between the registry and the prompt ratchet above.
+
 ## Dev scripts
 
 `scripts/` holds dev tools that are deliberately *not* CLI subcommands. One is the ratchet
