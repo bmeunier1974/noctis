@@ -8,15 +8,22 @@ the same checks and error contract as the production subprocess runner, minus th
 
 from __future__ import annotations
 
+import ast
+import hashlib
+import os
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
 
 from noctis.research import Capabilities, Turn
 from noctis.research.author import (
+    _FEASIBILITY_RULES,
+    AS_SHIPPED,
     WORKED_EXAMPLE_NAME,
     AuthoringError,
+    CoderTimeout,
     StrategyAuthor,
     StrategyBrief,
     _extract_code_block,
@@ -991,3 +998,359 @@ def test_on_attempt_carries_the_raw_reply_when_no_code_block(tmp_path, families,
     # A non-code reply has no code block: the callback carries the raw reply text to persist.
     assert isinstance(seen[0][1], library.StrategyValidationError)
     assert seen[0][2] == reply
+
+
+# ── 9. The ablation seam: each dial removes exactly its own asset (#223) ───────────────────
+# The five prompt-composition dials the eval layer's HarnessSpec names (contract sheet, template,
+# worked example, feasibility rules, retry hints) reach the engine as plain constructor
+# parameters — never an eval import, which the engine is forbidden. The defaults ARE production,
+# so every test below compares an ablated composition against the default one and asserts the
+# difference is exactly one contiguous span: the asset that was dialled off, and nothing else.
+_ALTERNATE_EXAMPLE_NAME = "rsi_meanrev"
+
+# The default coder system prompt of a real install (TEMPLATE.py + the shipped worked example on
+# disk), locked byte for byte. Regenerating these two numbers is a PROMPT CHANGE: it belongs in
+# the same commit as a new `docs/prompt-changelog.md` entry naming the `author` site and a
+# regenerated `prompt_fingerprint.json` (`uv run python scripts/prompt_fingerprint.py --write`).
+_GOLDEN_SYSTEM_PROMPT_LEN = 19235
+_GOLDEN_SYSTEM_PROMPT_SHA256 = "01bbf602d959cd44027e659161a68eb03132aaa2230190181c9144f3358c7477"
+
+
+@pytest.fixture
+def installed_dir(tmp_path):
+    """A seeds root as a real install has it: TEMPLATE.py AND the shipped worked-example seed."""
+    shutil.copyfile(_REPO_SEEDS / library.TEMPLATE_NAME, tmp_path / library.TEMPLATE_NAME)
+    shutil.copyfile(
+        _REPO_SEEDS / f"{WORKED_EXAMPLE_NAME}.py", tmp_path / f"{WORKED_EXAMPLE_NAME}.py"
+    )
+    shutil.copyfile(
+        _REPO_SEEDS / f"{_ALTERNATE_EXAMPLE_NAME}.py", tmp_path / f"{_ALTERNATE_EXAMPLE_NAME}.py"
+    )
+    return tmp_path
+
+
+def _system_sent(strategies_dir, families, **kwargs) -> str:
+    """The system prompt an author built with ``kwargs`` actually hands the coder client."""
+    client = FakeCoder([fenced(PROBE)])
+    engine = StrategyAuthor(
+        client=client, strategies_dir=strategies_dir, families=families, **kwargs
+    )
+    engine.author("probe", BRIEF)
+    return client.calls[0]["system"]
+
+
+def _dropped_span(default: str, ablated: str) -> str:
+    """The single contiguous span ``ablated`` dropped from ``default`` — the ablation's whole
+    effect. Fails outright when the two differ in more than one contiguous run of characters,
+    which is what makes "removes exactly its asset" an assertion rather than a hope."""
+    head = len(os.path.commonprefix([default, ablated]))
+    common_tail = len(os.path.commonprefix([default[::-1], ablated[::-1]]))
+    tail = min(common_tail, min(len(default), len(ablated)) - head)
+    assert ablated == default[:head] + default[len(default) - tail :]
+    return default[head : len(default) - tail]
+
+
+def test_a_default_author_composes_the_shipped_system_prompt_byte_for_byte(
+    installed_dir, families, fast_gate
+):
+    # The golden: with every dial at its default, the coder is sent exactly the prompt production
+    # sent before the ablation seam existed — same assets, same order, same separators.
+    system = _system_sent(installed_dir, families)
+
+    assert len(system) == _GOLDEN_SYSTEM_PROMPT_LEN
+    assert hashlib.sha256(system.encode("utf-8")).hexdigest() == _GOLDEN_SYSTEM_PROMPT_SHA256
+
+
+def test_the_contract_sheet_ablation_drops_exactly_the_contract_sheet(
+    installed_dir, families, fast_gate
+):
+    default = _system_sent(installed_dir, families)
+    ablated = _system_sent(installed_dir, families, include_contract_sheet=False)
+
+    assert CONTRACT_SHEET not in ablated
+    assert CONTRACT_SHEET in _dropped_span(default, ablated)
+    # Everything else the prompt is built from survives untouched.
+    assert _FEASIBILITY_RULES in ablated and _worked_example_source() in ablated
+
+
+def test_the_feasibility_rules_ablation_drops_exactly_the_feasibility_rules(
+    installed_dir, families, fast_gate
+):
+    default = _system_sent(installed_dir, families)
+    ablated = _system_sent(installed_dir, families, include_feasibility_rules=False)
+
+    assert _FEASIBILITY_RULES not in ablated
+    assert _FEASIBILITY_RULES in _dropped_span(default, ablated)
+    assert CONTRACT_SHEET in ablated and _worked_example_source() in ablated
+
+
+def test_the_template_ablation_drops_exactly_the_template_block(installed_dir, families, fast_gate):
+    template = (_REPO_SEEDS / library.TEMPLATE_NAME).read_text(encoding="utf-8")
+    default = _system_sent(installed_dir, families)
+    ablated = _system_sent(installed_dir, families, include_template=False)
+
+    assert template not in ablated
+    span = _dropped_span(default, ablated)
+    assert template in span and "TEMPLATE.py" in span
+    assert CONTRACT_SHEET in ablated and _worked_example_source() in ablated
+
+
+def test_a_template_source_override_is_composed_when_the_template_stays_included(
+    installed_dir, families, fast_gate
+):
+    # The pre-existing override seam is unchanged by the dial: an explicit template source is what
+    # the template block carries, in place of the seed on disk.
+    system = _system_sent(installed_dir, families, template_source="# a stand-in template\n")
+
+    assert "# a stand-in template" in system
+    assert (_REPO_SEEDS / library.TEMPLATE_NAME).read_text(encoding="utf-8") not in system
+
+
+def test_the_template_ablation_also_suppresses_an_explicit_template_source_override(
+    installed_dir, families, fast_gate
+):
+    # Dialling the template off means NO template block — an override cannot smuggle one back in.
+    system = _system_sent(
+        installed_dir, families, include_template=False, template_source="# a stand-in template\n"
+    )
+
+    assert "# a stand-in template" not in system
+    assert "TEMPLATE.py" not in system
+
+
+def test_a_worked_example_of_none_drops_exactly_the_worked_example_block(
+    installed_dir, families, fast_gate
+):
+    default = _system_sent(installed_dir, families)
+    ablated = _system_sent(installed_dir, families, worked_example=None)
+
+    assert _worked_example_source() not in ablated
+    span = _dropped_span(default, ablated)
+    assert _worked_example_source() in span and "COMPLETE WORKED EXAMPLE" in span
+    assert CONTRACT_SHEET in ablated and _FEASIBILITY_RULES in ablated
+
+
+def test_a_named_worked_example_composes_that_seed_instead_of_the_shipped_one(
+    installed_dir, families, fast_gate
+):
+    alternate = (_REPO_SEEDS / f"{_ALTERNATE_EXAMPLE_NAME}.py").read_text(encoding="utf-8")
+
+    system = _system_sent(installed_dir, families, worked_example=_ALTERNATE_EXAMPLE_NAME)
+
+    assert alternate in system  # the named seed is the example the coder studies
+    assert _worked_example_source() not in system  # and the shipped one is not composed too
+    assert "COMPLETE WORKED EXAMPLE" in system  # under the same framing production uses
+
+
+def test_the_as_shipped_worked_example_sentinel_reproduces_the_default_composition(
+    installed_dir, families, fast_gate
+):
+    # AS_SHIPPED is the 'no ablation' value: naming it explicitly is the default, byte for byte.
+    default = _system_sent(installed_dir, families)
+
+    assert _system_sent(installed_dir, families, worked_example=AS_SHIPPED) == default
+
+
+def test_the_retry_hint_ablation_leaves_the_raw_gate_error_alone_in_the_retry_prompt(
+    tmp_path, families, fast_gate
+):
+    # With hint enrichment dialled off, a known helper-API mistake still drives the retry through
+    # its raw gate error — but the true-signature hint line the contract sheet would append is gone.
+    client = FakeCoder([fenced(UPDATE_ARITY), fenced(PROBE)])
+    engine = StrategyAuthor(
+        client=client, strategies_dir=tmp_path, families=families, include_retry_hints=False
+    )
+
+    engine.author("probe", BRIEF)
+
+    retry = client.calls[1]["messages"][0]["content"]
+    assert "AtrState.update() takes 2 positional arguments but 4 were given" in retry
+    assert "API hint:" not in retry
+    hint = hint_for_gate_error("AtrState.update() takes 2 positional arguments but 4 were given")
+    assert hint is not None and hint not in retry
+
+
+# ── 9b. No production construction site drives the seam ────────────────────────────────────
+# The ablation dials and the per-attempt timeout are an EVAL-side lever: production composes the
+# shipped prompt and bounds a completion only through the transport. This scans every
+# StrategyAuthor(...) call in the shipped package, so a future wiring that quietly ablated a real
+# research session's prompt fails here.
+_ABLATION_KWARGS = frozenset(
+    {
+        "include_contract_sheet",
+        "include_template",
+        "include_feasibility_rules",
+        "worked_example",
+        "include_retry_hints",
+        "attempt_timeout",
+    }
+)
+
+
+def _production_author_call_sites() -> list[tuple[Path, frozenset[str]]]:
+    """Every ``StrategyAuthor(...)`` construction in ``src/noctis``, with the kwargs it passes."""
+    package = Path(__file__).resolve().parents[1] / "src" / "noctis"
+    sites: list[tuple[Path, frozenset[str]]] = []
+    for path in sorted(package.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            called = isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            if called and node.func.id == "StrategyAuthor":
+                sites.append((path, frozenset(kw.arg for kw in node.keywords if kw.arg)))
+    return sites
+
+
+def test_no_production_construction_site_passes_an_ablation_or_a_per_attempt_timeout():
+    sites = _production_author_call_sites()
+
+    assert sites  # the scan really found the toolbox's engines — not a vacuous pass
+    for path, kwargs in sites:
+        assert not (kwargs & _ABLATION_KWARGS), f"{path.name} drives the ablation seam: {kwargs}"
+
+
+# ── 10. The per-attempt timeout: a wedged completion is that attempt's failure (#223) ──────
+# A completion that never returns used to wedge the whole authoring job (and with it the research
+# phase). An optional per-attempt timeout bounds EACH completion: the wedged attempt fails with a
+# retained CoderTimeout, is reported like any other coder error, and the job retries.
+WEDGE = object()  # a scripted completion that never answers
+
+_ATTEMPT_TIMEOUT_S = 0.05  # short enough to keep the suite fast, long enough not to flake
+_WEDGE_RELEASE_S = 30.0  # a wedged completion's own ceiling, so no test thread lives forever
+
+
+class WedgingCoder(FakeCoder):
+    """A FakeCoder whose script may contain :data:`WEDGE` — a completion that blocks until the
+    test releases it, standing in for a transport that accepted the request and never answered."""
+
+    def __init__(self, replies, capabilities=None):
+        super().__init__([r for r in replies if r is not WEDGE], capabilities)
+        self._wedges = [r is WEDGE for r in replies]
+        self.released = threading.Event()
+
+    def complete(self, *, system, tools, messages, max_tokens, tool_choice=None, on_delta=None):
+        if self._wedges and self._wedges.pop(0):
+            self.calls.append({"system": system, "messages": messages, "wedged": True})
+            self.released.wait(_WEDGE_RELEASE_S)
+            return Turn(text="", tool_calls=[], stop_reason="end_turn", usage={})
+        return super().complete(
+            system=system,
+            tools=tools,
+            messages=messages,
+            max_tokens=max_tokens,
+            tool_choice=tool_choice,
+            on_delta=on_delta,
+        )
+
+
+@pytest.fixture
+def wedging():
+    """Hands out wedging coders and releases every wedged completion at teardown, so an abandoned
+    worker thread can never outlive the test that stranded it."""
+    clients: list[WedgingCoder] = []
+
+    def build(replies) -> WedgingCoder:
+        client = WedgingCoder(replies)
+        clients.append(client)
+        return client
+
+    yield build
+    for client in clients:
+        client.released.set()
+
+
+def test_a_wedged_completion_fails_its_attempt_at_the_per_attempt_timeout(
+    tmp_path, families, fast_gate, wedging
+):
+    client = wedging([WEDGE, fenced(PROBE)])
+    engine = StrategyAuthor(
+        client=client,
+        strategies_dir=tmp_path,
+        families=families,
+        attempt_timeout=_ATTEMPT_TIMEOUT_S,
+    )
+    seen = _seen_with_source(engine, "probe", BRIEF)
+
+    # The wedged attempt failed and the NEXT one landed the file — a bounded stumble, not a hang.
+    assert len(client.calls) == 2
+    assert library.strategy_path(tmp_path, "probe") == tmp_path / "__tmp" / "probe.py"
+    assert [n for n, _, _ in seen] == [1, 2]
+    timeout = seen[0][1]
+    assert isinstance(timeout, CoderTimeout)
+    assert str(_ATTEMPT_TIMEOUT_S) in str(timeout)  # the bound it blew is named in the error
+    assert seen[0][2] == ""  # no bytes arrived, so the attempt's material is empty
+    assert seen[1][1] is None
+
+
+def test_a_timed_out_attempt_carries_no_previous_source_into_the_next_prompt(
+    tmp_path, families, fast_gate, wedging
+):
+    # Nothing came back to correct, so the retry is a fresh authoring prompt — never a "fix your
+    # previous attempt" re-prompt over an empty file.
+    client = wedging([WEDGE, fenced(PROBE)])
+    engine = StrategyAuthor(
+        client=client,
+        strategies_dir=tmp_path,
+        families=families,
+        attempt_timeout=_ATTEMPT_TIMEOUT_S,
+    )
+    engine.author("probe", BRIEF)
+
+    retry = client.calls[1]["messages"][0]["content"]
+    assert "Your previous attempt did not pass validation" not in retry
+    assert "Previous source:" not in retry
+    assert BRIEF.thesis in retry  # still the full brief, asked again
+
+
+def test_every_attempt_timing_out_raises_an_authoring_error_carrying_the_timeout(
+    tmp_path, families, fast_gate, wedging
+):
+    client = wedging([WEDGE, WEDGE, WEDGE])
+    engine = StrategyAuthor(
+        client=client,
+        strategies_dir=tmp_path,
+        families=families,
+        attempt_timeout=_ATTEMPT_TIMEOUT_S,
+    )
+
+    with pytest.raises(AuthoringError) as excinfo:
+        engine.author("probe", BRIEF)
+
+    assert len(client.calls) == 3  # the budget was spent on bounded attempts, not on one hang
+    assert isinstance(excinfo.value.validation_error, CoderTimeout)
+    assert library.strategy_path(tmp_path, "probe") is None
+
+
+def test_a_bounded_completion_that_answers_in_time_leaves_no_worker_thread_behind(
+    tmp_path, families, fast_gate
+):
+    # The bound costs one short-lived worker per attempt: a job whose completions all answer
+    # returns to the thread count it started at.
+    client = FakeCoder([fenced(BROKEN), fenced(PROBE)])
+    engine = StrategyAuthor(
+        client=client, strategies_dir=tmp_path, families=families, attempt_timeout=30.0
+    )
+    before = threading.active_count()
+
+    engine.author("probe", BRIEF)
+
+    assert threading.active_count() == before
+
+
+def test_without_a_per_attempt_timeout_the_completion_runs_on_the_calling_thread(
+    tmp_path, families, fast_gate
+):
+    # The default is today's behavior exactly: no bound, no worker — the completion is made by
+    # the caller's own thread, so nothing about an unbounded job changed.
+    threads: list[threading.Thread] = []
+
+    class ThreadRecordingCoder(FakeCoder):
+        def complete(self, **kwargs):
+            threads.append(threading.current_thread())
+            return super().complete(**kwargs)
+
+    client = ThreadRecordingCoder([fenced(PROBE)])
+    engine = StrategyAuthor(client=client, strategies_dir=tmp_path, families=families)
+
+    engine.author("probe", BRIEF)
+
+    assert threads == [threading.current_thread()]
