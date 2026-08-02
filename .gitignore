@@ -43,6 +43,14 @@ mandate/references/*
 !mandate/references/example-watchlist.md
 !mandate/references/high-vol-momentum-brief.md
 
+# ── Benchmark cases: ship the scaffold; a mined corpus stays the operator's ──
+# The repo carries cases/README.md (the case file format) and nothing else. Every case
+# under cases/<site_id>/ is local: a mined corpus is harvested from an operator's own runs
+# and carries their briefs, symbols and run ids. Shipping a REVIEWED corpus to every user?
+# re-include it below by name, one line per directory — an explicit act, never a default.
+cases/*
+!cases/README.md
+
 # ── Byte-code & tool caches ──────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
