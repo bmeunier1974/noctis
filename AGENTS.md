@@ -79,6 +79,8 @@ python scripts/engine_fingerprint.py [--write]   # the engine fingerprint ratche
 python scripts/prompt_fingerprint.py [--write]   # the prompt-asset ratchet, its twin on its own
                            # clock: one content hash per LLM call site. --write refuses a prompt
                            # change the newest docs/prompt-changelog.md entry does not declare
+pytest tests/test_eval_boundary.py       # the eval import-isolation guard: the eval layer imports
+                           # the engine, the engine never imports src/noctis/eval (docs/development.md)
 
 python -m noctis setup [--check]   # guided first-run wizard: files, extras, keys, LLM verify
 python -m noctis init              # scaffold local config/.env/mandate + workspace (idempotent)

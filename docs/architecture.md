@@ -74,6 +74,7 @@ warning (see [development.md](development.md)).
 | 📡 Live | `src/noctis/live` | Trading loop + risk manager |
 | 📊 Reporting | `src/noctis/reporting` | Close-of-day report, Markdown + structured JSON (`<run>/reports/<date>.md` / `.json`) + the run record/store |
 | 🧠 Memory | `src/noctis/memory` | The agent-memory store (load / append / reorganize; lives at `<run>/memory/MEMORY.md`) |
+| 🧪 Eval layer | `src/noctis/eval` | Benchmark infrastructure for the LLM judgment sites: one `AgentSite` declaration per site, the ablation `HarnessSpec`, per-site knobs and identity. **One-way**: it imports the engine, the engine never imports it (below) |
 
 ## Two research paths, one contract
 
@@ -84,6 +85,25 @@ before. The agent loop itself runs one of two ways behind a further seam — the
 transcript or the small-context **episodic** driver — and the episodic path adds the
 machine-fixed scenario oracle (FORMULATE authors the tape, the coder only satisfies it; see
 [research.md](research.md)). See [research.md](research.md) for how a strategy earns promotion.
+
+## The eval layer, and why it is one-way
+
+The engine's LLM judgment sites are declared as data in `src/noctis/eval/` — one frozen
+`AgentSite` per site naming its emit contract, the production builder its prompt is rendered by,
+the knobs a bench may override, and a hand-bumped `version` — so a benchmark has something to look
+up instead of re-deriving a prompt. Five sites are declared (`coder`, `formulate`, `decide`,
+`discover`, `distill`); the conversation loop and onboarding-verify are deliberately undeclared and
+the registry says why (a transcript is not a function of disk — it is measured end-to-end by the
+parity harness; a liveness check is not a judgment).
+
+**The layer imports the engine; the engine never imports the layer.** A benchmark measures
+production, so production must not depend on it — otherwise a bench-only ablation (the contract
+sheet off, the worked example swapped) becomes reachable from a real research session, and every
+run afterwards is a run whose prompt composition nobody can state from the record alone. The
+one-way rule is enforced structurally, by an import-isolation guard that fails CI naming the
+offending module and line, and by the ablation dials living in a type production config has no word
+for. See
+[development.md → the eval boundary](development.md#the-eval-boundary-and-its-import-guard).
 
 ## Validation-on-write: the shared funnel and the Tier-1 invariants
 
