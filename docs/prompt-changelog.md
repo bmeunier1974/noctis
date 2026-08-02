@@ -34,6 +34,20 @@ never keep its old identity.
 
 ---
 
+## 2026-08-02 — sites: author
+
+Ablation seam widening, **no wording change**: the authoring engine's five prompt pieces (contract
+sheet, `TEMPLATE.py`, worked example, feasibility rules, retry-hint enrichment) became constructor
+parameters the benchmark layer can dial off one at a time (#223), and each completion can now be
+bounded by an optional per-attempt timeout. Not one asset's text moved, and the default
+composition — every dial at its shipped value, which is the only composition any production
+construction site builds — is byte-identical to the previous entry's: `tests/test_strategy_author.py`
+locks it with a golden length + SHA-256 of the system prompt a default author sends. The `author`
+hash moves because the composition *code* in `research/author.py` moved, which is exactly the
+over-partition this ratchet is designed for. The timeout rides the same file (a bounded wait around
+the client seam) and tells the coder nothing at all; a completion that never answers now fails its
+own attempt instead of the job.
+
 ## 2026-08-01 — sites: author, briefings, conversation, distill, episodic, ideation
 
 Baseline. The first committed prompt-asset fingerprint (#183): every site's hash records the

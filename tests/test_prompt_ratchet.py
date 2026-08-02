@@ -456,12 +456,31 @@ def test_the_committed_prompt_fingerprint_file_records_this_checkout():
     assert check(REPO_ROOT).ok, check(REPO_ROOT).report()
 
 
-def test_the_committed_changelog_has_an_entry_naming_every_site():
-    """The baseline entry is what the first committed hashes read back to."""
+def _committed_entry_sites() -> set[str]:
+    """Every site any entry in the committed changelog names, read newest-first with the module's
+    own entry parser (each pass consumes the heading it just read)."""
+    text = (REPO_ROOT / CHANGELOG_PATH).read_text()
+    sites: set[str] = set()
+    while (entry := newest_entry(text)) is not None:
+        sites.update(entry.sites)
+        heading = f"## {entry.heading}"
+        text = text[text.index(heading) + len(heading) :]
+    return sites
+
+
+def test_every_committed_site_hash_reads_back_to_a_changelog_entry():
+    """The page's own promise: every hash in the record reads back to an entry here. The baseline
+    entry names them all; each later entry names only the sites that moved with it."""
+    assert _committed_entry_sites() >= set(SITE_ASSETS)
+
+
+def test_the_newest_changelog_entry_names_only_sites_that_exist():
+    """A declaration a machine cannot resolve to a site declares nothing — a typo'd site name
+    would let real drift through under a heading that reads as if it covered it."""
     entry = newest_entry((REPO_ROOT / CHANGELOG_PATH).read_text())
 
     assert entry is not None
-    assert set(entry.sites) == set(SITE_ASSETS)
+    assert set(entry.sites) <= set(SITE_ASSETS)
 
 
 def test_the_prompt_record_is_separate_from_the_engine_record():

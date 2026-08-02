@@ -103,6 +103,42 @@ DECIDE_DIALS: dict[str, Any] = {
     },
 }
 
+
+def _rates(first: float | None, job: float | None) -> dict[str, Any]:
+    """One co-primary pass pair, in the shape the coder reading publishes it."""
+    return {
+        "pass_label": "pass@k with feedback",
+        "first_attempt_pass_rate": first,
+        "job_pass_rate": job,
+        "first_attempt_passes": 1,
+        "passed_jobs": 2,
+    }
+
+
+# The shapes a coder record carries: a pass pair, a per-axis breakdown of that pair, and the
+# taxonomy table whose every row names the knob its share points at.
+CODER_READING: dict[str, Any] = {
+    "cases": 3,
+    "jobs": 3,
+    "rates": _rates(0.3333, 0.6667),
+    "strata": {
+        "api_surface": {
+            "bars_only": {"cases": 1, "jobs": 1, "rates": _rates(1.0, 1.0)},
+            "exits": {"cases": 2, "jobs": 2, "rates": _rates(0.0, 0.5)},
+        },
+        "oracle_mode": {"authored": {"cases": 3, "jobs": 3, "rates": _rates(0.3333, 0.6667)}},
+    },
+    "failures": {
+        "attempts": 4,
+        "classes": {
+            "truncated": {"count": 3, "share": 0.75, "knob": "coder max-tokens"},
+            "unclassified": {"count": 0, "share": 0.0, "knob": "grow the taxonomy"},
+        },
+    },
+}
+
+CODER_DIALS: dict[str, Any] = {"answers": "fresh", "attempt_calls": 3, "coder": CODER_READING}
+
 # A record from a site that has never heard of an approval pair: different figures, different axes.
 STUB_DIALS: dict[str, Any] = {
     "stubby": {
@@ -304,6 +340,38 @@ def test_a_record_from_another_site_renders_its_own_axes_through_the_same_code_p
     assert _row(_block(strata, "long"), "usefulness") == "0.2500"
     assert _row(_block(strata, "short"), "usefulness") == "n/a"
     assert "agreement" not in rendered.lower()
+
+
+# ── a coder record's own shapes, rendered by exactly the same reader (#227) ──────────────────
+
+
+def test_the_report_renders_a_coder_records_per_axis_pass_breakdown(tmp_path):
+    rendered = render_bench_report(_record(dials=CODER_DIALS))
+
+    strata = _block(rendered, "strata")
+    assert "api_surface" in strata and "oracle_mode" in strata
+    assert _row(_block(strata, "bars_only"), "job_pass_rate") == "1.0000"
+    assert _row(_block(strata, "exits"), "job_pass_rate") == "0.5000"
+
+
+def test_the_report_renders_the_failure_taxonomy_share_table_with_the_knob_each_share_points_at(
+    tmp_path,
+):
+    rendered = render_bench_report(_record(dials=CODER_DIALS))
+
+    classes = _block(rendered, "classes")
+    truncated = _block(classes, "truncated")
+    assert _row(truncated, "share") == "0.7500"
+    assert _row(truncated, "knob") == "coder max-tokens"
+    assert _row(_block(classes, "unclassified"), "count") == "0"
+
+
+def test_the_same_shapes_under_another_sites_key_render_identically(tmp_path):
+    """No site branching in the renderer: the reading appears because the record carries it."""
+    coder = render_bench_report(_record(dials={"answers": "fresh", "coder": CODER_READING}))
+    stubby = render_bench_report(_record(dials={"answers": "fresh", "stubby": CODER_READING}))
+
+    assert _block(coder, "dials.coder") == _block(stubby, "dials.stubby")
 
 
 def test_a_record_carrying_no_dials_at_all_still_renders_its_generic_metrics_block(tmp_path):

@@ -1624,17 +1624,25 @@ def _build_coder_client(settings):
     If that client can't be built (its provider's key or the ``[llm]`` extra is missing) the
     degradation is loud, never silent: warn and fall back to ``None`` (driver-authored mode), so
     the session still assembles — the same graceful-degradation contract as the rest of the LLM
-    seam, never a mid-session failure."""
+    seam, never a mid-session failure.
+
+    The coder's sampling knobs (#222) ride the same builder: unset (the default) they ask for
+    nothing, so the coder's request is today's; a set knob is only sent where the provider seam
+    declares the capability, so the same mandate pointed at an Anthropic coder drops levers that
+    provider has no parameter for instead of erroring."""
     from noctis.research import client_for
 
-    coder_model = settings.research.agent.coder_model
+    agent = settings.research.agent
+    coder_model = agent.coder_model
     if not coder_model:
         return None
     coder = client_for(
         settings,
         coder_model,
-        thinking=settings.research.agent.coder_thinking,
+        thinking=agent.coder_thinking,
         deliberate=True,
+        temperature=agent.coder_temperature,
+        seed=agent.coder_seed,
     )
     if coder is None:
         logger.warning(
@@ -1674,6 +1682,10 @@ def _build_coder_fallback_client(settings):
         agent.coder_fallback_model,
         thinking=agent.coder_fallback_thinking,
         deliberate=True,
+        # One coder sampling policy per session (#222) — the escalated coder samples the way the
+        # local one was told to, capability-gated per provider like every other lever.
+        temperature=agent.coder_temperature,
+        seed=agent.coder_seed,
     )
     if fallback is None:
         logger.warning(

@@ -41,16 +41,32 @@ Two composition modes ride the same loop, gate, and retry budget as plain author
   the brief becomes the change request. The validated result replaces the file through the
   normal :func:`write_strategy` path; a revision that never validates leaves the previous
   version untouched (the library's own guarantee).
+
+**The composition is ablatable, from the outside only (#223).** "Is the contract sheet earning its
+tokens?" is only a runnable experiment if each piece the prompt is built from can be taken away one
+at a time, so the five pieces the benchmark layer names — contract sheet, template, worked example,
+feasibility rules, retry-hint enrichment — are plain constructor parameters here, defaulting to the
+composition production ships (``AS_SHIPPED`` for the three-valued worked-example selection). They
+are parameters and not config on purpose: production has no word for them, the mandate overlay
+cannot reach them, and the engine never imports the eval layer that maps a benchmark spec onto them.
+
+**Every completion can be bounded (#223).** ``attempt_timeout`` (seconds, ``None`` ⇒ today's
+unbounded behavior) caps EACH completion, so a transport that accepted the request and never
+answered costs one attempt — a retained :class:`CoderTimeout`, reported through the same
+per-attempt seam as any coder error — instead of wedging the authoring job and the research phase
+behind it.
 """
 
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 
 from noctis.research.contract_sheet import CONTRACT_SHEET, hint_for_gate_error
-from noctis.research.llm import LLMClient, cached_system
+from noctis.research.llm import LLMClient, Turn, cached_system
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.scenario_spec import SpecSuite, describe_spec
@@ -83,6 +99,27 @@ _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 # entry read against strictly-prior history (no lookahead) and a breakdown exit, with its own
 # known-outcome scenarios. It is read-only input — never mutated, only shown to the coder.
 WORKED_EXAMPLE_NAME = "donchian_breakout"
+
+
+class AsShipped(Enum):
+    """The 'no ablation' value of the worked-example selection: whatever production composes.
+
+    A deliberate twin of the eval layer's sentinel rather than a shared import: the engine may
+    never import :mod:`noctis.eval` (the boundary guard in ``tests/test_eval_boundary.py``), so the
+    benchmark layer maps its spec onto this one when it drives an ablation.
+    """
+
+    TOKEN = "as_shipped"
+
+    def __repr__(self) -> str:  # pragma: no cover - representation only
+        return "AS_SHIPPED"
+
+
+AS_SHIPPED = AsShipped.TOKEN
+
+# The worked-example dial is three-valued: the seed production ships (``AS_SHIPPED``), another
+# seed by name (does *which* example matter?), or none at all (does an example matter?).
+WorkedExample = str | None | AsShipped
 
 _ROLE_RULES = (
     "You are a strategy-authoring coder for the Noctis paper-trading research system. You "
@@ -160,6 +197,54 @@ class AuthoringError(Exception):
         self.validation_error = validation_error
 
 
+class CoderTimeout(library.StrategyValidationError):
+    """One coder completion outlived the per-attempt timeout, so the attempt failed unanswered.
+
+    A :class:`~noctis.strategies.library.StrategyValidationError` by inheritance for the same
+    reason a prose-only reply is one: the engine's failure vocabulary is "this attempt did not
+    produce a file the gate accepted", and every consumer downstream — the per-attempt hook, the
+    session event, the capped ``failed/`` record, the final :class:`AuthoringError` — already
+    speaks it. Nothing was validated; nothing arrived to validate.
+    """
+
+
+def _complete_within(call: Callable[[], Turn], timeout: float) -> Turn:
+    """Run ``call`` on a worker thread and give up on it after ``timeout`` seconds.
+
+    The client seam is a plain synchronous ``complete()`` with no cancellation and no timeout
+    parameter of its own (:class:`~noctis.research.llm.LLMClient`), so bounding it means bounding
+    the *wait*, not the call: a wedged request cannot be cancelled by anyone but its transport.
+    The worker is a **daemon** thread — one per bounded attempt, at most ``retries + 1`` per job —
+    so an abandoned one can neither block interpreter exit nor be joined at shutdown by a pool,
+    and it ends by itself when the transport's own request timeout fires
+    (:mod:`noctis.research.llm` sends an explicit one on every completion). A completion that
+    answers in time leaves nothing behind: the worker has already finished when the join returns.
+
+    Whatever the call raised is re-raised here, unchanged, so a bounded attempt fails exactly the
+    way an unbounded one does.
+    """
+    answer: list[Turn] = []
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            answer.append(call())
+        except BaseException as exc:  # noqa: BLE001 — re-raised verbatim in the calling thread
+            failure.append(exc)
+
+    worker = threading.Thread(target=run, name="noctis-coder-attempt", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise CoderTimeout(
+            f"the coder completion did not answer within the per-attempt timeout of {timeout}s; "
+            "the attempt was abandoned unanswered"
+        )
+    if failure:
+        raise failure[0]
+    return answer[0]
+
+
 def _fixed_oracle_block(spec: SpecSuite) -> str:
     """The coder-facing presentation of the FIXED scenario oracle on the spec path (#85).
 
@@ -234,17 +319,22 @@ def _seed_template(strategies_dir: library.LibrarySpec) -> str:
         return ""
 
 
-def _seed_example(strategies_dir: library.LibrarySpec) -> str:
-    """The committed worked-example seed source, or ``""`` when it is not on disk.
+def _seed_example(strategies_dir: library.LibrarySpec, selection: WorkedExample) -> str:
+    """The selected worked-example seed's source, or ``""`` when there is none to compose.
 
-    Best-effort, mirroring :func:`_seed_template`: a complete real-API strategy grounds the
-    coder, but a degraded install with no seed on disk still authors — the coder gets the
-    rules text and the API contract sheet. Read directly from the read-only ``seeds`` tier so
-    a working copy never shadows the committed example (and the seed is never mutated).
+    ``AS_SHIPPED`` reads the seed production folds in (:data:`WORKED_EXAMPLE_NAME`), a name reads
+    that seed instead, and ``None`` composes no example at all. Best-effort, mirroring
+    :func:`_seed_template`: a complete real-API strategy grounds the coder, but a degraded install
+    with no seed on disk still authors — the coder gets the rules text and the API contract sheet.
+    Read directly from the read-only ``seeds`` tier so a working copy never shadows the committed
+    example (and the seed is never mutated).
     """
+    if selection is None:
+        return ""
+    name = WORKED_EXAMPLE_NAME if selection is AS_SHIPPED else str(selection)
     seeds = library.LibraryPaths.coerce(strategies_dir).seeds
     try:
-        return (seeds / f"{WORKED_EXAMPLE_NAME}.py").read_text(encoding="utf-8")
+        return (seeds / f"{name}.py").read_text(encoding="utf-8")
     except OSError:
         return ""
 
@@ -266,10 +356,23 @@ class StrategyAuthor:
         max_tokens: int = _MAX_TOKENS,
         retries: int = _CODER_RETRIES,
         template_source: str | None = None,
+        include_contract_sheet: bool = True,
+        include_template: bool = True,
+        worked_example: WorkedExample = AS_SHIPPED,
+        include_feasibility_rules: bool = True,
+        include_retry_hints: bool = True,
+        attempt_timeout: float | None = None,
     ) -> None:
         self._client = client
         self._strategies_dir = strategies_dir
         self._families = families
+        # Whether an emit-failure re-prompt carries the contract sheet's true-signature hint for a
+        # known helper-API mistake (the fifth ablation dial). Default on = production.
+        self._retry_hints = include_retry_hints
+        # The per-completion wall-clock bound, in seconds. ``None`` — the default and every
+        # production construction — leaves the completion unbounded here, exactly as before, with
+        # only the transport's own timeouts under it.
+        self._attempt_timeout = attempt_timeout
         # The per-call output ceiling. ``max_tokens`` (the config's coder_max_tokens, or the
         # built-in default) is the FILE's budget; a client that runs provider thinking — its
         # ``thinking_enabled`` is duck-typed, absent ⇒ False — shares that ceiling with its
@@ -279,11 +382,21 @@ class StrategyAuthor:
             _THINKING_ALLOWANCE if getattr(client, "thinking_enabled", False) else 0
         )
         self._max_attempts = 1 + max(0, retries)
-        template = (
-            template_source if template_source is not None else _seed_template(strategies_dir)
+        # The template dial decides whether a template block is composed at all; the pre-existing
+        # ``template_source`` override decides WHICH source that block carries. Dialled off, no
+        # override can put one back — the ablation is "the coder never saw a template".
+        template = ""
+        if include_template:
+            template = (
+                template_source if template_source is not None else _seed_template(strategies_dir)
+            )
+        example = _seed_example(strategies_dir, worked_example)
+        self._system_prompt = self._build_system_prompt(
+            template,
+            example,
+            contract_sheet=include_contract_sheet,
+            feasibility_rules=include_feasibility_rules,
         )
-        example = _seed_example(strategies_dir)
-        self._system_prompt = self._build_system_prompt(template, example)
         # The coder's system prompt is byte-stable for the engine's life (contract sheet +
         # feasibility rules + one worked example — enlarged by #14-#16). Wrap it in one cache
         # breakpoint here, once, gated on the client's prompt_cache capability, and pass it by
@@ -323,10 +436,11 @@ class StrategyAuthor:
         *after* that attempt's validation resolves: ``on_attempt(attempt, None, source)`` on the
         completion that lands, ``on_attempt(attempt, error, source)`` (a
         :class:`~noctis.strategies.library.StrategyValidationError`) when a gate rejection, a
-        non-code reply, or an output-limit truncation fails an attempt. ``attempt`` is 1-based
-        (1 = first, 2… = a private retry); ``source`` is the attempt's material — the extracted
-        code block on a gate rejection or success, the raw reply text on a non-code reply or a
-        truncated completion — carried so a toolbox-side sink can persist the exact bytes the
+        non-code reply, an output-limit truncation, or a per-attempt timeout fails an attempt.
+        ``attempt`` is 1-based (1 = first, 2… = a private retry); ``source`` is the attempt's
+        material — the extracted code block on a gate rejection or success, the raw reply text on
+        a non-code reply or a truncated completion, and ``""`` for a timeout that produced no bytes
+        at all — carried so a toolbox-side sink can persist the exact bytes the
         coder produced. The engine holds no session state and keeps none of the source; the
         caller (the toolbox) adapts this into a session event carrying the coder model and
         strategy name, and into the capped ``failed/`` record.
@@ -344,13 +458,17 @@ class StrategyAuthor:
                 current_source=current_source,
                 spec=spec,
             )
-            turn = self._client.complete(
-                system=self._system,
-                tools=[],
-                messages=[{"role": "user", "content": content}],
-                max_tokens=self._max_tokens,
-                on_delta=_discard_delta,  # stream where the client can — a transport bound (#98)
-            )
+            try:
+                turn = self._completion(content)
+            except CoderTimeout as exc:
+                # The transport never answered inside the per-attempt bound. That is this
+                # attempt's failure, reported like any other coder error — with no material,
+                # because no bytes arrived — and the loop moves on to the next attempt. ``prior``
+                # stays as it was: there is no previous source to correct, so the next attempt is
+                # the same brief asked again rather than a fix-your-attempt re-prompt.
+                last_error = exc
+                self._report(on_attempt, attempt, exc, "")
+                continue
             source = _extract_code_block(turn.text)
             if source is None:
                 # No closing fence to extract. Classify why on the turn's own stop reason: an
@@ -376,6 +494,28 @@ class StrategyAuthor:
             f"attempts; last gate error: {last_error}",
             validation_error=last_error,
         ) from last_error
+
+    def _completion(self, content: str) -> Turn:
+        """One coder completion for ``content`` — bounded by the per-attempt timeout when set.
+
+        Unbounded (the default and every production construction) the client is called inline on
+        the caller's own thread, exactly as before. With a timeout the same call is made through
+        :func:`_complete_within`, which turns a completion that never answers into a
+        :class:`CoderTimeout` for this attempt.
+        """
+
+        def call() -> Turn:
+            return self._client.complete(
+                system=self._system,
+                tools=[],
+                messages=[{"role": "user", "content": content}],
+                max_tokens=self._max_tokens,
+                on_delta=_discard_delta,  # stream where the client can — a transport bound (#98)
+            )
+
+        if self._attempt_timeout is None:
+            return call()
+        return _complete_within(call, self._attempt_timeout)
 
     @staticmethod
     def _report(
@@ -426,13 +566,26 @@ class StrategyAuthor:
             return None
 
     # ── prompt composition ───────────────────────────────────────────────────
-    def _build_system_prompt(self, template: str, example: str) -> str:
+    def _build_system_prompt(
+        self,
+        template: str,
+        example: str,
+        *,
+        contract_sheet: bool = True,
+        feasibility_rules: bool = True,
+    ) -> str:
         # The contract sheet grounds the coder in the exact helper signatures the write gate
         # executes — the surface TEMPLATE.py deliberately elides — so it never hallucinates an
         # API. The feasibility rules make the coder own tape construction and kill the
         # unsatisfiable-brief retry loop from the coder's end. Both are independent of the
         # template, so a bare library still ships the full API surface and the discipline.
-        parts = [_ROLE_RULES, _CONTRACT_RULES, CONTRACT_SHEET, _FEASIBILITY_RULES]
+        # Each is composed unless its ablation dial took it away, and taking one away removes
+        # exactly that block — the surrounding assets and their order never move.
+        parts = [_ROLE_RULES, _CONTRACT_RULES]
+        if contract_sheet:
+            parts.append(CONTRACT_SHEET)
+        if feasibility_rules:
+            parts.append(_FEASIBILITY_RULES)
         if template:
             parts.append(
                 "Here is TEMPLATE.py — the canonical shape every strategy file follows. "
@@ -511,8 +664,9 @@ class StrategyAuthor:
             # When the gate error names a helper the contract sheet declares (a State .update()
             # arity slip, an unknown ExitRules field, a scenario-builder kwarg typo), append the
             # true signature from that same table row — the coder is stateless across jobs, so the
-            # retry must carry the real API to fix the actual mistake. Unmatched errors add nothing.
-            hint = hint_for_gate_error(error)
+            # retry must carry the real API to fix the actual mistake. Unmatched errors add nothing,
+            # and neither does an engine whose retry-hint dial is off (the ablation, #223).
+            hint = hint_for_gate_error(error) if self._retry_hints else None
             if hint:
                 prompt += f"{hint}\n"
             prompt += "Previous source:\n```python\n" + source + "\n```"

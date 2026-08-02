@@ -10,6 +10,8 @@ the flip-criterion assessment.
 
 from __future__ import annotations
 
+import pytest
+
 from noctis.engine.research import PROSE_STALL, ResearchSummary
 from noctis.research.ledger import SessionLedger
 from noctis.research.parity import (
@@ -103,28 +105,62 @@ def test_tokens_per_verdict_is_na_when_no_verdicts():
     assert m.tokens_per_verdict is None
 
 
-# ── validator first-attempt % (episodic: from the ledger; conversation: n/a) ───────────────────
-def test_validator_first_attempt_pct_from_real_ledger_rollup(tmp_path):
+# ── validator job-pass % (episodic: from the ledger; conversation: n/a) ────────────────────────
+def test_validator_job_pass_pct_from_real_ledger_rollup(tmp_path):
     led = _episodic_ledger(tmp_path, "s1")
     rollup = led.rollup().to_dict()
     assert rollup["authored"] == 2 and rollup["validation_failures"] == 1
     m = compute_loop_metrics(EPISODIC, [(_summary(promotions=1, rejections=1), rollup)])
-    # 2 of 3 author attempts passed the write gate on the first try.
-    assert m.validator_first_attempt_pct == 200.0 / 3.0
+    # 2 of 3 authoring JOBS ended with a file the write gate accepted — retries included.
+    assert m.validator_job_pass_pct == 200.0 / 3.0
 
 
-def test_validator_first_attempt_pct_is_na_without_a_ledger():
+def test_validator_job_pass_pct_is_na_without_a_ledger():
     """The conversation loop writes no ledger, so the validator pass-rate is honestly unavailable —
     n/a, never invented."""
     m = compute_loop_metrics(CONVERSATION, [(_summary(promotions=1, rejections=1), None)])
-    assert m.validator_first_attempt_pct is None
+    assert m.validator_job_pass_pct is None
 
 
-def test_validator_first_attempt_pct_is_na_with_no_author_attempts(tmp_path):
+def test_validator_job_pass_pct_is_na_with_no_author_attempts(tmp_path):
     led = SessionLedger(tmp_path, "empty")
     led.record_session_start(mandate=None, budgets={}, models={})
     m = compute_loop_metrics(EPISODIC, [(_summary(), led.rollup().to_dict())])
-    assert m.validator_first_attempt_pct is None
+    assert m.validator_job_pass_pct is None
+
+
+def test_the_validator_rate_is_named_for_the_job_level_thing_it_measures(tmp_path):
+    """The metric row an operator reads says *job*, because a private retry still counts here."""
+    rollup = _episodic_ledger(tmp_path, "named").rollup().to_dict()
+
+    text = render_comparison(_conversation_metrics(), _episodic_metrics(rollup))
+
+    assert "Validator job-pass %" in text
+    assert "1st-attempt" not in text
+
+
+# ── one definition, two layers: the parity row and the coder bench's job_pass rate ─────────────
+def test_the_parity_validator_rate_and_the_coder_benchs_job_pass_rate_are_one_definition(tmp_path):
+    """The same attempt-sequence facts, expressed in each layer's own shape, yield the same rate.
+
+    Three authoring jobs: one landed on its opening ask, one landed after a private validator
+    retry, one never landed. The parity row reads that off a ledger rollup (``authored`` vs
+    ``validation_failures``); the coder benchmark reads it off retained job records. Both are
+    job-level — a retry that landed is a pass on either side — so the two numbers must agree, and
+    this test is what stops them drifting apart.
+    """
+    from noctis.eval.coder_scorer import score_coder_jobs
+    from tests.test_eval_coder_scorer import _job
+
+    attempts = {"a": [True], "b": [False, True], "c": [False, False]}
+    landed = sum(1 for outcomes in attempts.values() if any(outcomes))
+    rollup = {"authored": landed, "validation_failures": len(attempts) - landed}
+
+    parity = compute_loop_metrics(EPISODIC, [(_summary(), rollup)])
+    bench = score_coder_jobs([_job(case, outcomes) for case, outcomes in attempts.items()])
+
+    assert bench.rates.job_pass_rate == 2.0 / 3.0
+    assert parity.validator_job_pass_pct == pytest.approx(100.0 * bench.rates.job_pass_rate)
 
 
 # ── promotion-gate reach % ─────────────────────────────────────────────────────────────────────

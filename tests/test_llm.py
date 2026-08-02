@@ -78,8 +78,9 @@ def test_capabilities_by_provider():
     assert a.prompt_cache and a.server_web_search and a.thinking and a.streaming and not a.effort
     # OpenAI: native reasoning_effort dial on + streaming; caches automatically (no breakpoints).
     assert capabilities_for("openai") == Capabilities(effort=True, streaming=True)
-    # Local: nothing provider-specific — streaming OFF (its tool-call streaming varies).
-    assert capabilities_for("ollama") == Capabilities()
+    # Local: nothing provider-specific except the sampler controls it really has (#222) —
+    # streaming OFF (its tool-call streaming varies), temperature/seed ON.
+    assert capabilities_for("ollama") == Capabilities(temperature=True, seed=True)
     assert capabilities_for("ollama").streaming is False
 
 
@@ -573,7 +574,8 @@ def test_build_llm_client_local_needs_no_key(monkeypatch):
     assert client is not None  # a keyless local backend still builds
     assert client._api_key is None
     assert client._base_url == "http://localhost:11434"
-    assert client.capabilities == Capabilities()  # cache/web_search/effort/thinking all no-op
+    # cache/web_search/effort/thinking all no-op; the sampler controls it really has stay on.
+    assert client.capabilities == Capabilities(temperature=True, seed=True)
     assert client._thinking is None  # ollama is not Sonnet
 
 
@@ -750,6 +752,109 @@ def test_streaming_midstream_error_propagates_to_the_loop(monkeypatch):
             on_delta=lambda k, t: seen.append((k, t)),
         )
     assert seen == [("think", "a")]  # the delta before the drop was rendered live
+
+
+# ── sampling knobs (#222): capability-gated temperature/seed ──────────────────────────────
+def test_sampling_capabilities_are_off_for_hosted_providers_and_on_for_the_local_seam():
+    """#222: the honest per-provider flags. Anthropic exposes no seed parameter at all and
+    rejects a temperature beside the thinking dial this seam pins; hosted OpenAI's reasoning
+    family fixes temperature and its seed forwarding is unverified, so both stay off there —
+    an unverifiable capability is off. The local/OpenAI-compatible class (vLLM, Ollama,
+    llama.cpp) accepts both as first-class sampler controls, so that is where they are on."""
+    anthropic = capabilities_for("anthropic")
+    assert (anthropic.temperature, anthropic.seed) == (False, False)
+    openai = capabilities_for("openai")
+    assert (openai.temperature, openai.seed) == (False, False)
+    local = capabilities_for("ollama")
+    assert (local.temperature, local.seed) == (True, True)
+
+
+def test_completion_kwargs_send_sampling_params_only_where_the_provider_supports_them():
+    """Set knobs reach the request on a capable provider and are absent on an incapable one —
+    never an error, never a fake promise: a False capability flag makes the lever unsent."""
+    kw = dict(system="s", tools=[], messages=[{"role": "user", "content": "go"}], max_tokens=8)
+
+    local = LiteLLMClient(
+        model="ollama/qwen3-coder",
+        capabilities=capabilities_for("ollama"),
+        temperature=0.2,
+        seed=7,
+    )
+    sent = local._completion_kwargs(**kw)
+    assert sent["temperature"] == 0.2
+    assert sent["seed"] == 7
+
+    # Same knobs, an Anthropic client: neither parameter is in the request at all.
+    claude = LiteLLMClient(
+        model="anthropic/claude-sonnet-5",
+        capabilities=capabilities_for("anthropic"),
+        temperature=0.2,
+        seed=7,
+    )
+    unsent = claude._completion_kwargs(**kw)
+    assert "temperature" not in unsent
+    assert "seed" not in unsent
+
+
+def test_each_sampling_knob_is_gated_on_its_own_capability():
+    """The two flags are independent: a backend that samples with a temperature but has no seed
+    parameter sends the one and not the other."""
+    kw = dict(system="s", tools=[], messages=[{"role": "user", "content": "go"}], max_tokens=8)
+    client = LiteLLMClient(
+        model="x", capabilities=Capabilities(temperature=True), temperature=0.5, seed=11
+    )
+    sent = client._completion_kwargs(**kw)
+    assert sent["temperature"] == 0.5
+    assert "seed" not in sent
+
+
+def test_unset_sampling_knobs_leave_the_request_identical_to_today():
+    """The default (both ``None``) is byte-identical to the pre-#222 request on every provider,
+    capable or not — an unset knob adds no key, so no existing session changes."""
+    kw = dict(system="s", tools=[], messages=[{"role": "user", "content": "go"}], max_tokens=8)
+    for provider, model in (("ollama", "ollama/qwen3-coder"), ("anthropic", "anthropic/claude-x")):
+        caps = capabilities_for(provider)
+        before = LiteLLMClient(model=model, capabilities=caps)._completion_kwargs(**kw)
+        after = LiteLLMClient(
+            model=model, capabilities=caps, temperature=None, seed=None
+        )._completion_kwargs(**kw)
+        assert before == after
+        assert "temperature" not in before
+        assert "seed" not in before
+
+
+def test_a_zero_temperature_is_sent_rather_than_read_as_unset():
+    """``0.0`` is a real (greedy-ish) sampling choice, not "unset" — only ``None`` means unset."""
+    client = LiteLLMClient(
+        model="ollama/qwen3-coder", capabilities=capabilities_for("ollama"), temperature=0.0
+    )
+    kwargs = client._completion_kwargs(
+        system="s", tools=[], messages=[{"role": "user", "content": "go"}], max_tokens=8
+    )
+    assert kwargs["temperature"] == 0.0
+
+
+def test_client_for_threads_sampling_knobs_onto_the_completion(monkeypatch):
+    """The shared builder carries the knobs to the client, so a coder built at the composition
+    root actually samples the way config asked on a capable backend."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "litellm", types.ModuleType("litellm"))
+    s = Settings()
+
+    client = client_for(s, "ollama/qwen3-coder", temperature=0.3, seed=99)
+    kwargs = client._completion_kwargs(
+        system="s", tools=[], messages=[{"role": "user", "content": "go"}], max_tokens=8
+    )
+    assert kwargs["temperature"] == 0.3
+    assert kwargs["seed"] == 99
+
+    # Unset (every caller that passes nothing) stays today's request.
+    default = client_for(s, "ollama/qwen3-coder")
+    assert "temperature" not in default._completion_kwargs(
+        system="s", tools=[], messages=[{"role": "user", "content": "go"}], max_tokens=8
+    )
 
 
 def test_completion_kwargs_carry_an_explicit_transport_timeout():

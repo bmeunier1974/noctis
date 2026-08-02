@@ -28,6 +28,8 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `research.agent.coder_thinking` | `on` (default) / `off` — the coder reasons through scenario-window/warmup arithmetic (deliberate, budgeted by `max_author_calls`); separate from the driver `thinking` dial |
 | `research.agent.coder_fallback_model`, `max_escalations`, `coder_fallback_thinking` | Paid escalation coder (#72): a local authoring job that spends its validator retries escalates the same brief, bounded per session by `max_escalations` (`0` = default = never). The escalated coder's thinking dial defaults `off` (#98) |
 | `research.agent.coder_max_tokens` | The coder's output-token ceiling — the *file's* budget: `null` (default) defers to the built-in `16000`; a number resizes it for a different coder backend. A thinking coder client gets a thinking allowance added on top (#98). A compat/sizing lever, **not** a cost budget (unused headroom is never billed); inert without a `coder_model` |
+| `research.agent.coder_temperature`, `coder_seed` | The coder's sampling dials: `null` (default) sends nothing (today's request, byte for byte); a value is forwarded **only where the provider supports it** — the local/OpenAI-compatible seam — and is a clean no-op elsewhere (Anthropic has no `seed` parameter and rejects a temperature beside the pinned thinking dial). Neither buys determinism; reps + paired stats are the variance defence |
+| `research.agent.coder_retries` | Private validator re-prompts per authoring job: `null` (default) defers to the engine's built-in `2` (initial + 2 ≤ 3 completions); a number pins it. Every attempt is a coder completion billed against `max_author_calls` |
 | `research.cost_profile` | `full` / `balanced` / `economy` — resource ceilings only, never quality gates |
 | `research.pricing` | `$/Mtok` price overrides for the run record's **spend estimate**, keyed by model prefix (see **Pricing the spend estimate** below). Pure accounting: it changes what a run is *reported* to have cost, never what it does |
 | `research.agent.thinking` | `off` (default) / `on` — opt a **watch** session into provider-native reasoning; costs output tokens (see below) |
@@ -183,18 +185,18 @@ fill-cost floor, the promotion thresholds, the two-axis holdout geometry, the ou
 secrets). Every leaf setting is classified **exactly once** in `src/noctis/config/overlay.py` —
 the authoritative table, with a justification comment per group — and a completeness ratchet in
 the test suite fails until a newly added knob is classified deliberately, so nothing is allowed
-by accident of omission. Today: **36 allowed, 2 clamped, 53 refused**. The whole surface also
+by accident of omission. Today: **39 allowed, 2 clamped, 53 refused**. The whole surface also
 ships commented-out in `mandate/MANDATE.md.example`, so it is discoverable without reading
 source.
 
-**Allowed (36), in six groups.** None of them is read by the promotion gates
+**Allowed (39), in six groups.** None of them is read by the promotion gates
 (`champions/promotion.py`), the split geometry (`backtest/splits.py`), or the safety gate
 (`config/gate.py`) — that is the property that makes them settable at all.
 
 | Group | Knobs |
 |---|---|
-| Model seam | `research.model`, `research.base_url`, `research.agent.model` / `coder_model` / `coder_fallback_model`, the three thinking dials (`thinking`, `coder_thinking`, `coder_fallback_thinking`), `research.agent.loop` |
-| Spend ceilings | `research.cost_profile`, `research.agent.max_iterations` / `max_backtests` / `sweep_trials` / `max_author_calls` / `max_escalations` / `max_tokens` / `coder_max_tokens` / `context_window` / `episode_retries` / `web_search` / `max_web_searches` / `sweep_workers` / `worker_bar_budget`, `research_time_budget_minutes`, `time_limit_hours`, `run_limit_hours` |
+| Model seam | `research.model`, `research.base_url`, `research.agent.model` / `coder_model` / `coder_fallback_model`, the three thinking dials (`thinking`, `coder_thinking`, `coder_fallback_thinking`), the coder's sampling dials (`coder_temperature`, `coder_seed`), `research.agent.loop` |
+| Spend ceilings | `research.cost_profile`, `research.agent.max_iterations` / `max_backtests` / `sweep_trials` / `max_author_calls` / `max_escalations` / `max_tokens` / `coder_max_tokens` / `context_window` / `episode_retries` / `coder_retries` / `web_search` / `max_web_searches` / `sweep_workers` / `worker_bar_budget`, `research_time_budget_minutes`, `time_limit_hours`, `run_limit_hours` |
 | Search shape | `promotion.metric`, `research.focus_size`, `research.tuning_dispersion_penalty`, `research.draft_ttl_hours`, `research.memory_distill_every` |
 | Data acquisition | `data.history_days`, `data.auto_backfill` |
 | Housekeeping | `observability.heartbeat_polls`, `qa.keep_last_runs` |
