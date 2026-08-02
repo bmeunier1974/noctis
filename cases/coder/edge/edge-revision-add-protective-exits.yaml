@@ -1,0 +1,47 @@
+# Edge — revision of an existing file: the brief is a change request against the source already
+# carrying the target name, not a new thesis. The author engine folds that source into the prompt
+# and the revised file replaces it through the normal write gate.
+site_id: coder
+payload:
+  thesis: >-
+    The strategy that already carries this name earns its entries; what it lacks is a defined
+    loss side. Keep its thesis and its entry logic exactly as they are and add a protective
+    bracket sized off recent true range plus a maximum holding horizon, so one trade cannot run
+    past the point at which the thesis has already been falsified.
+  entry_exit: >-
+    Preserve the existing entry and exit rules unchanged — same channel read, same direction,
+    same flat condition. Add to them: declare ExitRules alongside every non-flat target, with a
+    stop distance of `atr_mult` times the ATR over `atr_period` bars expressed as a fraction of
+    the entry price, and a trailing fraction `trail_pct`; and force a flat target once a position
+    has been held for `max_hold` bars. Change nothing else about the file.
+  param_space: >-
+    keep the existing channel lookback 5-60 bars (default 20) exactly as declared, and add ATR
+    period 10-40 bars (default 20), ATR stop multiple 1.5-5.0 (default 3.0) and maximum holding
+    horizon 20-200 bars (default 80). Four tuned parameters once the existing one is counted.
+  scenarios: >-
+    Keep the file's existing tapes honest and add one that proves the new exit.
+    bracket_exit_fires: a flat pad, an 80-bar rally that triggers an entry, then a fast 40-bar
+    selloff — flat by the end of the selloff because the protective stop fired, not merely
+    because the entry condition lapsed. steady_decline_never_longs: a flat pad then a 120-bar
+    decline — never long, because a monotone decline never prints a new channel high. Re-derive
+    the warmup from the REVISED Params defaults, not the old ones: the ATR that now sizes the
+    stop needs its own period plus one bar of history, so the warmup is the deeper of that and
+    the existing channel lookback.
+  style: breakout
+  symbols:
+    - SPY
+    - AAPL
+    - XLE
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:revision
+difficulty:
+  composition_mode: revision
+  oracle_mode: authored
+  warmup_arithmetic: composed
+  state_complexity: latched
+  no_trade_tape: falsified
+  param_space_breadth: moderate
+  api_surface: exits
+split: tuning

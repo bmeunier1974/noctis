@@ -1,0 +1,73 @@
+# Edge — a FIXED oracle: the gate stamps scenarios() from the spec below and rejects any the coder
+# writes, so the brief's scenarios field is that spec's own faithful rendering (describe_spec), the
+# way the episodic driver emits it. The no-trade tape is a steady selloff that falsifies the level
+# condition rather than a quiet tape that hopes not to trigger.
+site_id: coder
+payload:
+  thesis: >-
+    A breakout is only worth taking with the loss side defined in advance: entering above the
+    prior channel high and leaving on a fixed fraction of the entry price turns an open-ended
+    trend bet into a bounded one, which is what makes the per-trade arithmetic against the round
+    trip checkable rather than hopeful.
+  entry_exit: >-
+    Enter and hold a full long when the close exceeds the highest high of the prior `channel`
+    bars — the channel excludes the current bar — while the close is also above the trend
+    average; hold the position until the protective bracket fires or the close falls back below
+    the trend average. Declare the bracket alongside the target with ExitRules(stop_pct=...,
+    trail_pct=...). Long only.
+  param_space: >-
+    breakout channel 20-80 bars (default 40), trend average 50-200 bars (default 120), stop
+    fraction 0.01-0.06 (default 0.03) and trailing fraction 0.02-0.10 (default 0.05). Four tuned
+    parameters. Keep the deepest default modest: the fixed tape is preceded by a flat setup pad
+    sized to this file's own declared warmup.
+  scenarios: >-
+    breakout_run: flat(40) then trend(80) — enter long during leg 1; failed_breakout_exits:
+    trend(60) then selloff(60) then flat(40) — be flat by the end of leg 1;
+    steady_selloff_never_longs: selloff(120) — stay flat throughout (never trade)
+  scenario_spec:
+    scenarios:
+      - name: breakout_run
+        legs:
+          - kind: flat
+            bars: 40
+          - kind: trend
+            bars: 80
+            pct: 0.10
+        behavior: enter_long_during_leg
+        leg: 1
+      - name: failed_breakout_exits
+        legs:
+          - kind: trend
+            bars: 60
+            pct: 0.08
+          - kind: selloff
+            bars: 60
+            pct: 0.10
+          - kind: flat
+            bars: 40
+        behavior: flat_by_end_of_leg
+        leg: 1
+      - name: steady_selloff_never_longs
+        legs:
+          - kind: selloff
+            bars: 120
+            pct: 0.25
+        behavior: never_trade
+  style: breakout
+  symbols:
+    - SPY
+    - AAPL
+    - XLE
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:falsified-no-trade
+difficulty:
+  composition_mode: scratch
+  oracle_mode: fixed_spec
+  warmup_arithmetic: composed
+  state_complexity: latched
+  no_trade_tape: falsified
+  param_space_breadth: moderate
+  api_surface: exits
+split: tuning

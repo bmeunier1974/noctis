@@ -1,0 +1,41 @@
+# Edge — higher-timeframe warmup: the gate is hourly, the bars are minutes, so warmup multiplies.
+site_id: coder
+payload:
+  thesis: >-
+    Intraday noise is only worth trading in the direction the hour is already going: an hourly
+    trend read filters out the minute-by-minute mean reversion that eats the round-trip cost,
+    while entries on the base bars keep the fill close to the signal that earned it.
+  entry_exit: >-
+    Aggregate the 1-minute base bars into completed 1-hour bars and keep an EMA of the hourly
+    closes; only a completed hourly bar is ever read, so a partial hour is never visible. Hold a
+    full long on the base bars while the last completed hourly close is above that hourly EMA and
+    the current base close is above the base-bar average of the last `confirm` closes; go flat
+    whenever the hourly close falls back below its EMA. Long only.
+  param_space: >-
+    hourly EMA span 6-24 hourly bars (default 12), base-bar confirmation average 2-20 bars
+    (default 5), and a re-entry cooldown of 10-60 base bars (default 30). Three tuned parameters.
+  scenarios: >-
+    hourly_uptrend_goes_long: a flat pad longer than the whole warmup, a 400-bar rally, then a
+    300-bar selloff — long inside the rally, flat again by the end of the selloff.
+    steady_decline_never_longs: a flat pad then a 500-bar decline — never long, because the
+    hourly closes fall monotonically and never sit above their own EMA. Budget the warmup in BASE
+    bars, not hourly ones: 12 completed hourly bars is 12 x 60 = 720 one-minute bars before the
+    hourly EMA exists at all, so every directional window opens after 720 base bars and the tape
+    has to be long enough to hold that pad and still stay inside the 2000-bar ceiling.
+  style: momentum
+  symbols:
+    - SPY
+    - QQQ
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:higher-timeframe
+difficulty:
+  composition_mode: scratch
+  oracle_mode: authored
+  warmup_arithmetic: higher_timeframe
+  state_complexity: rolling
+  no_trade_tape: falsified
+  param_space_breadth: moderate
+  api_surface: indicators
+split: holdout

@@ -1,0 +1,42 @@
+# Edge — higher-timeframe warmup: a daily gate over 5-minute bars, so warmup is days x session.
+site_id: coder
+payload:
+  thesis: >-
+    An intraday breakout that fights the daily tape pays the spread twice and keeps nothing: the
+    same signal taken only while the daily trend agrees holds its move long enough to clear the
+    round trip. The gate is coarse on purpose — it changes at most once a session, so it adds no
+    turnover of its own.
+  entry_exit: >-
+    Aggregate the 5-minute base bars into completed daily bars and keep an SMA of the daily
+    closes; only completed daily bars are read. Hold a full long while the last completed daily
+    close is above that daily SMA AND the current base close is at least `buffer` above the
+    highest high of the prior `channel` base bars; go flat whenever either half fails. Long only.
+  param_space: >-
+    daily SMA 5-20 daily bars (default 10), intraday breakout channel 12-96 five-minute bars
+    (default 24), and an entry buffer of 0.0005-0.005 of price (default 0.001). Three tuned
+    parameters.
+  scenarios: >-
+    daily_uptrend_breakout_goes_long: a flat pad longer than the whole warmup, a 300-bar rally,
+    then a 200-bar selloff — long inside the rally, flat again by the end of the selloff.
+    steady_decline_never_longs: a flat pad then a 400-bar decline — never long, because a
+    monotone decline never prints a new `channel`-bar high, so the entry condition is falsified
+    rather than merely quiet. Budget the warmup in BASE bars: 10 completed daily bars over a
+    regular session of 78 five-minute bars is 780 base bars before the daily SMA exists, so the
+    setup pad is sized in base bars and every directional window opens after it.
+  style: breakout
+  symbols:
+    - SPY
+    - IWM
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:higher-timeframe
+difficulty:
+  composition_mode: scratch
+  oracle_mode: authored
+  warmup_arithmetic: higher_timeframe
+  state_complexity: rolling
+  no_trade_tape: falsified
+  param_space_breadth: moderate
+  api_surface: indicators
+split: tuning

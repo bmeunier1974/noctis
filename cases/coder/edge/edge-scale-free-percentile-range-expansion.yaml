@@ -1,0 +1,44 @@
+# Edge — a scale-free percentile rule: no amplitude silences a rank, so the no-trade tape must
+# falsify the directional half instead of hoping a quiet tape stays under a threshold.
+site_id: coder
+payload:
+  thesis: >-
+    Range expansion marks the arrival of information, and ranking today's true range against its
+    own trailing history is the scale-free way to say "unusually wide": the rank depends only on
+    the ordering inside the window, so the same rule means the same thing on a five-dollar stock
+    and a five-hundred-dollar one, and survives the volatility the fit window never contained.
+  entry_exit: >-
+    Keep a rolling window of the last `rank_window` true ranges. On each bar compute the
+    percentile rank of the current true range inside that window and go long when the rank is at
+    or above `rank_pct` AND the bar closed at or above `close_strength` of the way from its own
+    low to its own high; go flat on every other bar. Long only.
+  param_space: >-
+    rank window 50-250 bars (default 100), entry rank 0.75-0.99 (default 0.90) and close strength
+    0.5-0.9 (default 0.67). Three tuned parameters.
+  scenarios: >-
+    expansion_bar_goes_long: a flat pad, a 90-bar rally whose bars widen and close near their
+    highs, then a 60-bar drift back — long inside the rally and flat again by the end of the
+    drift. steady_decline_never_longs: a flat pad then a 150-bar monotone decline — never long.
+    Build that no-trade tape by falsifying the DIRECTIONAL half, never by shrinking the chop
+    amplitude: the percentile rank is scale-free, so some bar is always the widest of its own
+    window and the rank condition fires however small the moves are. On a monotone decline every
+    widening bar closes at the bottom of its range, so the close-strength condition provably
+    never holds. Warmup is the rank window plus the one prior close the true range needs.
+  style: vol-regime
+  symbols:
+    - SPY
+    - NVDA
+    - XOP
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:scale-free-percentile
+difficulty:
+  composition_mode: scratch
+  oracle_mode: authored
+  warmup_arithmetic: composed
+  state_complexity: rolling
+  no_trade_tape: scale_free
+  param_space_breadth: moderate
+  api_surface: indicators
+split: holdout

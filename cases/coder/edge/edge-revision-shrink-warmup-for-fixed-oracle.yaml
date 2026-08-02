@@ -1,0 +1,69 @@
+# Edge — a revision under a FIXED oracle, where the two constraints collide: the existing file's
+# deep default lookbacks make the setup pad (warmup + pad) overrun what the compiler will accept,
+# so the honest move is shrinking the Params defaults, never enlarging the tape.
+site_id: coder
+payload:
+  thesis: >-
+    The strategy that already carries this name reads a real trend, but its default lookbacks are
+    far deeper than the effect it measures needs — and a deep warmup is not free here, because
+    every fixed tape is preceded by a flat setup pad sized to the file's own declared warmup.
+    Shrink the defaults to the shallowest window that still expresses the same read; the thesis
+    does not change.
+  entry_exit: >-
+    Keep the existing rule exactly: hold a full long while the fast average of closes is strictly
+    above the slow average, go flat whenever it is not, long only. Re-declare the Params defaults
+    so the deepest lookback is modest, and narrow the tuning ranges to match — the defaults, not
+    the ranges, are what the warmup is derived from.
+  param_space: >-
+    fast average 3-20 bars (default 5) and slow average 10-40 bars (default 20), with fast kept
+    below slow. Two tuned parameters, both shallower than the file currently declares.
+  scenarios: >-
+    trend_ride: flat(30) then trend(70) — enter long during leg 1; rollover_exit: trend(60) then
+    selloff(60) then flat(20) — be flat by the end of leg 1; steady_decline_never_longs:
+    selloff(90) — stay flat throughout (never trade)
+  scenario_spec:
+    scenarios:
+      - name: trend_ride
+        legs:
+          - kind: flat
+            bars: 30
+          - kind: trend
+            bars: 70
+            pct: 0.09
+        behavior: enter_long_during_leg
+        leg: 1
+      - name: rollover_exit
+        legs:
+          - kind: trend
+            bars: 60
+            pct: 0.08
+          - kind: selloff
+            bars: 60
+            pct: 0.09
+          - kind: flat
+            bars: 20
+        behavior: flat_by_end_of_leg
+        leg: 1
+      - name: steady_decline_never_longs
+        legs:
+          - kind: selloff
+            bars: 90
+            pct: 0.15
+        behavior: never_trade
+  style: momentum
+  symbols:
+    - SPY
+    - MSFT
+provenance: authored:2026-08-02
+tags:
+  - bucket:edge
+  - shape:revision
+difficulty:
+  composition_mode: revision
+  oracle_mode: fixed_spec
+  warmup_arithmetic: composed
+  state_complexity: rolling
+  no_trade_tape: falsified
+  param_space_breadth: narrow
+  api_surface: indicators
+split: tuning
