@@ -1,0 +1,35 @@
+# Canary — the sma_crossover seed with one rule changed: the fast average collapses to the close.
+site_id: coder
+payload:
+  thesis: >-
+    The shortest possible reading of the same trend filter: the latest close is itself the
+    fastest average there is, so price above its own longer-run mean already says demand is
+    outpacing the baseline — without a second lookback to tune.
+  entry_exit: >-
+    Hold a full long while the close is strictly above the SMA of closes; go flat whenever it
+    is not. Long only, no shorting.
+  param_space: >-
+    a single tuned parameter: the SMA lookback, 20-100 bars (default 30).
+  scenarios: >-
+    trend_ride_then_rollover: a flat pad, a 40-bar rally, then a 40-bar selloff — long inside
+    the rally, flat again by the end of the selloff. steady_decline_never_longs: a flat pad
+    then a 60-bar decline — never long, because on a monotone decline the close sits below its
+    own trailing mean on every bar.
+  style: momentum
+  symbols:
+    - AAPL
+    - MSFT
+provenance: authored:2026-08-02
+tags:
+  - bucket:canary
+  - adapts:sma_crossover
+  - rule:price-against-one-average
+difficulty:
+  composition_mode: scratch
+  oracle_mode: authored
+  warmup_arithmetic: single
+  state_complexity: rolling
+  no_trade_tape: trivial
+  param_space_breadth: narrow
+  api_surface: indicators
+split: tuning

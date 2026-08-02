@@ -434,12 +434,16 @@ def test_a_case_file_dropped_into_the_cases_tree_is_gitignored_by_default():
     assert checked.returncode == 0
 
 
-def test_the_only_case_path_tracked_in_git_is_the_scaffold_readme():
+def test_the_only_case_paths_tracked_in_git_are_the_scaffold_and_a_reviewed_bucket():
+    """Deny-by-default, still: a bucket ships only by being named in the allowlist (#218 adds
+    the coder site's README and its two curated buckets; every other case path stays local)."""
     tracked = subprocess.run(
         ["git", "ls-files", "cases"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
     ).stdout.split()
+    allowed = ("cases/coder/README.md", "cases/coder/edge/", "cases/coder/canary/")
 
-    assert tracked == ["cases/README.md"]
+    assert "cases/README.md" in tracked
+    assert all(path == "cases/README.md" or path.startswith(allowed) for path in tracked), tracked
 
 
 # ── purity, structurally ──────────────────────────────────────────────────────────────────
