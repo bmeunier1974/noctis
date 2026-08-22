@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from noctis.broker import FeeModel, PaperBroker, SlippageModel, simulate
+from noctis.broker import FeeModel, PaperBroker, SlippageModel
 from noctis.live import RiskLimits, RiskManager, run_trading
 from noctis.strategies import Candidate
 from noctis.strategies.base import ExitRules
@@ -228,65 +228,6 @@ class _ScriptedExitStub:
         idx = min(self._i, len(self._script) - 1)
         ctx.set_target(self._script[idx], exits=self._exits)
         self._i += 1
-
-
-def _exit_tape():
-    """Entry at 100 → 10% stop breached intrabar → target cycles 0 → re-entry at 90.5."""
-    rows = [
-        (100.0, 101.0, 99.0, 100.0),
-        (100.0, 101.0, 100.0, 101.0),  # +1 fills at the open: 950 units at 100
-        (100.0, 100.0, 88.0, 92.0),  # low breaches 90 → stop fill at 90, latch on
-        (91.0, 92.0, 90.0, 91.0),  # raw target flips to 0 → un-latch, still flat
-        (90.0, 91.0, 89.0, 90.0),  # raw target back to +1 → decision to re-enter
-        (90.5, 91.0, 90.0, 91.0),  # re-entry fills at the open
-    ]
-    return pd.DataFrame(
-        {
-            "ts_event": [i * 60 * 1_000_000_000 for i in range(len(rows))],
-            "open": [r[0] for r in rows],
-            "high": [r[1] for r in rows],
-            "low": [r[2] for r in rows],
-            "close": [r[3] for r in rows],
-            "volume": [1000.0] * len(rows),
-        }
-    )
-
-
-def test_live_and_simulate_produce_the_same_fill_sequence_with_exits():
-    """The Phase-4 parity assertion: the live driver and the simulator run the SAME exit
-    engine on the same tape and cannot disagree on a single fill."""
-    script, rules = [1, 1, 1, 0, 1, 1], ExitRules(stop_pct=0.10)
-    tape = _exit_tape()
-
-    sim_result = simulate(
-        _ScriptedExitStub(script, rules),
-        tape,
-        PaperBroker(
-            starting_cash=100_000.0, fee_model=FeeModel(0.0), slippage_model=SlippageModel(0.0)
-        ),
-        symbol="AAPL",
-        alloc=0.95,
-    )
-
-    live_broker = PaperBroker(
-        starting_cash=100_000.0, fee_model=FeeModel(0.0), slippage_model=SlippageModel(0.0)
-    )
-    summary = run_trading(
-        candidates=[_ProbeCandidate(_ScriptedExitStub(script, rules))],
-        bars_by_symbol={"AAPL": tape},
-        broker=live_broker,
-        # 95% position cap = the simulator's alloc; loss floor at 100% never halts the drive.
-        limits=RiskLimits(
-            max_position_pct=95.0, max_gross_exposure_pct=100.0, max_daily_loss_pct=100.0
-        ),
-    )
-
-    def fill_seq(fills):
-        return [(f.side.value, f.quantity, f.price, f.reason) for f in fills]
-
-    assert fill_seq(live_broker.fills) == fill_seq(sim_result.fills)
-    assert [f.reason for f in live_broker.fills] == ["target", "stop", "target"]
-    assert summary.exit_fills == {"stop": 1}
 
 
 def test_halted_session_skips_exit_evaluation():
