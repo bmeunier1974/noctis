@@ -319,12 +319,12 @@ resumes against the current files instead.
 #### The three freezing tiers
 
 Every leaf setting belongs to exactly one tier, classified in `config/rehydrate.py`. Today:
-**72 frozen, 17 live, 2 refused**. The record publishes the three lists, so a consumer never has to
+**75 frozen, 18 live, 2 refused**. The record publishes the three lists, so a consumer never has to
 guess which is which.
 
 | Tier | Count | What | On a resume |
 |---|---|---|---|
-| **Frozen** | 72 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `session.*`, `universe`, `champion_count`, `data.provider`/`dataset`/`history_days`/`auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `embed_all_sources`, `live_feed.*` — **plus the whole mandate**, as resolved text | from the record |
+| **Frozen** | 75 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `session.*`, `universe`, `champion_count`, `data.provider`/`dataset`/`history_days`/`auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `embed_all_sources`, `live_feed.*` — **plus the whole mandate**, as resolved text | from the record |
 | **Live** | 17 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | from the current process |
 | **Refused** | 2 | `mode`, `allow_live` | from **neither** — never recorded, never restored |
 

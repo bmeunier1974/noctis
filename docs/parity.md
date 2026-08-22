@@ -68,7 +68,7 @@ honestly supply** that metric — never a fabricated number.
 |---|---|
 | **Verdicts / session** *(primary)* | `(promotions + rejections)` per session — the spent promote/reject decisions the gates arbitrated. The effectiveness axis: more real verdicts per session is more research done. |
 | **Tokens / verdict** *(decision)* | `tokens_total ÷ verdicts` — judgment-model tokens spent per verdict reached. The spend axis. `n/a` when a loop reached zero verdicts. |
-| Validator 1st-attempt % | Of the strategies a session tried to author, the fraction that passed the write gate on the first try. Episodic-only (from the ledger); the conversation loop keeps no ledger, so it reads `n/a`. |
+| Validator job-pass % | Of the authoring **jobs** a session ran, the fraction that ended with a file the write gate accepted. Job-level, not first-attempt: the author engine retries privately inside one job (re-asking the coder with the gate's own rejection), so a file that landed on its third try counts like one that landed on its first — the same definition the coder benchmark publishes as `job_pass`, and the two are pinned equal in `tests/test_parity.py`. Episodic-only (from the ledger); the conversation loop keeps no ledger, so it reads `n/a`. |
 | Promotion-gate reach % | `verdicts ÷ candidates` — the fraction of strategies worked on that reached a gated verdict. |
 | Undecided (total) | Strategies authored but never carried to a verdict (archived after the TTL). |
 | Prose stalls (sessions) | Sessions that ended `stopped_reason: prose_stall` — the conversation loop's zero-verdict prose ending after the liveness guard's nudge cap (#100). The episodic driver's episode contract forces a structured emission, so its cell is an honest 0; a non-zero conversation count explains an `n/a` tokens/verdict as a stalled model, not a thin fixture. |
@@ -84,7 +84,7 @@ driver is expected to win: the conversation loop re-sends (and cache-reads) a gr
 every round, while an episode is a fresh, bounded prompt — so the gap shows up squarely in
 tokens/verdict.
 
-Two metrics are `n/a` for the conversation loop by design: **validator first-attempt %** (it writes
+Two metrics are `n/a` for the conversation loop by design: **validator job-pass %** (it writes
 no ledger to derive author-vs-optimize counts from), and any ratio whose denominator is zero. The
 comparison still makes the decision legible, because the two decision rows — verdicts/session and
 tokens/verdict — are computed identically for both loops.

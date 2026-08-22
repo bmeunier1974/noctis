@@ -64,6 +64,8 @@ MODEL_SEAM = {
     "research.agent.thinking",
     "research.agent.coder_thinking",
     "research.agent.coder_fallback_thinking",
+    "research.agent.coder_temperature",
+    "research.agent.coder_seed",
     "research.agent.loop",
 }
 SPEND_CEILINGS = {
@@ -77,6 +79,7 @@ SPEND_CEILINGS = {
     "research.agent.coder_max_tokens",
     "research.agent.context_window",
     "research.agent.episode_retries",
+    "research.agent.coder_retries",
     "research.agent.web_search",
     "research.agent.max_web_searches",
     "research.agent.sweep_workers",
@@ -112,6 +115,8 @@ SAMPLE_VALUES: dict[str, object] = {
     "research.agent.thinking": "on",
     "research.agent.coder_thinking": "off",
     "research.agent.coder_fallback_thinking": "on",
+    "research.agent.coder_temperature": 0.2,
+    "research.agent.coder_seed": 7,
     "research.agent.loop": "episodic",
     # Spend + compatibility ceilings.
     "research.cost_profile": "economy",
@@ -124,6 +129,7 @@ SAMPLE_VALUES: dict[str, object] = {
     "research.agent.coder_max_tokens": 6000,
     "research.agent.context_window": 32768,
     "research.agent.episode_retries": 3,
+    "research.agent.coder_retries": 4,
     "research.agent.web_search": True,
     "research.agent.max_web_searches": 3,
     "research.agent.sweep_workers": 4,

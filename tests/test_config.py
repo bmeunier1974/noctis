@@ -234,6 +234,35 @@ def test_coder_fallback_model_and_max_escalations_load_from_yaml(tmp_path):
     assert settings.research.agent.max_escalations == 3
 
 
+def test_coder_sampling_knobs_and_retry_budget_default_to_none(tmp_path):
+    """#222: the three coder knobs ship unset, so today's behavior is reproduced bit for bit —
+    no sampling parameter is added to any request, and the author engine keeps its built-in
+    retry budget."""
+    settings = load_settings(config_path=tmp_path / "missing.yaml")
+    assert settings.research.agent.coder_temperature is None
+    assert settings.research.agent.coder_seed is None
+    assert settings.research.agent.coder_retries is None
+
+
+def test_coder_sampling_knobs_and_retry_budget_load_from_yaml(tmp_path):
+    """The three knobs live in the agent block beside the other ``coder_*`` levers."""
+    cfg = _write_yaml(
+        tmp_path / "config.yaml",
+        """
+        research:
+          agent:
+            coder_model: ollama_chat/noctis-qwen3:14b
+            coder_temperature: 0.2
+            coder_seed: 7
+            coder_retries: 4
+        """,
+    )
+    settings = load_settings(config_path=cfg)
+    assert settings.research.agent.coder_temperature == 0.2
+    assert settings.research.agent.coder_seed == 7
+    assert settings.research.agent.coder_retries == 4
+
+
 def test_example_config_ships_the_driver_coder_pairing():
     """The example config carries the commented local-driver + hosted-coder pairing (#4) —
     the whole point of the knob — under research.agent, still fully commented out."""

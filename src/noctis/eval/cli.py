@@ -16,8 +16,9 @@ the engine's commands take theirs from :mod:`noctis.bootstrap`.
 acknowledgement the runner requires — so :class:`~noctis.eval.runner.SpendUnacknowledged` is
 unreachable through the CLI, and ``--dry-run`` simply stops after the printing, having built no
 model client and written nothing at all. Nothing in it names a site: the corpus comes from the
-workspace's cases root through the generic provider, and how a case becomes the site's renderer
-input is a lookup in the ask table, so a second site runs down the same path.
+workspace's cases root through the generic provider, how a case becomes the site's renderer input is
+a lookup in the ask table, and *which* cases a ``--tier`` selects is a lookup in the tier table — so
+a second site, and a second tier, run down the same path.
 
 ``corpus`` is the verb that answers a question about the *input* rather than about a run: it loads
 every case a site declares through that site's own reader — another lookup, so the coder's
@@ -54,16 +55,17 @@ from noctis.eval.bench_report import render_bench_report
 from noctis.eval.bootstrap import (
     BenchSeams,
     LiveModelUnavailable,
+    bench_width,
     build_bench_runner,
-    cases_root,
+    case_paths,
     configs_for,
     corpus_provider,
     live_attempt,
     load_corpus,
-    select_split,
+    select_population,
     site_vocabulary,
 )
-from noctis.eval.case_provider import MissingCorpus
+from noctis.eval.case_provider import CasePaths, MissingCorpus
 from noctis.eval.corpus_report import read_corpus, render_corpus_report
 from noctis.eval.record import validate
 from noctis.eval.registry import UnknownSite
@@ -88,8 +90,9 @@ def run_bench(
     site_id: str,
     *,
     split: str = "all",
+    tier: str | None = None,
     reps: int = 1,
-    workers: int = 1,
+    workers: int | None = None,
     dry_run: bool = False,
     model: str | None = None,
     label: str | None = None,
@@ -103,33 +106,52 @@ def run_bench(
     (no client is built, no directory is made); a live run hands that plan straight back as the
     acknowledgement :meth:`~noctis.eval.runner.BenchRunner.run` refuses to start without.
 
+    ``tier`` names a **declared** subset of the site's corpus (:data:`~noctis.eval.bootstrap.
+    SITE_TIERS`) — the population is resolved once, in the eval layer's own table, so this body
+    names no tier and no site. Stating a tier *and* a ``--split`` is refused there rather than
+    intersected here, and a tiered run with no ``--workers`` takes the width its size derives.
+
     ``seams`` is the injection point the suite drives both halves through — a stub attempt
-    callable, a scratch registry, a resolved identity. The command body passes none of it.
+    callable, a scratch registry, a scratch tier table, a resolved identity. The command body passes
+    none of it.
     """
     settings = load_settings(config_path=config)
     injected = seams if seams is not None else BenchSeams()
-    root = cases_root(settings.workspace_dir)
+    paths = case_paths(settings)
     try:
-        selected = select_split(split)
-        corpus = load_corpus(site_id, cases_root=root, registry=injected.registry)
+        population = select_population(site_id, split=split, tier=tier, tiers=injected.tiers)
+        loaded = load_corpus(site_id, cases_root=paths, registry=injected.registry)
+        corpus = population.of(loaded)
         runner = build_bench_runner(
             settings,
             site_id=site_id,
-            attempt=_attempt_for(settings, model=model, dry_run=dry_run, seams=injected),
-            workers=workers,
+            attempt=_attempt_for(
+                settings, site_id=site_id, model=model, dry_run=dry_run, seams=injected
+            ),
+            workers=bench_width(workers, population, cases=len(corpus)),
             label=label,
             seams=injected,
         )
         configs = configs_for(model)
-        plan = runner.preflight(corpus, reps=reps, configs=configs, split=selected)
+        plan = runner.preflight(corpus, reps=reps, configs=configs, split=population.split)
         typer.echo(f"BENCH {site_id}{' (dry run)' if dry_run else ''}")
         typer.echo(f"plan: {plan.summary()}")
-        typer.echo(f"corpus: {root / site_id} — {len(corpus)} case(s), digest {corpus.digest}")
+        typer.echo(
+            f"corpus: {_corpus_source(paths, site_id)} — {len(corpus)} case(s), "
+            f"digest {corpus.digest}"
+        )
+        if population.tier is not None:
+            typer.echo(
+                f"tier: {population.tier.name} — {len(corpus)} of {len(loaded)} corpus case(s); "
+                f"{population.tier.rationale}"
+            )
         typer.echo(f"workers: {runner.executor.workers}")
         if dry_run:
             typer.echo("Nothing was spent and nothing was written — drop --dry-run to run it.")
             return
-        run = runner.run(corpus, reps=reps, configs=configs, split=selected, acknowledged=plan)
+        run = runner.run(
+            corpus, reps=reps, configs=configs, split=population.split, acknowledged=plan
+        )
     except _REFUSALS as refusal:
         _refuse(f"BENCH: {refusal}")
     typer.echo(f"bench: {run.bench_id} → {run.directory}")
@@ -138,7 +160,7 @@ def run_bench(
 
 
 def _attempt_for(
-    settings: Any, *, model: str | None, dry_run: bool, seams: BenchSeams
+    settings: Any, *, site_id: str, model: str | None, dry_run: bool, seams: BenchSeams
 ) -> AttemptFn:
     """The model call this invocation would make — injected, live, or a dry run's refusal.
 
@@ -146,12 +168,18 @@ def _attempt_for(
     called: the preflight asks nothing by construction, and the placeholder makes that a fact about
     the object instead of a promise about the control flow. It is also why ``--dry-run`` needs no
     key — :func:`~noctis.eval.bootstrap.live_attempt` is never reached.
+
+    The site is named on the way in because a bench measures exactly one, and a site whose live ask
+    is not a forced structured emit (the coder's is an authoring job) declares its own maker in the
+    ask table. Which one that is stays a lookup there, so this body names no site.
     """
     if seams.attempt is not None:
         return seams.attempt
     if dry_run:
         return _never_asked
-    return live_attempt(settings, model=model, registry=seams.registry, asks=seams.asks)
+    return live_attempt(
+        settings, site_id=site_id, model=model, registry=seams.registry, asks=seams.asks
+    )
 
 
 def _never_asked(request: AttemptRequest) -> Attempt:
@@ -159,6 +187,17 @@ def _never_asked(request: AttemptRequest) -> Attempt:
     raise LiveModelUnavailable(
         f"a dry run asked {request.case.case_id!r} — a preflight spends nothing by construction"
     )
+
+
+def _corpus_source(paths: CasePaths, site_id: str) -> str:
+    """Every tier the cases were read from, in precedence order — never just the winning one.
+
+    A reading is only an answer beside "from where", and with two tiers that is two paths: an
+    operator whose local case shadows a shipped one, and one whose workspace holds nothing at all,
+    both need to see which trees were open. A tier that holds no directory for this site is not
+    listed, because it contributed nothing.
+    """
+    return " + ".join(str(directory) for directory in paths.directories(site_id))
 
 
 def report_corpus(
@@ -178,13 +217,17 @@ def report_corpus(
     """
     settings = load_settings(config_path=config)
     injected = seams if seams is not None else BenchSeams()
-    root = cases_root(settings.workspace_dir)
+    paths = case_paths(settings)
     try:
-        provider = corpus_provider(site_id, cases_root=root, registry=injected.registry)
+        provider = corpus_provider(site_id, cases_root=paths, registry=injected.registry)
         reading = read_corpus(site_id, provider.load(site_id), vocabulary=site_vocabulary(site_id))
     except _REFUSALS as refusal:
         _refuse(f"CORPUS: {refusal}")
-    typer.echo(render_corpus_report(reading, source=root / site_id, loader=type(provider).__name__))
+    typer.echo(
+        render_corpus_report(
+            reading, source=_corpus_source(paths, site_id), loader=type(provider).__name__
+        )
+    )
 
 
 def report_bench(bench_id: str, *, config: str | None = None) -> None:

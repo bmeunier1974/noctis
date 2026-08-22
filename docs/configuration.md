@@ -28,6 +28,8 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `research.agent.coder_thinking` | `on` (default) / `off` — the coder reasons through scenario-window/warmup arithmetic (deliberate, budgeted by `max_author_calls`); separate from the driver `thinking` dial |
 | `research.agent.coder_fallback_model`, `max_escalations`, `coder_fallback_thinking` | Paid escalation coder (#72): a local authoring job that spends its validator retries escalates the same brief, bounded per session by `max_escalations` (`0` = default = never). The escalated coder's thinking dial defaults `off` (#98) |
 | `research.agent.coder_max_tokens` | The coder's output-token ceiling — the *file's* budget: `null` (default) defers to the built-in `16000`; a number resizes it for a different coder backend. A thinking coder client gets a thinking allowance added on top (#98). A compat/sizing lever, **not** a cost budget (unused headroom is never billed); inert without a `coder_model` |
+| `research.agent.coder_temperature`, `coder_seed` | The coder's sampling dials: `null` (default) sends nothing (today's request, byte for byte); a value is forwarded **only where the provider supports it** — the local/OpenAI-compatible seam — and is a clean no-op elsewhere (Anthropic has no `seed` parameter and rejects a temperature beside the pinned thinking dial). Neither buys determinism; reps + paired stats are the variance defence |
+| `research.agent.coder_retries` | Private validator re-prompts per authoring job: `null` (default) defers to the engine's built-in `2` (initial + 2 ≤ 3 completions); a number pins it. Every attempt is a coder completion billed against `max_author_calls` |
 | `research.cost_profile` | `full` / `balanced` / `economy` — resource ceilings only, never quality gates |
 | `research.pricing` | `$/Mtok` price overrides for the run record's **spend estimate**, keyed by model prefix (see **Pricing the spend estimate** below). Pure accounting: it changes what a run is *reported* to have cost, never what it does |
 | `research.agent.thinking` | `off` (default) / `on` — opt a **watch** session into provider-native reasoning; costs output tokens (see below) |
@@ -61,7 +63,7 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `runs_dir`, `data.lake_dir` | The workspace-level pair: the run tree (`workspace/runs`) and the data lake (`workspace/data_lake`), which is **shared by every run** |
 | `run_dir` | **The one run root** (default `workspace/runs/legacy`, the reserved run an invocation that never opened a run reads). `noctis run` / `noctis research` rebind it to the run they mint or resume |
 | `state_dir`, `reports_dir`, `memory_path`, `qa_dir` | Per-artifact overrides; each defaults to its **run**-derived location (`<run_dir>/state`, `<run_dir>/reports`, `<run_dir>/memory/MEMORY.md`, `<run_dir>/qa`) |
-| `strategies_dir`, `mandate_dir` | The committed input surfaces: the seed strategy library and the mandate scaffold |
+| `strategies_dir`, `mandate_dir`, `cases_dir` | The committed input surfaces: the seed strategy library, the mandate scaffold, and the curated benchmark corpus (read as a tier under `<workspace>/cases/`) |
 
 ## The workspace
 
@@ -104,14 +106,14 @@ operator deliberately adopts it ([below](#seeing-the-drift-and-adopting-it)).
 
 Every leaf setting belongs to exactly one of three tiers, classified in
 `src/noctis/config/rehydrate.py` and ratcheted by the test suite the same way the overlay's table
-is. Today: **72 frozen, 17 live, 2 refused**. The record publishes the three lists it froze under
+is. Today: **75 frozen, 18 live, 2 refused**. The record publishes the three lists it froze under
 `inputs.settings` ([run-record.md](run-record.md#inputs--the-frozen-configuration)), so a consumer
 never has to guess which tier a key is in.
 
 | Tier | Count | What | Where it comes from on a resume |
 |---|---|---|---|
-| **Frozen** | 72 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `embed_all_sources`, `live_feed.*` — **plus the whole mandate** | the record |
-| **Live** | 17 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | the current process |
+| **Frozen** | 75 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `embed_all_sources`, `live_feed.*` — **plus the whole mandate** | the record |
+| **Live** | 18 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `cases_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | the current process |
 | **Refused** | 2 | `mode`, `allow_live` | neither — see below |
 
 **Frozen includes the mandate, as resolved text.** The record stores the mandate's body verbatim
@@ -161,7 +163,7 @@ who really did mean to change the run's configuration needs a way to say so. Two
 
 - `--show-config-drift` prints how the current `config.yaml` and `mandate/` differ from what the
   run froze, then exits. Inspection only — it opens no segment, takes no lock, writes nothing.
-  It compares the **72 frozen keys** and the resolved **mandate text**; the 17 live keys are never
+  It compares the **75 frozen keys** and the resolved **mandate text**; the 18 live keys are never
   reported (they are this process's by design) and the 2 refused ones never appear at all.
 - `--rebase-config` adopts the current files for the rest of the run: it re-freezes them, bumps
   `inputs.config_epoch`, and appends a before/after entry to `inputs.config_changes` naming the
@@ -183,18 +185,18 @@ fill-cost floor, the promotion thresholds, the two-axis holdout geometry, the ou
 secrets). Every leaf setting is classified **exactly once** in `src/noctis/config/overlay.py` —
 the authoritative table, with a justification comment per group — and a completeness ratchet in
 the test suite fails until a newly added knob is classified deliberately, so nothing is allowed
-by accident of omission. Today: **36 allowed, 2 clamped, 53 refused**. The whole surface also
+by accident of omission. Today: **39 allowed, 2 clamped, 53 refused**. The whole surface also
 ships commented-out in `mandate/MANDATE.md.example`, so it is discoverable without reading
 source.
 
-**Allowed (36), in six groups.** None of them is read by the promotion gates
+**Allowed (39), in six groups.** None of them is read by the promotion gates
 (`champions/promotion.py`), the split geometry (`backtest/splits.py`), or the safety gate
 (`config/gate.py`) — that is the property that makes them settable at all.
 
 | Group | Knobs |
 |---|---|
-| Model seam | `research.model`, `research.base_url`, `research.agent.model` / `coder_model` / `coder_fallback_model`, the three thinking dials (`thinking`, `coder_thinking`, `coder_fallback_thinking`), `research.agent.loop` |
-| Spend ceilings | `research.cost_profile`, `research.agent.max_iterations` / `max_backtests` / `sweep_trials` / `max_author_calls` / `max_escalations` / `max_tokens` / `coder_max_tokens` / `context_window` / `episode_retries` / `web_search` / `max_web_searches` / `sweep_workers` / `worker_bar_budget`, `research_time_budget_minutes`, `time_limit_hours`, `run_limit_hours` |
+| Model seam | `research.model`, `research.base_url`, `research.agent.model` / `coder_model` / `coder_fallback_model`, the three thinking dials (`thinking`, `coder_thinking`, `coder_fallback_thinking`), the coder's sampling dials (`coder_temperature`, `coder_seed`), `research.agent.loop` |
+| Spend ceilings | `research.cost_profile`, `research.agent.max_iterations` / `max_backtests` / `sweep_trials` / `max_author_calls` / `max_escalations` / `max_tokens` / `coder_max_tokens` / `context_window` / `episode_retries` / `coder_retries` / `web_search` / `max_web_searches` / `sweep_workers` / `worker_bar_budget`, `research_time_budget_minutes`, `time_limit_hours`, `run_limit_hours` |
 | Search shape | `promotion.metric`, `research.focus_size`, `research.tuning_dispersion_penalty`, `research.draft_ttl_hours`, `research.memory_distill_every` |
 | Data acquisition | `data.history_days`, `data.auto_backfill` |
 | Housekeeping | `observability.heartbeat_polls`, `qa.keep_last_runs` |
@@ -223,8 +225,8 @@ refused set is the arena: the live-money double gate (`mode`, `allow_live`), the
 fill-cost floor (`backtest.fee_bps`, `backtest.slippage_bps`), every `promotion.*` except
 `metric`, the holdout geometry (`research.fit_set_size`, `research.symbol_holdout_size`),
 `champion_count`, every state/IO path (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`,
-`reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`), the
-three API keys, cost accounting (`research.pricing`), record content (`embed_all_sources`),
+`reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `cases_dir`,
+`data.lake_dir`), the three API keys, cost accounting (`research.pricing`), record content (`embed_all_sources`),
 self-selection (`research.mandate`, `research.mode`), `risk.*` / `trading.*` /
 `live_feed.poll_interval_s`, `data.provider` / `data.dataset`, `session.calendar` /
 `session.timezone`, and `ideation.*`.

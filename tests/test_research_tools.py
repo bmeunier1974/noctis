@@ -151,6 +151,7 @@ def _make_toolbox(
     coder_client=None,
     coder_model: str | None = None,
     coder_max_tokens: int | None = None,
+    coder_retries: int | None = None,
     max_author_calls: int | None = None,
     coder_fallback_client=None,
     coder_fallback_model: str | None = None,
@@ -170,6 +171,8 @@ def _make_toolbox(
         agent["coder_model"] = coder_model
     if coder_max_tokens is not None:
         agent["coder_max_tokens"] = coder_max_tokens
+    if coder_retries is not None:
+        agent["coder_retries"] = coder_retries
     if coder_fallback_model is not None:
         agent["coder_fallback_model"] = coder_fallback_model
     if max_escalations is not None:
@@ -1314,6 +1317,7 @@ def _coder_box(
     max_author_calls: int | None = None,
     coder_model: str = "fake/coder-1",
     coder_max_tokens: int | None = None,
+    coder_retries: int | None = None,
     on_event=None,
 ):
     coder = _FakeCoder(replies)
@@ -1323,6 +1327,7 @@ def _coder_box(
             coder_client=coder,
             coder_model=coder_model,
             coder_max_tokens=coder_max_tokens,
+            coder_retries=coder_retries,
             max_author_calls=max_author_calls,
             on_event=on_event,
         ),
@@ -1431,6 +1436,53 @@ def test_coder_max_tokens_unset_uses_the_builtin_ceiling(tmp_path):
     out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
     assert out.get("ok") is True
     assert coder.calls[0]["max_tokens"] == 16000
+
+
+def test_coder_retries_config_changes_the_authoring_attempt_count(tmp_path):
+    """#222: with research.agent.coder_retries set, an authoring job that never validates spends
+    exactly initial + that many coder completions — the retry budget is config, not a constant."""
+    box, coder = _coder_box(tmp_path, [_fenced(BROKEN)] * 5, coder_retries=4)
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    assert "error" in out
+    assert len(coder.calls) == 5  # initial + 4 private retries
+
+
+def test_coder_retries_zero_spends_a_single_authoring_completion(tmp_path):
+    """The floor of the same knob: ``0`` retries means one attempt and an honest failure — a
+    cheap ablation setting, and the gate the attempt must pass is unchanged."""
+    box, coder = _coder_box(tmp_path, [_fenced(BROKEN)], coder_retries=0)
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    assert "error" in out
+    assert len(coder.calls) == 1
+
+
+def test_coder_retries_unset_uses_the_builtin_retry_budget(tmp_path):
+    """Unset (the default): the authoring job falls through to the engine's built-in budget —
+    initial + 2 ≤ 3 completions, exactly today's behavior."""
+    box, coder = _coder_box(tmp_path, [_fenced(BROKEN)] * 3)
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    assert "error" in out
+    assert len(coder.calls) == 3
+
+
+def test_coder_retries_bounds_the_escalated_author_too(tmp_path):
+    """The paid escalation coder runs the SAME configured retry budget as the local one — one
+    authoring retry policy per session, so an ablation moves both halves together."""
+    local = _FakeCoder([_fenced(BROKEN)] * 2)
+    fallback = _FakeCoder([_fenced(BROKEN)] * 2)
+    box = _make_toolbox(
+        tmp_path,
+        coder_client=local,
+        coder_model="fake/coder-1",
+        coder_fallback_client=fallback,
+        coder_fallback_model="fake/coder-2",
+        max_escalations=1,
+        coder_retries=1,
+    )
+    out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+    assert "error" in out
+    assert len(local.calls) == 2  # initial + 1 retry
+    assert len(fallback.calls) == 2  # the escalation re-runs the same budget
 
 
 def test_source_write_still_works_with_coder_configured(tmp_path):

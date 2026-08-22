@@ -41,6 +41,10 @@ config:
   #     thinking: "off" # the driver's reasoning dial — a watch-session switch
   #     coder_model: anthropic/claude-sonnet-5 # the dedicated authoring model
   #     coder_thinking: "on" # the coder's own reasoning dial
+  #     coder_temperature: 0.2 # the coder's sampling temperature — sent only where the
+  #     coder_seed: 7 # provider supports it (the local/OpenAI-compatible seam; Anthropic
+  #     # # has neither parameter, so both are a clean no-op there). Neither buys
+  #     # # determinism: they narrow a sampler, nothing more.
   #     coder_fallback_model: anthropic/claude-opus-4-8 # paid escalation for a spent coder
   #     coder_fallback_thinking: "off" # the escalated coder's reasoning dial
   #     max_escalations: 1 # escalations allowed per session (0 = never)
@@ -52,6 +56,8 @@ config:
   #     coder_max_tokens: 16000 # the coder's output ceiling — the file's budget
   #     context_window: 32768 # whole-request budget (a small-context compat lever)
   #     episode_retries: 2 # corrective retries per episode when the model misfires
+  #     coder_retries: 2 # private validator re-prompts per authoring job (each is a
+  #     # # coder completion billed against max_author_calls)
   #     web_search: true # server-side grounding during FORMULATE/MATCH
   #     max_web_searches: 3 # and its per-session cap
   #     sweep_workers: 4 # parallel workers (results are identical whatever the count)

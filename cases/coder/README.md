@@ -21,6 +21,10 @@ cases/coder/
 └─ replay/      an operator's own known gate rejections              (LOCAL, gitignored)
 ```
 
+Every reader walks **both corpus tiers** — this committed one and `<workspace>/cases/coder/` —
+folding them by case id with the workspace's winning, so the shipped buckets are reachable on a
+fresh install with nothing copied anywhere (see [`../README.md`](../README.md)).
+
 The generic provider (`src/noctis/eval/case_provider.py`) reads `<cases_root>/<site_id>/*.yaml`,
 flat. The coder corpus is **not** flat, and `src/noctis/eval/coder_corpus.py` carries its own
 loader (`CoderCaseProvider`) that walks `cases/coder/<bucket>/*.yaml` and hands the same generic
@@ -147,3 +151,30 @@ plus one `rule:<change>` tag naming the single thing that differs from the seed.
 They sit at the easy end of every axis — no canary carries the hardest level of any of the seven —
 because that is the whole point: if a canary fails, look at the harness, the extras, the prompt
 assembly or the write gate before looking at the model.
+
+## The `smoke` tier: twelve of these cases, by name
+
+`noctis bench run --site coder --tier smoke` measures a **declared** twelve-case subset rather than
+the whole corpus — the fast question ("is the harness alive, and does the coder still land the plain
+briefs?") asked before spending on the real thing. The tier is data, not logic: the twelve ids live
+in `SITE_TIERS` in `src/noctis/eval/bootstrap.py`, so what it selects is reviewed in a diff.
+
+The rule that chose them: **every canary** (all six), **plus the smallest set of edge cases that,
+together with those canaries, exercises every level of all seven difficulty axes**. The canaries
+reach only the easy end, so each of the six edge cases below is here for the levels it is the
+cheapest cover for:
+
+| Edge case | Levels it covers |
+|---|---|
+| `edge-reference-adapt-donchian-to-shorts` | `composition_mode: reference`, `state_complexity: latched` |
+| `edge-revision-shrink-warmup-for-fixed-oracle` | `composition_mode: revision`, `oracle_mode: fixed_spec` |
+| `edge-higher-timeframe-daily-regime-filter` | `warmup_arithmetic: higher_timeframe` |
+| `edge-stateless-bar-shape-close-strength` | `state_complexity: stateless`, `api_surface: bars_only` |
+| `edge-scale-free-percentile-return-rank` | `no_trade_tape: scale_free`, `param_space_breadth: moderate` |
+| `edge-broad-param-space-multi-filter-breakout` | `param_space_breadth: broad`, `api_surface: exits` |
+
+The coverage claim is asserted by enumeration over the committed corpus
+(`tests/test_eval_bench_tier.py`), so a case whose labels move breaks the build rather than quietly
+thinning the tier. A tier is applied **after** the corpus is dealt, so every case keeps its stamped
+half; and naming a tier *and* a `--split` is refused rather than intersected, because a twelve-case
+tier filtered to its holdout is a different population wearing the word `smoke`.

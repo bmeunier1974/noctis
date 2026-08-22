@@ -24,6 +24,7 @@ from noctis.config.settings import AgentResearchConfig, ResearchConfig
 from noctis.eval.coder_distill_sites import (
     CODER_SITE,
     DISTILL_SITE,
+    NO_PROMPT,
     AuthoringJob,
     CoderKnobs,
     DistillKnobs,
@@ -91,6 +92,7 @@ def test_every_coder_knob_names_a_research_setting_that_exists_today() -> None:
 
 
 def test_the_coder_knob_set_names_the_whole_coder_model_settings_family() -> None:
+    """Including the sampling pair and the retry budget production grew in #222."""
     assert CoderKnobs.knob_names() == frozenset(
         {
             "coder_model",
@@ -99,6 +101,9 @@ def test_the_coder_knob_set_names_the_whole_coder_model_settings_family() -> Non
             "coder_thinking",
             "coder_fallback_thinking",
             "coder_max_tokens",
+            "coder_temperature",
+            "coder_seed",
+            "coder_retries",
             "max_author_calls",
         }
     )
@@ -112,7 +117,8 @@ def test_the_coder_knob_defaults_are_the_shipped_research_settings_defaults() ->
 
 
 def test_a_bench_override_naming_a_knob_the_coder_does_not_have_is_refused() -> None:
-    """Sampling levers arrive with the eval-runner epic; the coder has no word for one today."""
+    """The coder's sampling levers are spelled ``coder_temperature``/``coder_seed``, as the
+    settings model spells them — a bare ``temperature`` names no knob this site has."""
     spec = HarnessSpec(knob_overrides={"temperature": 0.7, "seed": 11})
 
     with pytest.raises(UnknownKnob) as error:
@@ -168,6 +174,26 @@ def test_the_coder_renderer_reproduces_a_revision_prompt_for_a_name_that_already
 
     assert rendered == f"{sent['system']}\n\n{sent['messages'][0]['content']}"
     assert "CURRENT VERSION of probe" in rendered
+
+
+def test_the_coder_renderer_says_no_prompt_was_composed_for_a_brief_the_engine_refuses(
+    seeds, families
+) -> None:
+    """An unresolvable reference spends no completion in production, so there are no bytes to
+    reproduce — the renderer stays total and names the refusal instead of inventing a prompt."""
+    engine = StrategyAuthor(client=FakeCoder([]), strategies_dir=seeds, families=families)
+    brief = StrategyBrief(
+        thesis=BRIEF.thesis,
+        entry_exit=BRIEF.entry_exit,
+        param_space=BRIEF.param_space,
+        scenarios=BRIEF.scenarios,
+        reference="kama_adaptive_trend",
+    )
+
+    rendered = CODER_SITE.render(AuthoringJob(engine, "probe", brief), HarnessSpec())
+
+    assert rendered.startswith(NO_PROMPT)
+    assert "kama_adaptive_trend" in rendered
 
 
 def test_the_distill_renderer_reproduces_the_prompt_production_sends_the_distiller() -> None:

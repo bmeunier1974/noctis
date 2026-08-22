@@ -232,6 +232,34 @@ class AgentResearchConfig(BaseModel):
     # a cost budget: output tokens are billed as generated, so unused headroom costs nothing (spend
     # is bounded by ``max_author_calls``, not this). Inert without a configured ``coder_model``.
     coder_max_tokens: int | None = None
+    # The coder's sampling temperature (#222). ``None`` (the default) sends NO temperature at all —
+    # today's request, byte for byte — and a number is offered to the client, which forwards it
+    # ONLY where the provider seam declares the capability (``llm.Capabilities.temperature``). On a
+    # provider without it the knob is a clean no-op: the parameter is simply not sent, never an
+    # error and never a fake promise. Current Anthropic models reject a temperature beside the
+    # thinking dial this seam pins (a 400) and hosted OpenAI's reasoning family fixes it, so the
+    # real lever is the local/OpenAI-compatible backend (vLLM, Ollama, llama.cpp). Lowering it does
+    # NOT make a coder deterministic — it narrows the sampler, nothing more; repetitions and paired
+    # statistics are the defence against run-to-run variance, never this knob. Inert without a
+    # configured ``coder_model``.
+    coder_temperature: float | None = None
+    # The coder's sampling seed (#222), same contract as ``coder_temperature``: ``None`` (the
+    # default) sends nothing, a number is forwarded only where the provider seam declares the
+    # ``seed`` capability. Current Anthropic models expose no seed parameter whatsoever, so it is a
+    # capability no-op there; local/OpenAI-compatible servers accept it as a real sampler control.
+    # Even where it IS sent a seed buys *repeatability at best effort*, never determinism —
+    # batching, kernel/quantization nondeterminism and a moved model snapshot all still change the
+    # output — so it is a variance-reduction lever, not an identity. Inert without a coder model.
+    coder_seed: int | None = None
+    # Private validator re-prompts per authoring job (#222): after the first attempt, how many times
+    # the coder may be shown its own gate error and asked again before the job fails typed. ``None``
+    # (the default) defers to the author engine's built-in budget (``StrategyAuthor._CODER_RETRIES``
+    # = 2, i.e. initial + 2 ≤ 3 coder completions per job); a number pins it. Every attempt —
+    # landing or not — spends one coder completion, so raising this raises the authoring bill in the
+    # Class-B ``max_author_calls`` ceiling that still bounds the session. A robustness/experiment
+    # knob (it is what a coder-benchmark ablation varies), never a gate: an attempt still has to
+    # pass the same write gate. Inert without a configured ``coder_model``.
+    coder_retries: int | None = None
     # Provider-native reasoning dial (verbose-observability P2), default OFF. ``"on"`` opts a
     # *watch* session into provider-native reasoning where it exists: for the Anthropic (non-Sonnet)
     # fallback model it sends adaptive thinking with a summarized display, so the loop emits
@@ -659,6 +687,10 @@ class Settings(BaseSettings):
     # shipped profiles/, tune-first.md, README, one reference example); the human's own MANDATE.md,
     # custom personalities, and personal references are gitignored so steering never pollutes git.
     mandate_dir: str = "mandate/"
+    # The committed benchmark corpus: the curated buckets a review shipped to every user, read-only
+    # input exactly like the strategy seeds beside it. The engine's own tier is <workspace>/cases/,
+    # and a case id in both is the workspace's. See cases/README.md.
+    cases_dir: str = "cases/"
 
     # --- Secrets / env-only switches ---
     databento_api_key: str | None = None

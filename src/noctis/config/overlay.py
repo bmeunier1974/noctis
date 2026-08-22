@@ -113,6 +113,14 @@ _MODEL_SEAM: frozenset[str] = frozenset(
         "research.agent.coder_thinking",
         # The escalated coder's reasoning dial — sized to the strong fallback model.
         "research.agent.coder_fallback_thinking",
+        # The coder's sampling dials (#222) — how the chosen backend samples, which is part of
+        # naming the brain a personality needs (a local 30B coder is run at a different
+        # temperature than a hosted frontier model). Both are capability-gated at the LLM seam:
+        # where the provider does not support one it is simply not sent. Neither can reach a
+        # gate — a sampled candidate is scored by the same pipeline against the same thresholds
+        # — and neither buys determinism (reps + paired stats are the variance defence).
+        "research.agent.coder_temperature",
+        "research.agent.coder_seed",
         # Which research loop drives the session (conversation transcript vs. episodic
         # driver). A backend-shape choice — the episodic driver exists for small-context
         # models — and both loops return the same ResearchSummary through the same tools.
@@ -150,6 +158,11 @@ _SPEND_CEILINGS: frozenset[str] = frozenset(
         "research.agent.context_window",
         # Corrective retries per episode when the model misfires — a robustness ceiling.
         "research.agent.episode_retries",
+        # Private validator re-prompts per authoring job (#222) — the same kind of robustness
+        # ceiling one level down, and a direct spend lever: every attempt is a coder completion
+        # billed against ``max_author_calls``. A weak local coder honestly needs more attempts
+        # than a frontier one; the gate each attempt must pass is untouched either way.
+        "research.agent.coder_retries",
         # Server-side web-search grounding during FORMULATE/MATCH, and its per-session cap:
         # latency + tool-use spend, and grounding never bypasses a gate (a searched-up idea
         # is validated exactly like an invented one).
@@ -368,6 +381,7 @@ REFUSED: dict[str, str] = {
     "runs_dir": STATE_IO,
     "strategies_dir": STATE_IO,
     "mandate_dir": STATE_IO,
+    "cases_dir": STATE_IO,
     "data.lake_dir": STATE_IO,
     # Secrets.
     "databento_api_key": SECRETS,

@@ -1,24 +1,19 @@
 {
   "changelog": {
     "declares": [
-      "author",
-      "briefings",
-      "conversation",
-      "distill",
-      "episodic",
-      "ideation"
+      "author"
     ],
-    "digest": "8a43720034ab1350",
-    "heading": "2026-08-01 \u2014 sites: author, briefings, conversation, distill, episodic, ideation",
+    "digest": "eb5ac09954525733",
+    "heading": "2026-08-02 \u2014 sites: author",
     "path": "docs/prompt-changelog.md"
   },
   "kind": "noctis.prompt_fingerprint",
   "regenerate_with": "uv run python scripts/prompt_fingerprint.py --write",
   "sites": {
     "author": {
-      "digest": "d734910da24f174a",
+      "digest": "7ed3cd98668b939d",
       "files": {
-        "src/noctis/research/author.py": "66968753203923fb",
+        "src/noctis/research/author.py": "d94307d5789ece36",
         "src/noctis/research/contract_sheet.py": "a94270514c15a554",
         "src/noctis/research/digests.py": "c731ffae918e9574"
       },

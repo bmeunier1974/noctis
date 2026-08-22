@@ -763,14 +763,21 @@ budget-gated — see [data.md](data.md).
 python -m noctis bench run --site decide --dry-run    # preflight only: print the plan, spend nothing
 python -m noctis bench run --site decide [--split tuning|holdout|all] [--reps N] [--workers N] \
                            [--model <provider/model>] [--label <name>]
+python -m noctis bench run --site coder --tier smoke  # the declared 12-case tier, six at a time
 python -m noctis bench report <bench-id>   # one bench record's reading, straight to stdout
 python -m noctis bench corpus --site coder # validate one site's corpus; print its stats and balance
 ```
 
 The bench area is workspace-level (`<workspace>/bench/<bench_id>/bench.json`), run-neutral like the
-data lake, so a bench is addressed by the id it was minted with and never through a run. Its corpus
-root sits beside it (`<workspace>/cases/<site>/*.yaml`) for the same reason — a corpus is a
-population, not one run's trajectory.
+data lake, so a bench is addressed by the id it was minted with and never through a run. A corpus is
+run-neutral for the same reason — a population, not one run's trajectory — and it is read from **two
+tiers**, the same split every committed input has: the repo's `cases/<site>/` (the curated buckets a
+review shipped, read-only input, `cases_dir`) and `<workspace>/cases/<site>/` (mined, harvested,
+the only one anything ever writes). Both are read, the workspace wins a shared case id — the
+strategy library's rule, applied to the population — and `bench corpus` names every tier it read
+from, so "20 cases validated" always comes with "from where". Nothing is copied between them on
+purpose: a copied corpus goes stale in silence, and the digest is the only thing that would have
+said so. A site no tier holds is refused naming both paths rather than read as an empty corpus.
 
 `bench run` **always preflights**. It resolves the site through the registry, loads that site's
 corpus from the cases root, counts the jobs (cases × reps × configurations), prices their ceiling
@@ -781,12 +788,51 @@ printing: no model client is built (no key and no `[llm]` extra are needed), no 
 nothing is spent. `--workers N` above 1 works the jobs on a pool; the printed `workers:` line states
 the width either way.
 
+`--tier <name>` measures a **declared subset** of the corpus instead of all of it. A tier is data,
+not logic: `src/noctis/eval/bootstrap.py`'s `SITE_TIERS` names the cases by id, so what a tier
+selects is read off the table and reviewed in a diff. The coder ships one — `smoke`, **twelve
+cases**: every canary the corpus holds (briefs so plain that a red one indicts the harness) plus the
+six edge cases that complete the coverage, so the twelve together touch every level of all seven
+difficulty axes. An unknown name is refused listing the tiers that site declares; a site with no
+tiers says so rather than accepting a word it cannot honour; and a tier that names a case the corpus
+no longer holds is refused naming it, because a partial tier would publish its name over another
+population.
+
+**A tier and a `--split` both name what to measure, so stating both is refused** rather than
+intersected: filtering a declared twelve-case tier down to its holdout is a handful of cases wearing
+the word `smoke`, and the number would then be compared against a tier nobody ran. The whole-corpus
+word (`--split all`, and the absence a bare invocation leaves) filters nothing, so it composes with a
+tier freely. Selection happens *after* the corpus is dealt, so every case keeps the tuning/holdout
+half the whole corpus gave it — a tier never re-deals a split.
+
+**A tiered run sizes its own pool.** With no `--workers`, an untiered run stays sequential (what a
+bench has always done — widening it spends against somebody's rate limit and stays an explicit act),
+while a tiered one opens `min(cases, 6)` workers: the smoke tier's twelve independent jobs are two
+waves of six, so a five-minute smoke target asks that one authoring job finish in about two and a
+half minutes — the budget a job already has from its per-attempt timeout and retry budget. The cap is
+not the job count on purpose: twelve concurrent completions is a rate-limit decision an operator
+takes deliberately, and a stated `--workers` always wins.
+
 The verb names no site. How a case becomes its site's renderer input is a lookup in the eval
 layer's ask table (`src/noctis/eval/bootstrap.py`) — DECIDE's frozen cases are reconstructed into
 the production briefing's own inputs, a site that declares no adapter is asked with the payload its
 cases carry — so every site runs down one code path. A live ask goes through the engine's own LLM
 seam and the site's declared emit contract; a site whose live ask is not declared is **refused**
 rather than asked under an invented system prompt.
+
+`--site coder` is the one site whose answer no emit contract types, and the ask table says so: its
+row declares its own live maker instead of a schema, because the coder's ask is a whole **authoring
+job** and its judge is the fresh-subprocess write gate. One runner attempt is one such job — the
+engine's private validator retries (and, when the escalation cap allows it, one fallback to the paid
+coder) happen *inside* it — and every internal attempt is recorded, so the job-level pass rate the
+record carries and the finer first-attempt reading a reader wants are both derivable from what was
+retained. Each job builds a throwaway three-tier strategy library inside its own working directory:
+the committed `strategies/` seeds are read in place (read-only input — a job authoring a seed's own
+name lands its file in its own `__tmp/` tier, exactly as a research session does), and the two
+writable tiers are fresh per job, so nothing one case writes is visible to the next and no run's
+library, board or state is touched at all. Beside the authored file the job keeps the exact prompt
+it sent and every rejected attempt's source and gate error, in the same `failed/` shape
+`noctis.eval.failed_attempts` already reads.
 
 Once every job has answered, the run **scores itself through the site's declared scorers** and folds
 what they publish into the record's `harness.dials`. There is no flag: a scorer is part of a site's
@@ -800,6 +846,15 @@ outcome it contributes (by strict majority of the verdicts that parsed); a reply
 does not admit is a failed attempt and an `unreadable` exclusion, never a row in agreement's
 denominator; and a case whose reps hold no majority is counted `unsettled` rather than given a
 verdict nobody emitted.
+
+For the coder that reading is the **co-primary pass pair** — the first-attempt rate and the job-level
+one, published together or not at all, the job rate always under the words *pass@k with feedback*
+because its retries saw the gate's rejection — with the effort, escalation and spend that explain the
+gap between them, a **failure-taxonomy table** naming every declared class with the knob its share
+points at (a class stays on the screen at zero, because a class that stopped happening and one that
+stopped matching look identical the moment a row disappears), and the same pair broken down **per
+difficulty axis**, level by level, since a job pass rate that is one thing on `bars_only` briefs and
+another on `exits` ones is two findings rather than one.
 
 Refusals come from the machinery and are rendered as one line: an undeclared `--site` names every
 site that is declared, an absent corpus names the directory it looked in, a `--split` word that
