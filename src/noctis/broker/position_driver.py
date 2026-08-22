@@ -8,12 +8,13 @@ half: ``on_bar``, carry the new target and its rules forward, mark the close). C
 them out of order raises rather than silently skipping a step, because a step order that
 can drift is exactly the bug this module exists to prevent.
 
-The backtest simulator and the live trading day are its two drivers (wired in later
-stories). They differ only in what they pass in — never in the step order, which lives
-here alone. **Sizing is a seam** (:class:`Sizer`: how many units a target means at this
-price): the backtest's allocation formula and the live risk manager are its two adapters,
-and a dead-band skip or a risk refusal is the adapter's answer (``None``), not the
-driver's. The whole protective-exit step lives here too — anchored at the fill price on
+The backtest simulator and the live trading day are its two drivers. They differ only in
+what they pass in — never in the step order, which lives here alone. It talks to the
+:class:`~noctis.broker.seam.Broker` seam (mark, position, rebalance) and not to any one
+implementation of it. **Sizing is a seam** too (:class:`Sizer`: how many units a target
+means at this price): the backtest's allocation formula and the live risk manager are its
+two adapters, and a dead-band skip or a risk refusal is the adapter's answer (``None``),
+not the driver's. The whole protective-exit step lives here too — anchored at the fill price on
 every open or flip, evaluated intrabar before the strategy decides, ratcheted only when
 nothing fired, and latched flat until the strategy asks for something new — so the exit
 engine (:mod:`noctis.broker.exits`) has exactly one caller per bar and its conservative
@@ -30,8 +31,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from noctis.broker.exits import ExitState, ExitTrigger, evaluate, ratchet
-from noctis.broker.paper import PaperBroker
-from noctis.broker.seam import Fill
+from noctis.broker.seam import Broker, Fill
 from noctis.strategies.base import Bar, ExitRules, TargetContext, TraderStrategy
 
 __all__ = ["CloseOutcome", "OpenOutcome", "PositionDriver", "Sizer"]
@@ -71,7 +71,7 @@ class PositionDriver:
 
     def __init__(
         self,
-        broker: PaperBroker,
+        broker: Broker,
         symbol: str,
         strategy: TraderStrategy,
         ctx: TargetContext,
@@ -97,7 +97,7 @@ class PositionDriver:
     @classmethod
     def from_position(
         cls,
-        broker: PaperBroker,
+        broker: Broker,
         symbol: str,
         strategy: TraderStrategy,
         ctx: TargetContext,
