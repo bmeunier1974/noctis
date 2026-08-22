@@ -83,3 +83,18 @@ session high-water mark **second**, identically for live and replay days. A cras
 the last two re-trades the session (safe) rather than silently skipping it. Before the
 unification the live path never advanced the mark, so a live-traded day followed by a
 replay day was re-traded on the carried account.
+
+## Position driver
+
+The one module that walks **one symbol's position** through bars under the fill model
+(`PositionDriver`, `noctis.broker.position_driver`, decided 2026-08-22): pending target →
+execute at the open → re-anchor exit tracking → evaluate exits → ratchet → `on_bar` → latch →
+carry. Two entry points, in a fixed order per bar: `at_open(bar)` (the broker-touching half)
+then `at_close(bar)` (the deciding half). The backtest simulator and the live trading day are
+its two drivers and differ only in what they pass in — never in the step order, which lives
+here alone. **Sizing is a seam** (`Sizer`: how many units a target means at this price; the
+backtest's `alloc` formula and the live `RiskManager` are its two adapters; a dead-band skip
+or a risk refusal is the live adapter's answer, not the driver's). A driver seeds from the
+broker's carried position (`from_position`), so a flat account and a carried one start through
+the same constructor. It returns what happened (fill, exit trigger) and never counts, logs or
+emits — those belong to the caller.

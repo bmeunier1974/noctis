@@ -1,12 +1,13 @@
 """The exit engine — pure evaluation of protective-exit rules against one bar.
 
-One implementation, two drivers: the backtest simulator and the live trading day call the
-same ``evaluate``/``ratchet`` on the strategy-timeframe bars, which is what structurally
-prevents backtest/live drift (the same shape as ``TargetContext`` and
-``StreamingAggregator``). Everything here is a pure function over frozen value types — no
-I/O, no globals, no randomness. The conservative intrabar policy is locked in the
-fill-model section of docs/architecture.md; the tests in ``tests/test_exits.py`` are its
-contract table.
+One implementation, one caller: :class:`noctis.broker.position_driver.PositionDriver` is the
+only thing that calls ``evaluate``/``ratchet`` — at most once per strategy-timeframe bar,
+evaluate before ratchet — and the backtest simulator and the live trading day are that
+driver's two drivers, which is what structurally prevents backtest/live drift (the same shape
+as ``TargetContext`` and ``StreamingAggregator``). Everything here is a pure function over
+frozen value types — no I/O, no globals, no randomness. The conservative intrabar policy is
+locked in the fill-model section of docs/architecture.md; the tests in ``tests/test_exits.py``
+are its contract table.
 """
 
 from __future__ import annotations
