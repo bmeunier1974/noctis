@@ -21,7 +21,7 @@ import pytest
 import yaml
 
 from noctis.eval.case import Case, MalformedCase, Provenance, ProvenanceKind, Split
-from noctis.eval.case_provider import MissingCorpus
+from noctis.eval.case_provider import CasePaths, MissingCorpus
 from noctis.eval.coder_case import AXIS_LEVELS, REQUIRED_BRIEF_KEYS, Axis, Bucket, coder_payload
 from noctis.eval.coder_corpus import (
     CODER_SITE_ID,
@@ -301,6 +301,62 @@ def test_the_committed_corpus_loads_as_one_corpus_with_a_content_digest(tmp_path
     assert corpus.site_id == CODER_SITE_ID
     assert corpus.identity.case_count == len(corpus)
     assert corpus.digest == load_coder_corpus(CASES_ROOT).digest
+
+
+# ── the two tiers a reader sees ───────────────────────────────────────────────────────────
+
+
+def test_the_committed_and_the_local_tier_load_as_one_corpus(tmp_path):
+    committed, workspace = tmp_path / "committed", tmp_path / "workspace"
+    _write(committed, Bucket.CANARY, "shipped-crossover")
+    _write(workspace, Bucket.FIELD, "mined-from-a-run")
+
+    loaded = CoderCaseProvider(cases_root=CasePaths((committed, workspace))).load(CODER_SITE_ID)
+
+    assert [case.case_id for case in loaded] == ["mined-from-a-run", "shipped-crossover"]
+
+
+def test_a_local_case_shadows_a_committed_one_of_the_same_id(tmp_path):
+    committed, workspace = tmp_path / "committed", tmp_path / "workspace"
+    _write(committed, Bucket.CANARY, "same-name")
+    _write(workspace, Bucket.FIELD, "same-name")
+
+    (case,) = CoderCaseProvider(cases_root=CasePaths((committed, workspace))).load(CODER_SITE_ID)
+
+    assert coder_payload(case).bucket is Bucket.FIELD
+
+
+def test_a_workspace_that_holds_no_corpus_still_reads_the_committed_one(tmp_path):
+    """The gap the tiers close: a fresh install has an empty workspace and a shipped corpus."""
+    committed, workspace = tmp_path / "committed", tmp_path / "workspace"
+    _write(committed, Bucket.CANARY, "shipped-crossover")
+
+    loaded = CoderCaseProvider(cases_root=CasePaths((committed, workspace))).load(CODER_SITE_ID)
+
+    assert [case.case_id for case in loaded] == ["shipped-crossover"]
+
+
+def test_a_corpus_in_no_tier_at_all_is_refused_naming_each_root(tmp_path):
+    committed, workspace = tmp_path / "committed", tmp_path / "workspace"
+
+    with pytest.raises(MissingCorpus) as refusal:
+        CoderCaseProvider(cases_root=CasePaths((committed, workspace))).load(CODER_SITE_ID)
+
+    assert str(committed / CODER_SITE_ID) in str(refusal.value)
+    assert str(workspace / CODER_SITE_ID) in str(refusal.value)
+
+
+def test_the_bucket_layout_is_enforced_in_every_tier_not_only_the_first(tmp_path):
+    committed, workspace = tmp_path / "committed", tmp_path / "workspace"
+    _write(committed, Bucket.CANARY, "shipped-crossover")
+    loose = workspace / CODER_SITE_ID / "beside-the-buckets.yaml"
+    loose.parent.mkdir(parents=True, exist_ok=True)
+    loose.write_text(yaml.safe_dump(_document(Bucket.FIELD), sort_keys=True), "utf-8")
+
+    with pytest.raises(MalformedCase) as refusal:
+        CoderCaseProvider(cases_root=CasePaths((committed, workspace))).load(CODER_SITE_ID)
+
+    assert "beside-the-buckets.yaml" in str(refusal.value)
 
 
 # ── the split: stamped once, read forever ─────────────────────────────────────────────────

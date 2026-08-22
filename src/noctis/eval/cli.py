@@ -57,7 +57,7 @@ from noctis.eval.bootstrap import (
     LiveModelUnavailable,
     bench_width,
     build_bench_runner,
-    cases_root,
+    case_paths,
     configs_for,
     corpus_provider,
     live_attempt,
@@ -65,7 +65,7 @@ from noctis.eval.bootstrap import (
     select_population,
     site_vocabulary,
 )
-from noctis.eval.case_provider import MissingCorpus
+from noctis.eval.case_provider import CasePaths, MissingCorpus
 from noctis.eval.corpus_report import read_corpus, render_corpus_report
 from noctis.eval.record import validate
 from noctis.eval.registry import UnknownSite
@@ -117,10 +117,10 @@ def run_bench(
     """
     settings = load_settings(config_path=config)
     injected = seams if seams is not None else BenchSeams()
-    root = cases_root(settings.workspace_dir)
+    paths = case_paths(settings)
     try:
         population = select_population(site_id, split=split, tier=tier, tiers=injected.tiers)
-        loaded = load_corpus(site_id, cases_root=root, registry=injected.registry)
+        loaded = load_corpus(site_id, cases_root=paths, registry=injected.registry)
         corpus = population.of(loaded)
         runner = build_bench_runner(
             settings,
@@ -136,7 +136,10 @@ def run_bench(
         plan = runner.preflight(corpus, reps=reps, configs=configs, split=population.split)
         typer.echo(f"BENCH {site_id}{' (dry run)' if dry_run else ''}")
         typer.echo(f"plan: {plan.summary()}")
-        typer.echo(f"corpus: {root / site_id} — {len(corpus)} case(s), digest {corpus.digest}")
+        typer.echo(
+            f"corpus: {_corpus_source(paths, site_id)} — {len(corpus)} case(s), "
+            f"digest {corpus.digest}"
+        )
         if population.tier is not None:
             typer.echo(
                 f"tier: {population.tier.name} — {len(corpus)} of {len(loaded)} corpus case(s); "
@@ -186,6 +189,17 @@ def _never_asked(request: AttemptRequest) -> Attempt:
     )
 
 
+def _corpus_source(paths: CasePaths, site_id: str) -> str:
+    """Every tier the cases were read from, in precedence order — never just the winning one.
+
+    A reading is only an answer beside "from where", and with two tiers that is two paths: an
+    operator whose local case shadows a shipped one, and one whose workspace holds nothing at all,
+    both need to see which trees were open. A tier that holds no directory for this site is not
+    listed, because it contributed nothing.
+    """
+    return " + ".join(str(directory) for directory in paths.directories(site_id))
+
+
 def report_corpus(
     site_id: str, *, config: str | None = None, seams: BenchSeams | None = None
 ) -> None:
@@ -203,13 +217,17 @@ def report_corpus(
     """
     settings = load_settings(config_path=config)
     injected = seams if seams is not None else BenchSeams()
-    root = cases_root(settings.workspace_dir)
+    paths = case_paths(settings)
     try:
-        provider = corpus_provider(site_id, cases_root=root, registry=injected.registry)
+        provider = corpus_provider(site_id, cases_root=paths, registry=injected.registry)
         reading = read_corpus(site_id, provider.load(site_id), vocabulary=site_vocabulary(site_id))
     except _REFUSALS as refusal:
         _refuse(f"CORPUS: {refusal}")
-    typer.echo(render_corpus_report(reading, source=root / site_id, loader=type(provider).__name__))
+    typer.echo(
+        render_corpus_report(
+            reading, source=_corpus_source(paths, site_id), loader=type(provider).__name__
+        )
+    )
 
 
 def report_bench(bench_id: str, *, config: str | None = None) -> None:

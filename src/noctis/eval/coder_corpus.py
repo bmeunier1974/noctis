@@ -69,7 +69,7 @@ from typing import Any
 import yaml
 
 from noctis.eval.case import Case, MalformedCase, Split, parse_case
-from noctis.eval.case_provider import CASE_SUFFIX, MissingCorpus
+from noctis.eval.case_provider import CASE_SUFFIX, CasePaths, CaseRootSpec, missing_corpus
 from noctis.eval.coder_case import BUCKET_TAG_PREFIX, Bucket, coder_payload, parse_coder_case
 from noctis.eval.corpus import Corpus
 from noctis.eval.registry import SITES, site
@@ -107,11 +107,11 @@ class CoderCaseProvider:
     globally so a test or a harness can load a corpus for a scratch set of sites.
     """
 
-    cases_root: Path
+    cases_root: CaseRootSpec
     registry: Mapping[str, AgentSite[Any, Any]] | None = None
 
     def load(self, site_id: str) -> tuple[Case, ...]:
-        """Every coder case in every bucket, in case-id order, or a loud refusal."""
+        """Every coder case in every bucket of every tier, in case-id order, or a loud refusal."""
         if site_id != CODER_SITE_ID:
             raise ValueError(
                 f"the coder corpus loader reads site {CODER_SITE_ID!r}, asked for {site_id!r} — "
@@ -121,7 +121,7 @@ class CoderCaseProvider:
 
 
 def load_coder_corpus(
-    cases_root: Path, registry: Mapping[str, AgentSite[Any, Any]] | None = None
+    cases_root: CaseRootSpec, registry: Mapping[str, AgentSite[Any, Any]] | None = None
 ) -> Corpus:
     """The whole coder corpus as one :class:`~noctis.eval.corpus.Corpus`, splits as stamped.
 
@@ -183,30 +183,34 @@ def stamp_splits(
 
 
 def _read(
-    cases_root: Path, registry: Mapping[str, AgentSite[Any, Any]] | None
+    cases_root: CaseRootSpec, registry: Mapping[str, AgentSite[Any, Any]] | None
 ) -> tuple[tuple[Path, Case], ...]:
     """Every coder case beside the file it came from, in case-id order, or a loud refusal.
 
     The one reader in this module: the provider projects the cases out of it, and the stamper needs
     the paths beside them, so neither walks the tree itself and there is no second place a bucket
     could be skipped.
+
+    Tiers are walked lowest precedence first (the committed corpus, then the workspace's) and
+    folded by case id, so a local case shadows a shipped one of the same name — the strategy
+    library's rule, applied to the population instead of the file. The bucket layout is enforced
+    per tier: a stray beside the buckets is a case nobody measures wherever it sits.
     """
     index = SITES if registry is None else registry
     site(CODER_SITE_ID, index)
-    root = Path(cases_root) / CODER_SITE_ID
-    if not root.is_dir():
-        raise MissingCorpus(
-            f"no case directory for site {CODER_SITE_ID!r} at {root} — a benchmark over an "
-            "absent corpus is a number nobody can trust"
-        )
-    _refuse_strays(root)
+    paths = CasePaths.coerce(cases_root)
+    roots = paths.directories(CODER_SITE_ID)
+    if not roots:
+        raise missing_corpus(CODER_SITE_ID, paths)
     declared = frozenset(index)
-    found = [
-        (path, _case(path, bucket, declared))
-        for bucket in Bucket
-        for path in _bucket_files(root / bucket.value)
-    ]
-    return tuple(sorted(found, key=lambda pair: pair[1].case_id))
+    found: dict[str, tuple[Path, Case]] = {}
+    for root in roots:
+        _refuse_strays(root)
+        for bucket in Bucket:
+            for path in _bucket_files(root / bucket.value):
+                case = _case(path, bucket, declared)
+                found[case.case_id] = (path, case)
+    return tuple(found[case_id] for case_id in sorted(found))
 
 
 def _bucket_files(directory: Path) -> tuple[Path, ...]:

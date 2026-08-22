@@ -32,7 +32,7 @@ from noctis.eval.case import (
     Split,
     parse_case,
 )
-from noctis.eval.case_provider import MissingCorpus, YamlCaseProvider
+from noctis.eval.case_provider import CasePaths, MissingCorpus, YamlCaseProvider
 from noctis.eval.registry import SITES, UnknownSite
 
 CASE_SOURCE = Path(__file__).resolve().parents[1] / "src/noctis/eval/case.py"
@@ -414,6 +414,66 @@ def test_the_provider_reads_the_registry_it_is_given_rather_than_the_shipped_one
 
     with pytest.raises(UnknownSite):
         YamlCaseProvider(cases_root=tmp_path, registry={}).load("coder")
+
+
+# ── the corpus tiers ──────────────────────────────────────────────────────────────────────
+
+
+def test_a_bare_path_still_means_the_single_root_layout_it_always_meant(tmp_path):
+    """Every caller that predates the tiers keeps working, because a path coerces to one tier."""
+    assert CasePaths.coerce(tmp_path) == CasePaths((tmp_path,))
+    assert CasePaths.coerce(CasePaths((tmp_path,))) == CasePaths((tmp_path,))
+
+
+def test_only_the_tiers_that_hold_the_site_are_listed_and_in_precedence_order(tmp_path):
+    committed, workspace, empty = tmp_path / "a", tmp_path / "b", tmp_path / "c"
+    _write(_corpus(committed), "shipped", _document())
+    _write(_corpus(workspace), "mined", _document())
+
+    paths = CasePaths((committed, empty, workspace))
+
+    assert paths.directories("coder") == (_corpus(committed), _corpus(workspace))
+
+
+def test_both_tiers_load_together_ordered_by_case_id(tmp_path):
+    committed, workspace = tmp_path / "committed", tmp_path / "workspace"
+    _write(_corpus(committed), "shipped-canary", _document())
+    _write(_corpus(workspace), "mined-from-a-run", _document())
+
+    cases = YamlCaseProvider(cases_root=CasePaths((committed, workspace))).load("coder")
+
+    assert [case.case_id for case in cases] == ["mined-from-a-run", "shipped-canary"]
+
+
+def test_a_case_id_in_both_tiers_is_the_later_tiers(tmp_path):
+    """The strategy library's rule: an operator shadows a shipped case, never the other way."""
+    committed, workspace = tmp_path / "committed", tmp_path / "workspace"
+    _write(_corpus(committed), "same-name", _document(tags=["shipped"]))
+    _write(_corpus(workspace), "same-name", _document(tags=["mine"]))
+
+    (case,) = YamlCaseProvider(cases_root=CasePaths((committed, workspace))).load("coder")
+
+    assert case.tags == ("mine",)
+
+
+def test_a_site_no_tier_holds_is_refused_naming_every_root_it_looked_in(tmp_path):
+    committed, workspace = tmp_path / "committed", tmp_path / "workspace"
+
+    with pytest.raises(MissingCorpus) as refusal:
+        YamlCaseProvider(cases_root=CasePaths((committed, workspace))).load("coder")
+
+    assert str(_corpus(committed)) in str(refusal.value)
+    assert str(_corpus(workspace)) in str(refusal.value)
+
+
+def test_one_tier_is_enough_so_a_workspace_that_has_never_been_mined_still_reads(tmp_path):
+    """The regression the tiers exist for: a fresh install reaches the committed corpus."""
+    committed, workspace = tmp_path / "committed", tmp_path / "workspace"
+    _write(_corpus(committed), "shipped", _document())
+
+    cases = YamlCaseProvider(cases_root=CasePaths((committed, workspace))).load("coder")
+
+    assert [case.case_id for case in cases] == ["shipped"]
 
 
 # ── the loading seam ──────────────────────────────────────────────────────────────────────

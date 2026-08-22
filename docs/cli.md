@@ -769,9 +769,15 @@ python -m noctis bench corpus --site coder # validate one site's corpus; print i
 ```
 
 The bench area is workspace-level (`<workspace>/bench/<bench_id>/bench.json`), run-neutral like the
-data lake, so a bench is addressed by the id it was minted with and never through a run. Its corpus
-root sits beside it (`<workspace>/cases/<site>/*.yaml`) for the same reason — a corpus is a
-population, not one run's trajectory.
+data lake, so a bench is addressed by the id it was minted with and never through a run. A corpus is
+run-neutral for the same reason — a population, not one run's trajectory — and it is read from **two
+tiers**, the same split every committed input has: the repo's `cases/<site>/` (the curated buckets a
+review shipped, read-only input, `cases_dir`) and `<workspace>/cases/<site>/` (mined, harvested,
+the only one anything ever writes). Both are read, the workspace wins a shared case id — the
+strategy library's rule, applied to the population — and `bench corpus` names every tier it read
+from, so "20 cases validated" always comes with "from where". Nothing is copied between them on
+purpose: a copied corpus goes stale in silence, and the digest is the only thing that would have
+said so. A site no tier holds is refused naming both paths rather than read as an empty corpus.
 
 `bench run` **always preflights**. It resolves the site through the registry, loads that site's
 corpus from the cases root, counts the jobs (cases × reps × configurations), prices their ceiling

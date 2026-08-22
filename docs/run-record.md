@@ -319,7 +319,7 @@ resumes against the current files instead.
 #### The three freezing tiers
 
 Every leaf setting belongs to exactly one tier, classified in `config/rehydrate.py`. Today:
-**75 frozen, 17 live, 2 refused**. The record publishes the three lists, so a consumer never has to
+**75 frozen, 18 live, 2 refused**. The record publishes the three lists, so a consumer never has to
 guess which is which.
 
 | Tier | Count | What | On a resume |

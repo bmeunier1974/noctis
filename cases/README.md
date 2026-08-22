@@ -6,6 +6,14 @@ this repo (see AGENTS.md, "Where state lives") — cases are reviewable files a 
 something the engine writes, so they live here rather than under `workspace/`. Everything a
 benchmark *produces* lands in a run's workspace tree; nothing in here is ever machine-edited.
 
+**A corpus is read from two tiers.** This folder is the first (curated, read-only input); the
+second is `<workspace>/cases/<site_id>/`, which is where anything the engine harvests — the DECIDE
+miner's output — is written, and the only one a writer is ever given. A reader loads both and the
+workspace wins a shared case id, exactly as a champion beats a seed of the same name in the
+strategy library. Nothing is ever copied between them: a copied corpus goes stale in silence, and
+two people would then run "the smoke tier" over two populations with only the digest to say so.
+Redirect this tier with `cases_dir` (env `CASES_DIR`) when a corpus lives somewhere else.
+
 ```
 cases/
 ├─ README.md              # this file — the format, and what it may never say   (committed)

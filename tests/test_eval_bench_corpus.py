@@ -34,7 +34,14 @@ import yaml
 from typer.testing import CliRunner
 
 from noctis.cli import app
-from noctis.eval.bootstrap import cases_root, flat_provider, load_corpus, site_vocabulary
+from noctis.config.settings import Settings
+from noctis.eval.bootstrap import (
+    case_paths,
+    cases_root,
+    flat_provider,
+    load_corpus,
+    site_vocabulary,
+)
 from noctis.eval.coder_case import AXIS_LEVELS, Axis, Bucket
 from noctis.eval.coder_corpus import CODER_SITE_ID, CoderCaseProvider
 from noctis.eval.corpus_report import CorpusVocabulary, read_corpus, render_corpus_report
@@ -141,6 +148,24 @@ def _snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
     }
 
 
+# ── the two corpus tiers ─────────────────────────────────────────────────────────────────────
+
+
+def test_case_paths_puts_the_committed_corpus_under_the_workspaces(tmp_path):
+    """Precedence, in one assertion: committed input first, the tree the engine writes second."""
+    settings = Settings(cases_dir=str(tmp_path / "cases"), workspace_dir=str(tmp_path / "ws"))
+
+    assert case_paths(settings).roots == (tmp_path / "cases", tmp_path / "ws" / "cases")
+
+
+def test_only_the_workspace_tier_is_ever_written(tmp_path):
+    """A writer takes one root, and it is never the committed one — cases/ is read-only input."""
+    settings = Settings(cases_dir=str(tmp_path / "cases"), workspace_dir=str(tmp_path / "ws"))
+
+    assert cases_root(settings.workspace_dir) == tmp_path / "ws" / "cases"
+    assert cases_root(settings.workspace_dir) not in (Path(settings.cases_dir),)
+
+
 # ── validation: everything it counts, it loaded ──────────────────────────────────────────────
 
 
@@ -180,10 +205,41 @@ def test_bench_corpus_refuses_a_malformed_case_file_naming_the_file_and_the_defe
     assert "case(s) validated" not in result.output
 
 
-def test_bench_corpus_refuses_an_absent_corpus_naming_the_directory_it_looked_in(tmp_path):
+def test_bench_corpus_refuses_an_absent_corpus_naming_every_tier_it_looked_in(tmp_path):
+    """Two roots, both named: a corpus nobody can find must not read as a root spelled wrong."""
     result = runner.invoke(app, ["bench", "corpus", "--site", "coder"])
 
     assert result.exit_code == 1
+    assert str(tmp_path / "cases" / CODER_SITE_ID) in result.output
+    assert str(cases_root(tmp_path / "workspace") / CODER_SITE_ID) in result.output
+
+
+def test_bench_corpus_reads_the_committed_corpus_when_the_workspace_holds_none(
+    tmp_path, monkeypatch
+):
+    """The gap the tiers close: a fresh install has an empty workspace and a shipped corpus.
+
+    Nothing is copied into the workspace for the shipped buckets to be reachable, which is the
+    whole point — a copy is a population that goes stale while its digest says nothing.
+    """
+    monkeypatch.setenv("CASES_DIR", str(COMMITTED_CASES))
+    shipped = CoderCaseProvider(cases_root=COMMITTED_CASES).load(CODER_SITE_ID)
+
+    result = runner.invoke(app, ["bench", "corpus", "--site", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert f"{len(shipped)} case(s) validated" in result.output
+    assert str(COMMITTED_CASES / CODER_SITE_ID) in result.output
+
+
+def test_bench_corpus_names_both_tiers_when_both_hold_cases(tmp_path, monkeypatch):
+    monkeypatch.setenv("CASES_DIR", str(COMMITTED_CASES))
+    _corpus(tmp_path)
+
+    result = runner.invoke(app, ["bench", "corpus", "--site", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert str(COMMITTED_CASES / CODER_SITE_ID) in result.output
     assert str(cases_root(tmp_path / "workspace") / CODER_SITE_ID) in result.output
 
 

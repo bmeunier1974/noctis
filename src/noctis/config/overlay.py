@@ -381,6 +381,7 @@ REFUSED: dict[str, str] = {
     "runs_dir": STATE_IO,
     "strategies_dir": STATE_IO,
     "mandate_dir": STATE_IO,
+    "cases_dir": STATE_IO,
     "data.lake_dir": STATE_IO,
     # Secrets.
     "databento_api_key": SECRETS,

@@ -36,6 +36,12 @@ def _clean_env(monkeypatch, tmp_path):
     # i.e. into the developer's repo checkout. Pinning makes ambient writes structurally
     # impossible; tests that assert the *default* derivation delenv it locally.
     monkeypatch.setenv("NOCTIS_WORKSPACE", str(tmp_path / "workspace"))
+    # The committed corpus tier is pinned for the same reason, and it is the *reading* twin of the
+    # line above: a corpus is read from the repo's ``cases/`` as well as the workspace's, so with
+    # this unset every corpus test would silently count the checkout's own committed cases on top
+    # of its fixtures — and its numbers would then move whenever a curator adds one. Tests that
+    # want the real shipped corpus name it explicitly (``CASES_DIR`` or a path to the provider).
+    monkeypatch.setenv("CASES_DIR", str(tmp_path / "cases"))
     # NOCTIS_CONFIG is *redirected*, not deleted: with it unset, Settings() falls back to
     # ./config.yaml — the repo file — so any operator edit there (cost_profile, mandate,
     # universe) would leak into tests that assert on shipped defaults. Pointing at a

@@ -21,6 +21,10 @@ cases/coder/
 └─ replay/      an operator's own known gate rejections              (LOCAL, gitignored)
 ```
 
+Every reader walks **both corpus tiers** — this committed one and `<workspace>/cases/coder/` —
+folding them by case id with the workspace's winning, so the shipped buckets are reachable on a
+fresh install with nothing copied anywhere (see [`../README.md`](../README.md)).
+
 The generic provider (`src/noctis/eval/case_provider.py`) reads `<cases_root>/<site_id>/*.yaml`,
 flat. The coder corpus is **not** flat, and `src/noctis/eval/coder_corpus.py` carries its own
 loader (`CoderCaseProvider`) that walks `cases/coder/<bucket>/*.yaml` and hands the same generic

@@ -67,7 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from noctis.eval.case import Case, CaseProvider, Split
-from noctis.eval.case_provider import YamlCaseProvider
+from noctis.eval.case_provider import CasePaths, CaseRootSpec, YamlCaseProvider
 from noctis.eval.corpus import Corpus
 from noctis.eval.corpus_report import CorpusVocabulary
 from noctis.eval.harness import HarnessSpec
@@ -112,6 +112,7 @@ __all__ = [
     "bench_width",
     "build_bench_runner",
     "build_executor",
+    "case_paths",
     "cases_root",
     "configs_for",
     "corpus_provider",
@@ -154,16 +155,31 @@ class LiveModelUnavailable(RuntimeError):
 
 
 def cases_root(workspace_dir: Path | str) -> Path:
-    """The corpus root of one workspace: ``<workspace>/cases``, one directory per site.
+    """The **writable** corpus root of one workspace: ``<workspace>/cases``, one dir per site.
 
     Workspace-level for the same reason the bench area is: a corpus is a population, not one run's
-    trajectory, and two runs in a workspace measure the same cases the way they read one lake.
+    trajectory, and two runs in a workspace measure the same cases the way they read one lake. This
+    is the tier the engine writes (the DECIDE miner harvests into exactly this tree) and therefore
+    the only root a writer is ever given. Readers take :func:`case_paths`, which puts the committed
+    corpus underneath it.
     """
     return Path(workspace_dir) / CORPUS_DIRNAME
 
 
+def case_paths(settings: Any) -> CasePaths:
+    """Both corpus tiers a reader sees: the committed ``cases/``, then this workspace's.
+
+    The same split every other committed input has (``strategies/`` seeds, the ``mandate/``
+    scaffold): a review ships the curated buckets, the engine writes only under ``workspace/``, and
+    reading both is what makes a shipped corpus reachable with no copy step to go stale. Precedence
+    is the library's — the workspace tier wins a shared case id — so an operator can shadow a
+    shipped case and a shipped one can never displace theirs.
+    """
+    return CasePaths((Path(settings.cases_dir), cases_root(settings.workspace_dir)))
+
+
 def flat_provider(
-    cases_root: Path, registry: Mapping[str, AgentSite[Any, Any]] | None
+    cases_root: CaseRootSpec, registry: Mapping[str, AgentSite[Any, Any]] | None
 ) -> CaseProvider:
     """The default reader: one directory per site, one ``*.yaml`` per case, validated file by file.
 
@@ -186,14 +202,14 @@ class SiteCorpus:
     gets the flat reader and no vocabulary at all, and reports over exactly what its cases carry.
     """
 
-    provider: Callable[[Path, Mapping[str, AgentSite[Any, Any]] | None], CaseProvider] = (
+    provider: Callable[[CaseRootSpec, Mapping[str, AgentSite[Any, Any]] | None], CaseProvider] = (
         flat_provider
     )
     vocabulary: Callable[[], CorpusVocabulary] = CorpusVocabulary
 
 
 def _coder_provider(
-    cases_root: Path, registry: Mapping[str, AgentSite[Any, Any]] | None
+    cases_root: CaseRootSpec, registry: Mapping[str, AgentSite[Any, Any]] | None
 ) -> CaseProvider:
     """The coder corpus's own reader: one directory per bucket, validated by the coder schema."""
     from noctis.eval.coder_corpus import CoderCaseProvider
@@ -246,18 +262,18 @@ def site_vocabulary(
 def corpus_provider(
     site_id: str,
     *,
-    cases_root: Path | str,
+    cases_root: CaseRootSpec,
     registry: Mapping[str, AgentSite[Any, Any]] | None = None,
     corpora: Mapping[str, SiteCorpus] | None = None,
 ) -> CaseProvider:
     """The reader that serves one site's corpus — the site's declared loader, or the generic one."""
-    return site_corpus(site_id, corpora).provider(Path(cases_root), registry)
+    return site_corpus(site_id, corpora).provider(cases_root, registry)
 
 
 def load_cases(
     site_id: str,
     *,
-    cases_root: Path | str,
+    cases_root: CaseRootSpec,
     registry: Mapping[str, AgentSite[Any, Any]] | None = None,
     corpora: Mapping[str, SiteCorpus] | None = None,
 ) -> tuple[Case, ...]:
@@ -274,7 +290,7 @@ def load_cases(
 def load_corpus(
     site_id: str,
     *,
-    cases_root: Path | str,
+    cases_root: CaseRootSpec,
     registry: Mapping[str, AgentSite[Any, Any]] | None = None,
     corpora: Mapping[str, SiteCorpus] | None = None,
 ) -> Corpus:

@@ -63,7 +63,7 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `runs_dir`, `data.lake_dir` | The workspace-level pair: the run tree (`workspace/runs`) and the data lake (`workspace/data_lake`), which is **shared by every run** |
 | `run_dir` | **The one run root** (default `workspace/runs/legacy`, the reserved run an invocation that never opened a run reads). `noctis run` / `noctis research` rebind it to the run they mint or resume |
 | `state_dir`, `reports_dir`, `memory_path`, `qa_dir` | Per-artifact overrides; each defaults to its **run**-derived location (`<run_dir>/state`, `<run_dir>/reports`, `<run_dir>/memory/MEMORY.md`, `<run_dir>/qa`) |
-| `strategies_dir`, `mandate_dir` | The committed input surfaces: the seed strategy library and the mandate scaffold |
+| `strategies_dir`, `mandate_dir`, `cases_dir` | The committed input surfaces: the seed strategy library, the mandate scaffold, and the curated benchmark corpus (read as a tier under `<workspace>/cases/`) |
 
 ## The workspace
 
@@ -106,14 +106,14 @@ operator deliberately adopts it ([below](#seeing-the-drift-and-adopting-it)).
 
 Every leaf setting belongs to exactly one of three tiers, classified in
 `src/noctis/config/rehydrate.py` and ratcheted by the test suite the same way the overlay's table
-is. Today: **72 frozen, 17 live, 2 refused**. The record publishes the three lists it froze under
+is. Today: **75 frozen, 18 live, 2 refused**. The record publishes the three lists it froze under
 `inputs.settings` ([run-record.md](run-record.md#inputs--the-frozen-configuration)), so a consumer
 never has to guess which tier a key is in.
 
 | Tier | Count | What | Where it comes from on a resume |
 |---|---|---|---|
-| **Frozen** | 72 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `embed_all_sources`, `live_feed.*` — **plus the whole mandate** | the record |
-| **Live** | 17 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | the current process |
+| **Frozen** | 75 | Everything that decides what the accumulated results *mean*: `research.*`, `promotion.*`, `backtest.*`, `trading.*`, `risk.*`, `ideation.*`, `universe`, `session.*`, `champion_count`, `data.provider` / `dataset` / `history_days` / `auto_backfill`, `research_time_budget_minutes`, `run_limit_hours`, `embed_all_sources`, `live_feed.*` — **plus the whole mandate** | the record |
+| **Live** | 18 | The three API keys; every path knob (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`, `reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `cases_dir`, `data.lake_dir`); the per-process budgets `time_limit_hours`, `data.budget_usd`, `qa.keep_last_runs`, `observability.heartbeat_polls` | the current process |
 | **Refused** | 2 | `mode`, `allow_live` | neither — see below |
 
 **Frozen includes the mandate, as resolved text.** The record stores the mandate's body verbatim
@@ -163,7 +163,7 @@ who really did mean to change the run's configuration needs a way to say so. Two
 
 - `--show-config-drift` prints how the current `config.yaml` and `mandate/` differ from what the
   run froze, then exits. Inspection only — it opens no segment, takes no lock, writes nothing.
-  It compares the **72 frozen keys** and the resolved **mandate text**; the 17 live keys are never
+  It compares the **75 frozen keys** and the resolved **mandate text**; the 18 live keys are never
   reported (they are this process's by design) and the 2 refused ones never appear at all.
 - `--rebase-config` adopts the current files for the rest of the run: it re-freezes them, bumps
   `inputs.config_epoch`, and appends a before/after entry to `inputs.config_changes` naming the
@@ -225,8 +225,8 @@ refused set is the arena: the live-money double gate (`mode`, `allow_live`), the
 fill-cost floor (`backtest.fee_bps`, `backtest.slippage_bps`), every `promotion.*` except
 `metric`, the holdout geometry (`research.fit_set_size`, `research.symbol_holdout_size`),
 `champion_count`, every state/IO path (`workspace_dir`, `runs_dir`, `run_dir`, `state_dir`,
-`reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `data.lake_dir`), the
-three API keys, cost accounting (`research.pricing`), record content (`embed_all_sources`),
+`reports_dir`, `memory_path`, `qa_dir`, `strategies_dir`, `mandate_dir`, `cases_dir`,
+`data.lake_dir`), the three API keys, cost accounting (`research.pricing`), record content (`embed_all_sources`),
 self-selection (`research.mandate`, `research.mode`), `risk.*` / `trading.*` /
 `live_feed.poll_interval_s`, `data.provider` / `data.dataset`, `session.calendar` /
 `session.timezone`, and `ideation.*`.

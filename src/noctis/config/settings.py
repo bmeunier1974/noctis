@@ -687,6 +687,10 @@ class Settings(BaseSettings):
     # shipped profiles/, tune-first.md, README, one reference example); the human's own MANDATE.md,
     # custom personalities, and personal references are gitignored so steering never pollutes git.
     mandate_dir: str = "mandate/"
+    # The committed benchmark corpus: the curated buckets a review shipped to every user, read-only
+    # input exactly like the strategy seeds beside it. The engine's own tier is <workspace>/cases/,
+    # and a case id in both is the workspace's. See cases/README.md.
+    cases_dir: str = "cases/"
 
     # --- Secrets / env-only switches ---
     databento_api_key: str | None = None
