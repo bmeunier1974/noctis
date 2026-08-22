@@ -761,6 +761,155 @@ def test_build_recorder_config_digest_excludes_secrets(tmp_path):
     assert base == with_secret  # a secret never perturbs the digest
 
 
+# ── open_run_store: the session's inputs, frozen onto the run (story #248) ────────────────
+def _run_settings(tmp_path, lines: list[str] | None = None, name: str = "run.yaml"):
+    """Settings whose workspace (and therefore ``runs_dir``) lives under ``tmp_path``."""
+    return load_settings(config_path=_config(tmp_path, ["mode: paper", *(lines or [])], name=name))
+
+
+def _session_inputs(settings, **fields):
+    """One resolved session, as ``run`` and ``research`` hand it to the composition root."""
+    from noctis.bootstrap import SessionInputs
+
+    return SessionInputs(
+        settings=settings,
+        mode=fields.pop("mode", "paper"),
+        mandate=fields.pop("mandate", None),
+        overrides=fields.pop("overrides", []),
+        **fields,
+    )
+
+
+def _run_record(run_dir: Path) -> dict:
+    import json
+
+    return json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+
+
+def test_a_store_opened_with_session_inputs_freezes_the_mode_mandate_and_overrides(tmp_path):
+    """The gate's verdict, the steering and what it moved are pinned at creation — read off one
+    ``SessionInputs``, so no entrypoint can freeze three of the five and drop the rest."""
+    from noctis.bootstrap import open_run_store
+    from noctis.research import Mandate
+
+    settings = _run_settings(tmp_path)
+    mandate = Mandate(
+        text="Hunt intraday momentum.",
+        source="profile:aggressive",
+        summary="Momentum.",
+        references=[],
+        config_overrides={"promotion.metric": "sharpe"},
+    )
+    store = open_run_store(
+        settings,
+        argv=["run"],
+        inputs=_session_inputs(settings, mandate=mandate, overrides=["promotion.metric=sharpe"]),
+    )
+    store.close(reason="stopped")
+
+    record = _run_record(store.run_dir)
+    assert record["inputs"]["execution_mode"] == "paper"
+    assert record["inputs"]["mandate"]["source"] == "profile:aggressive"
+    assert record["inputs"]["mandate"]["text"] == "Hunt intraday momentum."
+    assert record["inputs"]["mandate"]["overrides_applied"] == ["promotion.metric=sharpe"]
+    assert record["assumptions"]["paper_only"] is True
+
+
+def test_a_store_opened_with_a_sessions_rebase_adopts_it_over_what_the_run_carried(tmp_path):
+    """``--rebase-config`` is the one deliberate replacement of a frozen block, and the store
+    opener reads it off the session rather than being told twice."""
+    from noctis.bootstrap import open_run_store, resolve_research_loop
+    from noctis.config.rehydrate import rebase_inputs
+
+    settings = _run_settings(tmp_path, ["promotion:", "  metric: sharpe"])
+    first = open_run_store(settings, argv=["run"], inputs=_session_inputs(settings))
+    first.close(reason="stopped")
+
+    moved = _run_settings(tmp_path, ["promotion:", "  metric: sortino"], name="moved.yaml")
+    rebase = rebase_inputs(
+        _run_record(first.run_dir),
+        moved,
+        execution_mode="paper",
+        research_loop=resolve_research_loop(moved),
+        at="2026-08-22T00:00:00Z",
+        segment=1,
+    )
+    assert rebase is not None  # something really drifted
+    second = open_run_store(
+        moved,
+        argv=["run"],
+        run_id=first.run_id,
+        resume=True,
+        inputs=_session_inputs(moved, rebase=rebase),
+    )
+    second.close(reason="stopped")
+
+    frozen = _run_record(first.run_dir)["inputs"]
+    assert frozen["config_epoch"] == 2
+    assert frozen["config_changes"][-1]["segment"] == 1
+    assert frozen["settings"]["resolved"]["promotion"]["metric"] == "sortino"
+
+
+def test_a_store_opened_with_a_sessions_engine_upgrade_re_freezes_the_engine(tmp_path):
+    """The twin one layer down: an accepted engine change travels on the session too."""
+    from noctis.bootstrap import open_run_store
+
+    settings = _run_settings(tmp_path)
+    first = open_run_store(settings, argv=["run"], inputs=_session_inputs(settings))
+    first.close(reason="stopped")
+    entry = {
+        "at": "2026-08-22T00:00:00Z",
+        "segment": 1,
+        "from_epoch": 1,
+        "to_epoch": 2,
+        "from_engine_version": "1.0.0",
+        "to_engine_version": "1.1.0",
+        "components": [],
+        "accepted_by": "--allow-engine-upgrade",
+    }
+
+    second = open_run_store(
+        settings,
+        argv=["run"],
+        run_id=first.run_id,
+        resume=True,
+        inputs=_session_inputs(settings, engine_upgrade=entry),
+    )
+    second.close(reason="stopped")
+
+    engine = _run_record(first.run_dir)["engine"]
+    assert engine["engine_epoch"] == 2
+    assert engine["engine_changes"] == [entry]
+    assert engine["mixed_engine"] is True
+
+
+def test_a_store_opened_without_session_inputs_opens_a_run_that_froze_no_verdict(tmp_path):
+    """The bare form a direct caller (and a test) uses: no session, so nothing was measured —
+    ``null`` keeps meaning "nobody measured" rather than being invented here."""
+    from noctis.bootstrap import open_run_store
+
+    settings = _run_settings(tmp_path)
+    store = open_run_store(settings, argv=["run"])
+    store.close(reason="stopped")
+
+    record = _run_record(store.run_dir)
+    assert Path(settings.run_dir) == store.run_dir  # the run's tree is bound either way
+    assert record["inputs"]["execution_mode"] is None
+    assert record["inputs"]["mandate"] is None
+    assert record["assumptions"]["paper_only"] is None
+
+
+@pytest.mark.parametrize("field", ["mandate", "mode", "overrides", "rebase", "engine_upgrade"])
+def test_no_kwarg_of_the_store_opener_is_an_unpacked_session_input(tmp_path, field):
+    """D3: the five unpacked fields are gone — a new resume-policy tier is a change to
+    ``SessionInputs`` alone, never a sixth kwarg threaded through two command bodies."""
+    from noctis.bootstrap import open_run_store
+
+    settings = _run_settings(tmp_path)
+    with pytest.raises(TypeError):
+        open_run_store(settings, argv=["run"], **{field: None})
+
+
 # ── the environment probes: the one place hardware, git and extras are actually read ──────
 
 

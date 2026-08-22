@@ -718,11 +718,7 @@ def run(
             run_id=resume,
             resume=resume is not None,
             label=label,
-            mandate=active_mandate,
-            mode=mode,
-            overrides=inputs.overrides,
-            rebase=inputs.rebase,
-            engine_upgrade=inputs.engine_upgrade,
+            inputs=inputs,
         )
     except RunLockedError as exc:
         _exit_red(exc, prefix="RUN LOCKED: ")
@@ -1642,9 +1638,7 @@ def research(
             command="research",
             run_id=resume,
             resume=resume is not None,
-            mandate=active_mandate,
-            mode=mode,
-            overrides=inputs.overrides,
+            inputs=inputs,
         )
     except RunLockedError as exc:
         _exit_red(exc, prefix="RUN LOCKED: ")

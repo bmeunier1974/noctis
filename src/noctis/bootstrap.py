@@ -91,8 +91,8 @@ class SessionInputs:
     resume: str | None = None
     # The run's frozen ``inputs`` re-frozen on the current files, when this session is a
     # ``--rebase-config`` resume that found something to adopt (story #134): epoch already bumped,
-    # before/after entry already appended, built once by ``config.rehydrate.rebase_inputs``. The
-    # entrypoint hands it to :func:`open_run_store`, which lets it replace what the record carried.
+    # before/after entry already appended, built once by ``config.rehydrate.rebase_inputs``. Read
+    # off this session by :func:`open_run_store`, which lets it replace what the record carried.
     # ``None`` on every other session — including a rebase of a run nothing changed under, which is
     # a no-op by design rather than a cosmetic epoch bump.
     rebase: Mapping[str, Any] | None = None
@@ -101,8 +101,9 @@ class SessionInputs:
     # a resume that found no drift — silence is the signal that the engine held still.
     engine_notes: list[str] = field(default_factory=list)
     # The ``engine_changes`` entry a deliberately accepted engine change produced
-    # (``--allow-engine-upgrade``): epoch already bumped, moved components already named. Handed to
-    # :func:`open_run_store`, which re-freezes the run onto this engine. ``None`` everywhere else,
+    # (``--allow-engine-upgrade``): epoch already bumped, moved components already named. Read off
+    # this session by :func:`open_run_store`, which re-freezes the run onto this engine — like every
+    # other field freezing reads, so no entrypoint names it. ``None`` everywhere else,
     # including an upgrade of a run whose arbiter never moved — a documented no-op.
     engine_upgrade: Mapping[str, Any] | None = None
 
@@ -1205,11 +1206,7 @@ def open_run_store(
     clock: Callable[[], Any] | None = None,
     label: str | None = None,
     resume: bool = False,
-    mandate: Mandate | None = None,
-    mode: str | None = None,
-    overrides: list[str] | None = None,
-    rebase: Mapping[str, Any] | None = None,
-    engine_upgrade: Mapping[str, Any] | None = None,
+    inputs: SessionInputs | None = None,
 ):
     """Open this invocation's run — the always-on run identity, minted here and nowhere else.
 
@@ -1246,15 +1243,23 @@ def open_run_store(
     is continuing an existing run rather than minting one, which turns an unknown id and a
     ``completed`` run into refusals rather than a surprise new run.
 
-    ``rebase`` is the deliberate re-freeze a ``--rebase-config`` resume built (story #134): already
-    epoch-bumped and change-stamped by :func:`resume_session`, it **replaces** the inputs the record
-    carried instead of being ignored like a fresh freeze would be. Absent (the normal case) nothing
-    about freezing changes at all.
+    **What is frozen comes from the session, whole** (story #248): ``inputs`` is the
+    :class:`SessionInputs` an entrypoint resolved, and the five fields freezing reads — the gate's
+    verdict, the mandate, the overrides it applied, a rebase and an engine upgrade — are read off
+    it here rather than unpacked into five kwargs each command body has to keep in step. A tier of
+    resume policy added tomorrow is therefore a field on that object, not a sixth kwarg threaded
+    through two Typer bodies. ``None`` is the bare form a direct caller (or a test) uses: no
+    session was resolved, so no verdict was measured and nothing is adopted.
 
-    ``engine_upgrade`` is its twin one layer down (story #135): the ``engine_changes`` entry an
-    accepted ``--allow-engine-upgrade`` produced. Given one, the run's engine identity is re-frozen
-    onto this process's engine with that entry appended; absent, the run keeps the engine it was
-    created under, which is what every resume is compared against.
+    ``inputs.rebase`` is the deliberate re-freeze a ``--rebase-config`` resume built (story #134):
+    already epoch-bumped and change-stamped by :func:`resume_session`, it **replaces** the inputs
+    the record carried instead of being ignored like a fresh freeze would be. Absent (the normal
+    case) nothing about freezing changes at all.
+
+    ``inputs.engine_upgrade`` is its twin one layer down (story #135): the ``engine_changes`` entry
+    an accepted ``--allow-engine-upgrade`` produced. Given one, the run's engine identity is
+    re-frozen onto this process's engine with that entry appended; absent, the run keeps the engine
+    it was created under, which is what every resume is compared against.
 
     Raises :class:`~noctis.reporting.run_store.RunLockedError` when another engine already holds
     the addressed run — the one failure in this subsystem that is fatal rather than latched.
@@ -1267,6 +1272,25 @@ def open_run_store(
     from noctis.reporting.run_store import open_run
 
     tick = clock or (lambda: datetime.now(UTC))
+    # The session's frozen-tier fields, read off the one object that carries them. Without a
+    # session there is nothing to freeze but the settings themselves: an unmeasured mode, no
+    # steering, nothing adopted.
+    rebase = inputs.rebase if inputs is not None else None
+    # ``open_run``'s ``inputs=`` is the run record's frozen configuration block — a different thing
+    # from the session above, so it is named here rather than built inline against a parameter of
+    # the same name: an adopted rebase, or this invocation's own freeze.
+    frozen = (
+        rebase
+        if rebase is not None
+        else freeze_inputs(
+            settings,
+            mandate=inputs.mandate if inputs is not None else None,
+            overrides=inputs.overrides if inputs is not None else [],
+            execution_mode=inputs.mode if inputs is not None else None,
+            research_loop=resolve_research_loop(settings),
+            frozen_at=utc_iso(tick()),
+        )
+    )
     store = open_run(
         Path(settings.runs_dir),
         clock=tick,
@@ -1276,18 +1300,9 @@ def open_run_store(
         command=command,
         label=label,
         resume=resume,
-        inputs=rebase
-        if rebase is not None
-        else freeze_inputs(
-            settings,
-            mandate=mandate,
-            overrides=overrides or [],
-            execution_mode=mode,
-            research_loop=resolve_research_loop(settings),
-            frozen_at=utc_iso(tick()),
-        ),
+        inputs=frozen,
         rebase_config=rebase is not None,
-        engine_upgrade=engine_upgrade,
+        engine_upgrade=inputs.engine_upgrade if inputs is not None else None,
         # The machine this process is on (story #139), captured through the injected probes above
         # and stamped on THIS segment only: a run that migrates boxes mid-experiment keeps each
         # night's throughput attributed to the hardware that produced it.

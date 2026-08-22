@@ -781,6 +781,28 @@ def test_a_research_minted_run_records_the_gates_verdict(tmp_path, monkeypatch):
     assert record["assumptions"]["paper_only"] is True
 
 
+def test_both_commands_hand_the_store_opener_the_session_inputs_whole():
+    """D3 (#248): neither command body forwards an unpacked ``SessionInputs`` field, so a new
+    resume-policy tier lands in ``bootstrap.py`` alone instead of in two hand-walked call sites."""
+    import ast
+
+    import noctis.cli
+
+    source = Path(noctis.cli.__file__)
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "open_run_store"
+    ]
+
+    assert len(calls) == 2, "run and research are the two verbs that open a run"
+    for call in calls:
+        passed = {keyword.arg for keyword in call.keywords}
+        assert "inputs" in passed
+        assert not passed & {"mandate", "mode", "overrides", "rebase", "engine_upgrade"}
+
+
 def test_research_reports_what_the_session_spent_and_calls_the_dollars_an_estimate(
     tmp_path, monkeypatch
 ):
