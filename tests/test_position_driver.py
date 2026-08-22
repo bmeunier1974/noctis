@@ -381,3 +381,171 @@ def test_a_bar_that_touches_both_levels_resolves_to_the_stop():
     assert close.exit_fill.price == 95.0
     assert close.exit_fill.reason == "stop"
     assert broker.position(SYMBOL).quantity == 0.0
+
+
+def test_the_latch_holds_flat_until_the_strategy_asks_for_something_new():
+    """An exit is not a suggestion: re-asking for the same stance changes nothing."""
+    rules = ExitRules(stop_pct=0.05)
+    broker = _broker()
+    driver = _driver(broker, _scripted([1, 1, 1, 0, 1], exits=rules), _sizer([10.0]))
+    b1, b2, b3, b4, b5, b6 = _tape(
+        _bar(99.0, 100.0, 98.0, 99.0),
+        _bar(100.0, 101.0, 94.0, 96.0),  # long at 100, stopped out at 95
+        _bar(96.0, 97.0, 95.0, 96.0),  # the strategy re-asks for +1 — refused
+        _bar(96.0, 97.0, 95.0, 96.0),  # it changes its mind to 0 — the latch lifts
+        _bar(100.0, 101.0, 99.0, 100.0),
+        _bar(110.0, 111.0, 109.0, 110.0),
+    )
+
+    driver.at_open(b1)
+    driver.at_close(b1)
+    driver.at_open(b2)
+    assert driver.at_close(b2).exit_fill is not None
+    fills_after_the_exit = len(broker.fills)
+
+    held = driver.at_open(b3)
+    still_latched = driver.at_close(b3)
+
+    assert held.fill is None
+    assert still_latched.exit_fill is None
+    assert still_latched.raw_target == 1
+    assert still_latched.target == 0
+    assert driver.latched is True
+    assert len(broker.fills) == fills_after_the_exit
+
+    driver.at_open(b4)
+    unlatched = driver.at_close(b4)
+
+    assert driver.latched is False
+    assert unlatched.target == 0  # the new value is 0 — nothing to trade yet
+
+    driver.at_open(b5)
+    re_entry = driver.at_close(b5)
+
+    assert re_entry.target == 1  # +1 is a change of mind now, and executes normally
+    opened = driver.at_open(b6)
+
+    assert opened.fill is not None
+    assert opened.fill.price == 110.0
+    assert opened.fill.quantity == 10.0
+    assert opened.fill.reason == "target"
+    assert broker.position(SYMBOL).quantity == 10.0
+    assert driver.latched is False
+
+
+def test_a_carried_position_is_protected_from_the_first_rules_it_is_given():
+    """Rules arm at the close that declares them — never retroactively on that bar."""
+    broker = _broker()
+    broker.set_price(SYMBOL, 100.0, 0)
+    broker.rebalance_to(SYMBOL, 10.0)  # an earlier session's long, avg price 100
+    seeding_fills = len(broker.fills)
+    driver = _driver(broker, _scripted([1], exits=ExitRules(stop_pct=0.05)), _sizer([10.0]))
+    first, second = _tape(
+        _bar(110.0, 112.0, 90.0, 111.0),  # would have breached 95 — nothing armed yet
+        _bar(110.0, 111.0, 94.0, 96.0),
+    )
+
+    driver.at_open(first)
+    unarmed = driver.at_close(first)  # declares the stop for the first time
+
+    assert unarmed.exit_fill is None
+    assert unarmed.trigger is None
+    assert len(broker.fills) == seeding_fills
+    assert broker.position(SYMBOL).quantity == 10.0
+
+    driver.at_open(second)
+    close = driver.at_close(second)
+
+    assert close.trigger == ExitTrigger(price=95.0, reason="stop")
+    assert close.exit_fill is not None
+    assert close.exit_fill.price == 95.0  # the carried avg price 100 * 0.95, not 110 * 0.95
+    assert broker.position(SYMBOL).quantity == 0.0
+    assert driver.latched is True
+
+
+def test_exit_tracking_re_anchors_at_the_fill_price_and_clears_when_flat():
+    """The anchor is the price actually paid — at an open, and again at a flip."""
+    rules = ExitRules(stop_pct=0.05)
+    broker = _broker()
+    driver = _driver(broker, _scripted([1, 1, -1, 1, 1, 1], exits=rules), _sizer([10.0]))
+    b1, b2, b3, b4, b5, b6 = _tape(
+        _bar(90.0, 91.0, 89.0, 90.0),  # decides +1 with the close at 90
+        _bar(100.0, 101.0, 94.0, 96.0),  # fills at the OPEN, 100 → stop 95, not 85.5
+        _bar(96.0, 97.0, 95.0, 96.0),  # flat: the cleared anchor's level goes unnoticed
+        _bar(100.0, 101.0, 99.0, 100.0),  # re-opens short at 100
+        _bar(120.0, 121.0, 119.0, 120.0),  # flips long at 120 → the new anchor
+        _bar(118.0, 119.0, 113.0, 114.0),  # 120 * 0.95 = 114
+    )
+
+    driver.at_open(b1)
+    driver.at_close(b1)
+    driver.at_open(b2)
+    opened = driver.at_close(b2)
+
+    assert opened.exit_fill is not None
+    assert opened.exit_fill.price == 95.0  # anchored at the fill, not the decision bar
+
+    flat = driver.at_open(b3)
+    cleared = driver.at_close(b3)
+
+    assert flat.fill is None
+    assert cleared.exit_fill is None  # the low touches 95, but nothing is anchored
+    assert cleared.trigger is None
+    assert broker.position(SYMBOL).quantity == 0.0
+
+    driver.at_open(b4)
+    driver.at_close(b4)
+    flipped = driver.at_open(b5)
+    driver.at_close(b5)
+
+    assert flipped.fill is not None
+    assert flipped.fill.quantity == 20.0  # short 10 → long 10, through flat
+    assert flipped.fill.price == 120.0
+    assert broker.position(SYMBOL).quantity == 10.0
+
+    driver.at_open(b6)
+    close = driver.at_close(b6)
+
+    assert close.trigger == ExitTrigger(price=114.0, reason="stop")
+    assert close.exit_fill is not None
+    assert close.exit_fill.price == 114.0  # the FLIP fill price * 0.95
+    assert broker.position(SYMBOL).quantity == 0.0
+
+
+def test_execute_false_at_close_skips_the_exit_step_ratchet_included():
+    """A bar it could not act on must not advance the trail it will be judged by."""
+    rules = ExitRules(trail_pct=0.10)
+    broker = _broker()
+    driver = _driver(broker, _scripted([1], exits=rules), _sizer([10.0]))
+    b1, b2, b3, b4 = _tape(
+        _bar(100.0, 101.0, 99.0, 100.0),
+        _bar(100.0, 120.0, 99.0, 119.0),  # long at 100; the best ratchets to 120
+        _bar(118.0, 125.0, 107.0, 108.0),  # would breach 108 and mark 125 — suppressed
+        _bar(110.0, 111.0, 107.0, 108.0),
+    )
+
+    driver.at_open(b1)
+    driver.at_close(b1)
+    driver.at_open(b2)
+    driver.at_close(b2)
+    entry_fills = len(broker.fills)
+
+    driver.at_open(b3)
+    suppressed = driver.at_close(b3, execute=False)
+
+    assert suppressed.exit_fill is None
+    assert suppressed.trigger is None
+    assert len(broker.fills) == entry_fills
+    assert broker.position(SYMBOL).quantity == 10.0  # still held
+    assert driver.latched is False
+    assert suppressed.target == 1  # on_bar still ran...
+    assert driver.pending_target == 1  # ...and its decision still carried
+    assert driver.pending_exits == rules
+    assert broker.marks()[SYMBOL] == 108.0  # the close was still marked
+
+    driver.at_open(b4)
+    close = driver.at_close(b4)
+
+    assert close.exit_fill is not None
+    assert close.exit_fill.price == 108.0  # 120 * 0.9 — the suppressed bar's 125 never landed
+    assert close.exit_fill.reason == "trail"
