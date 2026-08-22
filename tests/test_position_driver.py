@@ -303,3 +303,81 @@ def test_a_short_stop_mirrors_the_long_case():
     assert broker.position(SYMBOL).quantity == 0.0
     assert driver.latched is True
     assert close.target == 0
+
+
+def test_the_trail_measures_from_the_prior_bars_extreme_not_this_bars():
+    """Evaluate before ratchet: a bar that makes a new high exits at the OLD trail level.
+
+    The high that would raise the mark may print after the low that breaches the level,
+    so ratcheting off the same bar the trail is judged on is intrabar lookahead.
+    """
+    rules = ExitRules(trail_pct=0.10)
+    broker = _broker()
+    driver = _driver(broker, _scripted([1], exits=rules), _sizer([10.0]))
+    first, second, third = _tape(
+        _bar(100.0, 101.0, 99.0, 100.0),
+        _bar(100.0, 120.0, 99.0, 119.0),  # runs up to 120 without breaching 100 * 0.9
+        _bar(118.0, 125.0, 107.0, 108.0),  # a new high AND a breach of the prior level
+    )
+
+    driver.at_open(first)
+    driver.at_close(first)
+    driver.at_open(second)  # long 10 units at 100
+    held = driver.at_close(second)
+
+    assert held.trigger is None  # 90 is far below this bar's low
+    assert held.exit_fill is None
+
+    driver.at_open(third)
+    close = driver.at_close(third)
+
+    assert close.trigger is not None
+    assert close.trigger.reason == "trail"
+    assert close.exit_fill is not None
+    assert close.exit_fill.price == 108.0  # 120 (the PRIOR bar's high) * 0.9, not 125 * 0.9
+    assert broker.position(SYMBOL).quantity == 0.0
+    assert driver.latched is True
+
+
+def test_a_take_profit_gapped_through_at_the_open_banks_the_better_price():
+    rules = ExitRules(take_profit_pct=0.05)
+    broker = _broker()
+    driver = _driver(broker, _scripted([1], exits=rules), _sizer([10.0]))
+    first, second, third = _tape(
+        _bar(99.0, 100.0, 98.0, 99.0),
+        _bar(100.0, 101.0, 99.0, 100.0),  # long 10 units at 100; 105 is out of reach
+        _bar(108.0, 110.0, 107.0, 109.0),  # gaps straight past the take-profit level
+    )
+
+    driver.at_open(first)
+    driver.at_close(first)
+    driver.at_open(second)
+    assert driver.at_close(second).trigger is None
+
+    driver.at_open(third)
+    close = driver.at_close(third)
+
+    assert close.trigger == ExitTrigger(price=108.0, reason="take_profit")
+    assert close.exit_fill is not None
+    assert close.exit_fill.price == 108.0  # the open, better than the 105 level
+    assert close.exit_fill.reason == "take_profit"
+    assert broker.position(SYMBOL).quantity == 0.0
+
+
+def test_a_bar_that_touches_both_levels_resolves_to_the_stop():
+    """The worst case the OHLC cannot disprove — never the flattering one."""
+    rules = ExitRules(stop_pct=0.05, take_profit_pct=0.05)
+    broker = _broker()
+    driver = _driver(broker, _scripted([1], exits=rules), _sizer([10.0]))
+    first, second = _tape(_bar(99.0, 100.0, 98.0, 99.0), _bar(100.0, 106.0, 94.0, 100.0))
+
+    driver.at_open(first)
+    driver.at_close(first)
+    driver.at_open(second)  # long 10 units at 100
+    close = driver.at_close(second)
+
+    assert close.trigger == ExitTrigger(price=95.0, reason="stop")
+    assert close.exit_fill is not None
+    assert close.exit_fill.price == 95.0
+    assert close.exit_fill.reason == "stop"
+    assert broker.position(SYMBOL).quantity == 0.0
