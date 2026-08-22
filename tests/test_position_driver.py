@@ -206,3 +206,54 @@ def test_from_position_on_a_carried_short_seeds_a_short_pending_target():
 
     assert driver.pending_target == -1
     assert driver.exit_state == ExitState(direction=-1, entry_price=50.0, best=50.0)
+
+
+def test_execute_false_at_open_marks_the_bar_without_trading():
+    """A suppressed open still prices the account honestly; the target stays owed."""
+    broker = _broker()
+    broker.set_price(SYMBOL, 100.0, 0)
+    broker.rebalance_to(SYMBOL, 10.0)  # 10 units at 100 → cash 99_000, equity 100_000
+    driver = _driver(broker, _scripted([1]), _sizer([20.0]))
+    carried_fills = len(broker.fills)  # the seeding trade above, not this session's
+    (first,) = _tape(_bar(110.0, 112.0, 109.0, 111.0))
+
+    opened = driver.at_open(first, execute=False)
+
+    assert opened.fill is None
+    assert opened.skipped is False  # nothing was refused — nothing was offered
+    assert broker.marks()[SYMBOL] == 110.0
+    assert broker.equity() == 100_100.0  # 99_000 cash + 10 units marked at the open
+    assert len(broker.fills) == carried_fills
+    assert driver.pending_target == 1
+
+
+def test_execute_false_at_close_still_decides_carries_and_marks():
+    broker = _broker()
+    driver = _driver(broker, _scripted([-1]), _sizer([10.0]))
+    (first,) = _tape(_bar(100.0, 101.0, 99.0, 100.5))
+
+    driver.at_open(first, execute=False)
+    close = driver.at_close(first, execute=False)
+
+    assert close.target == -1
+    assert driver.pending_target == -1  # carried into the next open
+    assert broker.marks()[SYMBOL] == 100.5
+    assert broker.fills == []
+
+
+def test_an_unlatched_close_executes_the_strategys_raw_target_and_carries_its_rules():
+    rules = ExitRules(stop_pct=0.05)
+    broker = _broker()
+    driver = _driver(broker, _scripted([1], exits=rules), _sizer([10.0]))
+    (first,) = _tape(_bar(100.0, 101.0, 99.0, 100.0))
+
+    driver.at_open(first)
+    close = driver.at_close(first)
+
+    assert close.raw_target == 1
+    assert close.target == close.raw_target  # nothing suppresses it while unlatched
+    assert close.exit_fill is None
+    assert close.trigger is None
+    assert driver.pending_target == 1
+    assert driver.pending_exits == rules
+    assert driver.latched is False
