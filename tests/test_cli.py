@@ -1509,3 +1509,68 @@ def test_mandate_preflight_shows_what_a_run_would_actually_get(tmp_path):
     kickoff = runner.invoke(app, ["run", "--config", cfg, "--mandate", "homelab"])
     assert kickoff.exit_code == 0, kickoff.output
     assert "research_time_budget_minutes=17" in kickoff.output
+
+
+# ── the one startup-error table (D7, story #252) ───────────────────────────────────────────
+
+REFUSAL_PREFIXES = (
+    "MANDATE: ",
+    "SAFETY GATE: ",
+    "RESUME: ",
+    "RUN LOCKED: ",
+    "FINISH: ",
+    "PRUNE: ",
+)
+
+NO_SUCH_RUN = "20260101T000000Z-nope00"
+
+
+def _refusing_argv(prefix: str, tmp_path, monkeypatch) -> list[str]:
+    """The shortest invocation that provokes one typed startup refusal, whole with its setup."""
+    if prefix == "MANDATE: ":
+        return ["run", "--config", _paper_config(tmp_path), "--mandate", "no-such-mandate"]
+    if prefix == "SAFETY GATE: ":
+        monkeypatch.delenv("ALLOW_LIVE", raising=False)
+        return ["run", "--config", _live_config(tmp_path)]
+    if prefix == "RESUME: ":
+        return ["run", "--config", _paper_config(tmp_path), "--resume", NO_SUCH_RUN]
+    if prefix == "FINISH: ":
+        return ["run", "--config", _paper_config(tmp_path), "--resume", NO_SUCH_RUN, "--finish"]
+    if prefix == "PRUNE: ":
+        return ["run-prune", NO_SUCH_RUN, "--config", _paper_config(tmp_path)]
+    from noctis.reporting.run_store import acquire_lock
+
+    cfg = _paper_config(tmp_path)
+    assert runner.invoke(app, ["run", "--config", cfg]).exit_code == 0
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    # A live lock held by this very process: never stale, so the next engine must refuse.
+    acquire_lock(run_dir, run_id=run_dir.name, now=datetime.now(UTC))
+    return ["run", "--config", cfg, "--resume", run_dir.name]
+
+
+@pytest.mark.parametrize("prefix", REFUSAL_PREFIXES)
+def test_every_typed_refusal_still_names_itself_on_stderr(prefix, tmp_path, monkeypatch):
+    """One table, six sentences unchanged (#252): each typed startup error still exits 1 with its
+    own prefix and its own diagnosis on stderr, whichever verb provoked it."""
+    result = runner.invoke(app, _refusing_argv(prefix, tmp_path, monkeypatch))
+
+    assert result.exit_code == 1, result.output
+    said = [line for line in result.stderr.splitlines() if line.startswith(prefix)]
+    assert len(said) == 1, result.stderr
+    assert said[0] != prefix.rstrip(), "the refusal's own diagnosis rides behind the prefix"
+
+
+@pytest.mark.parametrize("prefix", REFUSAL_PREFIXES)
+def test_each_refusal_prefix_is_spelled_exactly_once(prefix):
+    """D7 (#252): every startup refusal maps through one module-level table, so a prefix cannot
+    drift between the ladder in ``_resolve_session_or_exit`` and the four sites that used to
+    re-spell it by hand."""
+    import ast
+
+    spellings = [
+        node
+        for node in ast.walk(_cli_tree())
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == prefix
+    ]
+
+    assert len(spellings) == 1, f"{prefix!r} is spelled {len(spellings)} times in noctis/cli.py"

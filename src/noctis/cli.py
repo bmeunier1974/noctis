@@ -15,6 +15,7 @@ import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import TYPE_CHECKING, Literal, NoReturn
 
 import typer
@@ -45,21 +46,92 @@ app = typer.Typer(
 )
 
 
-def _resolve_mode_or_exit(config: str | None):
-    """Load settings and resolve the execution mode, exiting non-zero on a gate error."""
-    settings = load_settings(config_path=config)
-    try:
-        mode = resolve_execution_mode(settings)
-    except SafetyGateError as exc:
-        typer.secho(f"SAFETY GATE: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
-    return settings, mode
-
-
 def _exit_red(exc: Exception, prefix: str = "") -> NoReturn:
     """Red text on stderr + exit 1 — the one mapping every typed startup error takes."""
     typer.secho(f"{prefix}{exc}", fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1) from exc
+
+
+# The prefix a refusal about an *addressed run* is said under, chosen by the verb that addressed
+# it: an operator needs to know which of their commands refused, while the sentence beneath the
+# prefix stays the run store's own, whichever way the run was reached. `--resume` can meet all four
+# of the run/rehydration refusals; `--finish` and `run-prune` reach only the missing-run one — they
+# map through the same table anyway, so a fifth refusal cannot arrive at one verb unspoken.
+_VERB_PREFIXES = {"resume": "RESUME: ", "finish": "FINISH: ", "prune": "PRUNE: "}
+
+
+@lru_cache(maxsize=1)
+def _startup_refusals() -> tuple[tuple[type[Exception], str | None], ...]:
+    """The one table of typed startup refusals: what may be raised, and what it is said under.
+
+    Every entrypoint meets the same handful of refusals before any work starts — a mandate that
+    will not resolve, a closed safety gate, a run that is locked, missing, completed,
+    un-rehydratable or on a different engine — and each must be **loud**, because a typo'd
+    selector, or a refused resume that degraded into a silent new run, is a multi-day experiment
+    thrown away. This table is the single spelling of each prefix; :func:`_refusals_or_exit` is
+    the single place it is applied. ``None`` means "the addressing verb decides"
+    (:data:`_VERB_PREFIXES`).
+
+    Scanned in order, so a subclass is placed before its base. Built lazily — and cached, since it
+    is pure — because naming these types means importing the composition root, and ``--help`` must
+    stay fast.
+    """
+    from noctis.bootstrap import UsageError
+    from noctis.config.rehydrate import RehydrationError
+    from noctis.observability.engine_change import EngineChangeError
+    from noctis.reporting.run_store import (
+        RunCompletedError,
+        RunLockedError,
+        RunNotFoundError,
+        RunNotPrunableError,
+    )
+    from noctis.research import MandateError
+
+    return (
+        (UsageError, ""),  # --directive × --mandate, or an unknown --metric: it names itself
+        (MandateError, "MANDATE: "),
+        (SafetyGateError, "SAFETY GATE: "),
+        (RunLockedError, "RUN LOCKED: "),
+        (RunNotPrunableError, "PRUNE REFUSED: "),
+        (RunNotFoundError, None),
+        (RunCompletedError, None),
+        (RehydrationError, None),
+        (EngineChangeError, None),
+    )
+
+
+@contextmanager
+def _refusals_or_exit(
+    *, verb: str = "resume", only: tuple[type[Exception], ...] = ()
+) -> Iterator[None]:
+    """Run a startup step, turning any refusal :func:`_startup_refusals` names into red text + 1.
+
+    The one place the table is read, so the six prefixes are spelled once between them and no verb
+    can come to refuse the same condition in a different voice. ``verb`` picks the prefix for the
+    refusals that are *about an addressed run* (``resume`` / ``finish`` / ``prune``); ``only``
+    narrows the catch to the types this site owns, for a caller that handles the rest itself
+    (``status`` degrades an unusable mandate to a report rather than exiting on it).
+
+    Anything the table does not name propagates untouched: this maps refusals an operator must act
+    on, and swallowing a bug into a one-line exit would be the opposite of loud.
+    """
+    try:
+        yield
+    except Exception as exc:
+        if only and not isinstance(exc, only):
+            raise
+        for kind, prefix in _startup_refusals():
+            if isinstance(exc, kind):
+                _exit_red(exc, prefix=_VERB_PREFIXES[verb] if prefix is None else prefix)
+        raise
+
+
+def _resolve_mode_or_exit(config: str | None):
+    """Load settings and resolve the execution mode, exiting non-zero on a gate error."""
+    settings = load_settings(config_path=config)
+    with _refusals_or_exit():
+        mode = resolve_execution_mode(settings)
+    return settings, mode
 
 
 def _resolve_session_or_exit(config: str | None, **kwargs):
@@ -70,24 +142,10 @@ def _resolve_session_or_exit(config: str | None, **kwargs):
     The four resume refusals map here too, for the same reason: an unresumable run must be said
     out loud at the start rather than turned into a *new* run nobody asked for.
     """
-    from noctis.bootstrap import UsageError, resolve_session
-    from noctis.config.rehydrate import RehydrationError
-    from noctis.observability.engine_change import EngineChangeError
-    from noctis.reporting.run_store import RunCompletedError, RunNotFoundError
-    from noctis.research import MandateError
+    from noctis.bootstrap import resolve_session
 
-    try:
+    with _refusals_or_exit():
         return resolve_session(config, **kwargs)
-    except UsageError as exc:  # --directive × --mandate, or an unknown --metric
-        _exit_red(exc)
-    except MandateError as exc:
-        _exit_red(exc, prefix="MANDATE: ")
-    except SafetyGateError as exc:
-        _exit_red(exc, prefix="SAFETY GATE: ")
-    except (RunNotFoundError, RunCompletedError) as exc:
-        _exit_red(exc, prefix="RESUME: ")
-    except (RehydrationError, EngineChangeError) as exc:
-        _exit_red(exc, prefix="RESUME: ")
 
 
 def _resolve_status_session(config: str | None) -> tuple[SessionInputs, str | None]:
@@ -108,12 +166,11 @@ def _resolve_status_session(config: str | None) -> tuple[SessionInputs, str | No
     from noctis.research import MandateError
 
     try:
-        return resolve_session(config, require_gate=True), None
+        with _refusals_or_exit(only=(SafetyGateError,)):
+            return resolve_session(config, require_gate=True), None
     except MandateError as exc:
         settings, mode = _resolve_mode_or_exit(config)
         return SessionInputs(settings=settings, mode=mode, mandate=None, overrides=[]), str(exc)
-    except SafetyGateError as exc:
-        _exit_red(exc, prefix="SAFETY GATE: ")
 
 
 def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
@@ -185,12 +242,13 @@ def _segment_or_exit(
     every exit path — is :func:`~noctis.bootstrap.open_segment`'s, in the composition root. This
     is the one line of it a Typer command owns: a live lock is fatal (two engines writing one run
     would corrupt it), so the typed refusal the band raises becomes red text and a non-zero exit
-    here, where the exit codes live, rather than in a module that must never import Typer.
+    here — through the one startup-error table (:func:`_startup_refusals`), where the exit codes
+    live, rather than in a module that must never import Typer.
     """
     from noctis.bootstrap import open_segment
     from noctis.reporting.run_store import RunLockedError
 
-    try:
+    with _refusals_or_exit(only=(RunLockedError,)):
         with open_segment(
             inputs,
             command=command,
@@ -201,8 +259,6 @@ def _segment_or_exit(
             show_reasoning=show_reasoning,
         ) as segment:
             yield segment
-    except RunLockedError as exc:
-        _exit_red(exc, prefix="RUN LOCKED: ")
 
 
 def _echo_mandate(mandate, override_lines: list[str]) -> None:
@@ -303,7 +359,7 @@ def _show_config_drift(config: str | None, resume: str | None) -> None:
     """
     from noctis.bootstrap import UsageError
     from noctis.config.rehydrate import config_drift
-    from noctis.reporting.run_store import RunNotFoundError, read_run_record
+    from noctis.reporting.run_store import read_run_record
 
     if resume is None:
         _exit_red(
@@ -313,10 +369,8 @@ def _show_config_drift(config: str | None, resume: str | None) -> None:
             )
         )
     current = _resolve_session_or_exit(config)
-    try:
+    with _refusals_or_exit():
         record = read_run_record(current.settings.runs_dir, resume)
-    except RunNotFoundError as exc:
-        _exit_red(exc, prefix="RESUME: ")
     run = record.get("run")
     run_id = str((run.get("run_id") if isinstance(run, Mapping) else None) or resume)
     inputs = record.get("inputs")
@@ -340,7 +394,7 @@ def _finish_run(config: str | None, resume: str | None) -> None:
     from pathlib import Path
 
     from noctis.bootstrap import UsageError
-    from noctis.reporting.run_store import RunLockedError, RunNotFoundError, finish_run
+    from noctis.reporting.run_store import finish_run
 
     if resume is None:
         _exit_red(
@@ -351,17 +405,13 @@ def _finish_run(config: str | None, resume: str | None) -> None:
             )
         )
     settings = load_settings(config_path=config)
-    try:
+    with _refusals_or_exit(verb="finish"):
         outcome = finish_run(
             Path(settings.runs_dir),
             resume,
             clock=lambda: datetime.now(UTC),
             election_metric=settings.promotion.metric,
         )
-    except RunNotFoundError as exc:
-        _exit_red(exc, prefix="FINISH: ")
-    except RunLockedError as exc:
-        _exit_red(exc, prefix="RUN LOCKED: ")
     if not outcome.sealed:
         typer.echo(
             f"Run {outcome.run_id} was already completed (at {outcome.completed_utc}) — nothing "
@@ -1125,15 +1175,10 @@ def run_prune(
     from datetime import UTC, datetime
     from pathlib import Path
 
-    from noctis.reporting.run_store import (
-        RunLockedError,
-        RunNotFoundError,
-        RunNotPrunableError,
-        prune_run_state,
-    )
+    from noctis.reporting.run_store import prune_run_state
 
     settings = load_settings(config_path=config)
-    try:
+    with _refusals_or_exit(verb="prune"):
         outcome = prune_run_state(
             Path(settings.runs_dir),
             run_id,
@@ -1141,12 +1186,6 @@ def run_prune(
             election_metric=settings.promotion.metric,
             dry_run=dry_run,
         )
-    except RunNotFoundError as exc:
-        _exit_red(exc, prefix="PRUNE: ")
-    except RunNotPrunableError as exc:
-        _exit_red(exc, prefix="PRUNE REFUSED: ")
-    except RunLockedError as exc:
-        _exit_red(exc, prefix="RUN LOCKED: ")
     _echo_prune(outcome)
 
 
