@@ -18,21 +18,21 @@ summary out.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 import pandas as pd
 
-from noctis.broker.exits import ExitState, evaluate, ratchet
 from noctis.broker.paper import PaperBroker
+from noctis.broker.position_driver import PositionDriver
 from noctis.broker.seam import Broker, FeeModel, SlippageModel
 from noctis.champions.assignment import assign_indices
 from noctis.data.aggregate import StreamingAggregator
 from noctis.live.feed import BarFeed, ReplayBarFeed
 from noctis.live.risk import RiskLimits, RiskManager
 from noctis.observability import Event
-from noctis.strategies.base import Bar, ExitRules, TargetContext
+from noctis.strategies.base import Bar, TargetContext
 from noctis.strategies.candidate import Candidate
 from noctis.strategies.families import FamilyRegistry
 
@@ -113,6 +113,63 @@ def _assign(
     return {sym: candidates[j] for sym, j in idx.items()}
 
 
+class _LiveSizer:
+    """The live sizing adapter: the risk manager, then the rebalance dead-band.
+
+    The :class:`~noctis.broker.position_driver.Sizer` seam the live session hands its drivers.
+    ``None`` means "not this bar", and the caller must tell its two flavours apart:
+
+    * a **risk refusal** — ``last_reason`` names it, and the session counts it into
+      ``orders_refused`` and surfaces the first of each reason as a ``refuse`` event;
+    * a **dead-band skip** — ``last_reason`` is ``None``: nothing happened, nothing is
+      reported, the pending target simply holds and the next bar asks again.
+
+    Equity, positions and marks are re-read on every call, so earlier fills in the same
+    minute count against the gross cap for the symbols that follow.
+    """
+
+    def __init__(
+        self,
+        broker: Broker,
+        risk: RiskManager,
+        symbols: Sequence[str],
+        *,
+        min_order_notional: float,
+        rebalance_band_pct: float,
+    ):
+        self._broker = broker
+        self._risk = risk
+        self._symbols = symbols  # the session's traded symbols (the exposure denominator)
+        self._min_order_notional = min_order_notional
+        self._rebalance_band_pct = rebalance_band_pct
+        self.last_reason: str | None = None
+
+    def __call__(self, symbol: str, target: int, price: float) -> float | None:
+        self.last_reason = None
+        positions = {s: self._broker.position(s).quantity for s in self._symbols}
+        decision = self._risk.target(
+            symbol, target, price, self._broker.equity(), positions, self._broker.marks()
+        )
+        if decision.refused:
+            self.last_reason = decision.reason
+            return None
+        # Rebalance dead-band: re-true a HELD same-direction position only when the drift is
+        # material, so a held champion doesn't emit a sub-share fill nearly every bar as
+        # equity/price wobble. Opens (current 0), exits (target 0), and flips (opposite sign)
+        # always run; a skip leaves the driver's pending target alone, so the next bar
+        # re-evaluates and the position simply holds. Both thresholds default 0.0 ⇒ never
+        # skips ⇒ fills are byte-identical to the pre-band loop (every fill-count test is a
+        # regression guard).
+        target_qty = decision.target_qty
+        current = positions[symbol]
+        if current != 0.0 and target_qty != 0.0 and (target_qty > 0) == (current > 0):
+            drift = abs(target_qty - current)
+            band = self._rebalance_band_pct / 100.0 * abs(target_qty)
+            if drift * price < self._min_order_notional or drift < band:
+                return None
+        return target_qty
+
+
 class _TradingSession:
     """The per-bar trading core shared by the batch and streaming drivers.
 
@@ -120,6 +177,13 @@ class _TradingSession:
     completed for that minute: mark opens, execute the *previous* bar's risk-checked
     decisions, let champions decide this bar, then mark closes. Both drivers funnel every
     bar through here so replay and live can never diverge.
+
+    The fill-model step order itself is not written here: each symbol has a
+    :class:`~noctis.broker.position_driver.PositionDriver` and this session is the *live*
+    one of its two callers (the backtest simulator is the other), so a session can differ
+    from a backtest in what it feeds a bar — risk-clamped sizing, a degraded feed, the
+    daily-loss halt, the timeframe proxy — but never in the order the steps happen. What
+    stays here is what only a session has: counting, logging, and the console feed.
     """
 
     def __init__(
@@ -161,42 +225,34 @@ class _TradingSession:
             strat.on_start(self.ctxs[sym])
         limits = config.limits if config.limits is not None else RiskLimits()
         self.risk = RiskManager(limits, broker.equity())
-        # A carried position (the continuous account across sessions) keeps its direction
-        # until this session's strategy first decides — seeding 0 would force-flatten it at
-        # the first bar, injecting turnover the strategy never chose. A fresh broker is
-        # flat everywhere, so this seeds 0 exactly as before.
-        self.pending: dict[str, int] = {}
-        for sym in self.strategies:
-            q = broker.position(sym).quantity
-            self.pending[sym] = (q > 0) - (q < 0)
-        # Protective-exit tracking (the fill-model contract, same engine as the simulator).
-        # A carried position anchors at its true entry (the account's avg price); rules stay
-        # dormant until the strategy declares them with a target. The latch mirrors the
-        # simulator exactly: after an exit fires, the symbol holds flat until the raw target
-        # series changes value.
-        self.exit_states: dict[str, ExitState | None] = {}
-        for sym in self.strategies:
-            pos = broker.position(sym)
-            self.exit_states[sym] = (
-                ExitState(
-                    direction=1 if pos.quantity > 0 else -1,
-                    entry_price=pos.avg_price,
-                    best=pos.avg_price,
-                )
-                if pos.quantity != 0.0
-                else None
-            )
-        self.pending_exits: dict[str, ExitRules | None] = {sym: None for sym in self.strategies}
-        self.exit_latched: dict[str, bool] = {sym: False for sym in self.strategies}
-        self.prev_raw_target: dict[str, int] = dict(self.pending)
+        # Sizing is the live adapter's job (risk limits, then the dead-band); the driver only
+        # asks how many units a target means. One instance serves every symbol — the step
+        # loop reads ``last_reason`` straight back from the call it just made.
+        self._sizer = _LiveSizer(
+            broker,
+            self.risk,
+            list(self.strategies),
+            min_order_notional=self.min_order_notional,
+            rebalance_band_pct=self.rebalance_band_pct,
+        )
+        # One :class:`~noctis.broker.position_driver.PositionDriver` per symbol: the fill-model
+        # step order (execute at the open → exits → decide → carry) lives there, shared with the
+        # backtest, never re-implemented here. ``from_position`` seeds each driver from the
+        # account it inherits — a carried position (the continuous account across sessions)
+        # keeps its direction until this session's strategy first decides, and anchors its exit
+        # tracking at its true entry — so a fresh (flat) broker seeds flat, exactly as before.
+        self.drivers: dict[str, PositionDriver] = {
+            sym: PositionDriver.from_position(broker, sym, strat, self.ctxs[sym], self._sizer)
+            for sym, strat in self.strategies.items()
+        }
         # Champion-orphan detection: a carried position whose symbol NO current champion is
         # eligible to trade (its opener was displaced from the board, or its symbol set
         # changed) is unmanaged — no strategy will ever decide it again, so it is flattened
         # at its first bar this session (step 0 below). Eligibility comes from the same
         # resolver the trading assignment and settle attribution use, so the three cannot
         # disagree on what "no champion" means. A symbol REASSIGNED to a *different*
-        # champion is NOT an orphan: the new assignee inherits the position (``pending`` is
-        # seeded from its sign above) and re-decides at its first completed bar — flattening
+        # champion is NOT an orphan: the new assignee inherits the position (its driver is
+        # seeded from that position above) and re-decides at its first completed bar — flattening
         # it would preempt that decision and inject turnover nobody chose, while realized
         # attribution at settle and the unrealized display already follow the inheritor.
         held = sorted(broker.positions())
@@ -275,15 +331,19 @@ class _TradingSession:
             if self.record_bars:
                 self._built.setdefault(sym, []).append(bar)
 
-        marks = self.broker.marks()
-
-        # 2) execute the previous bar's decisions, risk-checked. Equity and positions are
-        # re-read per symbol so earlier fills in this minute count against the gross cap.
+        # 2) execute the previous bar's decisions through each symbol's driver, risk-checked
+        # by the sizer. Every present open is marked (step 1) before any of them executes, so
+        # each symbol is sized off this minute's prices, and equity/positions are re-read per
+        # symbol so earlier fills in this minute count against the gross cap.
         for sym in present:
             self.summary.bars_processed += 1
             if degraded:
                 self.summary.halted_for_degraded += 1
                 logger.info("trading halted: degraded feed; skipping %s", sym)
+                # Mark only. The bar still has to reach the driver: the halted minute is part
+                # of the series the next decision is made from, and the driver refuses a close
+                # that no open preceded.
+                self.drivers[sym].at_open(bars[sym], execute=False)
                 continue
             equity = self.broker.equity()
             # Announce the daily-loss latch exactly once, the bar it first trips, so the
@@ -300,63 +360,39 @@ class _TradingSession:
                     equity,
                     floor,
                 )
-            positions = {s: self.broker.position(s).quantity for s in self.strategies}
-            decision = self.risk.target(
-                sym, self.pending[sym], marks[sym], equity, positions, marks
-            )
-            if decision.refused:
+            opened = self.drivers[sym].at_open(bars[sym])
+            reason = self._sizer.last_reason
+            if opened.skipped and reason is not None:  # refused (a dead-band skip has no reason)
                 self.summary.orders_refused += 1
                 # Once latched, every increase is refused every bar — the one WARNING above
                 # already said so. Drop the rest (and any pre-latch "no room" refusal) to DEBUG
                 # so a volatile session no longer floods INFO with identical lines. The exact
                 # ``orders_refused`` total is unchanged, so the count stays honest.
-                logger.debug("order refused for %s: %s", sym, decision.reason)
+                logger.debug("order refused for %s: %s", sym, reason)
                 # Inline feed: surface the FIRST refusal per distinct reason only (the reason
                 # strings are symbol-agnostic — "daily loss limit breached…", "no exposure
                 # room"), so a halted session that refuses every bar still shows one `refuse`
                 # line, mirroring the collapsed WARNING above. The membership test gates event
                 # construction, so a quiet or already-seen refusal costs nothing.
-                if self._on_event is not None and decision.reason not in self._refused_reasons:
-                    self._refused_reasons.add(decision.reason)
+                if self._on_event is not None and reason not in self._refused_reasons:
+                    self._refused_reasons.add(reason)
                     self._on_event(
                         Event(
                             "refuse",
-                            f"{sym}: {decision.reason}",
-                            meta={"symbol": sym, "reason": decision.reason},
+                            f"{sym}: {reason}",
+                            meta={"symbol": sym, "reason": reason},
                             level=2,
                         )
                     )
                 continue
-            # Rebalance dead-band: re-true a HELD same-direction position only when the drift is
-            # material, so a held champion doesn't emit a sub-share fill nearly every bar as
-            # equity/price wobble. Opens (current 0), exits (target 0), and flips (opposite sign)
-            # always run; a skip leaves ``self.pending[sym]`` so the next bar re-evaluates and the
-            # position simply holds. Both thresholds default 0.0 ⇒ never skips ⇒ fills are
-            # byte-identical to the pre-band loop (every fill-count test is a regression guard).
-            target_qty = decision.target_qty
-            current = positions[sym]
-            if current != 0.0 and target_qty != 0.0 and (target_qty > 0) == (current > 0):
-                drift = abs(target_qty - current)
-                band = self.rebalance_band_pct / 100.0 * abs(target_qty)
-                if drift * marks[sym] < self.min_order_notional or drift < band:
-                    continue
-            fill = self.broker.rebalance_to(sym, target_qty)
-            # Exit tracking follows the fills exactly as in the simulator: flat clears the
-            # anchor, an open or a flip re-anchors at the true entry (this fill's price).
-            new_qty = self.broker.position(sym).quantity
-            if new_qty == 0.0:
-                self.exit_states[sym] = None
-            elif fill is not None and (current == 0.0 or (current > 0.0) != (new_qty > 0.0)):
-                self.exit_states[sym] = ExitState(
-                    direction=1 if new_qty > 0.0 else -1, entry_price=fill.price, best=fill.price
-                )
+            fill = opened.fill
             if fill is not None:
                 self.summary.orders_submitted += 1
                 # Inline feed: one `trade` event per ACTUAL fill (flat→long, exit, flip, or a
                 # material re-true), mirroring the fills the TRADING phase already folds into
-                # the report. The dead-band skip above ``continue``s before this
-                # line, so a suppressed sub-share adjustment emits nothing — construction is gated
-                # on the sink so a quiet run pays nothing.
+                # the report. A dead-band skip never produces one (the sizer answered "not this
+                # bar", so nothing was submitted) — construction is gated on the sink so a quiet
+                # run pays nothing.
                 if self._on_event is not None:
                     self._on_event(
                         Event(
@@ -375,70 +411,54 @@ class _TradingSession:
 
         # 3) champions decide for this bar. Each minute bar feeds the symbol's timeframe
         # proxy; the strategy only decides when an aggregated bar completes — between
-        # completions the pending target holds. When a bucket completes, armed protective
-        # exits evaluate FIRST, against that completed strategy-timeframe bar (never a raw
-        # sub-timeframe minute), through the same engine the simulator runs. Precedence:
-        # the halt latch and orphan flattening above own their paths unchanged — exit
-        # evaluation runs only for a live (un-degraded), un-halted, champion-held position.
+        # completions the pending target holds. What happens on a completed bucket is the
+        # driver's: armed protective exits evaluate FIRST, against that completed
+        # strategy-timeframe bar (never a raw sub-timeframe minute), then the strategy
+        # decides and the new target and its rules are carried — the same engine, in the
+        # same order, as the backtest. Precedence: the halt latch and orphan flattening
+        # above own their paths unchanged — exit evaluation runs only for a live
+        # (un-degraded), un-halted, champion-held position.
         for sym in present:
             agg_bar = self.aggregators[sym].add(bars[sym])
             if agg_bar is None:
                 continue
-            state = self.exit_states.get(sym)
-            rules = self.pending_exits.get(sym)
-            if (
-                state is not None
-                and rules is not None
-                and not degraded
-                and not self.risk.is_halted(self.broker.equity())
-            ):
-                trigger = evaluate(rules, state, agg_bar)
-                if trigger is None:
-                    self.exit_states[sym] = ratchet(state, agg_bar)  # after evaluate, never before
-                else:
-                    # Through the normal risk path like every close (a flat target is
-                    # risk-reducing, so the seam never refuses it — honor its verdict anyway).
-                    decision = self.risk.target(
-                        sym,
-                        0,
-                        trigger.price,
-                        self.broker.equity(),
-                        {s: self.broker.position(s).quantity for s in self.strategies},
-                        self.broker.marks(),
-                    )
-                    if decision.refused:  # unreachable today
-                        self.summary.orders_refused += 1
-                    else:
-                        fill = self.broker.rebalance_to(
-                            sym, decision.target_qty, price=trigger.price, reason=trigger.reason
+            driver = self.drivers[sym]
+            # Suppressing execution suppresses the whole exit step. The halt question is
+            # asked only when armed rules could actually be suppressed, because asking it
+            # latches: a bucket completing on a symbol with no exits must never be what
+            # trips the session's daily-loss halt.
+            suppressed = degraded or (
+                driver.exit_state is not None
+                and driver.pending_exits is not None
+                and self.risk.is_halted(self.broker.equity())
+            )
+            decided = driver.at_close(agg_bar, execute=not suppressed)
+            # A driver ends a close by marking the bar it was handed — here the *aggregated*
+            # one, which for a non-1m champion is an earlier, already completed bucket. This
+            # session marks every present symbol's close together in step 4, so put this
+            # minute's open mark back: what the symbols still to come in this loop read
+            # (equity, and the stamp their fills carry) stays this minute's, not a
+            # neighbour's bucket.
+            self.broker.set_price(sym, bars[sym].open, bars[sym].ts_event)
+            fill = decided.exit_fill
+            if fill is not None:
+                self.summary.orders_submitted += 1
+                if self._on_event is not None:
+                    self._on_event(
+                        Event(
+                            "trade",
+                            f"{fill.symbol} {fill.side.value} {fill.quantity:.4f} @ "
+                            f"{fill.price:.2f} ({fill.reason} exit)",
+                            meta={
+                                "symbol": fill.symbol,
+                                "side": fill.side.value,
+                                "qty": fill.quantity,
+                                "price": fill.price,
+                                "reason": fill.reason,
+                            },
+                            level=2,
                         )
-                        self.exit_states[sym] = None
-                        self.exit_latched[sym] = True
-                        if fill is not None:
-                            self.summary.orders_submitted += 1
-                            if self._on_event is not None:
-                                self._on_event(
-                                    Event(
-                                        "trade",
-                                        f"{fill.symbol} {fill.side.value} {fill.quantity:.4f} @ "
-                                        f"{fill.price:.2f} ({fill.reason} exit)",
-                                        meta={
-                                            "symbol": fill.symbol,
-                                            "side": fill.side.value,
-                                            "qty": fill.quantity,
-                                            "price": fill.price,
-                                            "reason": fill.reason,
-                                        },
-                                        level=2,
-                                    )
-                                )
-            self.strategies[sym].on_bar(self.ctxs[sym], agg_bar)
-            raw_target = self.ctxs[sym].target
-            if self.exit_latched[sym] and raw_target != self.prev_raw_target[sym]:
-                self.exit_latched[sym] = False  # the strategy re-decided; execute normally
-            self.prev_raw_target[sym] = raw_target
-            self.pending[sym] = 0 if self.exit_latched[sym] else raw_target
-            self.pending_exits[sym] = self.ctxs[sym].exits
+                    )
 
         # 4) mark closes.
         for sym in present:
