@@ -147,10 +147,13 @@ it.
 ## The fill model
 
 **The base contract: decide on bar *t*, fill at bar *t+1*'s open — and nothing else can create
-a fill.** Both backtest stages and the live driver share this single-fill-source rule
-(`src/noctis/broker/simulator.py`), and it is what makes the no-lookahead guarantee checkable:
-every fill traces to a target decided strictly before the bar that prices it, and fills route
-through the normal slippage/fee models, adverse to the trading side.
+a fill.** That step order lives in exactly one module — `PositionDriver`
+(`src/noctis/broker/position_driver.py`), the single fill source, with two drivers: the backtest
+simulator and the live trading day, which differ only in what they pass in (the sizer, the
+execute guards, the bar timing) and never in the order of the steps. It is what makes the
+no-lookahead guarantee checkable: every fill traces to a target decided strictly before the bar
+that prices it, and fills route through the normal slippage/fee models, adverse to the trading
+side.
 
 **Protective exits are the one sanctioned extension** — fixed **stop-loss**, **take-profit**,
 and **trailing stop**, all expressed as *percentages* — declared by the strategy alongside its
