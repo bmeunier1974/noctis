@@ -258,7 +258,12 @@ def test_noctis_research_without_resume_mints_a_fresh_run_every_time(tmp_path, s
 
 def test_a_session_that_cannot_start_still_closes_its_segment_and_releases_the_lock(tmp_path):
     """No LLM, no session — but the invocation still happened, so the record says so and the
-    next one is not blocked by a dangling lock."""
+    next one is not blocked by a dangling lock.
+
+    The early exit leaves through the band (#251): the ``typer.Exit`` unwinds the ``with``, which
+    closes the segment with the reason the command reported and releases the lock. Nothing ran,
+    so nothing is counted — "measured nothing", never a zeroed session.
+    """
     result = _research(_config(tmp_path))
 
     assert result.exit_code == 1
@@ -268,6 +273,8 @@ def test_a_session_that_cannot_start_still_closes_its_segment_and_releases_the_l
     (segment,) = _record(run_dir)["segments"]
     assert segment["status"] == "stopped"
     assert segment["stopped_reason"] == "no_session"
+    assert segment["counters"] == {}
+    assert segment["phase_seconds"] is None
 
 
 # ── resuming: the same run, one more segment ───────────────────────────────────────────────

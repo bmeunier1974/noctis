@@ -810,6 +810,80 @@ def test_research_debug_records_and_echoes(tmp_path, monkeypatch):
     assert "write_strategy(alpha)" not in result.output
 
 
+def test_research_debug_echoes_the_qa_frame_in_its_fixed_order(tmp_path, monkeypatch):
+    """The research ``--debug`` transcript, pinned (#251): the run's identity, the QA tree at
+    start, the session's own stop line, then the closing QA report + funnel — which print *after*
+    the session on every path, including a crash, because they say the recording is complete."""
+    _patch_research_agent(monkeypatch)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\nqa_dir: {tmp_path}/qa\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg), "--debug"])
+    assert result.exit_code == 0, result.output
+
+    framing = [
+        line.split(":")[0]
+        for line in result.output.splitlines()
+        if line.startswith(("Run: ", "Run record: ", "QA ", "Session over ("))
+    ]
+    assert framing == [
+        "Run",
+        "Run record",
+        "QA run",
+        "QA report",
+        "Session over (done)",
+        "QA report",
+        "QA funnel",
+    ]
+
+
+def test_a_research_recorder_that_refuses_to_build_still_releases_the_run_lock(
+    tmp_path, monkeypatch
+):
+    """The ``--debug`` recorder is assembled inside the band's guarded region (#251), so a qa_dir
+    that refuses to take one still closes the segment: nothing was measured, so it closes at the
+    sentinel — a closed, resumable run rather than a lock held until the stale-lock timeout."""
+    import json
+
+    from noctis.reporting.run_store import RUN_LOCK_NAME
+
+    def _refuse(*args, **kwargs):
+        raise OSError("qa_dir is unwritable")
+
+    _patch_research_agent(monkeypatch)
+    monkeypatch.setattr("noctis.bootstrap.build_recorder", _refuse)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\nqa_dir: {tmp_path}/qa\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg), "--debug"])
+    assert result.exit_code != 0  # the failure is not swallowed
+
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    assert not (run_dir / RUN_LOCK_NAME).exists(), "the lock outlived the segment"
+    segment = json.loads((run_dir / "run.json").read_text())["segments"][-1]
+    assert segment["stopped_reason"] == "startup"
+    assert segment["counters"] == {}  # measured nothing is never measured zero
+    assert segment["phase_seconds"] is None
+
+
+def test_research_says_when_a_reasoning_view_surfaced_no_reasoning(tmp_path, monkeypatch):
+    """A reasoning view that came back empty is named as the provider's doing, once — so silence
+    reads as "expected here", not "the feature is broken". The command duck-types ``saw_think``
+    and ``hint`` off the sink the band built, so the hint survives the move (#251)."""
+    _patch_research_agent(monkeypatch)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\n")
+
+    surfaced = runner.invoke(app, ["research", "--config", str(cfg)])
+    asked = runner.invoke(app, ["research", "--config", str(cfg), "--show-reasoning"])
+
+    assert asked.exit_code == 0, asked.output
+    assert "reasoning not surfaced by anthropic" in asked.output
+    assert "narration still shows" in asked.output
+    # …and nobody who did not ask for a reasoning view is told about one.
+    assert "reasoning not surfaced" not in surfaced.output
+
+
 def test_a_research_minted_run_records_the_gates_verdict(tmp_path, monkeypatch):
     """Rule 1's verdict is measured on every verb that mints a run (#247): a run born from a
     research session says its orders were paper-only, instead of "nobody measured"."""
@@ -848,11 +922,11 @@ def _command_body(name: str):
     return command
 
 
-def test_the_store_opener_is_handed_the_session_inputs_whole():
-    """D3 (#248): a command that opens a run forwards no unpacked ``SessionInputs`` field, so a
-    new resume-policy tier lands in ``bootstrap.py`` alone instead of in a hand-walked call site.
-
-    ``run`` opens through the band now (#250), so ``research`` is the one direct caller left."""
+def test_neither_command_opens_its_own_run_store():
+    """D3 (#248), finished by #251: both verbs open their run through the band, so
+    ``open_run_store`` — and every unpacked ``SessionInputs`` field it used to be handed by hand
+    — is named nowhere in ``cli.py``. A new resume-policy tier is a one-file change in
+    ``bootstrap.py`` instead of an edit to two hand-walked call sites."""
     import ast
 
     calls = [
@@ -861,20 +935,17 @@ def test_the_store_opener_is_handed_the_session_inputs_whole():
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "open_run_store"
     ]
 
-    assert len(calls) == 1, "research is the verb that still opens its own run"
-    for call in calls:
-        passed = {keyword.arg for keyword in call.keywords}
-        assert "inputs" in passed
-        assert not passed & {"mandate", "mode", "overrides", "rebase", "engine_upgrade"}
+    assert calls == [], "the band opens the run, for `run` and `research` alike"
 
 
-def test_run_owns_no_segment_lifecycle_of_its_own():
-    """Story #250: the open → work → close lifecycle lives in the band, so ``run`` builds no
-    store, no recorder and no event sink, closes nothing by hand, and carries no ``"startup"``
-    sentinel — it reports what stopped the segment and lets the band close it."""
+@pytest.mark.parametrize("verb", ["run", "research"])
+def test_neither_command_owns_a_segment_lifecycle_of_its_own(verb):
+    """Stories #250 / #251: the open → work → close lifecycle lives in the band, so neither
+    command builds a store, a recorder or an event sink, closes anything by hand, or carries a
+    ``"startup"`` sentinel — each reports what stopped its segment and lets the band close it."""
     import ast
 
-    command = _command_body("run")
+    command = _command_body(verb)
 
     built = {
         node.func.id
@@ -899,32 +970,53 @@ def test_run_owns_no_segment_lifecycle_of_its_own():
     }
     assert "startup" not in said, "the sentinel is the band's, not the command's"
 
-    finishes = [
+    finishes = _finish_calls(command)
+    assert finishes, f"{verb} reports what stopped the segment"
+    assert all(
+        isinstance(node.func.value, ast.Name) and node.func.value.id == "seg" for node in finishes
+    ), "the segment is finished through the handle the band yielded"
+
+
+def _finish_calls(command):
+    """Every ``…finish(…)`` call written in one command body."""
+    import ast
+
+    return [
         node
         for node in ast.walk(command)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "finish"
     ]
-    assert finishes, "run reports what stopped the segment"
-    assert all(
-        isinstance(node.func.value, ast.Name) and node.func.value.id == "seg" for node in finishes
-    ), "the segment is finished through the handle the band yielded"
 
 
-def test_run_hands_the_band_the_session_whole():
-    """Story #250: ``mode``, ``rebase`` and ``engine_upgrade`` are not ``run``'s to forward — the
-    band reads them off the session it was handed."""
+@pytest.mark.parametrize("verb", ["run", "research"])
+def test_both_commands_hand_the_band_the_session_whole(verb):
+    """Stories #250 / #251: ``mode``, ``rebase`` and ``engine_upgrade`` are no command's to
+    forward — the band reads them off the session it was handed."""
     import ast
 
     (call,) = [
         node
-        for node in ast.walk(_command_body("run"))
+        for node in ast.walk(_command_body(verb))
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_segment_or_exit"
     ]
 
     passed = {keyword.arg for keyword in call.keywords}
     assert not passed & {"mode", "rebase", "engine_upgrade", "mandate", "overrides", "resume"}
+
+
+def test_research_finishes_its_segment_with_the_working_seconds_it_measured_itself():
+    """#251: a ``ResearchSummary`` carries no phase timings, so the session's working seconds are
+    measured around ``session.run`` and reported explicitly — never derived from the outcome, and
+    never a zero standing in for a night nobody timed."""
+    reporting = [
+        call
+        for call in _finish_calls(_command_body("research"))
+        if {"outcome", "phase_seconds"} <= {keyword.arg for keyword in call.keywords}
+    ]
+
+    assert len(reporting) == 1, "one call reports the session's outcome and the seconds it took"
 
 
 def test_research_reports_what_the_session_spent_and_calls_the_dollars_an_estimate(
