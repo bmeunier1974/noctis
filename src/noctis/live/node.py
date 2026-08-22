@@ -197,9 +197,6 @@ class _TradingSession:
         self.broker = broker
         self.symbols = symbols
         self.record_bars = record_bars
-        # Rebalance dead-band thresholds (0.0 = off). See :class:`TradingConfig`.
-        self.min_order_notional = float(config.min_order_notional)
-        self.rebalance_band_pct = float(config.rebalance_band_pct)
         # Inline per-decision feed (verbose-observability P4): a console sink for `trade`/`refuse`
         # events, or ``None`` (a bare run) — every emit is guarded on it, so a quiet session
         # constructs no events on the per-bar hot path. Report accounting is untouched: this only
@@ -225,15 +222,16 @@ class _TradingSession:
             strat.on_start(self.ctxs[sym])
         limits = config.limits if config.limits is not None else RiskLimits()
         self.risk = RiskManager(limits, broker.equity())
-        # Sizing is the live adapter's job (risk limits, then the dead-band); the driver only
-        # asks how many units a target means. One instance serves every symbol — the step
-        # loop reads ``last_reason`` straight back from the call it just made.
+        # Sizing is the live adapter's job (risk limits, then the dead-band thresholds —
+        # 0.0 = off, see :class:`TradingConfig`); the driver only asks how many units a
+        # target means. One instance serves every symbol — the step loop reads
+        # ``last_reason`` straight back from the call it just made.
         self._sizer = _LiveSizer(
             broker,
             self.risk,
             list(self.strategies),
-            min_order_notional=self.min_order_notional,
-            rebalance_band_pct=self.rebalance_band_pct,
+            min_order_notional=float(config.min_order_notional),
+            rebalance_band_pct=float(config.rebalance_band_pct),
         )
         # One :class:`~noctis.broker.position_driver.PositionDriver` per symbol: the fill-model
         # step order (execute at the open → exits → decide → carry) lives there, shared with the
