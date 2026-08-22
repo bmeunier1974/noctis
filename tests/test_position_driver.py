@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from noctis.broker.exits import ExitState
 from noctis.broker.paper import PaperBroker
 from noctis.broker.position_driver import PositionDriver
 from noctis.broker.seam import FeeModel, SlippageModel
@@ -127,3 +128,81 @@ def test_at_close_before_at_open_raises():
     driver.at_close(first)
     with pytest.raises(RuntimeError):  # a second close without an open between
         driver.at_close(second)
+
+
+def test_a_none_sizer_answer_skips_the_bar_and_holds_the_pending_target():
+    """A refusal to trade this bar is not a change of mind: the target stays pending."""
+    broker = _broker()
+    scale = [10.0]
+    refuse = [True]
+
+    def sizer(symbol: str, target: int, price: float) -> float | None:
+        return None if refuse[0] else float(target) * scale[0]
+
+    driver = _driver(broker, _scripted([1]), sizer)
+    first, second, third = _tape(
+        _bar(100.0, 101.0, 99.0, 100.0),
+        _bar(110.0, 112.0, 109.0, 111.0),
+        _bar(120.0, 122.0, 119.0, 121.0),
+    )
+
+    driver.at_open(first)
+    driver.at_close(first)
+
+    skipped = driver.at_open(second)
+
+    assert skipped.skipped is True
+    assert skipped.fill is None
+    assert broker.fills == []
+    assert driver.pending_target == 1  # still owed, unchanged by the refusal
+    driver.at_close(second)
+
+    refuse[0] = False
+    opened = driver.at_open(third)
+
+    assert opened.skipped is False
+    assert opened.fill is not None
+    assert opened.fill.quantity == 10.0
+    assert opened.fill.price == 120.0
+    assert broker.position(SYMBOL).quantity == 10.0
+
+
+def test_from_position_on_a_carried_long_holds_it_until_the_strategy_decides():
+    """A carried position keeps its direction and anchors exits at its average price."""
+    broker = _broker()
+    broker.set_price(SYMBOL, 100.0, 0)
+    broker.rebalance_to(SYMBOL, 10.0)  # an earlier session's long, avg price 100
+    scale = [10.0]
+
+    driver = _driver(broker, _scripted([1]), _sizer(scale))
+
+    assert driver.pending_target == 1
+    assert driver.exit_state == ExitState(direction=1, entry_price=100.0, best=100.0)
+
+    first, second = _tape(_bar(110.0, 112.0, 109.0, 111.0), _bar(120.0, 122.0, 119.0, 121.0))
+    held = driver.at_open(first)
+
+    assert held.fill is None  # the same size at a new price: the position simply holds
+    assert held.skipped is False
+    assert broker.position(SYMBOL).quantity == 10.0
+
+    driver.at_close(first)
+    scale[0] = 20.0  # the sizer now wants a bigger position
+    re_trued = driver.at_open(second)
+
+    assert re_trued.fill is not None
+    assert re_trued.fill.quantity == 10.0  # the increment, not the whole position
+    assert re_trued.fill.price == 120.0
+    assert re_trued.fill.reason == "target"
+    assert broker.position(SYMBOL).quantity == 20.0
+
+
+def test_from_position_on_a_carried_short_seeds_a_short_pending_target():
+    broker = _broker()
+    broker.set_price(SYMBOL, 50.0, 0)
+    broker.rebalance_to(SYMBOL, -4.0)
+
+    driver = _driver(broker, _scripted([0]), _sizer([10.0]))
+
+    assert driver.pending_target == -1
+    assert driver.exit_state == ExitState(direction=-1, entry_price=50.0, best=50.0)
