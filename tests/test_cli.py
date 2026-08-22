@@ -92,6 +92,15 @@ def test_run_live_without_gate_exits_nonzero(tmp_path, monkeypatch):
     assert "SAFETY GATE" in result.output
 
 
+def test_research_live_without_gate_exits_nonzero(tmp_path, monkeypatch):
+    """No verb is a silent downgrade (#247): ``research`` arms the same gate ``run`` does, so
+    ``mode: live`` without ``ALLOW_LIVE`` refuses at startup with the same line."""
+    monkeypatch.delenv("ALLOW_LIVE", raising=False)
+    result = runner.invoke(app, ["research", "--config", _live_config(tmp_path)])
+    assert result.exit_code != 0
+    assert "SAFETY GATE" in result.output
+
+
 def test_run_live_with_gate_exits_zero(tmp_path, monkeypatch):
     monkeypatch.setenv("ALLOW_LIVE", "true")
     result = runner.invoke(app, ["run", "--config", _live_config(tmp_path)])
@@ -741,6 +750,9 @@ def test_research_debug_records_and_echoes(tmp_path, monkeypatch):
     run_dir = _one_qa_run(tmp_path)
     manifest = json.loads((run_dir / "run.json").read_text())
     assert manifest["stopped"] is not None
+    # The session resolved the gate, so the QA manifest carries its verdict rather than a
+    # null nobody measured (#247).
+    assert manifest["mode"] == "paper"
 
     run_id = run_dir.name
     assert result.output.count(run_id) >= 2  # echoed at start and again at stop
@@ -749,6 +761,24 @@ def test_research_debug_records_and_echoes(tmp_path, monkeypatch):
     assert "QA funnel: written=1" in result.output
     # --debug without -v stays silent: the emitted feed events never hit stdout
     assert "write_strategy(alpha)" not in result.output
+
+
+def test_a_research_minted_run_records_the_gates_verdict(tmp_path, monkeypatch):
+    """Rule 1's verdict is measured on every verb that mints a run (#247): a run born from a
+    research session says its orders were paper-only, instead of "nobody measured"."""
+    import json
+
+    _patch_research_agent(monkeypatch)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"mode: paper\nstate_dir: {tmp_path}/state/\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg)])
+
+    assert result.exit_code == 0, result.output
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    record = json.loads((run_dir / "run.json").read_text())
+    assert record["inputs"]["execution_mode"] == "paper"
+    assert record["assumptions"]["paper_only"] is True
 
 
 def test_research_reports_what_the_session_spent_and_calls_the_dollars_an_estimate(

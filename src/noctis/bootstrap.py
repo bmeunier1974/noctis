@@ -70,8 +70,11 @@ class SessionInputs:
     """The resolved inputs of one session: settings after every override, plus provenance."""
 
     settings: Settings
-    # The gate-resolved execution mode, or None when the entrypoint didn't ask for the gate
-    # (research/report never place orders, so they don't arm it).
+    # The gate-resolved execution mode, or None when the entrypoint didn't ask for the gate.
+    # Every verb that **opens a run** arms it (``run`` and — since story #247 — ``research``): the
+    # run freezes the verdict at creation and may trade on a later segment, so a record must carry
+    # what the gate decided rather than "nobody measured". ``status`` arms it to report it. Verbs
+    # that only read (``mandate``, ``engine``, the config-drift preview) resolve no mode.
     mode: Literal["paper", "live"] | None
     mandate: Mandate | None
     # "k=v" echo lines for each mandate override actually applied (the CLI prints them).

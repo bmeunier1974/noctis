@@ -1612,14 +1612,23 @@ def research(
         level=_logging_level(verbose), format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
 
-    # The composition root owns the ordering (§5): load_settings → resolve_mandate →
+    # The composition root owns the ordering (§5): safety gate → resolve_mandate →
     # overlay_mandate → explicit CLI flags, so --metric still wins over a mandate overlay. Under
     # --resume that middle is replaced by the run's frozen config, and the flags that would
     # re-steer it are refused with a reason — the same chain `run --resume` walks, from one place.
+    # The gate is armed here even though a research session places no order (story #247): the run
+    # this session mints is frozen at creation, and it may trade on a later `run --resume`, so its
+    # record must carry the gate's *verdict* rather than "nobody measured" — and no verb may be a
+    # silent downgrade, so `mode: live` without ALLOW_LIVE refuses here as it does in `run`.
     inputs = _resolve_session_or_exit(
-        config, directive=directive, mandate=mandate, metric=metric, resume=resume
+        config,
+        directive=directive,
+        mandate=mandate,
+        metric=metric,
+        require_gate=True,
+        resume=resume,
     )
-    settings, active_mandate = inputs.settings, inputs.mandate
+    settings, mode, active_mandate = inputs.settings, inputs.mode, inputs.mandate
     _guard_legacy_or_exit(settings)
 
     # Open the run BEFORE any collaborator is assembled: opening binds the run's own tree
@@ -1634,6 +1643,7 @@ def research(
             run_id=resume,
             resume=resume is not None,
             mandate=active_mandate,
+            mode=mode,
             overrides=inputs.overrides,
         )
     except RunLockedError as exc:
@@ -1655,7 +1665,7 @@ def research(
         # research never records a legacy session — leaves no orphaned half-written run tree. It
         # rides the run's OWN id, so the QA tree and the run record name the same run.
         if debug and client_status(settings).ok:
-            recorder = build_recorder(settings, argv=sys.argv[1:], mode=None, run_id=store.run_id)
+            recorder = build_recorder(settings, argv=sys.argv[1:], mode=mode, run_id=store.run_id)
             typer.echo(f"QA run: {recorder.run_id}")
             typer.echo(f"QA report: {recorder.run_dir}")
 
