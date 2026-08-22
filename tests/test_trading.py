@@ -371,3 +371,59 @@ def test_exits_evaluate_only_on_completed_declared_timeframe_bars():
     assert stop_fill.price == 90.0  # evaluated against the completed 5m bar's low
     # Fired while processing minute 10 (the bucket-completing minute), not minute 7.
     assert stop_fill.ts_event == 10 * 60 * 1_000_000_000
+
+
+def test_exit_fill_is_stamped_with_the_minute_it_fired_not_a_neighbours_bucket():
+    """A second symbol's exit fill carries THIS minute's stamp, whatever its neighbour's
+    aggregated bar was.
+
+    The session marks every present symbol's close together at the end of the minute, so a
+    5m champion's completed bucket (a stale price and an older stamp) must not leak into the
+    fill a 1m champion's stop produces later in the same minute. The single-symbol case is
+    pinned above; this is the multi-symbol one, and it is the reason the loop re-asserts the
+    minute's open mark after each decision.
+    """
+    minute = 60 * 1_000_000_000
+    rows = [(100.0, 101.0, 99.0, 100.0)] * 8
+    rows[5] = (100.0, 101.0, 88.0, 95.0)  # low breaches the 90 stop level at minute 5
+    stopped = pd.DataFrame(
+        {
+            "ts_event": [i * minute for i in range(len(rows))],
+            "open": [r[0] for r in rows],
+            "high": [r[1] for r in rows],
+            "low": [r[2] for r in rows],
+            "close": [r[3] for r in rows],
+            "volume": [1000.0] * len(rows),
+        }
+    )
+
+    class _FiveMinuteLong:
+        """The neighbour: a 5m champion whose bucket completes on minute 5."""
+
+        timeframe = "5m"
+
+        def on_start(self, ctx):
+            pass
+
+        def on_bar(self, ctx, bar):
+            ctx.set_target(1)
+
+    broker = PaperBroker(
+        starting_cash=100_000.0, fee_model=FeeModel(0.0), slippage_model=SlippageModel(0.0)
+    )
+    run_trading(
+        # "AAA" sorts first, so its 5m bucket completes before "BBB" evaluates its stop.
+        candidates=[
+            _ProbeCandidate(_FiveMinuteLong()),
+            _ProbeCandidate(_ScriptedExitStub([1] * 8, ExitRules(stop_pct=0.10))),
+        ],
+        bars_by_symbol={"AAA": make_ohlcv([100.0] * 8), "BBB": stopped},
+        broker=broker,
+        limits=RiskLimits(
+            max_position_pct=40.0, max_gross_exposure_pct=100.0, max_daily_loss_pct=100.0
+        ),
+    )
+
+    stops = [f for f in broker.fills if f.reason == "stop"]
+    assert [(f.symbol, f.price) for f in stops] == [("BBB", 90.0)]
+    assert stops[0].ts_event == 5 * minute
