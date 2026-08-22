@@ -80,6 +80,12 @@ class SessionInputs:
     # mandate` renders as the effective settings diff. Same paths as ``overrides`` by
     # construction (both come from the one applied patch); empty when nothing was overlaid.
     changes: list[OverrideChange] = field(default_factory=list)
+    # The run address this session continues — the one an operator *typed* (an id, ``latest``, a
+    # path, ``@label``), not the id it resolved to, so every refusal, echo and record write
+    # downstream is about a run they can go and look at. ``None`` on a fresh run: a run being
+    # minted right now continues nothing. Whether this session resumes at all is exactly
+    # ``resume is not None`` — one field, so no entrypoint can carry the address and the flag apart.
+    resume: str | None = None
     # The run's frozen ``inputs`` re-frozen on the current files, when this session is a
     # ``--rebase-config`` resume that found something to adopt (story #134): epoch already bumped,
     # before/after entry already appended, built once by ``config.rehydrate.rebase_inputs``. The
@@ -290,8 +296,9 @@ def resume_session(
         )
         if adopted is not None:
             # The engine verdict rides along whichever way the config went: a rebase adopts new
-            # *settings*, and says nothing about the code that will run them.
-            return replace(adopted, engine_notes=notes, engine_upgrade=upgrade)
+            # *settings*, and says nothing about the code that will run them. A rebase is still a
+            # resume, so it carries the same address every other resumed session does.
+            return replace(adopted, resume=run_id, engine_notes=notes, engine_upgrade=upgrade)
     if not has_frozen_inputs(record):
         logger.warning(
             "run %s froze no configuration (it predates config freezing, or it is history adopted "
@@ -314,6 +321,7 @@ def resume_session(
         mode=mode,
         mandate=active,
         overrides=overrides,
+        resume=run_id,
         engine_notes=notes,
         engine_upgrade=upgrade,
     )
