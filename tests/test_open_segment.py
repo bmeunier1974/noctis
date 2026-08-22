@@ -214,7 +214,11 @@ def test_a_research_segment_writes_one_session_its_counters_and_no_trades_key(tm
         seg.finish("agent_done", outcome=summary, phase_seconds={RESEARCH_PHASE: 42.5})
 
     segment = _segment(seg.store.run_dir)
-    assert segment["counters"] == {"sessions": 1, "research_iterations": 9, "research_promotions": 2}
+    assert segment["counters"] == {
+        "sessions": 1,
+        "research_iterations": 9,
+        "research_promotions": 2,
+    }
     assert "trades" not in segment["counters"]
     assert segment["phase_seconds"] == {RESEARCH_PHASE: 42.5}
 
@@ -295,12 +299,15 @@ def test_the_sessions_resume_address_appends_a_segment_to_the_same_run(tmp_path)
     settings = _settings(tmp_path)
     clock = FakeClock()
     with open_segment(_inputs(settings), command="run", argv=["run"], clock=clock) as first:
+        clock.advance(3600)  # the wall-clock time this segment really took
         first.finish("time_limit", outcome=_result())
     run_id = first.run_id
 
-    clock.advance(3600)
     with open_segment(
-        _inputs(settings, resume=run_id), command="run", argv=["run", "--resume", run_id], clock=clock
+        _inputs(settings, resume=run_id),
+        command="run",
+        argv=["run", "--resume", run_id],
+        clock=clock,
     ) as second:
         assert second.run_id == run_id
         assert second.resumed is True
@@ -432,7 +439,7 @@ def test_a_recorder_that_refuses_to_build_still_closes_the_segment(tmp_path, mon
         ):
             pass
 
-    run_dir = next((Path(settings.runs_dir)).iterdir())
+    run_dir = next(path for path in Path(settings.runs_dir).iterdir() if path.is_dir())
     assert _segment(run_dir)["stopped_reason"] == "startup"
     assert not _locked(run_dir)
 

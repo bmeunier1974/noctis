@@ -21,7 +21,8 @@ and keeping test monkeypatching on the owning modules effective.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
     from noctis.data.seam import MarketDataLake
     from noctis.engine.research import ResearchSummary
     from noctis.observability import Console, Event, EventTee
+    from noctis.observability.debug import Recorder
+    from noctis.reporting.run_store import RunStore
     from noctis.research import CostProfile, Mandate, ResearchToolbox
     from noctis.strategies.families import FamilyRegistry
 
@@ -1423,6 +1426,241 @@ def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str |
         clock=lambda: datetime.now(UTC),
         manifest=manifest,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The run segment — one context manager owns open → work → close
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Segment:
+    """One process's open stretch of work on a run: its store, its recorder, its event sink.
+
+    The handle :func:`open_segment` yields. It carries what the work needs — the run's store, the
+    ``--debug`` recorder (or ``None``), the ``on_event`` sink the runtime and the research session
+    take — plus read-through conveniences for the four things a command echoes (:attr:`run_id`,
+    :attr:`record_path`, :attr:`resumed`, :attr:`prior_runtime_s`), so a command body never reaches
+    through to the store for them.
+
+    :meth:`finish` is the **only** mutation: it reports what stopped this segment and what it
+    measured, and the band closes with that when the ``with`` block unwinds. Everything else here
+    reads. A body that never finishes closes at the ``"startup"`` sentinel — the honest reading of
+    a process that fell over before it measured anything.
+    """
+
+    inputs: SessionInputs
+    command: Literal["run", "research"]
+    store: RunStore
+    recorder: Recorder | None
+    on_event: Console | EventTee | None
+    # What ``finish`` reported, held until the band closes the segment. ``None`` means "nothing was
+    # reported": the sentinel reason, and — separately, for each measurement — nothing measured.
+    _reason: str | None = field(default=None, init=False, repr=False)
+    _counters: dict[str, int] | None = field(default=None, init=False, repr=False)
+    _phase_seconds: dict[str, float] | None = field(default=None, init=False, repr=False)
+
+    @property
+    def run_id(self) -> str:
+        """The run this segment belongs to — minted for a fresh run, resolved for a resumed one."""
+        return str(self.store.run_id)
+
+    @property
+    def record_path(self) -> Path:
+        """The one file this run writes."""
+        return Path(self.store.record_path)
+
+    @property
+    def resumed(self) -> bool:
+        """Whether this session continues an existing run — exactly ``inputs.resume is not None``,
+        read off the one field that carries the address, so the flag can never disagree with it."""
+        return self.inputs.resume is not None
+
+    @property
+    def prior_runtime_s(self) -> float:
+        """Runtime the run had already accumulated before this segment opened (story #136)."""
+        return float(self.store.prior_runtime_s)
+
+    def checkpoint(self, outcome: Any) -> None:
+        """Rewrite the record mid-segment — the day loop's ``on_cycle_close`` seam.
+
+        Incremental durability: a multi-week run's evidence is current on disk long before the
+        process stops, so a machine that dies at 3am still has last cycle's numbers. Takes the same
+        ``RuntimeResult``-shaped outcome the loop hands its seam, and derives the same two
+        measurements the close derives, so an interrupted segment and a clean one are counted the
+        same way.
+        """
+        self.store.checkpoint(
+            counters=segment_counters(outcome),
+            phase_seconds=segment_phase_seconds(outcome),
+        )
+
+    def finish(
+        self,
+        reason: str,
+        *,
+        outcome: Any = None,
+        phase_seconds: Mapping[str, float] | None = None,
+    ) -> None:
+        """Report what stopped this segment, and what it measured. The band closes with it.
+
+        Counters are derived **by command**, from the outcome the work actually produced: a
+        ``RuntimeResult`` under ``run`` (four counters plus the phase timings it measured itself),
+        a ``ResearchSummary`` under ``research`` (one session and its two research counters, and
+        deliberately no ``trades`` key — a session that cannot place an order must not write a zero
+        the record would read as "this run traded nothing"). Research measures its own working
+        seconds around the session, so ``phase_seconds`` is the caller's there; given explicitly it
+        always wins, since an explicit measurement beats a derived one.
+
+        ``outcome=None`` means **nobody measured**: no counters, no phase seconds, never zeros.
+        Called twice, the **first** reason wins and the call is otherwise a no-op — the store's
+        close is idempotent and a segment stops once, so a later cleanup path cannot rewrite the
+        reason the work chose.
+        """
+        if self._reason is not None:
+            return
+        self._reason = reason
+        if outcome is None:
+            return
+        if self.command == "research":
+            self._counters = research_segment_counters(outcome)
+        else:
+            self._counters = segment_counters(outcome)
+            self._phase_seconds = segment_phase_seconds(outcome)
+        if phase_seconds is not None:
+            self._phase_seconds = {str(phase): float(s) for phase, s in phase_seconds.items()}
+
+    def _reported(self) -> tuple[str, dict[str, int] | None, dict[str, float] | None]:
+        """What to close the store with: the reported reason, or the ``"startup"`` sentinel."""
+        if self._reason is None:
+            return "startup", None, None
+        return self._reason, self._counters, self._phase_seconds
+
+
+def _segment_recorder(
+    inputs: SessionInputs,
+    *,
+    command: Literal["run", "research"],
+    argv: list[str],
+    debug: bool,
+    run_id: str,
+) -> Any:
+    """The ``--debug`` QA recorder for this segment, under the command's own rule — or ``None``.
+
+    Two rules, because the two verbs mean different things by a missing LLM. ``run`` records
+    whatever the night does: without a buildable client the legacy proposer/Optuna loop drives
+    research, which instruments no funnel, so the recorder is *marked* legacy and renders the
+    honesty line instead of a comforting all-zeros funnel (AGENTS.md rule 2). ``research`` without
+    a client has no session to run at all, so it records nothing rather than leaving an orphaned
+    half-written run tree behind.
+
+    The client is only ever asked about under ``--debug``, exactly as both command bodies asked
+    before: a bare run answers no question about an LLM it never needed.
+    """
+    if not debug:
+        return None
+    from noctis.research import client_status
+
+    llm_ready = client_status(inputs.settings).ok
+    if command == "research" and not llm_ready:
+        return None
+    recorder = build_recorder(inputs.settings, argv=argv, mode=inputs.mode, run_id=run_id)
+    if command == "run" and not llm_ready:
+        recorder.mark_legacy_research()
+    return recorder
+
+
+@contextmanager
+def open_segment(
+    inputs: SessionInputs,
+    *,
+    command: Literal["run", "research"],
+    argv: list[str],
+    label: str | None = None,
+    debug: bool = False,
+    verbose: int = 0,
+    show_reasoning: bool = False,
+    clock: Callable[[], Any] | None = None,
+) -> Iterator[Segment]:
+    """Open one run segment, hand it to the work, and close it however the work ends (#249).
+
+    A ``noctis run`` and a ``noctis research`` invocation both open exactly one segment: take the
+    lock, mint or resume the run id, freeze the inputs, record every engine-change note, build the
+    ``--debug`` recorder, build the event sink, do the work, then stamp the segment with its stop
+    reason and counters and release the lock. That lifecycle used to be written twice, by hand, in
+    two Typer command bodies — so a lock-release fix could land in one and be missed in the other.
+    It is one context manager here instead, and the commands keep only what is theirs: the echoes,
+    the exit codes, and the collaborators they drive.
+
+    **The resume decision is read off the session, whole** (D2/D3): ``inputs.resume`` is the
+    address an operator typed and ``resume is not None`` is the flag, so no entrypoint can carry
+    the two apart, and a tier of resume policy added tomorrow is a field on
+    :class:`SessionInputs` rather than another kwarg threaded through two command bodies.
+    ``label`` stays a kwarg: it is a nickname for *this* invocation, not a session input.
+
+    **Recording is the band's half of the engine-change note** (D4): every note the resume policy
+    found lands on the record here, whether or not a terminal ever printed it — a record is what an
+    experiment is judged from months later. Saying it is the command's half, and it says it from
+    ``seg.inputs``.
+
+    **Everything after the lock is guarded** (D5): the recorder and the event sink are assembled
+    *inside* the try, so a recorder that refuses to build (an unwritable ``qa_dir``, a prune that
+    raised) still closes the segment instead of leaving the run locked until the stale-lock
+    timeout.
+
+    **Every exit path closes once.** A normal return, a body that reported nothing
+    (``reason="startup"``, no counters — "measured nothing", never zeros), an exception, a
+    ``typer.Exit`` raised by a command body: all reach the same close, in the same order the
+    commands used — recorder first, then the store, which releases the lock.
+
+    The one failure this lets out is a live lock
+    (:class:`~noctis.reporting.run_store.RunLockedError`): two engines writing one run is
+    corruption, not degradation. It leaves as the typed error, because this module never imports
+    Typer and never exits the process — mapping it to red text and an exit code is the command's
+    job, and only the command knows which code.
+    """
+    store = open_run_store(
+        inputs.settings,
+        argv=argv,
+        command=command,
+        run_id=inputs.resume,
+        resume=inputs.resume is not None,
+        clock=clock,
+        label=label,
+        inputs=inputs,
+    )
+    # Against the segment it is true of, so a run that changed engines twice says which night was
+    # which. A resume that found no drift records nothing at all — silence is the signal.
+    for note in inputs.engine_notes:
+        store.note(note)
+
+    recorder = None
+    segment: Segment | None = None
+    try:
+        recorder = _segment_recorder(
+            inputs, command=command, argv=argv, debug=debug, run_id=store.run_id
+        )
+        segment = Segment(
+            inputs=inputs,
+            command=command,
+            store=store,
+            recorder=recorder,
+            # One level-aware sink renders the loop's typed events and, under --debug, tees them
+            # into the recorder even when the console is absent — a quiet --debug run records
+            # silently rather than not at all.
+            on_event=build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder),
+        )
+        yield segment
+    finally:
+        if recorder is not None:
+            recorder.close()
+        # Closing the segment stamps its stop reason and duration, writes the record one last time
+        # and releases the lock — including on the paths that never reached the work, so a run that
+        # exits early is still a closed, resumable run rather than a dangling lock.
+        reason, counters, phase_seconds = (
+            segment._reported() if segment is not None else ("startup", None, None)
+        )
+        store.close(reason=reason, counters=counters, phase_seconds=phase_seconds)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
