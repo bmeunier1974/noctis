@@ -4,10 +4,10 @@
 
 <!-- Live workflow/coverage badges 404 on a private repo (GitHub's image proxy fetches anonymously).
      At public release, restore the live CI badge from
-     https://github.com/bmeunier1974/agent-trader/actions/workflows/ci.yml/badge.svg
+     https://github.com/bmeunier1974/noctis/actions/workflows/ci.yml/badge.svg
      and swap the static coverage badge for codecov.
      The static coverage number is real: `pytest --cov=noctis` → 93% (2026-07-15); re-measure before bumping. -->
-[![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white)](https://github.com/bmeunier1974/agent-trader/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white)](https://github.com/bmeunier1974/noctis/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/coverage-93%25-brightgreen)](docs/development.md)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -18,11 +18,11 @@
 
 # Noctis — autonomous, paper-only trading research
 
-Noctis is an autonomous, paper-only trading research system. While the market is closed it
-designs and evaluates new trading strategies using an LLM, walk-forward validation, and
-out-of-sample testing. While the market is open it deploys only the strategies that survived,
-into a continuous paper account that builds a genuine forward performance record. At the close
-it publishes a report, updates its memory, and returns to research — looping day after day.
+Noctis researches trading strategies on its own, then trades only the ones that survived.
+While the market is closed, an LLM agent writes new strategies as reviewable Python files and
+validates each with walk-forward backtests and two out-of-sample holdouts. While it's open,
+the survivors trade a continuous paper account on bars no tuning ever saw. At the close it
+publishes a report, updates its memory, and returns to research — looping day after day.
 
 > [!WARNING]
 > **Paper-only by design.** Noctis cannot submit live orders unless two independent
@@ -38,10 +38,10 @@ it publishes a report, updates its memory, and returns to research — looping d
   holdout it never trained on before it can be promoted.
 - **A genuine forward track record.** Champions trade only bars no tuning ever saw, in one
   continuous paper account that carries equity and positions across sessions.
-- **Provider-neutral, and free where it can be.** The whole session — ideation, tool
-  orchestration and strategy authoring — runs on any hosted or local LLM, and a local backend
-  is $0/token. Small models work because the episodic driver keeps every step inside a short
-  context window. No model configured? A classic optimizer loop runs instead.
+- **Free, if you want it to be.** The whole session — ideation, tool orchestration and
+  strategy authoring — runs on any hosted or local LLM, and a local backend is $0/token. Small
+  models keep up because the research loop can work in short, self-contained steps instead of
+  one long transcript. No model configured? A classic optimizer loop runs instead.
 
 ## Getting started
 
@@ -66,11 +66,6 @@ if it's missing, and connects the LLM — paste an API key, or let it detect a l
 write the config for you. It then proves the model answers with one real call, before you commit
 to an overnight run. Re-run it any time; it never overwrites your edits. To audit an existing
 install without changing anything, run `noctis setup --check`.
-
-Once it's running: `noctis status` (mode, market state, champions), `noctis runs` (the run
-board), `noctis run-record latest` (one run's whole record), `noctis report latest`
-(close-of-day report), `noctis research -v` (watch one research session live). Every command:
-[docs/cli.md](docs/cli.md)
 
 ### Choosing a model
 
@@ -109,47 +104,7 @@ downgrade.
 The full commented config file: [config.example.yaml](config.example.yaml) · every knob
 explained: [docs/configuration.md](docs/configuration.md)
 
-## Steering it — the mandate is your input surface
-
-Noctis researches on its own, but **what it hunts for** is yours to set. It lives in one place:
-the local `mandate/` folder `noctis setup` created. That folder is gitignored, so steering the
-agent never shows up as a repo change.
-
-A mandate is two things in one file. The prose brief tells the agent what kind of trader you
-want the system to be: style, risk appetite, horizon, which names to look at. The front-matter
-`config:` block shapes the run it steers — which model thinks, what one session may spend, which
-universe it starts from, and the flagship knob, the election metric.
-
-- **The election metric** (`promotion.metric`) is the risk dial every candidate is scored,
-  ranked, and promoted on: `sharpe` penalizes all volatility, `sortino` only the downside, and
-  `total_return` is raw profit. It threads through the whole pipeline, and it is the *one*
-  `promotion.*` knob a mandate may bind. The thresholds beside it are read in its units, so they
-  stay yours. `config.yaml` sets the base every run starts from, which is what an unmandated run
-  scores on — as does an `auto` session, whose profile is picked too late to overlay.
-- **Which mandate governs a run** is `research.mandate` in `config.yaml`. Point it at one of:
-
-  - a shipped profile — `aggressive`, `conservative`, `long-term`, `short-term`,
-    `sector-specialist`
-  - your own brief in `mandate/MANDATE.md`, via the selector `MANDATE`
-  - `auto`, to let the agent pick a personality each session
-  - `null`, for unconstrained research
-
-  The flags `--mandate <name>` and `--directive "<text>"` are mutually exclusive, and override
-  the selector for one session. On `--resume` both are refused, because a run's steering is
-  frozen at creation.
-- **The run is yours, the arena is not.** A mandate can never loosen a validation gate. The
-  overlay allowlist is deny-by-default: it refuses the safety mode, the fill costs, every
-  promotion threshold but the metric, the holdout geometry, the state paths and the secrets — by
-  name. A mandate that reaches for one doesn't start.
-
-→ [Authoring mandates](mandate/README.md) ·
-[the overlay surface, knob by knob](docs/configuration.md#the-mandate-overlay) ·
-[how a mandate steers research](docs/research.md)
-
-Secrets (LLM/vendor keys, the `ALLOW_LIVE` gate) go in `.env` — see
-[docs/configuration.md](docs/configuration.md).
-
-## Try it: one brief, one hour, one record
+## Your first session — one brief, one hour, one record
 
 Give it a brief and an hour. Research runs while the market is closed; when it opens, the
 same loop trades the champions that survived.
@@ -180,6 +135,52 @@ froze at creation. A brief worth keeping graduates from a flag into a file: writ
 `mandate/MANDATE.md`, set `research.mandate: MANDATE` in `config.yaml`, and every run reads it
 without being asked.
 
+Two more worth knowing: `noctis status` prints the resolved mode, market state and champion
+board, and `noctis research -v` runs one research session live so you can watch it think. Every
+command: [docs/cli.md](docs/cli.md)
+
+## Steering it — the mandate is your input surface
+
+Noctis researches on its own, but **what it hunts for** is yours to set. It lives in one place:
+the local `mandate/` folder `noctis setup` created. That folder is gitignored, so steering the
+agent never shows up as a repo change.
+
+A mandate is two things in one file. The prose brief tells the agent what kind of trader you
+want the system to be: style, risk appetite, horizon, which names to look at. The front-matter
+`config:` block shapes the run it steers — which model thinks, what one session may spend, which
+universe it starts from, and the flagship knob, the election metric.
+
+The **election metric** (`promotion.metric`) is the risk dial every candidate is scored, ranked
+and promoted on: `sharpe` penalizes all volatility, `sortino` only the downside, and
+`total_return` is raw profit. It threads through the whole pipeline, and it is the *one*
+`promotion.*` knob a mandate may bind. The thresholds beside it are read in its units, so they
+stay yours. `config.yaml` sets the base every run starts from, which is what an unmandated run
+scores on — as does an `auto` session, whose profile is picked too late to overlay.
+
+Which mandate governs a run is `research.mandate` in `config.yaml`. Point it at one of:
+
+- a shipped profile — `aggressive`, `conservative`, `long-term`, `short-term`,
+  `sector-specialist`
+- your own brief in `mandate/MANDATE.md`, via the selector `MANDATE`
+- `auto`, to let the agent pick a personality each session
+- `null`, for unconstrained research
+
+The flags `--mandate <name>` and `--directive "<text>"` are mutually exclusive, and override the
+selector for one session. On `--resume` both are refused, because a run's steering is frozen at
+creation.
+
+And a mandate can never loosen a validation gate. The overlay allowlist is deny-by-default: it
+refuses the safety mode, the fill costs, every promotion threshold but the metric, the holdout
+geometry, the state paths and the secrets — by name. **A mandate that reaches for one doesn't
+start.**
+
+→ [Authoring mandates](mandate/README.md) ·
+[the overlay surface, knob by knob](docs/configuration.md#the-mandate-overlay) ·
+[how a mandate steers research](docs/research.md)
+
+Secrets (LLM/vendor keys, the `ALLOW_LIVE` gate) go in `.env` — see
+[docs/configuration.md](docs/configuration.md).
+
 ## How it works
 
 **Research — market closed.** Noctis continuously generates new strategies (one
@@ -197,12 +198,13 @@ configured time limit. → [docs/run-record.md](docs/run-record.md)
 
 ## Safety
 
-- **Two independent gates** — config `mode: live` **and** env `ALLOW_LIVE=true` — must
+- **Two independent gates** — config `mode: live` and env `ALLOW_LIVE=true` — must
   both be open before any live path is even reachable, and the live adapter is a stub
   that refuses anyway.
-- A half-open gate **refuses to start** rather than silently downgrading.
+- **A half-open gate refuses to start.** `mode: live` without `ALLOW_LIVE` is a startup
+  error, never a quiet downgrade to paper.
 - **No lookahead:** decisions on bar *t* fill at bar *t+1*'s open — asserted by tests.
-- **No secrets and no vendor data in git.**
+- No secrets and no vendor data ever land in git.
 
 The full model: [docs/safety.md](docs/safety.md)
 
@@ -249,12 +251,12 @@ Project: [Changelog](CHANGELOG.md) · [Roadmap](ROADMAP.md) · [Validation metho
 
 ## Disclaimer
 
-Noctis is **research and educational software**. It is **paper-only by construction** — it
-does not, and is not intended to, place real-money orders (see [the safety
+Noctis is research and educational software. It is **paper-only by construction** — it does
+not, and is not intended to, place real-money orders (see [the safety
 model](docs/safety.md)). Nothing here is **financial, investment, or trading advice**. The
-software is provided "as is", without warranty of any kind and **with no warranty of fitness
-for live trading**. Backtested and paper results are simulated; **past simulated performance
-does not indicate future results**. You are solely responsible for any use you make of this
+software is provided "as is", without warranty of any kind and with no warranty of fitness
+for live trading. Backtested and paper results are simulated; past simulated performance
+does not indicate future results. You are solely responsible for any use you make of this
 code, including any decision to adapt it toward live trading — which you would do entirely at
 your own risk.
 
