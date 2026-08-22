@@ -61,7 +61,7 @@ warning (see [development.md](development.md)).
 | Area | Module | What it does |
 |---|---|---|
 | 🔐 Config + safety gate | `src/noctis/config` | Typed settings (`config.yaml` + `.env`); the paper/live double gate |
-| 🧩 Composition root | `src/noctis/bootstrap.py` | One session-assembly seam: the settings → gate → mandate → CLI-flag precedence chain, plus the shared builders (lake, memory, console, the agent research session) every entrypoint uses instead of hand-wiring |
+| 🧩 Composition root | `src/noctis/bootstrap.py` | One session-assembly seam: the settings → gate → mandate → CLI-flag precedence chain (`resolve_session`), the run segment's one entry (`open_segment`), plus the shared builders (lake, memory, the event sink, the agent research session) every entrypoint uses instead of hand-wiring |
 | 🗄️ Fetch-once data lake | `src/noctis/data` | Parquet catalog + coverage registry + coverage-diffed ingest + tail-only sync + integrity check + cost preflight |
 | 📚 Strategy library | `strategies/` + `src/noctis/strategies/library.py` | One `.py` per strategy — thesis, code, tuned params, and research provenance in a docstring header; `write_strategy` validates in a subprocess so a broken file can never land. Three tiers: committed seeds in `strategies/`, plus the run's `__tmp/` working files and `champions/` (a later tier overrides an earlier one) |
 | 📐 Strategies | `src/noctis/strategies` | `TraderStrategy` base: event-driven `on_bar()` plus a default `signals()` that replays it (parity by construction; a vectorised override stays possible); indicator helpers; SMA / RSI / Donchian worked examples; the candidate proposer |
@@ -325,12 +325,13 @@ account, and a run's numbers describe only what that run produced — which is w
 states `assumptions.state_scope: "run"`, so a comparison between two runs is a comparison of two
 experiments rather than of two views of one board. The four per-run paths
 (`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from `run_dir` in
-`config/settings.py`; `bootstrap.open_run_store` rebinds `run_dir` to the run it just minted, so
-no command body does path arithmetic. `run_dir` defaults to the reserved `runs/legacy/` run —
-what an invocation that never opened a run reads (`status`, `champions`, `account`, `report`, a
-bare `research`), and the run `noctis migrate` adopts existing state into. The **committed
-`strategies/` seeds stay read-only input for every run**: the three-tier discovery contract
-(seeds → `__tmp/` → `champions/`) is unchanged; only the two writable tiers moved under the run.
+`config/settings.py`; opening a segment (`bootstrap.open_segment` → `open_run_store`) rebinds
+`run_dir` to the run it just minted or resumed, so no command body does path arithmetic. `run_dir`
+defaults to the reserved `runs/legacy/` run — what an invocation that never opened a run reads
+(`status`, `champions`, `account`, `report`), and the run `noctis migrate` adopts existing state
+into. The **committed `strategies/` seeds stay read-only input for every run**: the three-tier
+discovery contract (seeds → `__tmp/` → `champions/`) is unchanged; only the two writable tiers
+moved under the run.
 
 **The operator surface (input — the engine treats all of it as read-only):**
 
@@ -371,6 +372,19 @@ collected, and `reporting/schema.py` is a pure validator. This section is *why* 
 exist and how they are produced; the field-by-field contract — every key, when it is `null`, the
 versioning promise, the caps, and a worked example — is [run-record.md](run-record.md).
 
+**One entry opens a run segment: `bootstrap.open_segment`.** A segment is one process's stretch of
+work on a run, and its lifecycle is written once, in the composition root: take the lock, mint or
+resume the id, freeze the inputs, record every engine-change note, build the `--debug` recorder and
+the event sink, hand the work a `Segment`, then close with a stop reason and its counters and
+release the lock — on every exit path, including the ones that never reached the work (a body that
+reported nothing closes at `startup`, with no counters, never zeros). Both verbs that open a run —
+`noctis run` and `noctis research` — open through it and differ only in what they drive and what
+they echo, so a lock-release fix can no longer land in one verb and be missed in the other. The
+band imports no Typer: a live lock leaves as the typed `RunLockedError`, and mapping it to red text
+and an exit code is the CLI's job. During the work, `Segment.checkpoint` is the day loop's
+`on_cycle_close` seam — the incremental record write that keeps a multi-week run's evidence
+current on disk.
+
 **`segments[].environment` — per segment, never per run.** Each process invocation records the
 machine it actually ran on: hardware (CPU model, physical/logical cores, max frequency, total RAM,
 free disk), OS (system, release, arch, container), python and noctis versions, git state (commit,
@@ -399,13 +413,19 @@ function): two segments on one machine are provably the same host, without publi
 **`inputs` — the frozen provenance block.** The run's own configuration, pinned at creation and
 restored on every resume (`config/rehydrate.py`): the mandate as **resolved text** plus its applied
 overlay and digest, the secret-excluded settings dump with its digest and the three tier lists, the
-gate's verdict, and `config_epoch`/`config_changes`. Beside them sit two derived views —
-`inputs.models` (which model researches, authors, escalates and ideates; the resolved research
-loop; the declared context window; the cost profile) and `inputs.data` (provider, dataset, and the
-shared workspace-level lake directory) — stated once, resolved, so nothing downstream rebuilds a
-fallback chain to know what produced a run's numbers. No credential is reachable from any of it: a
-model name is public, and the keys are secret tier and excluded from the record entirely, which is
-why a resumed run takes its keys from the live `.env` (see [safety.md](safety.md)).
+gate's verdict, and `config_epoch`/`config_changes`. **Every verb that opens a run arms the safety
+gate** — `research` as well as `run` — so a run minted by a research session freezes
+`inputs.execution_mode: "paper"` and `assumptions.paper_only: true` rather than "nobody measured":
+the session places no order itself, but the run it mints may trade on a later `run --resume`, and
+no verb may be a silent downgrade (`mode: live` without `ALLOW_LIVE` refuses at startup in both).
+`null` there means only an adopted history that froze no verdict. Beside them sit two derived
+views — `inputs.models` (which model researches, authors, escalates and ideates; the resolved
+research loop; the declared context window; the cost profile) and `inputs.data` (provider, dataset,
+and the shared workspace-level lake directory) — stated once, resolved, so nothing downstream
+rebuilds a fallback chain to know what produced a run's numbers. No credential is reachable from
+any of it: a model name is public, and the keys are secret tier and excluded from the record
+entirely, which is why a resumed run takes its keys from the live `.env` (see
+[safety.md](safety.md)).
 
 **`strategies[]` — everything considered, and the gate that stopped it.** One entry per candidate,
 not per champion: *"47 of 66 candidates died at the symbol-holdout gate"* is the sentence that

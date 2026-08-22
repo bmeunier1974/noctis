@@ -826,6 +826,43 @@ def test_a_resumed_session_reads_the_frozen_config_and_the_live_paths(tmp_path, 
     assert resumed.mode == "paper"
 
 
+def test_a_fresh_session_carries_no_resume_address(tmp_path):
+    """A run being minted right now continues nothing, and says so with ``None`` (#247)."""
+    from noctis.bootstrap import resolve_session
+
+    assert resolve_session(_config(tmp_path), require_gate=True).resume is None
+
+
+def test_a_resumed_session_carries_the_address_the_operator_typed(tmp_path):
+    """The session inputs carry the *address*, not the id it resolved to (#247): every refusal,
+    echo and record write downstream is about the run an operator can go and look at, and
+    ``latest`` is a run nobody has to know the id of."""
+    cfg = _config(tmp_path)
+    runner.invoke(app, ["run", "--config", cfg])
+    run_id = _run_dirs(tmp_path)[0].name
+
+    assert _resume_inputs(cfg, run_id).resume == run_id
+    assert _resume_inputs(cfg, "latest").resume == "latest"
+
+
+def test_a_rebasing_session_carries_the_resume_address_too(tmp_path):
+    """``--rebase-config`` adopts new *settings*; it is still a resume, and still names the run
+    it continues (#247)."""
+    from noctis.bootstrap import resolve_session
+
+    cfg = _config(tmp_path, "promotion:\n  metric: sortino\n")
+    runner.invoke(app, ["run", "--config", cfg])
+    run_id = _run_dirs(tmp_path)[0].name
+    Path(cfg).write_text(
+        f"mode: paper\ndata:\n  lake_dir: {tmp_path}/lake\npromotion:\n  metric: sharpe\n"
+    )
+
+    rebased = resolve_session(cfg, require_gate=True, resume=run_id, rebase_config=True)
+
+    assert rebased.rebase is not None  # something was actually there to adopt
+    assert rebased.resume == run_id
+
+
 def test_a_resumed_run_picks_up_its_own_run_scoped_state(tmp_path):
     """Champions, account, memory and the strategy tiers belong to the run that produced them —
     a resumed segment reads that run's tree, not the workspace's."""

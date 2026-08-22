@@ -21,7 +21,8 @@ and keeping test monkeypatching on the owning modules effective.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
     from noctis.data.seam import MarketDataLake
     from noctis.engine.research import ResearchSummary
     from noctis.observability import Console, Event, EventTee
+    from noctis.observability.debug import Recorder
+    from noctis.reporting.run_store import RunStore
     from noctis.research import CostProfile, Mandate, ResearchToolbox
     from noctis.strategies.families import FamilyRegistry
 
@@ -70,8 +73,11 @@ class SessionInputs:
     """The resolved inputs of one session: settings after every override, plus provenance."""
 
     settings: Settings
-    # The gate-resolved execution mode, or None when the entrypoint didn't ask for the gate
-    # (research/report never place orders, so they don't arm it).
+    # The gate-resolved execution mode, or None when the entrypoint didn't ask for the gate.
+    # Every verb that **opens a run** arms it (``run`` and — since story #247 — ``research``): the
+    # run freezes the verdict at creation and may trade on a later segment, so a record must carry
+    # what the gate decided rather than "nobody measured". ``status`` arms it to report it. Verbs
+    # that only read (``mandate``, ``engine``, the config-drift preview) resolve no mode.
     mode: Literal["paper", "live"] | None
     mandate: Mandate | None
     # "k=v" echo lines for each mandate override actually applied (the CLI prints them).
@@ -80,10 +86,16 @@ class SessionInputs:
     # mandate` renders as the effective settings diff. Same paths as ``overrides`` by
     # construction (both come from the one applied patch); empty when nothing was overlaid.
     changes: list[OverrideChange] = field(default_factory=list)
+    # The run address this session continues — the one an operator *typed* (an id, ``latest``, a
+    # path, ``@label``), not the id it resolved to, so every refusal, echo and record write
+    # downstream is about a run they can go and look at. ``None`` on a fresh run: a run being
+    # minted right now continues nothing. Whether this session resumes at all is exactly
+    # ``resume is not None`` — one field, so no entrypoint can carry the address and the flag apart.
+    resume: str | None = None
     # The run's frozen ``inputs`` re-frozen on the current files, when this session is a
     # ``--rebase-config`` resume that found something to adopt (story #134): epoch already bumped,
-    # before/after entry already appended, built once by ``config.rehydrate.rebase_inputs``. The
-    # entrypoint hands it to :func:`open_run_store`, which lets it replace what the record carried.
+    # before/after entry already appended, built once by ``config.rehydrate.rebase_inputs``. Read
+    # off this session by :func:`open_run_store`, which lets it replace what the record carried.
     # ``None`` on every other session — including a rebase of a run nothing changed under, which is
     # a no-op by design rather than a cosmetic epoch bump.
     rebase: Mapping[str, Any] | None = None
@@ -92,8 +104,9 @@ class SessionInputs:
     # a resume that found no drift — silence is the signal that the engine held still.
     engine_notes: list[str] = field(default_factory=list)
     # The ``engine_changes`` entry a deliberately accepted engine change produced
-    # (``--allow-engine-upgrade``): epoch already bumped, moved components already named. Handed to
-    # :func:`open_run_store`, which re-freezes the run onto this engine. ``None`` everywhere else,
+    # (``--allow-engine-upgrade``): epoch already bumped, moved components already named. Read off
+    # this session by :func:`open_run_store`, which re-freezes the run onto this engine — like every
+    # other field freezing reads, so no entrypoint names it. ``None`` everywhere else,
     # including an upgrade of a run whose arbiter never moved — a documented no-op.
     engine_upgrade: Mapping[str, Any] | None = None
 
@@ -290,8 +303,9 @@ def resume_session(
         )
         if adopted is not None:
             # The engine verdict rides along whichever way the config went: a rebase adopts new
-            # *settings*, and says nothing about the code that will run them.
-            return replace(adopted, engine_notes=notes, engine_upgrade=upgrade)
+            # *settings*, and says nothing about the code that will run them. A rebase is still a
+            # resume, so it carries the same address every other resumed session does.
+            return replace(adopted, resume=run_id, engine_notes=notes, engine_upgrade=upgrade)
     if not has_frozen_inputs(record):
         logger.warning(
             "run %s froze no configuration (it predates config freezing, or it is history adopted "
@@ -314,6 +328,7 @@ def resume_session(
         mode=mode,
         mandate=active,
         overrides=overrides,
+        resume=run_id,
         engine_notes=notes,
         engine_upgrade=upgrade,
     )
@@ -896,13 +911,6 @@ def build_event_sink(
     return EventTee(console, secondary)
 
 
-def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | None:
-    """Thin back-compat alias for :func:`build_event_sink` with no secondary — the level-aware
-    console for ``-v``/``-vv``/``--show-reasoning``, or ``None`` on a quiet run. Existing callers
-    and tests that only want a console keep this exact name, signature, and behavior."""
-    return _build_console(verbose, show_reasoning=show_reasoning)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # The --debug QA recorder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1194,11 +1202,7 @@ def open_run_store(
     clock: Callable[[], Any] | None = None,
     label: str | None = None,
     resume: bool = False,
-    mandate: Mandate | None = None,
-    mode: str | None = None,
-    overrides: list[str] | None = None,
-    rebase: Mapping[str, Any] | None = None,
-    engine_upgrade: Mapping[str, Any] | None = None,
+    inputs: SessionInputs | None = None,
 ):
     """Open this invocation's run — the always-on run identity, minted here and nowhere else.
 
@@ -1235,15 +1239,23 @@ def open_run_store(
     is continuing an existing run rather than minting one, which turns an unknown id and a
     ``completed`` run into refusals rather than a surprise new run.
 
-    ``rebase`` is the deliberate re-freeze a ``--rebase-config`` resume built (story #134): already
-    epoch-bumped and change-stamped by :func:`resume_session`, it **replaces** the inputs the record
-    carried instead of being ignored like a fresh freeze would be. Absent (the normal case) nothing
-    about freezing changes at all.
+    **What is frozen comes from the session, whole** (story #248): ``inputs`` is the
+    :class:`SessionInputs` an entrypoint resolved, and the five fields freezing reads — the gate's
+    verdict, the mandate, the overrides it applied, a rebase and an engine upgrade — are read off
+    it here rather than unpacked into five kwargs each command body has to keep in step. A tier of
+    resume policy added tomorrow is therefore a field on that object, not a sixth kwarg threaded
+    through two Typer bodies. ``None`` is the bare form a direct caller (or a test) uses: no
+    session was resolved, so no verdict was measured and nothing is adopted.
 
-    ``engine_upgrade`` is its twin one layer down (story #135): the ``engine_changes`` entry an
-    accepted ``--allow-engine-upgrade`` produced. Given one, the run's engine identity is re-frozen
-    onto this process's engine with that entry appended; absent, the run keeps the engine it was
-    created under, which is what every resume is compared against.
+    ``inputs.rebase`` is the deliberate re-freeze a ``--rebase-config`` resume built (story #134):
+    already epoch-bumped and change-stamped by :func:`resume_session`, it **replaces** the inputs
+    the record carried instead of being ignored like a fresh freeze would be. Absent (the normal
+    case) nothing about freezing changes at all.
+
+    ``inputs.engine_upgrade`` is its twin one layer down (story #135): the ``engine_changes`` entry
+    an accepted ``--allow-engine-upgrade`` produced. Given one, the run's engine identity is
+    re-frozen onto this process's engine with that entry appended; absent, the run keeps the engine
+    it was created under, which is what every resume is compared against.
 
     Raises :class:`~noctis.reporting.run_store.RunLockedError` when another engine already holds
     the addressed run — the one failure in this subsystem that is fatal rather than latched.
@@ -1256,6 +1268,25 @@ def open_run_store(
     from noctis.reporting.run_store import open_run
 
     tick = clock or (lambda: datetime.now(UTC))
+    # The session's frozen-tier fields, read off the one object that carries them. Without a
+    # session there is nothing to freeze but the settings themselves: an unmeasured mode, no
+    # steering, nothing adopted.
+    rebase = inputs.rebase if inputs is not None else None
+    # ``open_run``'s ``inputs=`` is the run record's frozen configuration block — a different thing
+    # from the session above, so it is named here rather than built inline against a parameter of
+    # the same name: an adopted rebase, or this invocation's own freeze.
+    frozen = (
+        rebase
+        if rebase is not None
+        else freeze_inputs(
+            settings,
+            mandate=inputs.mandate if inputs is not None else None,
+            overrides=inputs.overrides if inputs is not None else [],
+            execution_mode=inputs.mode if inputs is not None else None,
+            research_loop=resolve_research_loop(settings),
+            frozen_at=utc_iso(tick()),
+        )
+    )
     store = open_run(
         Path(settings.runs_dir),
         clock=tick,
@@ -1265,18 +1296,9 @@ def open_run_store(
         command=command,
         label=label,
         resume=resume,
-        inputs=rebase
-        if rebase is not None
-        else freeze_inputs(
-            settings,
-            mandate=mandate,
-            overrides=overrides or [],
-            execution_mode=mode,
-            research_loop=resolve_research_loop(settings),
-            frozen_at=utc_iso(tick()),
-        ),
+        inputs=frozen,
         rebase_config=rebase is not None,
-        engine_upgrade=engine_upgrade,
+        engine_upgrade=inputs.engine_upgrade if inputs is not None else None,
         # The machine this process is on (story #139), captured through the injected probes above
         # and stamped on THIS segment only: a run that migrates boxes mid-experiment keeps each
         # night's throughput attributed to the hardware that produced it.
@@ -1397,6 +1419,241 @@ def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str |
         clock=lambda: datetime.now(UTC),
         manifest=manifest,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The run segment — one context manager owns open → work → close
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Segment:
+    """One process's open stretch of work on a run: its store, its recorder, its event sink.
+
+    The handle :func:`open_segment` yields. It carries what the work needs — the run's store, the
+    ``--debug`` recorder (or ``None``), the ``on_event`` sink the runtime and the research session
+    take — plus read-through conveniences for the four things a command echoes (:attr:`run_id`,
+    :attr:`record_path`, :attr:`resumed`, :attr:`prior_runtime_s`), so a command body never reaches
+    through to the store for them.
+
+    :meth:`finish` is the **only** mutation: it reports what stopped this segment and what it
+    measured, and the band closes with that when the ``with`` block unwinds. Everything else here
+    reads. A body that never finishes closes at the ``"startup"`` sentinel — the honest reading of
+    a process that fell over before it measured anything.
+    """
+
+    inputs: SessionInputs
+    command: Literal["run", "research"]
+    store: RunStore
+    recorder: Recorder | None
+    on_event: Console | EventTee | None
+    # What ``finish`` reported, held until the band closes the segment. ``None`` means "nothing was
+    # reported": the sentinel reason, and — separately, for each measurement — nothing measured.
+    _reason: str | None = field(default=None, init=False, repr=False)
+    _counters: dict[str, int] | None = field(default=None, init=False, repr=False)
+    _phase_seconds: dict[str, float] | None = field(default=None, init=False, repr=False)
+
+    @property
+    def run_id(self) -> str:
+        """The run this segment belongs to — minted for a fresh run, resolved for a resumed one."""
+        return str(self.store.run_id)
+
+    @property
+    def record_path(self) -> Path:
+        """The one file this run writes."""
+        return Path(self.store.record_path)
+
+    @property
+    def resumed(self) -> bool:
+        """Whether this session continues an existing run — exactly ``inputs.resume is not None``,
+        read off the one field that carries the address, so the flag can never disagree with it."""
+        return self.inputs.resume is not None
+
+    @property
+    def prior_runtime_s(self) -> float:
+        """Runtime the run had already accumulated before this segment opened (story #136)."""
+        return float(self.store.prior_runtime_s)
+
+    def checkpoint(self, outcome: Any) -> None:
+        """Rewrite the record mid-segment — the day loop's ``on_cycle_close`` seam.
+
+        Incremental durability: a multi-week run's evidence is current on disk long before the
+        process stops, so a machine that dies at 3am still has last cycle's numbers. Takes the same
+        ``RuntimeResult``-shaped outcome the loop hands its seam, and derives the same two
+        measurements the close derives, so an interrupted segment and a clean one are counted the
+        same way.
+        """
+        self.store.checkpoint(
+            counters=segment_counters(outcome),
+            phase_seconds=segment_phase_seconds(outcome),
+        )
+
+    def finish(
+        self,
+        reason: str,
+        *,
+        outcome: Any = None,
+        phase_seconds: Mapping[str, float] | None = None,
+    ) -> None:
+        """Report what stopped this segment, and what it measured. The band closes with it.
+
+        Counters are derived **by command**, from the outcome the work actually produced: a
+        ``RuntimeResult`` under ``run`` (four counters plus the phase timings it measured itself),
+        a ``ResearchSummary`` under ``research`` (one session and its two research counters, and
+        deliberately no ``trades`` key — a session that cannot place an order must not write a zero
+        the record would read as "this run traded nothing"). Research measures its own working
+        seconds around the session, so ``phase_seconds`` is the caller's there; given explicitly it
+        always wins, since an explicit measurement beats a derived one.
+
+        ``outcome=None`` means **nobody measured**: no counters, no phase seconds, never zeros.
+        Called twice, the **first** reason wins and the call is otherwise a no-op — the store's
+        close is idempotent and a segment stops once, so a later cleanup path cannot rewrite the
+        reason the work chose.
+        """
+        if self._reason is not None:
+            return
+        self._reason = reason
+        if outcome is None:
+            return
+        if self.command == "research":
+            self._counters = research_segment_counters(outcome)
+        else:
+            self._counters = segment_counters(outcome)
+            self._phase_seconds = segment_phase_seconds(outcome)
+        if phase_seconds is not None:
+            self._phase_seconds = {str(phase): float(s) for phase, s in phase_seconds.items()}
+
+    def _reported(self) -> tuple[str, dict[str, int] | None, dict[str, float] | None]:
+        """What to close the store with: the reported reason, or the ``"startup"`` sentinel."""
+        if self._reason is None:
+            return "startup", None, None
+        return self._reason, self._counters, self._phase_seconds
+
+
+def _segment_recorder(
+    inputs: SessionInputs,
+    *,
+    command: Literal["run", "research"],
+    argv: list[str],
+    debug: bool,
+    run_id: str,
+) -> Any:
+    """The ``--debug`` QA recorder for this segment, under the command's own rule — or ``None``.
+
+    Two rules, because the two verbs mean different things by a missing LLM. ``run`` records
+    whatever the night does: without a buildable client the legacy proposer/Optuna loop drives
+    research, which instruments no funnel, so the recorder is *marked* legacy and renders the
+    honesty line instead of a comforting all-zeros funnel (AGENTS.md rule 2). ``research`` without
+    a client has no session to run at all, so it records nothing rather than leaving an orphaned
+    half-written run tree behind.
+
+    The client is only ever asked about under ``--debug``, exactly as both command bodies asked
+    before: a bare run answers no question about an LLM it never needed.
+    """
+    if not debug:
+        return None
+    from noctis.research import client_status
+
+    llm_ready = client_status(inputs.settings).ok
+    if command == "research" and not llm_ready:
+        return None
+    recorder = build_recorder(inputs.settings, argv=argv, mode=inputs.mode, run_id=run_id)
+    if command == "run" and not llm_ready:
+        recorder.mark_legacy_research()
+    return recorder
+
+
+@contextmanager
+def open_segment(
+    inputs: SessionInputs,
+    *,
+    command: Literal["run", "research"],
+    argv: list[str],
+    label: str | None = None,
+    debug: bool = False,
+    verbose: int = 0,
+    show_reasoning: bool = False,
+    clock: Callable[[], Any] | None = None,
+) -> Iterator[Segment]:
+    """Open one run segment, hand it to the work, and close it however the work ends (#249).
+
+    A ``noctis run`` and a ``noctis research`` invocation both open exactly one segment: take the
+    lock, mint or resume the run id, freeze the inputs, record every engine-change note, build the
+    ``--debug`` recorder, build the event sink, do the work, then stamp the segment with its stop
+    reason and counters and release the lock. That lifecycle used to be written twice, by hand, in
+    two Typer command bodies — so a lock-release fix could land in one and be missed in the other.
+    It is one context manager here instead, and the commands keep only what is theirs: the echoes,
+    the exit codes, and the collaborators they drive.
+
+    **The resume decision is read off the session, whole** (D2/D3): ``inputs.resume`` is the
+    address an operator typed and ``resume is not None`` is the flag, so no entrypoint can carry
+    the two apart, and a tier of resume policy added tomorrow is a field on
+    :class:`SessionInputs` rather than another kwarg threaded through two command bodies.
+    ``label`` stays a kwarg: it is a nickname for *this* invocation, not a session input.
+
+    **Recording is the band's half of the engine-change note** (D4): every note the resume policy
+    found lands on the record here, whether or not a terminal ever printed it — a record is what an
+    experiment is judged from months later. Saying it is the command's half, and it says it from
+    ``seg.inputs``.
+
+    **Everything after the lock is guarded** (D5): the recorder and the event sink are assembled
+    *inside* the try, so a recorder that refuses to build (an unwritable ``qa_dir``, a prune that
+    raised) still closes the segment instead of leaving the run locked until the stale-lock
+    timeout.
+
+    **Every exit path closes once.** A normal return, a body that reported nothing
+    (``reason="startup"``, no counters — "measured nothing", never zeros), an exception, a
+    ``typer.Exit`` raised by a command body: all reach the same close, in the same order the
+    commands used — recorder first, then the store, which releases the lock.
+
+    The one failure this lets out is a live lock
+    (:class:`~noctis.reporting.run_store.RunLockedError`): two engines writing one run is
+    corruption, not degradation. It leaves as the typed error, because this module never imports
+    Typer and never exits the process — mapping it to red text and an exit code is the command's
+    job, and only the command knows which code.
+    """
+    store = open_run_store(
+        inputs.settings,
+        argv=argv,
+        command=command,
+        run_id=inputs.resume,
+        resume=inputs.resume is not None,
+        clock=clock,
+        label=label,
+        inputs=inputs,
+    )
+    # Against the segment it is true of, so a run that changed engines twice says which night was
+    # which. A resume that found no drift records nothing at all — silence is the signal.
+    for note in inputs.engine_notes:
+        store.note(note)
+
+    recorder = None
+    segment: Segment | None = None
+    try:
+        recorder = _segment_recorder(
+            inputs, command=command, argv=argv, debug=debug, run_id=store.run_id
+        )
+        segment = Segment(
+            inputs=inputs,
+            command=command,
+            store=store,
+            recorder=recorder,
+            # One level-aware sink renders the loop's typed events and, under --debug, tees them
+            # into the recorder even when the console is absent — a quiet --debug run records
+            # silently rather than not at all.
+            on_event=build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder),
+        )
+        yield segment
+    finally:
+        if recorder is not None:
+            recorder.close()
+        # Closing the segment stamps its stop reason and duration, writes the record one last time
+        # and releases the lock — including on the paths that never reached the work, so a run that
+        # exits early is still a closed, resumable run rather than a dangling lock.
+        reason, counters, phase_seconds = (
+            segment._reported() if segment is not None else ("startup", None, None)
+        )
+        store.close(reason=reason, counters=counters, phase_seconds=phase_seconds)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

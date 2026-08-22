@@ -170,8 +170,13 @@ family's re-tune, only by a different strategy.
 design: `reporting/run_store.py` is the **only** module that touches that tree — it collects, locks,
 appends the process's segment and writes atomically behind a fail-safe latch — while
 `reporting/run_record.py` (`build(artifacts) -> dict`) and `reporting/schema.py` (`validate`) are
-**pure**, which is what makes the golden-record snapshot cheap. Wired in the composition root
-(`bootstrap.open_run_store`), rewritten at each CLOSE via the runtime's `on_cycle_close` seam. Two
+**pure**, which is what makes the golden-record snapshot cheap. Wired in the composition root:
+`bootstrap.open_segment` is a **run segment's one entry** — it opens the run through
+`bootstrap.open_run_store`, records the engine-change notes, builds the `--debug` recorder and the
+event sink, hands the work a `Segment`, and closes with a stop reason and its counters, releasing
+the lock on every exit path — and `run` and `research` both open through it, differing only in what
+they drive. The record is rewritten at each CLOSE via the runtime's `on_cycle_close` seam
+(`Segment.checkpoint`), so a machine that dies at 3am still has last cycle's numbers. Two
 honesty rules: a killed segment is marked `interrupted` on the **next** open, never guessed at write
 time, and a live lock is a hard refusal (two engines on one run is corruption) while everything else
 latches off with one warning rather than raising into the engine. **Retention is opt-in and
@@ -207,9 +212,11 @@ as allowed — the arena (safety mode, fill costs, promotion thresholds, holdout
 secrets) is refused there by name; a `--metric` CLI flag wins over the overlay,
 and `--mandate`/`--directive` (mutually exclusive) override the config selector for one session
 (all three are refused on a `--resume`, whose steering is frozen).
-That precedence chain, and the collaborator builders the entrypoints share (lake, memory, console,
-the strategy-family registry, the agent research session), live in one composition root —
-`src/noctis/bootstrap.py`. Assemble sessions there, not by hand in a command body.
+That precedence chain, the two entries every session-opening verb shares (`resolve_session` for the
+inputs, `open_segment` for the run segment they do the work in), and the collaborator builders
+(lake, memory, the event sink, the strategy-family registry, the agent research session), live in
+one composition root — `src/noctis/bootstrap.py`. Assemble sessions there, not by hand in a command
+body.
 
 ## Conventions and gotchas
 
@@ -233,8 +240,9 @@ the strategy-family registry, the agent research session), live in one compositi
   the one output root; the four
   per-run paths (`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from **`run_dir`**,
   which defaults to the reserved `runs/legacy/` run — what an invocation that never opened a run
-  reads (`status`, `champions`, `account`, `report`, a bare `research`) — and is rebound to the
-  run's own tree by `bootstrap.open_run_store` the moment `noctis run` mints an id. Derive paths
+  reads (`status`, `champions`, `account`, `report`) — and is rebound to the run's own tree the
+  moment a segment opens (`bootstrap.open_segment` → `open_run_store`), which is what `noctis run`
+  and `noctis research` each do when they mint or resume an id. Derive paths
   in `config/settings.py` and rebind them in the composition root, never in a command body.
   `noctis init` scaffolds the local input copies; `noctis migrate` moves a pre-workspace layout
   in **and** adopts a pre-run-scoped `workspace/state/` into the `legacy` run; one startup guard

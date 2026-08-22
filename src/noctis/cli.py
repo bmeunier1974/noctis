@@ -12,17 +12,18 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, NoReturn
+from functools import lru_cache
+from typing import TYPE_CHECKING, Literal, NoReturn
 
 import typer
 
 from noctis.config import SafetyGateError, load_settings, resolve_execution_mode
 
 if TYPE_CHECKING:  # the composition root imports at call time (fast `--help`), types don't
-    from noctis.bootstrap import OverrideChange, SessionInputs
+    from noctis.bootstrap import OverrideChange, Segment, SessionInputs
 
 
 def _logging_level(verbose: int) -> int:
@@ -45,21 +46,92 @@ app = typer.Typer(
 )
 
 
-def _resolve_mode_or_exit(config: str | None):
-    """Load settings and resolve the execution mode, exiting non-zero on a gate error."""
-    settings = load_settings(config_path=config)
-    try:
-        mode = resolve_execution_mode(settings)
-    except SafetyGateError as exc:
-        typer.secho(f"SAFETY GATE: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
-    return settings, mode
-
-
 def _exit_red(exc: Exception, prefix: str = "") -> NoReturn:
     """Red text on stderr + exit 1 — the one mapping every typed startup error takes."""
     typer.secho(f"{prefix}{exc}", fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1) from exc
+
+
+# The prefix a refusal about an *addressed run* is said under, chosen by the verb that addressed
+# it: an operator needs to know which of their commands refused, while the sentence beneath the
+# prefix stays the run store's own, whichever way the run was reached. `--resume` can meet all four
+# of the run/rehydration refusals; `--finish` and `run-prune` reach only the missing-run one — they
+# map through the same table anyway, so a fifth refusal cannot arrive at one verb unspoken.
+_VERB_PREFIXES = {"resume": "RESUME: ", "finish": "FINISH: ", "prune": "PRUNE: "}
+
+
+@lru_cache(maxsize=1)
+def _startup_refusals() -> tuple[tuple[type[Exception], str | None], ...]:
+    """The one table of typed startup refusals: what may be raised, and what it is said under.
+
+    Every entrypoint meets the same handful of refusals before any work starts — a mandate that
+    will not resolve, a closed safety gate, a run that is locked, missing, completed,
+    un-rehydratable or on a different engine — and each must be **loud**, because a typo'd
+    selector, or a refused resume that degraded into a silent new run, is a multi-day experiment
+    thrown away. This table is the single spelling of each prefix; :func:`_refusals_or_exit` is
+    the single place it is applied. ``None`` means "the addressing verb decides"
+    (:data:`_VERB_PREFIXES`).
+
+    Scanned in order, so a subclass is placed before its base. Built lazily — and cached, since it
+    is pure — because naming these types means importing the composition root, and ``--help`` must
+    stay fast.
+    """
+    from noctis.bootstrap import UsageError
+    from noctis.config.rehydrate import RehydrationError
+    from noctis.observability.engine_change import EngineChangeError
+    from noctis.reporting.run_store import (
+        RunCompletedError,
+        RunLockedError,
+        RunNotFoundError,
+        RunNotPrunableError,
+    )
+    from noctis.research import MandateError
+
+    return (
+        (UsageError, ""),  # --directive × --mandate, or an unknown --metric: it names itself
+        (MandateError, "MANDATE: "),
+        (SafetyGateError, "SAFETY GATE: "),
+        (RunLockedError, "RUN LOCKED: "),
+        (RunNotPrunableError, "PRUNE REFUSED: "),
+        (RunNotFoundError, None),
+        (RunCompletedError, None),
+        (RehydrationError, None),
+        (EngineChangeError, None),
+    )
+
+
+@contextmanager
+def _refusals_or_exit(
+    *, verb: str = "resume", only: tuple[type[Exception], ...] = ()
+) -> Iterator[None]:
+    """Run a startup step, turning any refusal :func:`_startup_refusals` names into red text + 1.
+
+    The one place the table is read, so the six prefixes are spelled once between them and no verb
+    can come to refuse the same condition in a different voice. ``verb`` picks the prefix for the
+    refusals that are *about an addressed run* (``resume`` / ``finish`` / ``prune``); ``only``
+    narrows the catch to the types this site owns, for a caller that handles the rest itself
+    (``status`` degrades an unusable mandate to a report rather than exiting on it).
+
+    Anything the table does not name propagates untouched: this maps refusals an operator must act
+    on, and swallowing a bug into a one-line exit would be the opposite of loud.
+    """
+    try:
+        yield
+    except Exception as exc:
+        if only and not isinstance(exc, only):
+            raise
+        for kind, prefix in _startup_refusals():
+            if isinstance(exc, kind):
+                _exit_red(exc, prefix=_VERB_PREFIXES[verb] if prefix is None else prefix)
+        raise
+
+
+def _resolve_mode_or_exit(config: str | None):
+    """Load settings and resolve the execution mode, exiting non-zero on a gate error."""
+    settings = load_settings(config_path=config)
+    with _refusals_or_exit():
+        mode = resolve_execution_mode(settings)
+    return settings, mode
 
 
 def _resolve_session_or_exit(config: str | None, **kwargs):
@@ -70,24 +142,10 @@ def _resolve_session_or_exit(config: str | None, **kwargs):
     The four resume refusals map here too, for the same reason: an unresumable run must be said
     out loud at the start rather than turned into a *new* run nobody asked for.
     """
-    from noctis.bootstrap import UsageError, resolve_session
-    from noctis.config.rehydrate import RehydrationError
-    from noctis.observability.engine_change import EngineChangeError
-    from noctis.reporting.run_store import RunCompletedError, RunNotFoundError
-    from noctis.research import MandateError
+    from noctis.bootstrap import resolve_session
 
-    try:
+    with _refusals_or_exit():
         return resolve_session(config, **kwargs)
-    except UsageError as exc:  # --directive × --mandate, or an unknown --metric
-        _exit_red(exc)
-    except MandateError as exc:
-        _exit_red(exc, prefix="MANDATE: ")
-    except SafetyGateError as exc:
-        _exit_red(exc, prefix="SAFETY GATE: ")
-    except (RunNotFoundError, RunCompletedError) as exc:
-        _exit_red(exc, prefix="RESUME: ")
-    except (RehydrationError, EngineChangeError) as exc:
-        _exit_red(exc, prefix="RESUME: ")
 
 
 def _resolve_status_session(config: str | None) -> tuple[SessionInputs, str | None]:
@@ -108,12 +166,11 @@ def _resolve_status_session(config: str | None) -> tuple[SessionInputs, str | No
     from noctis.research import MandateError
 
     try:
-        return resolve_session(config, require_gate=True), None
+        with _refusals_or_exit(only=(SafetyGateError,)):
+            return resolve_session(config, require_gate=True), None
     except MandateError as exc:
         settings, mode = _resolve_mode_or_exit(config)
         return SessionInputs(settings=settings, mode=mode, mandate=None, overrides=[]), str(exc)
-    except SafetyGateError as exc:
-        _exit_red(exc, prefix="SAFETY GATE: ")
 
 
 def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
@@ -165,6 +222,43 @@ def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
         typer.secho(message, fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
     typer.secho(f"WARNING: {message}", fg=typer.colors.YELLOW, err=True)
+
+
+@contextmanager
+def _segment_or_exit(
+    inputs: SessionInputs,
+    *,
+    command: Literal["run", "research"],
+    argv: list[str],
+    label: str | None = None,
+    debug: bool = False,
+    verbose: int = 0,
+    show_reasoning: bool = False,
+) -> Iterator[Segment]:
+    """Open this invocation's run segment, or refuse out loud (story #250).
+
+    The lifecycle itself — take the lock, mint or resume the id, freeze the inputs, record the
+    engine notes, build the ``--debug`` recorder and the event sink, and close with a reason on
+    every exit path — is :func:`~noctis.bootstrap.open_segment`'s, in the composition root. This
+    is the one line of it a Typer command owns: a live lock is fatal (two engines writing one run
+    would corrupt it), so the typed refusal the band raises becomes red text and a non-zero exit
+    here — through the one startup-error table (:func:`_startup_refusals`), where the exit codes
+    live, rather than in a module that must never import Typer.
+    """
+    from noctis.bootstrap import open_segment
+    from noctis.reporting.run_store import RunLockedError
+
+    with _refusals_or_exit(only=(RunLockedError,)):
+        with open_segment(
+            inputs,
+            command=command,
+            argv=argv,
+            label=label,
+            debug=debug,
+            verbose=verbose,
+            show_reasoning=show_reasoning,
+        ) as segment:
+            yield segment
 
 
 def _echo_mandate(mandate, override_lines: list[str]) -> None:
@@ -265,7 +359,7 @@ def _show_config_drift(config: str | None, resume: str | None) -> None:
     """
     from noctis.bootstrap import UsageError
     from noctis.config.rehydrate import config_drift
-    from noctis.reporting.run_store import RunNotFoundError, read_run_record
+    from noctis.reporting.run_store import read_run_record
 
     if resume is None:
         _exit_red(
@@ -275,10 +369,8 @@ def _show_config_drift(config: str | None, resume: str | None) -> None:
             )
         )
     current = _resolve_session_or_exit(config)
-    try:
+    with _refusals_or_exit():
         record = read_run_record(current.settings.runs_dir, resume)
-    except RunNotFoundError as exc:
-        _exit_red(exc, prefix="RESUME: ")
     run = record.get("run")
     run_id = str((run.get("run_id") if isinstance(run, Mapping) else None) or resume)
     inputs = record.get("inputs")
@@ -302,7 +394,7 @@ def _finish_run(config: str | None, resume: str | None) -> None:
     from pathlib import Path
 
     from noctis.bootstrap import UsageError
-    from noctis.reporting.run_store import RunLockedError, RunNotFoundError, finish_run
+    from noctis.reporting.run_store import finish_run
 
     if resume is None:
         _exit_red(
@@ -313,17 +405,13 @@ def _finish_run(config: str | None, resume: str | None) -> None:
             )
         )
     settings = load_settings(config_path=config)
-    try:
+    with _refusals_or_exit(verb="finish"):
         outcome = finish_run(
             Path(settings.runs_dir),
             resume,
             clock=lambda: datetime.now(UTC),
             election_metric=settings.promotion.metric,
         )
-    except RunNotFoundError as exc:
-        _exit_red(exc, prefix="FINISH: ")
-    except RunLockedError as exc:
-        _exit_red(exc, prefix="RUN LOCKED: ")
     if not outcome.sealed:
         typer.echo(
             f"Run {outcome.run_id} was already completed (at {outcome.completed_utc}) — nothing "
@@ -439,20 +527,19 @@ def _echo_config_rebase(rebase: Mapping | None, *, rebased: bool) -> None:
     )
 
 
-def _echo_engine_change(store, inputs, *, upgrading: bool) -> None:
-    """Say — and **record** — that this run resumed under a different engine (story #135).
+def _echo_engine_change(inputs, *, upgrading: bool) -> None:
+    """Say that this run resumed under a different engine (story #135).
 
-    Both, always, and in that order of importance: the record is what an experiment is judged from
-    months later, so an engine change that only ever appeared in a terminal would be invisible
-    exactly when it mattered. The event lands against the segment it is true of, which is why it is
-    written per resume rather than once per run.
+    **Saying** is this command's half; **recording** is the band's (:func:`~noctis.bootstrap.
+    open_segment`, story #250), and it happens whether or not a terminal ever printed it — the
+    record is what an experiment is judged from months later, so an engine change visible only on
+    stdout would be missing exactly when it mattered.
 
     A refused resume never reaches here (the policy raises during session assembly), and a resume
-    that found no drift prints and records nothing at all — silence is the signal.
+    that found no drift prints nothing at all — silence is the signal.
     """
     for note in inputs.engine_notes:
         typer.secho(f"Engine change: {note}", fg=typer.colors.YELLOW)
-        store.note(note)
     if not upgrading:
         return
     upgrade = inputs.engine_upgrade
@@ -615,20 +702,9 @@ def run(
     import signal
     import sys
 
-    from noctis.bootstrap import (
-        UsageError,
-        build_event_sink,
-        build_lake,
-        build_memory,
-        build_recorder,
-        open_run_store,
-        segment_counters,
-        segment_phase_seconds,
-    )
+    from noctis.bootstrap import UsageError, build_lake, build_memory
     from noctis.engine import MarketClock, build_runtime, initial_phase_for
-    from noctis.engine.runtime import trading_roster
-    from noctis.reporting.run_store import RunLockedError
-    from noctis.research import client_status
+    from noctis.engine.runtime import RuntimeResult, trading_roster
 
     # Off by default (WARNING) so a bare run stays quiet; the -v feed rides the Console below,
     # -vv drops stdlib logging to DEBUG. One ladder shared with `noctis research`.
@@ -703,140 +779,119 @@ def run(
     typer.echo(f"Initial phase: {initial_phase_for(clock).value}")
     _echo_mandate(active_mandate, inputs.overrides)
 
-    # Always-on run identity (story #129): every invocation mints a run, gets its own tree under
-    # workspace/runs/<run_id>/, takes the liveness lock, and writes one self-describing run.json.
-    # A live lock is the one fatal failure in this subsystem — two engines writing one run would
-    # corrupt it — so it exits non-zero here instead of degrading to a shared write.
-    # …and `--resume <run_id>` continues one instead: the same tree, the same record, one more
-    # segment, under the configuration that run froze at creation (story #132). The run — not this
-    # process — is the unit progress accumulates on.
-    try:
-        store = open_run_store(
-            settings,
-            argv=sys.argv[1:],
-            command="run",
-            run_id=resume,
-            resume=resume is not None,
-            label=label,
-            mandate=active_mandate,
-            mode=mode,
-            overrides=inputs.overrides,
-            rebase=inputs.rebase,
-            engine_upgrade=inputs.engine_upgrade,
-        )
-    except RunLockedError as exc:
-        _exit_red(exc, prefix="RUN LOCKED: ")
-    typer.echo(f"{'Resumed run' if resume else 'Run'}: {store.run_id}")
-    typer.echo(f"Run record: {store.record_path}")
-    _echo_run_limit(settings.run_limit_hours, spent_s=store.prior_runtime_s)
-    _echo_config_rebase(inputs.rebase, rebased=rebase_config)
-    _echo_engine_change(store, inputs, upgrading=allow_engine_upgrade)
-
-    # --debug assembles the QA recorder in the composition root (prune-on-start → run tree →
-    # stamped manifest), echoes the run id + report path here at start, and — when the legacy
-    # loop will drive research — marks the funnel uninstrumented so a zero-fill can't read as
-    # "nothing happened". Off by default: recorder stays None and the run is byte-identical.
-    # It rides the run's OWN id, so the QA tree and the run record name the same run.
+    # Always-on run identity (story #129): every invocation opens exactly one run *segment* — the
+    # id minted or resumed, its own tree under workspace/runs/<run_id>/, the liveness lock, the
+    # frozen inputs, the --debug recorder and the event sink — and closes it with a stop reason on
+    # every exit path. That whole lifecycle is the band's (story #250); what stays here is what
+    # only a command knows: what to say, and what to drive. `--resume <address>` continues an
+    # existing run rather than minting one: the same tree, the same record, one more segment, under
+    # the configuration that run froze at creation (story #132) — the run, not this process, is the
+    # unit progress accumulates on.
     recorder = None
-    if debug:
-        recorder = build_recorder(settings, argv=sys.argv[1:], mode=mode, run_id=store.run_id)
-        typer.echo(f"QA run: {recorder.run_id}")
-        typer.echo(f"QA report: {recorder.run_dir}")
-        if not client_status(settings).ok:
-            recorder.mark_legacy_research()
-
-    # The run store and the recorder wrap the whole run: a between-phases stop
-    # (SIGINT/SIGTERM/time limit returns normally through runtime.run()) AND a hard error both
-    # reach close() via the finally, so an interrupted run still lands a readable final segment,
-    # a stamped manifest, and a closed run record with its lock released.
-    stopped_reason = "startup"
-    result = None
+    result: RuntimeResult | None = None
     try:
-        memory = build_memory(settings)
-        lake = build_lake(settings)
+        with _segment_or_exit(
+            inputs,
+            command="run",
+            argv=sys.argv[1:],
+            label=label,
+            debug=debug,
+            verbose=verbose,
+            show_reasoning=show_reasoning,
+        ) as seg:
+            recorder = seg.recorder
+            typer.echo(f"{'Resumed run' if seg.resumed else 'Run'}: {seg.run_id}")
+            typer.echo(f"Run record: {seg.record_path}")
+            _echo_run_limit(settings.run_limit_hours, spent_s=seg.prior_runtime_s)
+            _echo_config_rebase(inputs.rebase, rebased=rebase_config)
+            _echo_engine_change(inputs, upgrading=allow_engine_upgrade)
+            # --debug records an hour-segmented QA report of the whole run. The band assembled it
+            # (prune-on-start → run tree → stamped manifest) on the run's OWN id, so the QA tree
+            # and the run record name the same run; this says where it landed. Off by default:
+            # no recorder, and the run is byte-identical.
+            if recorder is not None:
+                typer.echo(f"QA run: {recorder.run_id}")
+                typer.echo(f"QA report: {recorder.run_dir}")
 
-        # Optional, opt-in auto-backfill: before the readiness check, fetch missing history for
-        # any not-yet-ready universe symbol (budget-gated). Off by default → zero fetches.
-        missing = [s for s in settings.universe if not lake.check_symbol_ready(s)]
-        if missing and settings.data.auto_backfill:
-            if not settings.databento_api_key:
-                typer.secho(
-                    "auto_backfill is on but no DATABENTO_API_KEY — skipping backfill.",
-                    fg=typer.colors.YELLOW,
-                    err=True,
+            memory = build_memory(settings)
+            lake = build_lake(settings)
+
+            # Optional, opt-in auto-backfill: before the readiness check, fetch missing history
+            # for any not-yet-ready universe symbol (budget-gated). Off by default → zero fetches.
+            missing = [s for s in settings.universe if not lake.check_symbol_ready(s)]
+            if missing and settings.data.auto_backfill:
+                if not settings.databento_api_key:
+                    typer.secho(
+                        "auto_backfill is on but no DATABENTO_API_KEY — skipping backfill.",
+                        fg=typer.colors.YELLOW,
+                        err=True,
+                    )
+                else:
+                    _auto_backfill(settings, lake, missing)
+
+            # Readiness spans the trading roster (the growing universe): the config seed plus every
+            # symbol the research agent has fetched into the lake.
+            ready = [s for s in trading_roster(settings, lake) if lake.check_symbol_ready(s)]
+            if not ready:
+                typer.echo(
+                    "No catalog data yet — ingest history first (e.g. `noctis data ingest AAPL "
+                    "--start 2024-01-01 --end 2024-12-31`), then run again. Exiting cleanly."
                 )
-            else:
-                _auto_backfill(settings, lake, missing)
+                seg.finish("no_data")
+                return
 
-        # Readiness spans the trading roster (the growing universe): the config seed plus every
-        # symbol the research agent has fetched into the lake.
-        ready = [s for s in trading_roster(settings, lake) if lake.check_symbol_ready(s)]
-        if not ready:
-            typer.echo(
-                "No catalog data yet — ingest history first (e.g. `noctis data ingest AAPL "
-                "--start 2024-01-01 --end 2024-12-31`), then run again. Exiting cleanly."
+            runtime = build_runtime(
+                settings,
+                market_lake=lake,
+                memory=memory,
+                clock=clock,
+                mandate=active_mandate,
+                # One level-aware sink renders the loop's typed events (phase banners + the
+                # research feed) and, under --debug, tees them into the recorder even when the
+                # console is absent — a quiet --debug run records silently rather than not at all.
+                on_event=seg.on_event,
+                # Incremental durability: the record is rewritten at each CLOSE, so a multi-week
+                # run's evidence is current on disk long before the process stops.
+                on_cycle_close=seg.checkpoint,
+                # The run-level cap is measured against the whole run, so this segment starts
+                # counting from what its predecessors already spent (story #136).
+                prior_runtime_s=seg.prior_runtime_s,
             )
-            stopped_reason = "no_data"
-            return
 
-        # One level-aware sink renders the loop's typed events (phase banners + the research feed,
-        # and the trading feed once P4 lands) and, under --debug, tees them into the recorder even
-        # when the console is absent (quiet --debug records silently). A bare run passes the plain
-        # console (or None), so the runtime stays byte-identical to today.
-        runtime = build_runtime(
-            settings,
-            market_lake=lake,
-            memory=memory,
-            clock=clock,
-            mandate=active_mandate,
-            on_event=build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder),
-            # Incremental durability: the record is rewritten at each CLOSE, so a multi-week run's
-            # evidence is current on disk long before the process stops.
-            on_cycle_close=lambda outcome: store.checkpoint(
-                counters=segment_counters(outcome),
-                phase_seconds=segment_phase_seconds(outcome),
-            ),
-            # The run-level cap is measured against the whole run, so this segment starts counting
-            # from what its predecessors already spent (story #136).
-            prior_runtime_s=store.prior_runtime_s,
-        )
+            # SIGINT/SIGTERM route through one clean shutdown path (stops between phases).
+            def _shutdown(signum, _frame):
+                typer.echo(f"\nReceived signal {signum}; stopping cleanly after this phase…")
+                runtime.request_stop()
 
-        # SIGINT/SIGTERM route through one clean shutdown path (stops between phases).
-        def _shutdown(signum, _frame):
-            typer.echo(f"\nReceived signal {signum}; stopping cleanly after this phase…")
-            runtime.request_stop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(sig, _shutdown)
 
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(sig, _shutdown)
-
-        result = runtime.run()
-        stopped_reason = result.stopped_reason
-        typer.echo(
-            f"Stopped ({result.stopped_reason}): {result.cycles_completed} cycle(s), "
-            f"{result.research_iterations} candidates researched, {result.trades} paper orders."
-        )
+            result = runtime.run()
+            # What stopped this segment, and what it measured: the band stamps both onto the
+            # record when the `with` unwinds — after a clean between-phases stop
+            # (SIGINT/SIGTERM/time limit all return normally through runtime.run()) and after a
+            # hard error alike, so an interrupted run still lands a readable final segment.
+            seg.finish(result.stopped_reason, outcome=result)
+            typer.echo(
+                f"Stopped ({result.stopped_reason}): {result.cycles_completed} cycle(s), "
+                f"{result.research_iterations} candidates researched, {result.trades} paper orders."
+            )
     finally:
+        # Where the QA report landed and what its funnel counted, said once the recording is
+        # complete — the band closed the recorder as the segment closed, on every path including
+        # a crash, which is exactly why these two lines live in a finally of their own.
         if recorder is not None:
-            recorder.close()
             typer.echo(f"QA report: {recorder.run_dir} (run {recorder.run_id})")
             typer.echo(f"QA funnel: {recorder.funnel_line()}")
-        # Closing the segment stamps its stop reason and duration, writes the record one last
-        # time and releases the lock — including on the paths that never reached the loop, so a
-        # run that exits early is still a closed, resumable run rather than a dangling lock.
-        store.close(
-            reason=stopped_reason,
-            counters=segment_counters(result) if result is not None else None,
-            phase_seconds=segment_phase_seconds(result) if result is not None else None,
+    # Said after the segment is closed, because that write is what makes it true: the record
+    # derives the seal from its own segments, so the run is completed the moment the segment
+    # that spent the cap lands on disk.
+    if result is not None and result.stopped_reason == "run_limit":
+        typer.echo(
+            f"Run {seg.run_id} reached its {settings.run_limit_hours:g}h compute cap and is "
+            "now completed — a terminal state, so it refuses resume. Start a new run to "
+            "continue researching."
         )
-        # Said after the segment is closed, because that write is what makes it true: the record
-        # derives the seal from its own segments, so the run is completed the moment the segment
-        # that spent the cap lands on disk.
-        if stopped_reason == "run_limit":
-            typer.echo(
-                f"Run {store.run_id} reached its {settings.run_limit_hours:g}h compute cap and is "
-                "now completed — a terminal state, so it refuses resume. Start a new run to "
-                "continue researching."
-            )
 
 
 @app.command()
@@ -1120,15 +1175,10 @@ def run_prune(
     from datetime import UTC, datetime
     from pathlib import Path
 
-    from noctis.reporting.run_store import (
-        RunLockedError,
-        RunNotFoundError,
-        RunNotPrunableError,
-        prune_run_state,
-    )
+    from noctis.reporting.run_store import prune_run_state
 
     settings = load_settings(config_path=config)
-    try:
+    with _refusals_or_exit(verb="prune"):
         outcome = prune_run_state(
             Path(settings.runs_dir),
             run_id,
@@ -1136,12 +1186,6 @@ def run_prune(
             election_metric=settings.promotion.metric,
             dry_run=dry_run,
         )
-    except RunNotFoundError as exc:
-        _exit_red(exc, prefix="PRUNE: ")
-    except RunNotPrunableError as exc:
-        _exit_red(exc, prefix="PRUNE REFUSED: ")
-    except RunLockedError as exc:
-        _exit_red(exc, prefix="RUN LOCKED: ")
     _echo_prune(outcome)
 
 
@@ -1594,185 +1638,191 @@ def research(
     import time
 
     from noctis.bootstrap import (
-        build_event_sink,
         build_families,
         build_lake,
         build_memory,
-        build_recorder,
         build_research_session,
-        open_run_store,
-        research_segment_counters,
     )
     from noctis.champions import build_registry
     from noctis.reporting.run_record import RESEARCH_PHASE
-    from noctis.reporting.run_store import RunLockedError
-    from noctis.research import client_status, provider_of, resolved_research_model
+    from noctis.research import provider_of, resolved_research_model
 
     logging.basicConfig(
         level=_logging_level(verbose), format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
 
-    # The composition root owns the ordering (§5): load_settings → resolve_mandate →
+    # The composition root owns the ordering (§5): safety gate → resolve_mandate →
     # overlay_mandate → explicit CLI flags, so --metric still wins over a mandate overlay. Under
     # --resume that middle is replaced by the run's frozen config, and the flags that would
     # re-steer it are refused with a reason — the same chain `run --resume` walks, from one place.
+    # The gate is armed here even though a research session places no order (story #247): the run
+    # this session mints is frozen at creation, and it may trade on a later `run --resume`, so its
+    # record must carry the gate's *verdict* rather than "nobody measured" — and no verb may be a
+    # silent downgrade, so `mode: live` without ALLOW_LIVE refuses here as it does in `run`.
     inputs = _resolve_session_or_exit(
-        config, directive=directive, mandate=mandate, metric=metric, resume=resume
+        config,
+        directive=directive,
+        mandate=mandate,
+        metric=metric,
+        require_gate=True,
+        resume=resume,
     )
     settings, active_mandate = inputs.settings, inputs.mandate
     _guard_legacy_or_exit(settings)
 
-    # Open the run BEFORE any collaborator is assembled: opening binds the run's own tree
-    # (state, memory, strategy tiers, reports), so everything built below reads the run's state
-    # with no path arithmetic here. A live lock is the one fatal failure in this subsystem — two
-    # engines writing one run would corrupt it — and it refuses identically whichever verb asked.
-    try:
-        store = open_run_store(
-            settings,
-            argv=sys.argv[1:],
-            command="research",
-            run_id=resume,
-            resume=resume is not None,
-            mandate=active_mandate,
-            overrides=inputs.overrides,
-        )
-    except RunLockedError as exc:
-        _exit_red(exc, prefix="RUN LOCKED: ")
-    typer.echo(f"{'Resumed run' if resume else 'Run'}: {store.run_id}")
-    typer.echo(f"Run record: {store.record_path}")
-    _echo_engine_change(store, inputs, upgrading=False)
-
-    # The run store and the recorder wrap the whole session: an early exit (no key/extra) and a
-    # hard error both reach the one finally, so a session that never ran still lands a closed,
-    # resumable segment with its lock released — the same shape `run` uses.
-    stopped_reason = "startup"
-    summary = None
-    research_s = 0.0
+    # A standalone session is a run (story #137), so this invocation opens exactly one run
+    # *segment* — the id minted or resumed, its own tree under workspace/runs/<run_id>/, the
+    # liveness lock, the frozen inputs, the --debug recorder and the event sink — and closes it
+    # with a stop reason on every exit path. That whole lifecycle is the band's (story #251), the
+    # same band `run` opens, so a lock-release fix can no longer land in one verb and be missed in
+    # the other. The segment opens BEFORE any collaborator is assembled: opening binds the run's
+    # own tree (state, memory, strategy tiers, reports), so everything built below reads the run's
+    # state with no path arithmetic here.
     recorder = None
     try:
-        # --debug opens the QA recorder only once the agent session is known to be buildable
-        # (``client_status.ok`` mirrors ``build_research_session is not None``), so an early exit —
-        # research never records a legacy session — leaves no orphaned half-written run tree. It
-        # rides the run's OWN id, so the QA tree and the run record name the same run.
-        if debug and client_status(settings).ok:
-            recorder = build_recorder(settings, argv=sys.argv[1:], mode=None, run_id=store.run_id)
-            typer.echo(f"QA run: {recorder.run_id}")
-            typer.echo(f"QA report: {recorder.run_dir}")
+        with _segment_or_exit(
+            inputs,
+            command="research",
+            argv=sys.argv[1:],
+            debug=debug,
+            verbose=verbose,
+            show_reasoning=show_reasoning,
+        ) as seg:
+            recorder = seg.recorder
+            typer.echo(f"{'Resumed run' if seg.resumed else 'Run'}: {seg.run_id}")
+            typer.echo(f"Run record: {seg.record_path}")
+            _echo_engine_change(inputs, upgrading=False)
+            # --debug records an hour-segmented QA report of this session. The band built it only
+            # once the agent session was known to be buildable (``client_status.ok`` mirrors
+            # ``build_research_session is not None``), so an early exit — research never records a
+            # legacy session — leaves no orphaned half-written run tree; and it rides the run's
+            # OWN id, so the QA tree and the run record name the same run. This says where it
+            # landed. Off by default: no recorder, and the session is byte-identical.
+            if recorder is not None:
+                typer.echo(f"QA run: {recorder.run_id}")
+                typer.echo(f"QA report: {recorder.run_dir}")
 
-        # One level-aware sink renders the loop's typed events, teed into the recorder under
-        # --debug; --show-reasoning opens the think/say streams without the full -vv DEBUG noise.
-        # Quiet (no -v, no --debug) ⇒ None ⇒ the loop's own logging default handles events. The
-        # command duck-types console.saw_think/hint off this sink — the EventTee proxies both to
-        # the primary (or a no-op stand-in when --debug runs without -v), so -v output stays
-        # byte-identical.
-        console = build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder)
-        session = build_research_session(
-            settings=settings,
-            lake=build_lake(settings),
-            registry=build_registry(settings),
-            families=build_families(settings),  # champions may be minted spec-families
-            memory=build_memory(settings),
-            mandate=active_mandate,
-            on_event=console,
-        )
-        if session is None:
-            stopped_reason = "no_session"
-            resolved_model = resolved_research_model(settings)
-            provider = provider_of(resolved_model)
-            key_env = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider)
-            need_key = f" and {key_env}" if key_env else ""
-            typer.secho(
-                f"Agent research needs the [llm] extra{need_key} for model {resolved_model!r}.",
-                fg=typer.colors.RED,
-                err=True,
+            # The band's level-aware sink renders the loop's typed events, teed into the recorder
+            # under --debug. The command duck-types console.saw_think/hint off it — the EventTee
+            # proxies both to the primary (or a no-op stand-in when --debug runs without -v), so
+            # -v output stays byte-identical, and a quiet run (None) keeps the loop on its own
+            # logging default.
+            console = seg.on_event
+            session = build_research_session(
+                settings=settings,
+                lake=build_lake(settings),
+                registry=build_registry(settings),
+                families=build_families(settings),  # champions may be minted spec-families
+                memory=build_memory(settings),
+                mandate=active_mandate,
+                on_event=console,
             )
-            raise typer.Exit(code=1)
-
-        typer.echo(
-            f"Agent research session: model={session.model}, "
-            f"profile={session.budgets.name}, "
-            f"metric={settings.promotion.metric}, "
-            f"budget={settings.research_time_budget_minutes} min, "
-            f"max_iterations={max_iterations or session.budgets.max_iterations}, "
-            f"exhaustion gate={settings.research.min_trials} trials"
-        )
-        _echo_mandate(active_mandate, inputs.overrides)
-        # Seconds this process spent *working* in RESEARCH — measured around the session itself,
-        # monotonically, so a clock step cannot make a night look longer. Startup and waiting are
-        # not research: they belong to the segment's wall-clock duration and to no phase, exactly
-        # as the day loop's own phase timings work.
-        started = time.monotonic()
-        summary = session.run(max_iterations=max_iterations)
-        research_s = round(time.monotonic() - started, 3)
-        stopped_reason = summary.stopped_reason or "agent_done"
-        # Graceful degradation: a reasoning view (-vv or --show-reasoning) that surfaced no `think`
-        # events almost always means the provider returns no chain-of-thought over the API — the
-        # default OpenAI reasoning models are exactly this case. Say so once, so silence reads as
-        # "expected for this provider", not "the feature is broken". Narration (say) is unaffected.
-        if console is not None and (verbose >= 2 or show_reasoning) and not console.saw_think:
-            console.hint(
-                f"reasoning not surfaced by {provider_of(session.model)} — its reasoning models "
-                f"return no raw chain-of-thought over the API; narration still shows"
-            )
-        # A standalone session counts toward periodic memory distillation too (the distillation
-        # itself only ever runs at the day loop's CLOSE).
-        from noctis.research.distill import bump_research_session
-
-        bump_research_session(settings.state_dir)
-        coder_calls = (
-            f" {session.toolbox.author_calls} coder authoring call(s),"
-            if session.toolbox.author_calls
-            else ""
-        )
-        typer.echo(
-            f"Session over ({summary.stopped_reason}): {summary.iterations} tool rounds, "
-            f"{session.toolbox.backtests_run} backtests,{coder_calls} "
-            f"{summary.promotions} promotion(s), {summary.rejections} rejection(s)."
-        )
-        # What the session spent, and — deliberately — that the dollars are an *estimate* priced
-        # from a versioned table rather than a charge anyone made (story #140). A model the table
-        # does not carry is named as unpriced: a zero would be a confidently false bill.
-        if summary.tokens_total:
-            # The version named here is the session's **own** table (the one the run was priced
-            # with, config override included), read off the same session that spent the tokens —
-            # so the line can never credit a bill to a table that did not produce it.
-            table_version = session.price_table.version
-            if summary.usd_estimate is None:
-                typer.echo(
-                    f"Spend: {summary.tokens_total:,} tokens; no price for {session.model!r} in "
-                    f"table {table_version} — cost not estimated"
+            if session is None:
+                # No session ran, so nothing was measured — the reason is reported and the counters
+                # are not, and the `typer.Exit` unwinds through the band, which closes the segment
+                # and releases the lock. An invocation that exits early is still a closed,
+                # resumable run rather than a dangling lock.
+                seg.finish("no_session")
+                resolved_model = resolved_research_model(settings)
+                provider = provider_of(resolved_model)
+                key_env = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(
+                    provider
                 )
-            else:
-                typer.echo(
-                    f"Spend: {summary.tokens_total:,} tokens ≈ ${summary.usd_estimate:.4f} "
-                    f"(estimate, price table {table_version})"
+                need_key = f" and {key_env}" if key_env else ""
+                typer.secho(
+                    f"Agent research needs the [llm] extra{need_key} for model {resolved_model!r}.",
+                    fg=typer.colors.RED,
+                    err=True,
                 )
-        if summary.candidates:
-            typer.echo(f"Strategies worked on: {', '.join(summary.candidates)}")
+                raise typer.Exit(code=1)
+
             typer.echo(
-                f"Inspect: noctis strategies; {settings.state_dir}/experiments/<name>.jsonl; "
-                f"{settings.memory_path}"
+                f"Agent research session: model={session.model}, "
+                f"profile={session.budgets.name}, "
+                f"metric={settings.promotion.metric}, "
+                f"budget={settings.research_time_budget_minutes} min, "
+                f"max_iterations={max_iterations or session.budgets.max_iterations}, "
+                f"exhaustion gate={settings.research.min_trials} trials"
             )
-        if summary.undecided:
+            _echo_mandate(active_mandate, inputs.overrides)
+            # Seconds this process spent *working* in RESEARCH — measured around the session
+            # itself, monotonically, so a clock step cannot make a night look longer. Startup and
+            # waiting are not research: they belong to the segment's wall-clock duration and to no
+            # phase, exactly as the day loop's own phase timings work. A ``ResearchSummary`` knows
+            # nothing about them, which is why they are reported explicitly rather than derived.
+            started = time.monotonic()
+            summary = session.run(max_iterations=max_iterations)
+            research_s = round(time.monotonic() - started, 3)
+            # What stopped this segment, and what it measured: the band stamps both onto the
+            # record when the `with` unwinds — after a clean stop and after a hard error alike, so
+            # an interrupted session still lands a readable final segment.
+            seg.finish(
+                summary.stopped_reason or "agent_done",
+                outcome=summary,
+                phase_seconds={RESEARCH_PHASE: research_s},
+            )
+            # Graceful degradation: a reasoning view (-vv or --show-reasoning) that surfaced no
+            # `think` events almost always means the provider returns no chain-of-thought over the
+            # API — the default OpenAI reasoning models are exactly this case. Say so once, so
+            # silence reads as "expected for this provider", not "the feature is broken".
+            # Narration (say) is unaffected.
+            if console is not None and (verbose >= 2 or show_reasoning) and not console.saw_think:
+                console.hint(
+                    f"reasoning not surfaced by {provider_of(session.model)} — its reasoning "
+                    f"models return no raw chain-of-thought over the API; narration still shows"
+                )
+            # A standalone session counts toward periodic memory distillation too (the
+            # distillation itself only ever runs at the day loop's CLOSE).
+            from noctis.research.distill import bump_research_session
+
+            bump_research_session(settings.state_dir)
+            coder_calls = (
+                f" {session.toolbox.author_calls} coder authoring call(s),"
+                if session.toolbox.author_calls
+                else ""
+            )
             typer.echo(
-                f"Left undecided ({len(summary.undecided)}): {', '.join(summary.undecided)} "
-                f"— archived after the TTL"
+                f"Session over ({summary.stopped_reason}): {summary.iterations} tool rounds, "
+                f"{session.toolbox.backtests_run} backtests,{coder_calls} "
+                f"{summary.promotions} promotion(s), {summary.rejections} rejection(s)."
             )
+            # What the session spent, and — deliberately — that the dollars are an *estimate*
+            # priced from a versioned table rather than a charge anyone made (story #140). A model
+            # the table does not carry is named as unpriced: a zero would be a confidently false
+            # bill.
+            if summary.tokens_total:
+                # The version named here is the session's **own** table (the one the run was
+                # priced with, config override included), read off the same session that spent the
+                # tokens — so the line can never credit a bill to a table that did not produce it.
+                table_version = session.price_table.version
+                if summary.usd_estimate is None:
+                    typer.echo(
+                        f"Spend: {summary.tokens_total:,} tokens; no price for {session.model!r} "
+                        f"in table {table_version} — cost not estimated"
+                    )
+                else:
+                    typer.echo(
+                        f"Spend: {summary.tokens_total:,} tokens ≈ ${summary.usd_estimate:.4f} "
+                        f"(estimate, price table {table_version})"
+                    )
+            if summary.candidates:
+                typer.echo(f"Strategies worked on: {', '.join(summary.candidates)}")
+                typer.echo(
+                    f"Inspect: noctis strategies; {settings.state_dir}/experiments/<name>.jsonl; "
+                    f"{settings.memory_path}"
+                )
+            if summary.undecided:
+                typer.echo(
+                    f"Left undecided ({len(summary.undecided)}): {', '.join(summary.undecided)} "
+                    f"— archived after the TTL"
+                )
     finally:
+        # Where the QA report landed and what its funnel counted, said once the recording is
+        # complete — the band closed the recorder as the segment closed, on every path including
+        # a crash, which is exactly why these two lines live in a finally of their own.
         if recorder is not None:
-            recorder.close()
             typer.echo(f"QA report: {recorder.run_dir} (run {recorder.run_id})")
             typer.echo(f"QA funnel: {recorder.funnel_line()}")
-        # Closing the segment stamps its stop reason and duration, writes the record one last time
-        # (re-counting the run's journaled trials from disk) and releases the lock — including on
-        # the paths that never reached a session, so a run that exits early is still a closed,
-        # resumable run rather than a dangling lock. A session that never ran measured no phase
-        # and counts nothing: ``None`` leaves both off the segment rather than claiming a zero.
-        store.close(
-            reason=stopped_reason,
-            counters=research_segment_counters(summary) if summary is not None else None,
-            phase_seconds={RESEARCH_PHASE: research_s} if summary is not None else None,
-        )
 
 
 @app.command()

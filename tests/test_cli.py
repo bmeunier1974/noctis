@@ -92,6 +92,15 @@ def test_run_live_without_gate_exits_nonzero(tmp_path, monkeypatch):
     assert "SAFETY GATE" in result.output
 
 
+def test_research_live_without_gate_exits_nonzero(tmp_path, monkeypatch):
+    """No verb is a silent downgrade (#247): ``research`` arms the same gate ``run`` does, so
+    ``mode: live`` without ``ALLOW_LIVE`` refuses at startup with the same line."""
+    monkeypatch.delenv("ALLOW_LIVE", raising=False)
+    result = runner.invoke(app, ["research", "--config", _live_config(tmp_path)])
+    assert result.exit_code != 0
+    assert "SAFETY GATE" in result.output
+
+
 def test_run_live_with_gate_exits_zero(tmp_path, monkeypatch):
     monkeypatch.setenv("ALLOW_LIVE", "true")
     result = runner.invoke(app, ["run", "--config", _live_config(tmp_path)])
@@ -664,6 +673,53 @@ def test_run_debug_hard_exception_still_stamps_manifest(tmp_path, monkeypatch):
     assert manifest["stopped"] is not None  # closed via the finally despite the crash
 
 
+def test_run_debug_echoes_the_qa_frame_in_its_fixed_order(tmp_path):
+    """The ``--debug`` transcript, pinned (story #250): the run's identity, the QA tree at start,
+    the loop's own stop line, then the closing QA report + funnel — which print *after* the work
+    on every path, including a crash, because they are what says the recording is complete."""
+    cfg = _debug_run_config(tmp_path)
+    result = runner.invoke(app, ["run", "--config", cfg, "--debug", "--time-limit-hours", "0"])
+    assert result.exit_code == 0, result.output
+
+    framing = [
+        line.split(":")[0]
+        for line in result.output.splitlines()
+        if line.startswith(("Run: ", "Run record: ", "QA ", "Stopped ("))
+    ]
+    assert framing == [
+        "Run",
+        "Run record",
+        "QA run",
+        "QA report",
+        "Stopped (time_limit)",
+        "QA report",
+        "QA funnel",
+    ]
+
+
+def test_a_recorder_that_refuses_to_build_still_releases_the_run_lock(tmp_path, monkeypatch):
+    """The ``--debug`` recorder is assembled *inside* the guarded region (story #250): a qa_dir
+    that refuses to take a recorder used to leave the run locked until the stale-lock timeout,
+    because the builder ran after the lock was taken and outside the try that released it."""
+    import json
+
+    from noctis.reporting.run_store import RUN_LOCK_NAME
+
+    def _refuse(*args, **kwargs):
+        raise OSError("qa_dir is unwritable")
+
+    monkeypatch.setattr("noctis.bootstrap.build_recorder", _refuse)
+    cfg = _debug_run_config(tmp_path)
+    result = runner.invoke(app, ["run", "--config", cfg, "--debug", "--time-limit-hours", "0"])
+    assert result.exit_code != 0  # the failure is not swallowed
+
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    assert not (run_dir / RUN_LOCK_NAME).exists(), "the lock outlived the segment"
+    record = json.loads((run_dir / "run.json").read_text())
+    # Nothing was measured, so the segment closes at the sentinel — a closed, resumable run.
+    assert record["segments"][-1]["stopped_reason"] == "startup"
+
+
 def test_run_no_debug_writes_no_qa_tree(tmp_path):
     """The default (no --debug) is byte-identical to today: no recorder, no QA writes, no echoes."""
     cfg = _debug_run_config(tmp_path)
@@ -741,6 +797,9 @@ def test_research_debug_records_and_echoes(tmp_path, monkeypatch):
     run_dir = _one_qa_run(tmp_path)
     manifest = json.loads((run_dir / "run.json").read_text())
     assert manifest["stopped"] is not None
+    # The session resolved the gate, so the QA manifest carries its verdict rather than a
+    # null nobody measured (#247).
+    assert manifest["mode"] == "paper"
 
     run_id = run_dir.name
     assert result.output.count(run_id) >= 2  # echoed at start and again at stop
@@ -749,6 +808,215 @@ def test_research_debug_records_and_echoes(tmp_path, monkeypatch):
     assert "QA funnel: written=1" in result.output
     # --debug without -v stays silent: the emitted feed events never hit stdout
     assert "write_strategy(alpha)" not in result.output
+
+
+def test_research_debug_echoes_the_qa_frame_in_its_fixed_order(tmp_path, monkeypatch):
+    """The research ``--debug`` transcript, pinned (#251): the run's identity, the QA tree at
+    start, the session's own stop line, then the closing QA report + funnel — which print *after*
+    the session on every path, including a crash, because they say the recording is complete."""
+    _patch_research_agent(monkeypatch)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\nqa_dir: {tmp_path}/qa\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg), "--debug"])
+    assert result.exit_code == 0, result.output
+
+    framing = [
+        line.split(":")[0]
+        for line in result.output.splitlines()
+        if line.startswith(("Run: ", "Run record: ", "QA ", "Session over ("))
+    ]
+    assert framing == [
+        "Run",
+        "Run record",
+        "QA run",
+        "QA report",
+        "Session over (done)",
+        "QA report",
+        "QA funnel",
+    ]
+
+
+def test_a_research_recorder_that_refuses_to_build_still_releases_the_run_lock(
+    tmp_path, monkeypatch
+):
+    """The ``--debug`` recorder is assembled inside the band's guarded region (#251), so a qa_dir
+    that refuses to take one still closes the segment: nothing was measured, so it closes at the
+    sentinel — a closed, resumable run rather than a lock held until the stale-lock timeout."""
+    import json
+
+    from noctis.reporting.run_store import RUN_LOCK_NAME
+
+    def _refuse(*args, **kwargs):
+        raise OSError("qa_dir is unwritable")
+
+    _patch_research_agent(monkeypatch)
+    monkeypatch.setattr("noctis.bootstrap.build_recorder", _refuse)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\nqa_dir: {tmp_path}/qa\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg), "--debug"])
+    assert result.exit_code != 0  # the failure is not swallowed
+
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    assert not (run_dir / RUN_LOCK_NAME).exists(), "the lock outlived the segment"
+    segment = json.loads((run_dir / "run.json").read_text())["segments"][-1]
+    assert segment["stopped_reason"] == "startup"
+    assert segment["counters"] == {}  # measured nothing is never measured zero
+    assert segment["phase_seconds"] is None
+
+
+def test_research_says_when_a_reasoning_view_surfaced_no_reasoning(tmp_path, monkeypatch):
+    """A reasoning view that came back empty is named as the provider's doing, once — so silence
+    reads as "expected here", not "the feature is broken". The command duck-types ``saw_think``
+    and ``hint`` off the sink the band built, so the hint survives the move (#251)."""
+    _patch_research_agent(monkeypatch)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\n")
+
+    surfaced = runner.invoke(app, ["research", "--config", str(cfg)])
+    asked = runner.invoke(app, ["research", "--config", str(cfg), "--show-reasoning"])
+
+    assert asked.exit_code == 0, asked.output
+    assert "reasoning not surfaced by anthropic" in asked.output
+    assert "narration still shows" in asked.output
+    # …and nobody who did not ask for a reasoning view is told about one.
+    assert "reasoning not surfaced" not in surfaced.output
+
+
+def test_a_research_minted_run_records_the_gates_verdict(tmp_path, monkeypatch):
+    """Rule 1's verdict is measured on every verb that mints a run (#247): a run born from a
+    research session says its orders were paper-only, instead of "nobody measured"."""
+    import json
+
+    _patch_research_agent(monkeypatch)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"mode: paper\nstate_dir: {tmp_path}/state/\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg)])
+
+    assert result.exit_code == 0, result.output
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    record = json.loads((run_dir / "run.json").read_text())
+    assert record["inputs"]["execution_mode"] == "paper"
+    assert record["assumptions"]["paper_only"] is True
+
+
+def _cli_tree():
+    """``noctis/cli.py`` parsed — the source these structural tests read."""
+    import ast
+
+    import noctis.cli
+
+    source = Path(noctis.cli.__file__)
+    return ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+
+
+def _command_body(name: str):
+    """One Typer command's function definition, as written in ``noctis/cli.py``."""
+    import ast
+
+    (command,) = [
+        node for node in _cli_tree().body if isinstance(node, ast.FunctionDef) and node.name == name
+    ]
+    return command
+
+
+def test_neither_command_opens_its_own_run_store():
+    """D3 (#248), finished by #251: both verbs open their run through the band, so
+    ``open_run_store`` — and every unpacked ``SessionInputs`` field it used to be handed by hand
+    — is named nowhere in ``cli.py``. A new resume-policy tier is a one-file change in
+    ``bootstrap.py`` instead of an edit to two hand-walked call sites."""
+    import ast
+
+    calls = [
+        node
+        for node in ast.walk(_cli_tree())
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "open_run_store"
+    ]
+
+    assert calls == [], "the band opens the run, for `run` and `research` alike"
+
+
+@pytest.mark.parametrize("verb", ["run", "research"])
+def test_neither_command_owns_a_segment_lifecycle_of_its_own(verb):
+    """Stories #250 / #251: the open → work → close lifecycle lives in the band, so neither
+    command builds a store, a recorder or an event sink, closes anything by hand, or carries a
+    ``"startup"`` sentinel — each reports what stopped its segment and lets the band close it."""
+    import ast
+
+    command = _command_body(verb)
+
+    built = {
+        node.func.id
+        for node in ast.walk(command)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert not built & {"open_run_store", "build_recorder", "build_event_sink"}
+
+    closed = [
+        node
+        for node in ast.walk(command)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "close"
+    ]
+    assert closed == [], "the band closes the recorder and the store, on every exit path"
+
+    said = {
+        node.value
+        for node in ast.walk(command)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "startup" not in said, "the sentinel is the band's, not the command's"
+
+    finishes = _finish_calls(command)
+    assert finishes, f"{verb} reports what stopped the segment"
+    assert all(
+        isinstance(node.func.value, ast.Name) and node.func.value.id == "seg" for node in finishes
+    ), "the segment is finished through the handle the band yielded"
+
+
+def _finish_calls(command):
+    """Every ``…finish(…)`` call written in one command body."""
+    import ast
+
+    return [
+        node
+        for node in ast.walk(command)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "finish"
+    ]
+
+
+@pytest.mark.parametrize("verb", ["run", "research"])
+def test_both_commands_hand_the_band_the_session_whole(verb):
+    """Stories #250 / #251: ``mode``, ``rebase`` and ``engine_upgrade`` are no command's to
+    forward — the band reads them off the session it was handed."""
+    import ast
+
+    (call,) = [
+        node
+        for node in ast.walk(_command_body(verb))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_segment_or_exit"
+    ]
+
+    passed = {keyword.arg for keyword in call.keywords}
+    assert not passed & {"mode", "rebase", "engine_upgrade", "mandate", "overrides", "resume"}
+
+
+def test_research_finishes_its_segment_with_the_working_seconds_it_measured_itself():
+    """#251: a ``ResearchSummary`` carries no phase timings, so the session's working seconds are
+    measured around ``session.run`` and reported explicitly — never derived from the outcome, and
+    never a zero standing in for a night nobody timed."""
+    reporting = [
+        call
+        for call in _finish_calls(_command_body("research"))
+        if {"outcome", "phase_seconds"} <= {keyword.arg for keyword in call.keywords}
+    ]
+
+    assert len(reporting) == 1, "one call reports the session's outcome and the seconds it took"
 
 
 def test_research_reports_what_the_session_spent_and_calls_the_dollars_an_estimate(
@@ -1241,3 +1509,68 @@ def test_mandate_preflight_shows_what_a_run_would_actually_get(tmp_path):
     kickoff = runner.invoke(app, ["run", "--config", cfg, "--mandate", "homelab"])
     assert kickoff.exit_code == 0, kickoff.output
     assert "research_time_budget_minutes=17" in kickoff.output
+
+
+# ── the one startup-error table (D7, story #252) ───────────────────────────────────────────
+
+REFUSAL_PREFIXES = (
+    "MANDATE: ",
+    "SAFETY GATE: ",
+    "RESUME: ",
+    "RUN LOCKED: ",
+    "FINISH: ",
+    "PRUNE: ",
+)
+
+NO_SUCH_RUN = "20260101T000000Z-nope00"
+
+
+def _refusing_argv(prefix: str, tmp_path, monkeypatch) -> list[str]:
+    """The shortest invocation that provokes one typed startup refusal, whole with its setup."""
+    if prefix == "MANDATE: ":
+        return ["run", "--config", _paper_config(tmp_path), "--mandate", "no-such-mandate"]
+    if prefix == "SAFETY GATE: ":
+        monkeypatch.delenv("ALLOW_LIVE", raising=False)
+        return ["run", "--config", _live_config(tmp_path)]
+    if prefix == "RESUME: ":
+        return ["run", "--config", _paper_config(tmp_path), "--resume", NO_SUCH_RUN]
+    if prefix == "FINISH: ":
+        return ["run", "--config", _paper_config(tmp_path), "--resume", NO_SUCH_RUN, "--finish"]
+    if prefix == "PRUNE: ":
+        return ["run-prune", NO_SUCH_RUN, "--config", _paper_config(tmp_path)]
+    from noctis.reporting.run_store import acquire_lock
+
+    cfg = _paper_config(tmp_path)
+    assert runner.invoke(app, ["run", "--config", cfg]).exit_code == 0
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    # A live lock held by this very process: never stale, so the next engine must refuse.
+    acquire_lock(run_dir, run_id=run_dir.name, now=datetime.now(UTC))
+    return ["run", "--config", cfg, "--resume", run_dir.name]
+
+
+@pytest.mark.parametrize("prefix", REFUSAL_PREFIXES)
+def test_every_typed_refusal_still_names_itself_on_stderr(prefix, tmp_path, monkeypatch):
+    """One table, six sentences unchanged (#252): each typed startup error still exits 1 with its
+    own prefix and its own diagnosis on stderr, whichever verb provoked it."""
+    result = runner.invoke(app, _refusing_argv(prefix, tmp_path, monkeypatch))
+
+    assert result.exit_code == 1, result.output
+    said = [line for line in result.stderr.splitlines() if line.startswith(prefix)]
+    assert len(said) == 1, result.stderr
+    assert said[0] != prefix.rstrip(), "the refusal's own diagnosis rides behind the prefix"
+
+
+@pytest.mark.parametrize("prefix", REFUSAL_PREFIXES)
+def test_each_refusal_prefix_is_spelled_exactly_once(prefix):
+    """D7 (#252): every startup refusal maps through one module-level table, so a prefix cannot
+    drift between the ladder in ``_resolve_session_or_exit`` and the four sites that used to
+    re-spell it by hand."""
+    import ast
+
+    spellings = [
+        node
+        for node in ast.walk(_cli_tree())
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == prefix
+    ]
+
+    assert len(spellings) == 1, f"{prefix!r} is spelled {len(spellings)} times in noctis/cli.py"

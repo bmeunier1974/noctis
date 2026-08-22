@@ -215,6 +215,35 @@ def test_a_research_segment_carries_its_own_stamps_reason_argv_and_counters(tmp_
     assert segment["phase_seconds"]["RESEARCH"] > 0.0
 
 
+def test_a_research_minted_run_freezes_the_safety_gates_verdict(tmp_path, sessions):
+    """A research session places no orders, but the run it mints may trade on a later segment —
+    so the gate is resolved and its verdict frozen at creation like any other run's (#247).
+    ``null`` is left to mean the one thing it should: an adopted history that froze no verdict."""
+    result = _research(_config(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    record = _record(_run_dirs(tmp_path)[0])
+    assert record["inputs"]["execution_mode"] == "paper"
+    assert record["assumptions"]["paper_only"] is True
+
+
+def test_a_research_minted_runs_results_cannot_acquire_live_segments(
+    tmp_path, sessions, monkeypatch
+):
+    """The frozen verdict is a real one, so it binds every later segment: a run minted by
+    ``research`` refuses a live ``run --resume`` exactly as a run-minted one does (#247)."""
+    cfg = _config(tmp_path)
+    run_id = _echoed_run_id(_research(cfg))
+    Path(cfg).write_text(f"mode: live\ndata:\n  lake_dir: {tmp_path}/lake\n")
+    monkeypatch.setenv("ALLOW_LIVE", "true")
+
+    result = runner.invoke(app, ["run", "--config", cfg, "--resume", run_id])
+
+    assert result.exit_code == 1
+    assert "paper" in result.output and "live" in result.output
+    assert len(_record(_runs_dir(tmp_path) / run_id)["segments"]) == 1  # refused before opening
+
+
 def test_noctis_research_without_resume_mints_a_fresh_run_every_time(tmp_path, sessions):
     """Identity is minted, never derived: two sessions under one config are two runs."""
     cfg = _config(tmp_path)
@@ -229,7 +258,12 @@ def test_noctis_research_without_resume_mints_a_fresh_run_every_time(tmp_path, s
 
 def test_a_session_that_cannot_start_still_closes_its_segment_and_releases_the_lock(tmp_path):
     """No LLM, no session — but the invocation still happened, so the record says so and the
-    next one is not blocked by a dangling lock."""
+    next one is not blocked by a dangling lock.
+
+    The early exit leaves through the band (#251): the ``typer.Exit`` unwinds the ``with``, which
+    closes the segment with the reason the command reported and releases the lock. Nothing ran,
+    so nothing is counted — "measured nothing", never a zeroed session.
+    """
     result = _research(_config(tmp_path))
 
     assert result.exit_code == 1
@@ -239,6 +273,8 @@ def test_a_session_that_cannot_start_still_closes_its_segment_and_releases_the_l
     (segment,) = _record(run_dir)["segments"]
     assert segment["status"] == "stopped"
     assert segment["stopped_reason"] == "no_session"
+    assert segment["counters"] == {}
+    assert segment["phase_seconds"] is None
 
 
 # ── resuming: the same run, one more segment ───────────────────────────────────────────────

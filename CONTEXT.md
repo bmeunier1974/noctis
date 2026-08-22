@@ -98,3 +98,18 @@ or a risk refusal is the live adapter's answer, not the driver's). A driver seed
 broker's carried position (`from_position`), so a flat account and a carried one start through
 the same constructor. It returns what happened (fill, exit trigger) and never counts, logs or
 emits — those belong to the caller.
+
+## Run segment
+
+One process's stretch of work on a run: opened once through `open_segment` (`noctis.bootstrap`,
+decided 2026-08-22), closed once with a **reason** (`stopped_reason`) and its counters, always
+releasing the run lock — on **every** exit path (normal return, early exit, an exception, a
+`typer.Exit`). Opening takes the lock, mints or resumes the run id, freezes the session's inputs,
+records every engine-change note, and builds the `--debug` recorder and the event sink. `run` and
+`research` are its two drivers and differ only in what they drive and what they say — never in the
+lifecycle, which lives in the band alone. `Segment` is the handle the work holds: `finish` is its
+**only mutation** (what stopped this segment, and what it measured; called twice, the first reason
+wins), and `checkpoint` is the incremental record write the day loop's `on_cycle_close` seam calls.
+A body that never reports closes at the `"startup"` sentinel — **measured nothing, never zeros**.
+The band never imports Typer, so a live lock leaves as `RunLockedError` and the CLI maps it to red
+text and an exit code, once.

@@ -349,3 +349,28 @@ def test_inconclusive_stays_generic_when_the_stall_is_not_universal():
 
 def test_material_token_reduction_threshold_is_a_stated_fraction():
     assert 0.0 < MATERIAL_TOKEN_REDUCTION < 1.0
+
+
+def test_the_harness_asks_the_composition_root_only_for_builders_it_still_has():
+    """The harness assembles each session through ``noctis.bootstrap`` inside a function, so a
+    builder deleted from the composition root would surface only on an operator's paid dual-loop
+    run — the one run in this repo that costs real money. The names it asks for are read off the
+    script and checked against the module here instead (story #252 deleted ``build_console``)."""
+    import ast
+    from pathlib import Path
+
+    import noctis.bootstrap as bootstrap
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "parity_harness.py"
+    tree = ast.parse(script.read_text(encoding="utf-8"), filename=str(script))
+    asked = sorted(
+        {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "noctis.bootstrap"
+            for alias in node.names
+        }
+    )
+
+    assert asked, "the harness builds its sessions through the composition root"
+    assert [name for name in asked if not hasattr(bootstrap, name)] == []
