@@ -673,6 +673,53 @@ def test_run_debug_hard_exception_still_stamps_manifest(tmp_path, monkeypatch):
     assert manifest["stopped"] is not None  # closed via the finally despite the crash
 
 
+def test_run_debug_echoes_the_qa_frame_in_its_fixed_order(tmp_path):
+    """The ``--debug`` transcript, pinned (story #250): the run's identity, the QA tree at start,
+    the loop's own stop line, then the closing QA report + funnel — which print *after* the work
+    on every path, including a crash, because they are what says the recording is complete."""
+    cfg = _debug_run_config(tmp_path)
+    result = runner.invoke(app, ["run", "--config", cfg, "--debug", "--time-limit-hours", "0"])
+    assert result.exit_code == 0, result.output
+
+    framing = [
+        line.split(":")[0]
+        for line in result.output.splitlines()
+        if line.startswith(("Run: ", "Run record: ", "QA ", "Stopped ("))
+    ]
+    assert framing == [
+        "Run",
+        "Run record",
+        "QA run",
+        "QA report",
+        "Stopped (time_limit)",
+        "QA report",
+        "QA funnel",
+    ]
+
+
+def test_a_recorder_that_refuses_to_build_still_releases_the_run_lock(tmp_path, monkeypatch):
+    """The ``--debug`` recorder is assembled *inside* the guarded region (story #250): a qa_dir
+    that refuses to take a recorder used to leave the run locked until the stale-lock timeout,
+    because the builder ran after the lock was taken and outside the try that released it."""
+    import json
+
+    from noctis.reporting.run_store import RUN_LOCK_NAME
+
+    def _refuse(*args, **kwargs):
+        raise OSError("qa_dir is unwritable")
+
+    monkeypatch.setattr("noctis.bootstrap.build_recorder", _refuse)
+    cfg = _debug_run_config(tmp_path)
+    result = runner.invoke(app, ["run", "--config", cfg, "--debug", "--time-limit-hours", "0"])
+    assert result.exit_code != 0  # the failure is not swallowed
+
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    assert not (run_dir / RUN_LOCK_NAME).exists(), "the lock outlived the segment"
+    record = json.loads((run_dir / "run.json").read_text())
+    # Nothing was measured, so the segment closes at the sentinel — a closed, resumable run.
+    assert record["segments"][-1]["stopped_reason"] == "startup"
+
+
 def test_run_no_debug_writes_no_qa_tree(tmp_path):
     """The default (no --debug) is byte-identical to today: no recorder, no QA writes, no echoes."""
     cfg = _debug_run_config(tmp_path)
@@ -781,26 +828,103 @@ def test_a_research_minted_run_records_the_gates_verdict(tmp_path, monkeypatch):
     assert record["assumptions"]["paper_only"] is True
 
 
-def test_both_commands_hand_the_store_opener_the_session_inputs_whole():
-    """D3 (#248): neither command body forwards an unpacked ``SessionInputs`` field, so a new
-    resume-policy tier lands in ``bootstrap.py`` alone instead of in two hand-walked call sites."""
+def _cli_tree():
+    """``noctis/cli.py`` parsed — the source these structural tests read."""
     import ast
 
     import noctis.cli
 
     source = Path(noctis.cli.__file__)
-    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    return ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+
+
+def _command_body(name: str):
+    """One Typer command's function definition, as written in ``noctis/cli.py``."""
+    import ast
+
+    (command,) = [
+        node for node in _cli_tree().body if isinstance(node, ast.FunctionDef) and node.name == name
+    ]
+    return command
+
+
+def test_the_store_opener_is_handed_the_session_inputs_whole():
+    """D3 (#248): a command that opens a run forwards no unpacked ``SessionInputs`` field, so a
+    new resume-policy tier lands in ``bootstrap.py`` alone instead of in a hand-walked call site.
+
+    ``run`` opens through the band now (#250), so ``research`` is the one direct caller left."""
+    import ast
+
     calls = [
         node
-        for node in ast.walk(tree)
+        for node in ast.walk(_cli_tree())
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "open_run_store"
     ]
 
-    assert len(calls) == 2, "run and research are the two verbs that open a run"
+    assert len(calls) == 1, "research is the verb that still opens its own run"
     for call in calls:
         passed = {keyword.arg for keyword in call.keywords}
         assert "inputs" in passed
         assert not passed & {"mandate", "mode", "overrides", "rebase", "engine_upgrade"}
+
+
+def test_run_owns_no_segment_lifecycle_of_its_own():
+    """Story #250: the open → work → close lifecycle lives in the band, so ``run`` builds no
+    store, no recorder and no event sink, closes nothing by hand, and carries no ``"startup"``
+    sentinel — it reports what stopped the segment and lets the band close it."""
+    import ast
+
+    command = _command_body("run")
+
+    built = {
+        node.func.id
+        for node in ast.walk(command)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert not built & {"open_run_store", "build_recorder", "build_event_sink"}
+
+    closed = [
+        node
+        for node in ast.walk(command)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "close"
+    ]
+    assert closed == [], "the band closes the recorder and the store, on every exit path"
+
+    said = {
+        node.value
+        for node in ast.walk(command)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "startup" not in said, "the sentinel is the band's, not the command's"
+
+    finishes = [
+        node
+        for node in ast.walk(command)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "finish"
+    ]
+    assert finishes, "run reports what stopped the segment"
+    assert all(
+        isinstance(node.func.value, ast.Name) and node.func.value.id == "seg" for node in finishes
+    ), "the segment is finished through the handle the band yielded"
+
+
+def test_run_hands_the_band_the_session_whole():
+    """Story #250: ``mode``, ``rebase`` and ``engine_upgrade`` are not ``run``'s to forward — the
+    band reads them off the session it was handed."""
+    import ast
+
+    (call,) = [
+        node
+        for node in ast.walk(_command_body("run"))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_segment_or_exit"
+    ]
+
+    passed = {keyword.arg for keyword in call.keywords}
+    assert not passed & {"mode", "rebase", "engine_upgrade", "mandate", "overrides", "resume"}
 
 
 def test_research_reports_what_the_session_spent_and_calls_the_dollars_an_estimate(
