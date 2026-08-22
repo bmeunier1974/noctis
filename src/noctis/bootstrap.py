@@ -911,13 +911,6 @@ def build_event_sink(
     return EventTee(console, secondary)
 
 
-def build_console(verbose: int, *, show_reasoning: bool = False) -> Console | None:
-    """Thin back-compat alias for :func:`build_event_sink` with no secondary — the level-aware
-    console for ``-v``/``-vv``/``--show-reasoning``, or ``None`` on a quiet run. Existing callers
-    and tests that only want a console keep this exact name, signature, and behavior."""
-    return _build_console(verbose, show_reasoning=show_reasoning)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # The --debug QA recorder
 # ─────────────────────────────────────────────────────────────────────────────

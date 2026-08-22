@@ -119,14 +119,7 @@ def test_event_reaches_both_primary_and_secondary():
 
 
 # ── the event-sink builder (AC 4) ─────────────────────────────────────────────────────────────
-def test_build_console_alias_is_unchanged():
-    from noctis.bootstrap import build_console
-
-    assert build_console(0) is None  # quiet run ⇒ None ⇒ loops stay on their logger sinks
-    assert isinstance(build_console(1), Console)  # -v ⇒ a level-aware console
-
-
-def test_build_event_sink_without_secondary_matches_build_console():
+def test_build_event_sink_without_secondary_is_the_console_itself():
     from noctis.bootstrap import build_event_sink
 
     assert build_event_sink(0) is None  # no secondary, quiet ⇒ exactly the old None

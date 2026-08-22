@@ -107,7 +107,7 @@ def _run_loop(loop: str, args: argparse.Namespace) -> Sequence[SessionPair]:
     fixture, and mandate. The episodic rollup is loaded back from each summary's ledger path; the
     conversation loop writes none, so its rollup is ``None``."""
     from noctis.bootstrap import (
-        build_console,
+        build_event_sink,
         build_families,
         build_lake,
         build_memory,
@@ -136,7 +136,7 @@ def _run_loop(loop: str, args: argparse.Namespace) -> Sequence[SessionPair]:
             families=build_families(settings),
             memory=build_memory(settings),
             mandate=inputs.mandate,
-            on_event=build_console(args.verbose),
+            on_event=build_event_sink(args.verbose),
         )
         if session is None:  # defensive: the key check already gated this
             raise SystemExit("no LLM client buildable for the configured research model")
