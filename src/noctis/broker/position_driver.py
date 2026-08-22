@@ -13,8 +13,11 @@ stories). They differ only in what they pass in — never in the step order, whi
 here alone. **Sizing is a seam** (:class:`Sizer`: how many units a target means at this
 price): the backtest's allocation formula and the live risk manager are its two adapters,
 and a dead-band skip or a risk refusal is the adapter's answer (``None``), not the
-driver's. Protective-exit tracking is carried here too, anchored on every open or flip,
-so the exit engine (:mod:`noctis.broker.exits`) has exactly one caller per bar.
+driver's. The whole protective-exit step lives here too — anchored at the fill price on
+every open or flip, evaluated intrabar before the strategy decides, ratcheted only when
+nothing fired, and latched flat until the strategy asks for something new — so the exit
+engine (:mod:`noctis.broker.exits`) has exactly one caller per bar and its conservative
+policy is never re-implemented.
 
 The driver returns what happened and nothing more: it never logs, counts, or emits
 events — that is the caller's job, and keeping it out is what lets both drivers share
@@ -26,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from noctis.broker.exits import ExitState, ExitTrigger
+from noctis.broker.exits import ExitState, ExitTrigger, evaluate, ratchet
 from noctis.broker.paper import PaperBroker
 from noctis.broker.seam import Fill
 from noctis.strategies.base import Bar, ExitRules, TargetContext, TraderStrategy
@@ -176,11 +179,18 @@ class PositionDriver:
         return OpenOutcome(fill=fill, skipped=False)
 
     def at_close(self, bar: Bar, *, execute: bool = True) -> CloseOutcome:
-        """Let the strategy decide for this bar, carry the decision, mark the close.
+        """Enforce the armed exits intrabar, then let the strategy decide for this bar.
 
-        ``execute=False`` suppresses order emission only; the strategy still sees the bar
-        and the close is still marked, so a suppressed bar leaves no hole in the series
-        the next decision is made from.
+        The rules evaluated here are the ones carried from the *previous* close, against
+        this bar's full range — a position opened at this bar's open is protected from
+        this bar on. A trigger flattens at the trigger price, clears the anchor and
+        latches; only when nothing fires does the favorable extreme ratchet, so the trail
+        is always measured from the prior bar's extreme (see :mod:`noctis.broker.exits`).
+
+        ``execute=False`` suppresses order emission — and with it the whole exit step,
+        ratchet included, so a suppressed bar cannot advance a trail it was never allowed
+        to act on. The strategy still sees the bar and the close is still marked, so a
+        suppressed bar leaves no hole in the series the next decision is made from.
         """
         if not self._opened:
             raise RuntimeError(
@@ -188,6 +198,19 @@ class PositionDriver:
                 "not preceded by its bar's open execution would break the fill model"
             )
         self._opened = False
+
+        exit_fill: Fill | None = None
+        trigger: ExitTrigger | None = None
+        if execute and self.exit_state is not None and self._pending_exits is not None:
+            trigger = evaluate(self._pending_exits, self.exit_state, bar)
+            if trigger is not None:
+                exit_fill = self._broker.rebalance_to(
+                    self._symbol, 0.0, price=trigger.price, reason=trigger.reason
+                )
+                self.exit_state = None  # flat clears the anchor
+                self._latched = True
+            else:
+                self.exit_state = ratchet(self.exit_state, bar)  # after evaluate — never before
 
         self._strategy.on_bar(self._ctx, bar)
         raw_target = self._ctx.target
@@ -199,4 +222,6 @@ class PositionDriver:
         self._pending_exits = self._ctx.exits
 
         self._broker.set_price(self._symbol, bar.close, bar.ts_event)
-        return CloseOutcome(exit_fill=None, trigger=None, target=target, raw_target=raw_target)
+        return CloseOutcome(
+            exit_fill=exit_fill, trigger=trigger, target=target, raw_target=raw_target
+        )

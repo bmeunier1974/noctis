@@ -13,10 +13,10 @@ from dataclasses import dataclass
 
 import pytest
 
-from noctis.broker.exits import ExitState
+from noctis.broker.exits import ExitState, ExitTrigger
 from noctis.broker.paper import PaperBroker
 from noctis.broker.position_driver import PositionDriver
-from noctis.broker.seam import FeeModel, SlippageModel
+from noctis.broker.seam import FeeModel, Side, SlippageModel
 from noctis.strategies.base import Bar, ExitRules, TargetContext, TraderStrategy
 
 SYMBOL = "SYM"
@@ -257,3 +257,49 @@ def test_an_unlatched_close_executes_the_strategys_raw_target_and_carries_its_ru
     assert driver.pending_target == 1
     assert driver.pending_exits == rules
     assert driver.latched is False
+
+
+def test_a_long_stop_touched_intrabar_exits_at_the_stop_level_and_latches():
+    """The armed rules are enforced against the bar the position was opened on."""
+    rules = ExitRules(stop_pct=0.05)
+    broker = _broker()
+    driver = _driver(broker, _scripted([1], exits=rules), _sizer([10.0]))
+    first, second = _tape(_bar(99.0, 100.0, 98.0, 99.0), _bar(100.0, 101.0, 94.0, 96.0))
+
+    driver.at_open(first)
+    driver.at_close(first)  # decides +1 and arms the stop
+    driver.at_open(second)  # long 10 units at 100 — the anchor
+    close = driver.at_close(second)
+
+    assert close.trigger == ExitTrigger(price=95.0, reason="stop")
+    assert close.exit_fill is not None
+    assert close.exit_fill.price == 95.0  # 100 * (1 - 0.05)
+    assert close.exit_fill.reason == "stop"
+    assert close.exit_fill.side is Side.SELL
+    assert close.exit_fill.quantity == 10.0
+    assert broker.position(SYMBOL).quantity == 0.0
+    assert len(broker.fills) == 2  # the entry and the exit
+    assert driver.latched is True
+    assert close.raw_target == 1  # the strategy still wants the long...
+    assert close.target == 0  # ...and the latch holds it flat anyway
+
+
+def test_a_short_stop_mirrors_the_long_case():
+    rules = ExitRules(stop_pct=0.05)
+    broker = _broker()
+    driver = _driver(broker, _scripted([-1], exits=rules), _sizer([10.0]))
+    first, second = _tape(_bar(99.0, 100.0, 98.0, 99.0), _bar(100.0, 106.0, 99.0, 104.0))
+
+    driver.at_open(first)
+    driver.at_close(first)
+    driver.at_open(second)  # short 10 units at 100
+    close = driver.at_close(second)
+
+    assert close.trigger == ExitTrigger(price=105.0, reason="stop")
+    assert close.exit_fill is not None
+    assert close.exit_fill.price == 105.0  # 100 * (1 + 0.05), adverse for a short
+    assert close.exit_fill.reason == "stop"
+    assert close.exit_fill.side is Side.BUY
+    assert broker.position(SYMBOL).quantity == 0.0
+    assert driver.latched is True
+    assert close.target == 0
