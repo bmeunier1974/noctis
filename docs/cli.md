@@ -698,10 +698,11 @@ python -m noctis strategies                # the strategy library: status / styl
 python -m noctis backtest <name>           # replay a library strategy on its shipped Params defaults
 ```
 
-`research` accepts the same `--mandate` / `--directive` one-session overrides as `run`, and the
-same `--debug` QA recorder (see [QA report (`--debug`)](#qa-report---debug) above). A `research`
-session only records when the agent loop is actually buildable — it never opens a report tree for a
-legacy session that would immediately exit. `--metric` is applied **after** the mandate overlay, so
+`research` loads config + memory and resolves the safety gate exactly as `run` does, and accepts
+the same `--mandate` / `--directive` one-session overrides and the same `--debug` QA recorder (see
+[QA report (`--debug`)](#qa-report---debug) above). A `research` session only records when the
+agent loop is actually buildable — it never opens a report tree for a legacy session that would
+immediately exit. `--metric` is applied **after** the mandate overlay, so
 it wins over a mandate's `promotion.metric` (as `--time-limit-hours` does over its knob on `run`);
 everything else a mandate binds comes from the mandate file —
 [configuration.md](configuration.md#the-mandate-overlay).
@@ -733,6 +734,15 @@ is the whole answer. Its measured RESEARCH seconds roll into the run's `cumulati
 the trials it journals into the run's `state/experiments/` roll into `cumulative_trials` — both
 re-derived at every write, so a run's research hours and trials accumulate the same whether the
 night came from `noctis run` or from a standalone session.
+
+**The segment also carries the gate's verdict.** `research` resolves the safety gate exactly as
+`run` does, so a run a session mints freezes `inputs.execution_mode: "paper"` and reports
+`assumptions.paper_only: true` — not `null`, which now means only an adopted history that froze no
+verdict at all. The session places no order itself, but the run it mints may trade on a later
+`run --resume`, and the record has to say what the gate *decided* rather than "nobody measured".
+For the same reason no verb is a silent downgrade: `noctis research` under `mode: live` without
+`ALLOW_LIVE` refuses at startup with `SAFETY GATE: …`, exactly as `run` does
+([safety.md](safety.md)).
 
 **A run that only ever researched is a first-class shape.** It reports `traded: false` and
 `performance: null` — never zeros — so a consumer renders "researching" rather than a flat 0% equity
