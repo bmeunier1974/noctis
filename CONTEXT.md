@@ -148,3 +148,23 @@ owns *where they come from* (journal, lake, registry, memory, library tiers), an
 for one — `toolbox.journal`, or a `getattr` probe that invents the fact when it misses — is what
 `tests/test_toolbox_boundary.py` refuses. A test double conforms to the Protocol, never to the
 implementation.
+
+## Fingerprint ratchet
+
+A committed statement of what part of the repo *is*, plus a rule that refuses an undeclared change
+to it. **One mechanism, two policies** (`noctis.observability.ratchet`, decided 2026-08-23): the
+shared module owns everything but the rule — the record built from the tree, loaded and written,
+the check, `--write`, the report — and a policy is a `RatchetSpec` plus the one judging callable
+that *is* its rule. `engine_ratchet` judges on the arbiter/searcher tier and the declared
+`ENGINE_VERSION` (arbiter drift fails, searcher drift warns and passes); `prompt_ratchet` judges on
+the declared-change rule over `docs/prompt-changelog.md` (the newest entry must name the drifted
+site **and** post-date the record; nothing here warns). **Two records on two clocks** —
+`engine_fingerprint.json` and `prompt_fingerprint.json`, one command each
+(`scripts/engine_fingerprint.py`, `scripts/prompt_fingerprint.py`) — because prompts and arbiter
+behaviour drift independently. `--write` regenerates every case except the one its policy exists to
+catch (an undeclared arbiter move, an undeclared prompt change): regenerating is the advice every
+failure prints, so it can never also be how one gets recorded. **One null rule**,
+`engine_id.compare` over `name → digest` maps: a name present on one side only moved (a fingerprint
+surface *appearing* is the news), two nulls did not, a non-string reads as null — shared with the
+resume policy `engine_change`, so "may this change land" and "may this run continue" can never
+answer one edit differently.

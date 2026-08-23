@@ -346,3 +346,46 @@ def test_the_committed_record_in_this_checkout_matches_this_tree(policy):
     assert record is not None
     result = check(policy.spec, REPO_ROOT)
     assert result.ok, result.report()
+
+
+# ── documentation ─────────────────────────────────────────────────────────────────────────
+
+
+def _glossary_entry(title: str) -> str:
+    """One ``## <title>`` section of the domain glossary."""
+    text = (REPO_ROOT / "CONTEXT.md").read_text(encoding="utf-8")
+    start = text.find(f"## {title}\n")
+    assert start >= 0, f"CONTEXT.md: the '{title}' entry is gone — retarget this test"
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end >= 0 else len(text)]
+
+
+def _development_section(title: str) -> str:
+    """One ``## <title>`` section of the page that explains the ratchets to a contributor."""
+    text = (REPO_ROOT / "docs" / "development.md").read_text(encoding="utf-8")
+    start = text.find(f"## {title}\n")
+    assert start >= 0, f"docs/development.md: the '{title}' section is gone — retarget this test"
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end >= 0 else len(text)]
+
+
+def test_the_glossary_defines_one_mechanism_two_policies_two_records_and_one_null_rule():
+    """A reader who meets "the ratchet" in a review lands on the right file from the glossary:
+    the mechanics are one module, each rule is its policy's, and what moved is one function."""
+    entry = _glossary_entry("Fingerprint ratchet")
+
+    assert "noctis.observability.ratchet" in entry
+    assert "RatchetSpec" in entry
+    assert "engine_ratchet" in entry and "prompt_ratchet" in entry
+    assert engine_ratchet.RECORD_PATH in entry and prompt_ratchet.RECORD_PATH in entry
+    assert "engine_id.compare" in entry
+
+
+def test_the_page_a_contributor_reads_names_the_policy_module_and_the_shared_mechanics(policy):
+    """Each ratchet's section says where its *rule* is and that the mechanics are shared, so a
+    contributor edits the policy rather than a copy of the record machinery."""
+    module = policy.spec.judge.__module__.rsplit(".", 1)[-1]
+    section = _development_section(f"The {policy.spec.title}")
+
+    assert f"src/noctis/observability/{module}.py" in section
+    assert "src/noctis/observability/ratchet.py" in section
