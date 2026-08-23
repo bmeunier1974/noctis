@@ -171,7 +171,7 @@ def test_trading_day_threads_configured_costs_into_session_config(tmp_path):
     from noctis.broker.seam import FeeModel, SlippageModel
     from noctis.engine.forward_ledger import ForwardLedger
     from noctis.engine.sessions import SessionLedger
-    from noctis.engine.trading_day import TradingDay
+    from noctis.engine.trading_phase import TradingDay
     from noctis.live.risk import RiskLimits
     from noctis.strategies.families import FamilyRegistry
 

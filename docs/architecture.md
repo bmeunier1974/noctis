@@ -264,15 +264,14 @@ champions keep trading the whole universe).
 **One driver, one feed contract, one settle order.** The session driver polls a `BarFeed`
 (`src/noctis/live/feed.py`) — the live yfinance adapter (clock-bounded: the session close ends
 the day) or a catalog `ReplayBarFeed` (data-bounded: the slice's exhaustion does) — so live and
-replay can never diverge on how a day is traded. However the day ran, `TradingDay`
-(`src/noctis/engine/trading_day.py`) settles it the same way: attribute forward P&L (derived
-evidence, never blocks), persist the account **first**, advance the session high-water mark
-**second** — a crash between the two re-trades the session rather than silently skipping it.
-The TRADING entry itself sits behind its own seam: `TradingPhase`
-(`src/noctis/engine/trading_phase.py`) assembles the account, forward ledger, and day runner,
-resolves live vs replay, runs the catch-up loop, and folds every settled session into one
-outcome the runtime copies into its report accumulators — the same interface tests drive
-directly with fake bars and feeds.
+replay can never diverge on how a day is traded. However the day ran, `TradingDay` settles it
+the same way: attribute forward P&L (derived evidence, never blocks), persist the account
+**first**, advance the session high-water mark **second** — a crash between the two re-trades
+the session rather than silently skipping it. The TRADING entry itself sits behind its own seam
+in the same module: `TradingPhase` (`src/noctis/engine/trading_phase.py`) assembles the account,
+forward ledger, and day runner, resolves live vs replay, and runs the catch-up loop, while each
+`TradingDay.run` folds its settled session straight into the one outcome the runtime copies into
+its report accumulators — the same interface tests drive directly with fake bars and feeds.
 
 **Catalog replay is a rolling live-holdout.** Each day trades only the newest session(s) past a
 persisted high-water mark (the state dir's `trading_sessions.json`) — bars no tuning ever saw — one

@@ -13,7 +13,7 @@ from datetime import date, datetime, time
 import pandas as pd
 import pytest
 
-import noctis.engine.trading_day as trading_day_mod
+import noctis.engine.trading_phase as trading_phase_mod
 from noctis.broker.persistence import AccountStore
 from noctis.data.types import empty_bars
 from noctis.engine.sessions import (
@@ -207,7 +207,7 @@ def test_crash_mid_catchup_resumes_at_the_right_date(tmp_path, monkeypatch):
     runtime = _make_runtime(tmp_path, lake)
     SessionLedger(_ledger_path(runtime)).save(days[0])
 
-    real = trading_day_mod.TradingDay.run
+    real = trading_phase_mod.TradingDay.run
     sessions_run = [0]
 
     def crashy(self, **kwargs):
@@ -216,7 +216,7 @@ def test_crash_mid_catchup_resumes_at_the_right_date(tmp_path, monkeypatch):
         sessions_run[0] += 1
         return real(self, **kwargs)
 
-    monkeypatch.setattr(trading_day_mod.TradingDay, "run", crashy)
+    monkeypatch.setattr(trading_phase_mod.TradingDay, "run", crashy)
     with pytest.raises(RuntimeError, match="boom"):
         _run_phase(runtime)
 

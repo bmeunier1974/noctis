@@ -28,7 +28,7 @@ from noctis.broker.seam import Order, Side
 from noctis.config import load_settings
 from noctis.data.types import NS_PER_SECOND
 from noctis.engine import ForwardLedger, SimulatedSleeper, build_runtime
-from noctis.engine.trading_day import TradingDay
+from noctis.engine.trading_phase import TradingDay
 from noctis.live import RiskLimits, SessionConfig, run_trading, run_trading_day
 from noctis.memory import MemoryStore
 from noctis.strategies import FamilyRegistry

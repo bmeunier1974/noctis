@@ -42,7 +42,7 @@ logger = logging.getLogger("noctis.trading")
 @dataclass
 class TradingSummary:
     # Which session this summary is the evidence for. The *settle* stamps it
-    # (:class:`~noctis.engine.trading_day.TradingDay` knows the date it is settling); the
+    # (:class:`~noctis.engine.trading_phase.TradingDay` knows the date it is settling); the
     # batch wrapper :func:`run_trading` drains a whole static timeline with no session date
     # of its own, so it leaves it ``None``.
     session: date | None = None
