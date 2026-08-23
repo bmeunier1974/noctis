@@ -55,6 +55,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from noctis.reporting import schema as schema_module
 from noctis.reporting.run_record import (
@@ -531,7 +532,11 @@ def with_evidence(artifacts: RunArtifacts, evidence: Evidence) -> RunArtifacts:
     record carries about a run *other* than these seven fields is parsed from the record and
     carried forward verbatim.
     """
-    return replace(artifacts, **evidence.changes())  # type: ignore[arg-type]
+    # One copy over seven differently-typed fields, splatted by name: ``Evidence``'s own field
+    # names *are* the derived fields, so this cannot name one ``RunArtifacts`` does not have — but
+    # a ``**`` of a heterogeneous mapping is exactly what a static type cannot say.
+    changes: dict[str, Any] = evidence.changes()
+    return replace(artifacts, **changes)
 
 
 def _upgraded_schema(prior: dict | None) -> tuple[dict | None, RecordEvent | None]:
@@ -633,7 +638,7 @@ def _frozen_engine(engine: object) -> EngineIdentity | None:
     changes = engine.get("engine_changes")
     return EngineIdentity(
         engine_version=version,
-        fingerprint=dict(fingerprint),  # type: ignore[arg-type]
+        fingerprint=dict(fingerprint),
         comparable_key=str(engine.get("comparable_key", "")),
         noctis_version=str(engine.get("noctis_version", "")),
         engine_epoch=epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else 1,
@@ -658,7 +663,7 @@ def _listed(prior: Mapping[str, object], key: str) -> list[Mapping[str, object]]
     values = prior.get(key, [])
     if not isinstance(values, list) or not all(isinstance(item, Mapping) for item in values):
         raise TypeError(f"the {key!r} section is not a list of objects")
-    return values  # type: ignore[return-value]
+    return values
 
 
 def _upgraded(
@@ -718,7 +723,6 @@ class RunStore:
         self._writer = writer
         self._disabled = False
         self._closed = False
-        self._complete = False
 
         now = clock()
         prior = tuple(artifacts.segments)
@@ -741,8 +745,14 @@ class RunStore:
             # records what actually produced it (story #139).
             environment=dict(environment) if environment else None,
         )
-        self._artifacts = RunArtifacts(
-            run_id=artifacts.run_id,
+        # A COPY, not a rebuild (story #289): everything this constructor does not name is carried
+        # forward by construction, which is what makes the record's "carried forward verbatim"
+        # promise — ``inputs``, ``completed_utc``, ``state_pruned`` — hold in code rather than by
+        # luck. The seven derived fields are carried as read (since story #288, at their defaults)
+        # and the flush that ends this constructor fills every one of them in a single pass before
+        # the first byte reaches disk.
+        self._artifacts = replace(
+            artifacts,
             created_utc=artifacts.created_utc or utc_iso(now),
             last_active_utc=utc_iso(now),
             # Frozen at creation, unless an engine change was deliberately accepted.
@@ -750,7 +760,6 @@ class RunStore:
             current_engine=current,
             segments=prior + (self._segment,),
             label=label,
-            completed_utc=artifacts.completed_utc,
             complete=False,
             events=tuple(artifacts.events),
             errors=tuple(artifacts.errors),
@@ -758,11 +767,6 @@ class RunStore:
             # by a run that has never frozen any (a fresh one, or an adopted history) — or by a
             # deliberate ``--rebase-config``, which is the operator saying "adopt these instead".
             inputs=inputs if rebase_config or artifacts.inputs is None else artifacts.inputs,
-            # Carried as read — which since story #288 means "at their defaults": an open parses
-            # the record and derives nothing, and the flush that ends this constructor fills every
-            # derived field in one pass before the first byte reaches disk.
-            trials=artifacts.trials,
-            strategies=artifacts.strategies,
         )
         if opening_note is not None:
             self._append(
@@ -855,12 +859,14 @@ class RunStore:
         Exactly one warning, then silence: a run record is evidence, and evidence that cannot be
         written must not take the run down with it. The record left on disk keeps
         ``complete: false`` (the final clean-close write never happens), so nothing that reads it
-        later can mistake a truncated record for a whole one.
+        later can mistake a truncated record for a whole one — and the artifacts held here are
+        un-said with it, so a latch that tripped *during* the closing flush leaves nothing behind
+        that still claims the run finished cleanly.
         """
         if self._disabled:
             return
         self._disabled = True
-        self._complete = False
+        self._artifacts = replace(self._artifacts, complete=False)
         logger.warning(
             "run record %s self-disabled after an internal failure (%s: %s); the record on disk "
             "is marked incomplete and will not be updated again this segment",
@@ -903,7 +909,9 @@ class RunStore:
             status="stopped",
         )
         self._touch(now)
-        self._complete = True
+        # The one write that may say so: ``complete`` flips here, one line before the flush that
+        # puts it on disk, and nowhere else.
+        self._artifacts = replace(self._artifacts, complete=True)
         self._flush()
         self._closed = True
 
@@ -930,44 +938,23 @@ class RunStore:
         """Swap the open segment for an updated copy, in the artifacts as well as the handle."""
         updated = replace(self._segment, **changes)  # type: ignore[arg-type]
         self._segment = updated
-        self._replace_artifacts(segments=tuple(self._artifacts.segments[:-1]) + (updated,))
+        self._artifacts = replace(
+            self._artifacts, segments=tuple(self._artifacts.segments[:-1]) + (updated,)
+        )
 
     def _append(self, event: RecordEvent) -> None:
         if event.kind == "error":
-            self._replace_artifacts(errors=tuple(self._artifacts.errors) + (event,))
+            self._artifacts = replace(
+                self._artifacts, errors=tuple(self._artifacts.errors) + (event,)
+            )
         else:
-            self._replace_artifacts(events=tuple(self._artifacts.events) + (event,))
+            self._artifacts = replace(
+                self._artifacts, events=tuple(self._artifacts.events) + (event,)
+            )
 
     def _touch(self, now: datetime) -> None:
-        self._replace_artifacts(last_active_utc=utc_iso(now))
+        self._artifacts = replace(self._artifacts, last_active_utc=utc_iso(now))
         touch_lock(self._run_dir, run_id=self._artifacts.run_id, now=now)
-
-    def _replace_artifacts(self, **changes: object) -> None:
-        current = self._artifacts
-        self._artifacts = RunArtifacts(
-            run_id=current.run_id,
-            created_utc=current.created_utc,
-            last_active_utc=str(changes.get("last_active_utc", current.last_active_utc)),
-            engine=current.engine,
-            current_engine=current.current_engine,
-            segments=changes.get("segments", current.segments),  # type: ignore[arg-type]
-            label=current.label,
-            completed_utc=current.completed_utc,
-            complete=self._complete,
-            events=changes.get("events", current.events),  # type: ignore[arg-type]
-            errors=changes.get("errors", current.errors),  # type: ignore[arg-type]
-            inputs=current.inputs,
-            trials=changes.get("trials", current.trials),  # type: ignore[arg-type]
-            spend=changes.get("spend", current.spend),  # type: ignore[arg-type]
-            pricing_table_version=changes.get(  # type: ignore[arg-type]
-                "pricing_table_version", current.pricing_table_version
-            ),
-            champions=changes.get("champions", current.champions),  # type: ignore[arg-type]
-            strategies=changes.get("strategies", current.strategies),  # type: ignore[arg-type]
-            sessions=changes.get("sessions", current.sessions),  # type: ignore[arg-type]
-            benchmark=changes.get("benchmark", current.benchmark),  # type: ignore[arg-type]
-            state_pruned=current.state_pruned,
-        )
 
     def _flush(self) -> None:
         # Derived at write time, like every cumulative number the record carries: the run's own
@@ -975,9 +962,11 @@ class RunStore:
         # forward, so a segment that journalled trials and burned tokens all night lands them on
         # disk without anyone tracking a total in memory (epic D4). **One pass per write** — the
         # open before this one derived nothing (story #288) — priced and embedded under the run's
-        # own frozen inputs. The copy goes through ``_replace_artifacts`` rather than
-        # ``with_evidence`` only because that is where ``complete`` is still carried.
-        self._replace_artifacts(**derive_evidence(self._run_dir, self._artifacts.inputs).changes())
+        # own frozen inputs, and joined onto the artifacts by the same ``with_evidence`` the two
+        # storeless verbs use (story #289).
+        self._artifacts = with_evidence(
+            self._artifacts, derive_evidence(self._run_dir, self._artifacts.inputs)
+        )
         self._writer(self._run_dir, build(self._artifacts))
         # The roll-up follows the record, never leads it: it is refreshed *after* a successful
         # write and re-read from the file just written, so the listing can never advertise a
@@ -1012,7 +1001,7 @@ def _segment_from(raw: Mapping[str, object]) -> SegmentArtifact:
     if isinstance(fingerprint, Mapping) and isinstance(version, int):
         engine = EngineIdentity(
             engine_version=version,
-            fingerprint=dict(fingerprint),  # type: ignore[arg-type]
+            fingerprint=dict(fingerprint),
             comparable_key=str(raw.get("comparable_key", "")),
             noctis_version=str(raw.get("noctis_version", "")),
         )
@@ -1031,14 +1020,14 @@ def _segment_from(raw: Mapping[str, object]) -> SegmentArtifact:
         argv=tuple(str(part) for part in argv) if isinstance(argv, Sequence) else (),
         command=str(raw.get("command", "run")),
         resumed=bool(raw.get("resumed", False)),
-        counters=dict(counters) if isinstance(counters, Mapping) else {},  # type: ignore[arg-type]
+        counters=dict(counters) if isinstance(counters, Mapping) else {},
         # Read back so the run's cumulative research/trading seconds are re-derived from every
         # segment on disk at every write — the totals are never carried in memory across a restart.
-        phase_seconds=dict(phases) if isinstance(phases, Mapping) else None,  # type: ignore[arg-type]
+        phase_seconds=dict(phases) if isinstance(phases, Mapping) else None,
         # Carried forward verbatim, like the segment's engine digests: the machine a *past*
         # segment ran on is history, and re-stamping it with whatever this process is running on
         # would be the exact misattribution the per-segment block exists to prevent.
-        environment=dict(environment) if isinstance(environment, Mapping) else None,  # type: ignore[arg-type]
+        environment=dict(environment) if isinstance(environment, Mapping) else None,
     )
 
 

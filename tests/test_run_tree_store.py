@@ -17,6 +17,7 @@ Two contracts get particular attention because they are the ones that bite in pr
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -36,11 +37,14 @@ from noctis.cli import app
 from noctis.observability.debug import RUN_ID_RE
 from noctis.observability.engine_id import ENGINE_VERSION
 from noctis.reporting import schema
+from noctis.reporting.run_record import RunArtifacts
 from noctis.reporting.run_tree import (
     RUN_INDEX_NAME,
     RUN_LOCK_NAME,
     RUN_RECORD_NAME,
+    Evidence,
     RunLockedError,
+    RunStore,
     open_run,
     read_artifacts,
     rebuild_index,
@@ -651,6 +655,98 @@ def test_the_run_tree_pulls_no_optional_extra_and_reads_no_settings():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+# ── every field of a record is derived, store-owned or carried (story #289) ────────────────
+#
+# The classification below is the whole contract of ``RunStore``'s copies, written down once:
+#
+# * **derived** — the seven fields ``derive_evidence`` reads off the run's own durable artifacts
+#   at every write, and that a store must therefore overwrite;
+# * **store-owned** — what an open, a checkpoint and a close legitimately rewrite: the stamps, the
+#   segment list, the label, the two engine identities, the event streams and ``complete``;
+# * **carried** — everything else, which the record froze and every later segment must hand
+#   forward verbatim.
+#
+# A field added to ``RunArtifacts`` without a classification lands in ``CARRIED`` with no sample
+# and fails the coverage assertion; a carried field a copy forgets fails the round trip.
+
+DERIVED = {f.name for f in dataclasses.fields(Evidence)}
+STORE_OWNED = {
+    "created_utc",
+    "last_active_utc",
+    "segments",
+    "complete",
+    "label",
+    "engine",
+    "current_engine",
+    "events",
+    "errors",
+}
+CARRIED = {f.name for f in dataclasses.fields(RunArtifacts)} - DERIVED - STORE_OWNED
+
+CARRIED_RUN_ID = "20260727T142233Z-a1b2c3"
+# One non-default, JSON-round-trippable value per carried field: a value the store's copies cannot
+# reproduce by accident, so a dropped field comes back as its default and fails.
+CARRIED_SAMPLES: dict[str, object] = {
+    "run_id": CARRIED_RUN_ID,
+    "completed_utc": "2026-07-27T16:00:00.000Z",
+    "inputs": {"settings": {"resolved": {"mode": "paper"}}},
+    "state_pruned": True,
+}
+
+
+def _store_over(run_dir: Path, **carried: object) -> RunStore:
+    """A store opened over artifacts that already carry something — what ``open_run`` builds once
+    it has parsed the record, minus the lock and the engine fingerprint."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    fields: dict[str, object] = {
+        "run_id": run_dir.name,
+        "created_utc": None,
+        "last_active_utc": None,
+        "engine": ENGINE,
+        "current_engine": ENGINE,
+    }
+    artifacts = RunArtifacts(**{**fields, **carried})  # type: ignore[arg-type]
+    return RunStore(run_dir, artifacts=artifacts, clock=FakeClock(), argv=["run", "-v"])
+
+
+def _carried_round_trip(runs_dir: Path, field: str, sample: object) -> object:
+    """Open, checkpoint and close a store over artifacts carrying ``sample``, then read the value
+    back off the ``run.json`` it left behind."""
+    run_dir = runs_dir / CARRIED_RUN_ID
+    store = _store_over(run_dir, **{field: sample})
+    store.checkpoint(counters={"cycles": 1})
+    store.close(reason="stopped")
+
+    return getattr(read_artifacts(run_dir, current=ENGINE), field)
+
+
+def test_every_artifact_field_is_carried_or_derived(tmp_path):
+    """Every field of ``RunArtifacts`` is classified, and every carried one survives a segment."""
+    assert DERIVED & STORE_OWNED == set()
+    assert DERIVED | STORE_OWNED | CARRIED == {f.name for f in dataclasses.fields(RunArtifacts)}
+    assert set(CARRIED_SAMPLES) == CARRIED  # every carried field has a sample to round-trip
+
+    round_tripped = {
+        field: _carried_round_trip(tmp_path / field, field, sample)
+        for field, sample in sorted(CARRIED_SAMPLES.items())
+    }
+
+    assert round_tripped == CARRIED_SAMPLES
+
+
+def test_a_pruned_runs_state_pruned_survives_the_open_that_appends_a_segment(tmp_path):
+    """``state_pruned`` is carried forward verbatim, exactly as the record's own docstring says:
+    it states that the heavy directories were deliberately removed, and no later write may un-say
+    it because something recreated an empty ``state/``."""
+    run_dir = tmp_path / "runs" / CARRIED_RUN_ID
+
+    store = _store_over(run_dir, state_pruned=True)
+
+    assert store.record()["run"]["state_pruned"] is True
+    store.close(reason="stopped")
+    assert _record(run_dir)["run"]["state_pruned"] is True
 
 
 # ── the golden record, written by a real (simulated-clock) run ─────────────────────────────
