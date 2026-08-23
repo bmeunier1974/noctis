@@ -1,0 +1,299 @@
+{
+  "retrospective": false,
+  "answers": "fresh",
+  "attempt_calls": 16,
+  "decide": {
+    "approval": {
+      "agreement": 0.6666666666666666,
+      "approval_rate": 0.6666666666666666,
+      "decided": 6,
+      "approvals": 4,
+      "labeled_approvals": 3,
+      "unlabeled_approvals": 1,
+      "promoted": 2
+    },
+    "revise_rate": 0.16666666666666666,
+    "revise_flip_rate": 0.0,
+    "revises": 1,
+    "revise_flips": 0,
+    "rejections": 1,
+    "unreadable": 1,
+    "unsettled": 1,
+    "cases": [
+      {
+        "case_id": "carry_roll-20260720T144233Z-a3f9c1",
+        "run_id": "20260720T144233Z-a3f9c1",
+        "verdict": "revise",
+        "label": null,
+        "revises": 1,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "n/a",
+          "binding_gate": "none",
+          "evidence_depth": "at-floor"
+        }
+      },
+      {
+        "case_id": "gap_fade_open-20260720T144233Z-a3f9c1",
+        "run_id": "20260720T144233Z-a3f9c1",
+        "verdict": "approve",
+        "label": "refused",
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "comfortable",
+          "binding_gate": "forward_holdout",
+          "evidence_depth": "above-floor"
+        }
+      },
+      {
+        "case_id": "mean_revert_close-20260721T090000Z-b7d2e4",
+        "run_id": "20260721T090000Z-b7d2e4",
+        "verdict": "reject",
+        "label": null,
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "near",
+          "binding_gate": "activity_floor",
+          "evidence_depth": "at-floor"
+        }
+      },
+      {
+        "case_id": "momo_pullback-20260720T144233Z-a3f9c1",
+        "run_id": "20260720T144233Z-a3f9c1",
+        "verdict": null,
+        "label": null,
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "near",
+          "binding_gate": "symbol_holdout",
+          "evidence_depth": "above-floor"
+        },
+        "error": "the case's answers settled on no single verdict, and none is invented for it"
+      },
+      {
+        "case_id": "orb_fade-20260721T090000Z-b7d2e4",
+        "run_id": "20260721T090000Z-b7d2e4",
+        "verdict": null,
+        "label": null,
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "comfortable",
+          "binding_gate": "consistency",
+          "evidence_depth": "below-floor"
+        },
+        "error": "no reply this case gave carried a verdict the emit contract admits"
+      },
+      {
+        "case_id": "range_compression-20260721T090000Z-b7d2e4",
+        "run_id": "20260721T090000Z-b7d2e4",
+        "verdict": "approve",
+        "label": null,
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "comfortable",
+          "binding_gate": "n/a",
+          "evidence_depth": "below-floor"
+        }
+      },
+      {
+        "case_id": "squeeze_fade-20260721T090000Z-b7d2e4",
+        "run_id": "20260721T090000Z-b7d2e4",
+        "verdict": "approve",
+        "label": "promoted",
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "comfortable",
+          "binding_gate": "forward_holdout",
+          "evidence_depth": "above-floor"
+        }
+      },
+      {
+        "case_id": "vol_breakout_squeeze-20260720T144233Z-a3f9c1",
+        "run_id": "20260720T144233Z-a3f9c1",
+        "verdict": "approve",
+        "label": "promoted",
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "near",
+          "binding_gate": "none",
+          "evidence_depth": "at-floor"
+        }
+      }
+    ],
+    "strata": {
+      "margin": {
+        "comfortable": {
+          "approval": {
+            "agreement": 0.5,
+            "approval_rate": 1.0,
+            "decided": 3,
+            "approvals": 3,
+            "labeled_approvals": 2,
+            "unlabeled_approvals": 1,
+            "promoted": 1
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "n/a": {
+          "approval": {
+            "agreement": null,
+            "approval_rate": 0.0,
+            "decided": 1,
+            "approvals": 0,
+            "labeled_approvals": 0,
+            "unlabeled_approvals": 0,
+            "promoted": 0
+          },
+          "revise_rate": 1.0,
+          "revise_flip_rate": 0.0,
+          "revises": 1,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "near": {
+          "approval": {
+            "agreement": 1.0,
+            "approval_rate": 0.5,
+            "decided": 2,
+            "approvals": 1,
+            "labeled_approvals": 1,
+            "unlabeled_approvals": 0,
+            "promoted": 1
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 1
+        }
+      },
+      "binding_gate": {
+        "activity_floor": {
+          "approval": {
+            "agreement": null,
+            "approval_rate": 0.0,
+            "decided": 1,
+            "approvals": 0,
+            "labeled_approvals": 0,
+            "unlabeled_approvals": 0,
+            "promoted": 0
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 1
+        },
+        "forward_holdout": {
+          "approval": {
+            "agreement": 0.5,
+            "approval_rate": 1.0,
+            "decided": 2,
+            "approvals": 2,
+            "labeled_approvals": 2,
+            "unlabeled_approvals": 0,
+            "promoted": 1
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "n/a": {
+          "approval": {
+            "agreement": null,
+            "approval_rate": 1.0,
+            "decided": 1,
+            "approvals": 1,
+            "labeled_approvals": 0,
+            "unlabeled_approvals": 1,
+            "promoted": 0
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "none": {
+          "approval": {
+            "agreement": 1.0,
+            "approval_rate": 0.5,
+            "decided": 2,
+            "approvals": 1,
+            "labeled_approvals": 1,
+            "unlabeled_approvals": 0,
+            "promoted": 1
+          },
+          "revise_rate": 0.5,
+          "revise_flip_rate": 0.0,
+          "revises": 1,
+          "revise_flips": 0,
+          "rejections": 0
+        }
+      },
+      "evidence_depth": {
+        "above-floor": {
+          "approval": {
+            "agreement": 0.5,
+            "approval_rate": 1.0,
+            "decided": 2,
+            "approvals": 2,
+            "labeled_approvals": 2,
+            "unlabeled_approvals": 0,
+            "promoted": 1
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "at-floor": {
+          "approval": {
+            "agreement": 1.0,
+            "approval_rate": 0.3333333333333333,
+            "decided": 3,
+            "approvals": 1,
+            "labeled_approvals": 1,
+            "unlabeled_approvals": 0,
+            "promoted": 1
+          },
+          "revise_rate": 0.3333333333333333,
+          "revise_flip_rate": 0.0,
+          "revises": 1,
+          "revise_flips": 0,
+          "rejections": 1
+        },
+        "below-floor": {
+          "approval": {
+            "agreement": null,
+            "approval_rate": 1.0,
+            "decided": 1,
+            "approvals": 1,
+            "labeled_approvals": 0,
+            "unlabeled_approvals": 1,
+            "promoted": 0
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 0
+        }
+      }
+    }
+  }
+}

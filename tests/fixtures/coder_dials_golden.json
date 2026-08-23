@@ -1,0 +1,391 @@
+{
+  "answers": "fresh",
+  "attempt_calls": 7,
+  "coder": {
+    "pass_label": "pass@k with feedback",
+    "cases": 3,
+    "jobs": 5,
+    "unattempted_jobs": 1,
+    "unreadable": 1,
+    "rates": {
+      "pass_label": "pass@k with feedback",
+      "first_attempt_pass_rate": 0.25,
+      "job_pass_rate": 0.75,
+      "first_attempt_passes": 1,
+      "passed_jobs": 3
+    },
+    "effort": {
+      "pass_label": "pass@k with feedback",
+      "mean_attempts_to_pass": 2.25,
+      "attempt_distribution": {
+        "passed_on": {
+          "1": 0.25,
+          "2": 0.25,
+          "3": 0.25
+        },
+        "never": 0.25
+      },
+      "retry_yield": {
+        "2": 0.25,
+        "3": 0.25
+      }
+    },
+    "escalation": {
+      "pass_label": "pass@k with feedback",
+      "escalated_jobs": 2,
+      "rescued_jobs": 1,
+      "escalation_rescue_rate": 0.5,
+      "usd_per_rescued_file_estimate": 39.0,
+      "pricing_table_version": "2026-07.1"
+    },
+    "cost": {
+      "pass_label": "pass@k with feedback",
+      "tokens_total": 8000000,
+      "tokens_per_pass": 2666666.6666666665,
+      "usd_total_estimate": 48.0,
+      "usd_per_pass_estimate": 16.0,
+      "pricing_table_version": "2026-07.1",
+      "seconds_total": 32.5,
+      "p50_seconds_to_pass": 9.0,
+      "p95_seconds_to_pass": 12.149999999999999
+    },
+    "failures": {
+      "attempts": 5,
+      "classes": {
+        "warmup_too_large": {
+          "count": 0,
+          "share": 0.0,
+          "knob": "fixed-oracle block wording, spec-path only"
+        },
+        "api_misuse": {
+          "count": 0,
+          "share": 0.0,
+          "knob": "contract sheet coverage, hint enrichment"
+        },
+        "name_mismatch": {
+          "count": 1,
+          "share": 0.2,
+          "knob": "prompt contract rules"
+        },
+        "signals_parity": {
+          "count": 0,
+          "share": 0.0,
+          "knob": "model capability"
+        },
+        "structural_invariant": {
+          "count": 0,
+          "share": 0.0,
+          "knob": "model capability \u2014 the serious one"
+        },
+        "scenario_violation": {
+          "count": 2,
+          "share": 0.4,
+          "knob": "feasibility rules, thinking dial, oracle mode"
+        },
+        "truncated": {
+          "count": 1,
+          "share": 0.2,
+          "knob": "coder max-tokens, thinking allowance, thinking dial"
+        },
+        "no_code_block": {
+          "count": 0,
+          "share": 0.0,
+          "knob": "prompt output rules, model instruction-following"
+        },
+        "import_error": {
+          "count": 1,
+          "share": 0.2,
+          "knob": "model capability / contract sheet"
+        },
+        "unclassified": {
+          "count": 0,
+          "share": 0.0,
+          "knob": "grow the taxonomy"
+        }
+      }
+    },
+    "strata": {
+      "composition_mode": {
+        "reference": {
+          "cases": 1,
+          "jobs": 1,
+          "unattempted_jobs": 1,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": null,
+            "job_pass_rate": null,
+            "first_attempt_passes": 0,
+            "passed_jobs": 0
+          }
+        },
+        "revision": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.0,
+            "job_pass_rate": 0.5,
+            "first_attempt_passes": 0,
+            "passed_jobs": 1
+          }
+        },
+        "scratch": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.5,
+            "job_pass_rate": 1.0,
+            "first_attempt_passes": 1,
+            "passed_jobs": 2
+          }
+        }
+      },
+      "oracle_mode": {
+        "authored": {
+          "cases": 2,
+          "jobs": 3,
+          "unattempted_jobs": 1,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.5,
+            "job_pass_rate": 1.0,
+            "first_attempt_passes": 1,
+            "passed_jobs": 2
+          }
+        },
+        "fixed_spec": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.0,
+            "job_pass_rate": 0.5,
+            "first_attempt_passes": 0,
+            "passed_jobs": 1
+          }
+        }
+      },
+      "warmup_arithmetic": {
+        "composed": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.0,
+            "job_pass_rate": 0.5,
+            "first_attempt_passes": 0,
+            "passed_jobs": 1
+          }
+        },
+        "higher_timeframe": {
+          "cases": 1,
+          "jobs": 1,
+          "unattempted_jobs": 1,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": null,
+            "job_pass_rate": null,
+            "first_attempt_passes": 0,
+            "passed_jobs": 0
+          }
+        },
+        "single": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.5,
+            "job_pass_rate": 1.0,
+            "first_attempt_passes": 1,
+            "passed_jobs": 2
+          }
+        }
+      },
+      "state_complexity": {
+        "latched": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.0,
+            "job_pass_rate": 0.5,
+            "first_attempt_passes": 0,
+            "passed_jobs": 1
+          }
+        },
+        "rolling": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.5,
+            "job_pass_rate": 1.0,
+            "first_attempt_passes": 1,
+            "passed_jobs": 2
+          }
+        },
+        "stateless": {
+          "cases": 1,
+          "jobs": 1,
+          "unattempted_jobs": 1,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": null,
+            "job_pass_rate": null,
+            "first_attempt_passes": 0,
+            "passed_jobs": 0
+          }
+        }
+      },
+      "no_trade_tape": {
+        "falsified": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.5,
+            "job_pass_rate": 1.0,
+            "first_attempt_passes": 1,
+            "passed_jobs": 2
+          }
+        },
+        "scale_free": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.0,
+            "job_pass_rate": 0.5,
+            "first_attempt_passes": 0,
+            "passed_jobs": 1
+          }
+        },
+        "trivial": {
+          "cases": 1,
+          "jobs": 1,
+          "unattempted_jobs": 1,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": null,
+            "job_pass_rate": null,
+            "first_attempt_passes": 0,
+            "passed_jobs": 0
+          }
+        }
+      },
+      "param_space_breadth": {
+        "broad": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.0,
+            "job_pass_rate": 0.5,
+            "first_attempt_passes": 0,
+            "passed_jobs": 1
+          }
+        },
+        "moderate": {
+          "cases": 1,
+          "jobs": 1,
+          "unattempted_jobs": 1,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": null,
+            "job_pass_rate": null,
+            "first_attempt_passes": 0,
+            "passed_jobs": 0
+          }
+        },
+        "narrow": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.5,
+            "job_pass_rate": 1.0,
+            "first_attempt_passes": 1,
+            "passed_jobs": 2
+          }
+        }
+      },
+      "api_surface": {
+        "exits": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.0,
+            "job_pass_rate": 0.5,
+            "first_attempt_passes": 0,
+            "passed_jobs": 1
+          }
+        },
+        "indicators": {
+          "cases": 1,
+          "jobs": 2,
+          "unattempted_jobs": 0,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": 0.5,
+            "job_pass_rate": 1.0,
+            "first_attempt_passes": 1,
+            "passed_jobs": 2
+          }
+        },
+        "n/a": {
+          "cases": 1,
+          "jobs": 1,
+          "unattempted_jobs": 1,
+          "rates": {
+            "pass_label": "pass@k with feedback",
+            "first_attempt_pass_rate": null,
+            "job_pass_rate": null,
+            "first_attempt_passes": 0,
+            "passed_jobs": 0
+          }
+        }
+      }
+    },
+    "warnings": [
+      {
+        "case_id": "gap-fade-revision",
+        "rep": 1,
+        "strategy": "gap_fade_revision",
+        "detector": "one_sided_book",
+        "severity": "WARNING",
+        "summary": "the file took 41 long positions and never once went flat"
+      },
+      {
+        "case_id": "sma-cross-scratch",
+        "rep": 2,
+        "strategy": "sma_cross_scratch",
+        "detector": "one_sided_book",
+        "severity": "WARNING",
+        "summary": "the file took 41 long positions and never once went flat"
+      },
+      {
+        "case_id": "sma-cross-scratch",
+        "rep": 2,
+        "strategy": "sma_cross_scratch",
+        "detector": "param_floor_collapse",
+        "severity": "WARNING",
+        "summary": "every tuned param sits on its space's floor (lookback=5 of 5..40)"
+      }
+    ],
+    "warned_jobs": 2
+  }
+}

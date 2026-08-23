@@ -1,0 +1,195 @@
+Bench 20260801T131415Z-d4e5f6 — golden-net
+  workspace/bench/20260801T131415Z-d4e5f6/bench.json
+
+Site                              decide
+Site version                           1
+Corpus split                      tuning
+Complete                             yes
+Started (UTC)               2026-08-01T13:14:15Z
+Finished (UTC)              2026-08-01T13:21:02Z
+Comparable key
+  engine_version=3|engine_fingerprint=0ab702d65ec8a507|site_id=decide|site_version=1|prompt_asset_hash=c0ffee1234567890|corpus_version=decide/2026-07|corpus_hash=deadbeefdeadbeef|harness_hash=8877665544332211|pricing_table_version=2026-07.1
+
+Cases (n)                              8
+Runs (reps)                           15
+Reps per case                        n/a
+Attempts                              16
+Corpus cases                           9
+  not scored                           1
+
+Harness dials
+retrospective                         no
+answers                            fresh
+attempt_calls                         16
+
+dials.decide
+approval
+  Approval-side agreement           0.6667
+  Approval rate                     0.6667
+  Approvals                              4
+    gates promoted                       2
+    gates labeled                        3
+    unlabeled (n/a)                      1
+revise_rate                       0.1667
+revise_flip_rate                  0.0000
+revises                                1
+revise_flips                           0
+rejections                             1
+unreadable                             1
+unsettled                              1
+cases                        [8 entries]
+strata
+  margin
+    comfortable
+      approval
+        Approval-side agreement           0.5000
+        Approval rate                     1.0000
+        Approvals                              3
+          gates promoted                       1
+          gates labeled                        2
+          unlabeled (n/a)                      1
+      revise_rate                       0.0000
+      revise_flip_rate                     n/a
+      revises                                0
+      revise_flips                           0
+      rejections                             0
+    n/a
+      approval
+        Approval-side agreement              n/a
+        Approval rate                     0.0000
+        Approvals                              0
+          gates promoted                       0
+          gates labeled                        0
+          unlabeled (n/a)                      0
+      revise_rate                       1.0000
+      revise_flip_rate                  0.0000
+      revises                                1
+      revise_flips                           0
+      rejections                             0
+    near
+      approval
+        Approval-side agreement           1.0000
+        Approval rate                     0.5000
+        Approvals                              1
+          gates promoted                       1
+          gates labeled                        1
+          unlabeled (n/a)                      0
+      revise_rate                       0.0000
+      revise_flip_rate                     n/a
+      revises                                0
+      revise_flips                           0
+      rejections                             1
+  binding_gate
+    activity_floor
+      approval
+        Approval-side agreement              n/a
+        Approval rate                     0.0000
+        Approvals                              0
+          gates promoted                       0
+          gates labeled                        0
+          unlabeled (n/a)                      0
+      revise_rate                       0.0000
+      revise_flip_rate                     n/a
+      revises                                0
+      revise_flips                           0
+      rejections                             1
+    forward_holdout
+      approval
+        Approval-side agreement           0.5000
+        Approval rate                     1.0000
+        Approvals                              2
+          gates promoted                       1
+          gates labeled                        2
+          unlabeled (n/a)                      0
+      revise_rate                       0.0000
+      revise_flip_rate                     n/a
+      revises                                0
+      revise_flips                           0
+      rejections                             0
+    n/a
+      approval
+        Approval-side agreement              n/a
+        Approval rate                     1.0000
+        Approvals                              1
+          gates promoted                       0
+          gates labeled                        0
+          unlabeled (n/a)                      1
+      revise_rate                       0.0000
+      revise_flip_rate                     n/a
+      revises                                0
+      revise_flips                           0
+      rejections                             0
+    none
+      approval
+        Approval-side agreement           1.0000
+        Approval rate                     0.5000
+        Approvals                              1
+          gates promoted                       1
+          gates labeled                        1
+          unlabeled (n/a)                      0
+      revise_rate                       0.5000
+      revise_flip_rate                  0.0000
+      revises                                1
+      revise_flips                           0
+      rejections                             0
+  evidence_depth
+    above-floor
+      approval
+        Approval-side agreement           0.5000
+        Approval rate                     1.0000
+        Approvals                              2
+          gates promoted                       1
+          gates labeled                        2
+          unlabeled (n/a)                      0
+      revise_rate                       0.0000
+      revise_flip_rate                     n/a
+      revises                                0
+      revise_flips                           0
+      rejections                             0
+    at-floor
+      approval
+        Approval-side agreement           1.0000
+        Approval rate                     0.3333
+        Approvals                              1
+          gates promoted                       1
+          gates labeled                        1
+          unlabeled (n/a)                      0
+      revise_rate                       0.3333
+      revise_flip_rate                  0.0000
+      revises                                1
+      revise_flips                           0
+      rejections                             1
+    below-floor
+      approval
+        Approval-side agreement              n/a
+        Approval rate                     1.0000
+        Approvals                              1
+          gates promoted                       0
+          gates labeled                        0
+          unlabeled (n/a)                      1
+      revise_rate                       0.0000
+      revise_flip_rate                     n/a
+      revises                                0
+      revise_flips                           0
+      rejections                             0
+
+Metrics
+first_attempt_pass_rate           0.7708
+job_pass_rate                     0.8125
+mean_attempts_to_pass             1.0476
+attempt_distribution
+  passed_on
+    1                                 0.7708
+    2                                 0.0417
+  never                             0.1875
+retry_yield
+  2                                 0.0417
+cost
+  tokens_total                     1632000
+  tokens_per_pass              136000.0000
+  usd_total_estimate                1.7600
+  usd_per_pass_estimate             0.1467
+  pricing_table_version          2026-07.1
+latency
+  p50_s                             1.5000
+  p95_s                             2.1750
