@@ -81,7 +81,12 @@ warning (see [development.md](development.md)).
 The agent loop (`src/noctis/research/agent.py` + the curated `ResearchToolbox`) and the legacy
 proposer/Optuna loop return the *same* `ResearchSummary`, so the runtime calls either behind one
 seam — no LLM configured means the legacy path runs over the same strategy library, exactly as
-before. The agent loop itself runs one of two ways behind a further seam — the **conversation**
+before. Every reader of that toolbox holds one declared surface (`src/noctis/research/surface.py`),
+in two tiers: `ResearchFacts` — the derived facts a *renderer* reads (the briefings, the system
+prompt, an eval site rebuilding a past ask) — and `Toolbox`, which adds the tools, the capture seams
+and the counters snapshot a *driver* needs. A consumer reads facts, never the collaborator behind
+one, and `tests/test_toolbox_boundary.py` is the check that it stays that way. The agent
+loop itself runs one of two ways behind a further seam — the **conversation**
 transcript or the small-context **episodic** driver — and the episodic path adds the
 machine-fixed scenario oracle (FORMULATE authors the tape, the coder only satisfies it; see
 [research.md](research.md)). See [research.md](research.md) for how a strategy earns promotion.

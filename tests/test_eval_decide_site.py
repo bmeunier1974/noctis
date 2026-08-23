@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from noctis.eval.case import Case
+from noctis.eval.case import Case, parse_case
 from noctis.eval.corpus import Corpus
 from noctis.eval.decide_case import (
     LABEL_PROMOTED,
@@ -56,10 +56,12 @@ from noctis.eval.metrics import AttemptOutcome
 from noctis.eval.record import EngineStamp
 from noctis.eval.runner import Attempt, AttemptRequest, BenchRunner, bench_root, replay
 from noctis.eval.stats import MISMATCHED_CASES, Refusal, compare
+from noctis.research import digests
 from noctis.research.briefings import decide_briefing
 from noctis.research.driver import DECIDE_CONTRACT, DECIDE_FINAL_CONTRACT
-from noctis.research.journal import ExperimentJournal
+from noctis.research.journal import ExperimentJournal, evidence_block
 from noctis.research.ledger import SessionLedger
+from noctis.research.surface import ChampionBoard, ResearchFacts, ResearchLimits
 
 from ._promotion_cases import card, rules
 
@@ -208,7 +210,11 @@ class _Memory:
 
 
 class _Toolbox:
-    """Everything the production DECIDE briefing builder reads off a research toolbox."""
+    """Every fact the production DECIDE briefing builder asks a session for, answered from a real
+    journal and the empty collaborators above — through the production renderers, never a copy.
+
+    A :class:`~noctis.research.surface.ResearchFacts` and nothing wider: the session context a
+    bench states is read, never driven, so a fixture here cannot dispatch a tool."""
 
     def __init__(
         self,
@@ -225,9 +231,37 @@ class _Toolbox:
         self.memory = memory or _Memory()
         self.strategies_dir = strategies_dir if strategies_dir is not None else "/nonexistent/lib"
         self._market = market or {}
+        self.limits = ResearchLimits(
+            min_trials=min_trials, max_backtests=12, sweep_trials=40, max_author_calls=3
+        )
 
     def market_context(self) -> dict[str, Any]:
         return dict(self._market)
+
+    def journal_evidence(self, name: str) -> dict[str, Any]:
+        return evidence_block(self.journal, name, min_trials=self.min_trials)
+
+    def champion_board(self) -> ChampionBoard:
+        return ChampionBoard(
+            rows=tuple(digests.champion_digest(self.registry)),
+            crowned_families=tuple(digests.crowned_families(self.registry)),
+            capacity=0,
+        )
+
+    def library_index(self) -> list[dict]:
+        return digests.library_index(self.strategies_dir)
+
+    def memory_tail(self, *, prefix_trim: bool = False) -> tuple[list, list]:
+        return digests.memory_block(self.memory, prefix_trim=prefix_trim)
+
+    def lake_inventory(self, *, limit: int = 60) -> list[str]:
+        return []
+
+    def data_budget(self) -> float | None:
+        return None
+
+    def template_text(self) -> str:
+        return "(none)"
 
 
 MARKET = {
@@ -342,6 +376,79 @@ def test_the_rebuilt_briefing_carries_the_candidates_gate_facing_evidence(tmp_pa
 
     assert f"EVIDENCE FOR {STRATEGY} (gate-facing)" in rebuilt
     assert '"min_trials_gate": 6' in rebuilt
+
+
+def test_the_frozen_case_toolbox_and_the_neutral_session_are_research_facts(tmp_path):
+    """Both stand-ins the bench renders through satisfy the declared surface and nothing wider:
+    a re-run reads facts (:class:`~noctis.research.surface.ResearchFacts`), never a tool, so no
+    fixture in this layer can start a backtest or spend a verdict."""
+    case = _approved_case(tmp_path)
+
+    assert isinstance(NEUTRAL_SESSION, ResearchFacts)
+    assert isinstance(decide_input(case, context_window=WINDOW).toolbox, ResearchFacts)
+
+
+def test_the_case_toolbox_answers_every_session_fact_off_the_context_it_was_given(tmp_path):
+    """One fact is the case's — its evidence; every other fact is the bench's context, forwarded
+    untouched. Asserted on the facts themselves so a block the briefing does not render today is
+    still answered from the one place that knows it."""
+    journal = _journal(tmp_path)
+    _sweep(journal)
+    context = _Toolbox(journal, market=MARKET, memory=_Memory(["momentum decays by lunch"]))
+    _approve(journal, promoted=True)
+
+    box = decide_input(_case(journal), context_window=WINDOW, context=context).toolbox
+
+    assert box.market_context() == MARKET
+    assert box.memory_tail() == context.memory_tail()
+    assert box.champion_board() == context.champion_board()
+    assert box.library_index() == context.library_index()
+    assert box.lake_inventory() == context.lake_inventory()
+    assert box.data_budget() == context.data_budget()
+    assert box.template_text() == context.template_text()
+
+
+def test_the_case_toolbox_states_the_exhaustion_floor_the_case_was_judged_under(tmp_path):
+    """The one limit a case freezes is its own ``min_trials`` floor; the cost ceilings stay the
+    bench's, because a re-run spends the bench's budget and was judged against history's floor."""
+    journal = _journal(tmp_path)
+    _sweep(journal)
+    context = _Toolbox(journal)
+    _approve(journal, promoted=True)
+
+    limits = decide_input(_case(journal), context_window=WINDOW, context=context).toolbox.limits
+
+    assert limits.min_trials == MIN_TRIALS
+    assert limits.max_backtests == context.limits.max_backtests
+
+
+def test_the_evidence_a_case_froze_is_answered_as_mined_rather_than_rebuilt_from_its_trials(
+    tmp_path,
+):
+    """The frozen block *is* the ask. It was written by the production evidence builder when the
+    case was mined, so the adapter hands it back whole — which is why a field a later miner adds
+    reaches the rendered prompt without this adapter learning that field's name."""
+    case = parse_case(
+        {
+            "site_id": "decide",
+            "payload": {
+                "evidence": {
+                    "strategy": STRATEGY,
+                    "min_trials_gate": MIN_TRIALS,
+                    "top_trials": [{"params": {"lookback": 10}, "symbols": ["AAPL"]}],
+                    "holdout_note": "a field a later miner froze",
+                },
+                "ledger_tail": [],
+            },
+            "provenance": f"mined:{RUN_ID}",
+        },
+        case_id="hand-frozen",
+        source="test",
+    )
+
+    rebuilt = DECIDE_SITE.render(decide_input(case, context_window=WINDOW), HarnessSpec())
+
+    assert '"holdout_note": "a field a later miner froze"' in rebuilt
 
 
 def test_the_runner_seam_adapts_every_case_in_a_corpus_through_one_declared_adapter(tmp_path):

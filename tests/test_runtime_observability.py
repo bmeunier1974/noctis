@@ -72,6 +72,51 @@ def test_run_agent_research_tees_the_feed_into_the_console(tmp_path, monkeypatch
     assert any("weighing the mean-reversion thesis" in line for line in out)
 
 
+@pytest.mark.parametrize(
+    "source, expected",
+    [("profile:spicy", "profile:spicy"), (None, "(none)")],
+)
+def test_run_agent_research_logs_the_mandate_the_session_carries(
+    tmp_path, monkeypatch, caplog, source, expected
+):
+    """#260: the RESEARCH line names the provenance of the session's OWN resolved mandate.
+
+    The session stub below carries what the composition root hands it — a ``mandate`` and a
+    toolbox — and nothing more, so a runtime that still reached through the toolbox for the
+    provenance it already holds would fail here instead of logging a second-hand name.
+    """
+    from noctis.research.mandate import Mandate
+
+    mandate = (
+        None
+        if source is None
+        else Mandate(
+            text="Hunt intraday reversals.",
+            source=source,
+            summary="intraday reversals",
+            references=[],
+            config_overrides={},
+        )
+    )
+
+    class _Session:
+        def __init__(self):
+            self.mandate = mandate
+            self.toolbox = object()
+
+        def run(self, *, max_iterations=None, stop_event=None):
+            return ResearchSummary()
+
+    monkeypatch.setattr("noctis.bootstrap.build_research_session", lambda **kwargs: _Session())
+    runtime = _runtime(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="noctis.runtime"):
+        runtime._run_agent_research()
+
+    lines = [r.getMessage() for r in caplog.records if "agent research session:" in r.getMessage()]
+    assert lines == [f"agent research session: mandate={expected}, metric=sharpe"]
+
+
 def test_run_agent_research_without_a_console_passes_none(tmp_path, monkeypatch):
     """A bare run (no ``-v``) carries ``on_event=None``, so the research loop falls back to its
     own logger sink — the day/night loop stays silent by default."""

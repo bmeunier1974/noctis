@@ -56,6 +56,7 @@ from noctis.research.driver import (
 from noctis.research.episode import EmitContract
 from noctis.research.ledger import SessionLedger
 from noctis.research.mandate import Mandate
+from noctis.research.surface import ResearchFacts
 
 __all__ = [
     "DECIDE_CONTRACTS",
@@ -114,15 +115,16 @@ class DiscoverKnobs(EpisodeKnobs):
 # ─────────────────────────────────────────────────────────────────────────────
 # Site inputs — one frozen record per builder signature
 # ─────────────────────────────────────────────────────────────────────────────
-# The toolbox is typed as it is at the builders' own boundary: structurally, ``Any``. The briefing
-# builders take "whatever exposes the journal/registry/memory/lake surface they read", which is how
-# a session's real ResearchToolbox and a harness's stand-in can both be rendered from without the
-# declaration layer stating a nominal type the engine itself declines to state.
+# The toolbox is typed as it is at the builders' own boundary: a
+# :class:`~noctis.research.surface.ResearchFacts` — the read-only tier of the research-toolbox
+# surface (#257). The briefing builders ask a session for *facts*, so that is exactly what a site
+# input carries, and a session's real ResearchToolbox, a bench's stated context and the frozen
+# case's stand-in all satisfy it structurally. A renderer is handed no tool it could dispatch.
 @dataclass(frozen=True)
 class FormulateSiteInput:
     """What :func:`~noctis.research.briefings.formulate_briefing` is called with."""
 
-    toolbox: Any
+    toolbox: ResearchFacts
     ledger: SessionLedger
     context_window: int
     mandate: Mandate | None = None
@@ -132,7 +134,7 @@ class FormulateSiteInput:
 class DecideSiteInput:
     """What :func:`~noctis.research.briefings.decide_briefing` is called with, for one candidate."""
 
-    toolbox: Any
+    toolbox: ResearchFacts
     ledger: SessionLedger
     strategy: str
     context_window: int
@@ -147,7 +149,7 @@ class DiscoverSiteInput:
     the history a fetch would cover — the spend context the ask is made inside.
     """
 
-    toolbox: Any
+    toolbox: ResearchFacts
     ledger: SessionLedger
     thesis: str
     symbol_character: str

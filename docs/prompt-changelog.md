@@ -34,6 +34,41 @@ never keep its old identity.
 
 ---
 
+## 2026-08-22 — sites: author, briefings, conversation, episodic
+
+Seam refactor, **no wording change**: the renderers that assemble these prompts were re-typed
+against `noctis.research.surface.ResearchFacts` (epic #255, stories #257-#259) and now read the
+session's *derived facts* — the champion board, the library index, the memory tail, the lake
+inventory, the data budget, one candidate's journaled evidence — instead of reaching **through**
+the research toolbox into whichever collaborator happened to hold the answer (`toolbox.journal`,
+`toolbox.registry.capacity`, `toolbox.lake.preflight.budget_usd`), often behind a `getattr` probe
+that quietly invented a fact when the reach missed. Three builders moved with that: the DECIDE
+evidence block is now `journal.evidence_block` (one builder, beside the record schema it reads),
+the lake-inventory builder moved out of `research/digests.py` onto the toolbox, and the one
+tolerant read left in the codebase — a lake with no cost preflight — answers `None` once, from
+`ResearchToolbox.data_budget()`, rather than being probed for at each call site.
+
+Not one asset's text moved. `tests/test_prompt_goldens.py` pins the rendered FORMULATE, DECIDE and
+DISCOVER briefings and the conversation system prompt (at both `prefix_trim` values) by length +
+SHA-256, and all five fingerprints are unchanged across the epic — that is the proof of byte
+identity, on the same principle as the previous entry's author golden. The hashes move because the
+composition *code* moved: `research/briefings.py` (`briefings`), `research/prompt.py`
+(`conversation`), and the shared fact-renderer `research/digests.py`, which is listed under
+`author` and `episodic` as well — exactly the over-partition this ratchet is designed for.
+`episodic`'s own asset `research/driver.py` carries the same move (#259): the episodic driver holds
+a `noctis.research.surface.Toolbox` instead of an `Any`, and its ten `getattr(toolbox, …, default)`
+probes are gone — readiness is `toolbox.symbol_ready`, the FORMULATE class check takes
+`toolbox.class_exhausted` as a callable, sweep sizing reads `toolbox.limits`, and session end takes
+one `toolbox.session_counters()` snapshot instead of six live reads. No wording change there
+either: the per-stage system texts, emit contracts and every ledgered/emitted line are
+byte-identical, pinned by the goldens and by the driver's own ledger assertions. This one entry
+declares the whole epic's move.
+
+Amended for #261, the epic's last story and the same kind of move: the eval layer's frozen DECIDE
+case now reads the rendered trial cap straight from `research/journal.py`, the module that owns the
+evidence block, so the `_TOP_TRIALS` alias `research/briefings.py` was keeping for it is deleted.
+That is the only line of any asset this amendment moves, and it is a name nothing renders.
+
 ## 2026-08-02 — sites: author
 
 Ablation seam widening, **no wording change**: the authoring engine's five prompt pieces (contract

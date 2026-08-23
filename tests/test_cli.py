@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from noctis.cli import app
+from noctis.research.surface import SessionCounters
 
 runner = CliRunner()
 
@@ -269,8 +270,8 @@ def test_research_end_of_session_lists_undecided(tmp_path, monkeypatch):
         max_iterations = 20
 
     class _Toolbox:
-        author_calls = 0
-        backtests_run = 3
+        def session_counters(self):
+            return SessionCounters(backtests_run=3)
 
     class _Session:
         model = "fake/model"
@@ -298,8 +299,8 @@ def test_research_end_of_session_omits_undecided_when_empty(tmp_path, monkeypatc
         max_iterations = 20
 
     class _Toolbox:
-        author_calls = 0
-        backtests_run = 1
+        def session_counters(self):
+            return SessionCounters(backtests_run=1)
 
     class _Session:
         model = "fake/model"
@@ -313,6 +314,53 @@ def test_research_end_of_session_omits_undecided_when_empty(tmp_path, monkeypatc
     result = runner.invoke(app, ["research", "-c", _paper_config(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "undecided" not in result.output.lower()
+
+
+@pytest.mark.parametrize(
+    "author_calls, expected",
+    [
+        (
+            0,
+            "Session over (agent_done): 4 tool rounds, 3 backtests, "
+            "1 promotion(s), 2 rejection(s).",
+        ),
+        (
+            2,
+            "Session over (agent_done): 4 tool rounds, 3 backtests, 2 coder authoring call(s), "
+            "1 promotion(s), 2 rejection(s).",
+        ),
+    ],
+)
+def test_research_session_over_line_is_filled_from_the_counters_snapshot(
+    tmp_path, monkeypatch, author_calls, expected
+):
+    """#260: the operator's end-of-session grep target, byte-for-byte — and every counter in it
+    comes from one ``session_counters()`` snapshot, the verb's only reach into the toolbox."""
+    from noctis.engine.research import ResearchSummary
+
+    summary = ResearchSummary(iterations=4, promotions=1, rejections=2, stopped_reason="agent_done")
+
+    class _Budgets:
+        name = "test-profile"
+        max_iterations = 20
+
+    class _Toolbox:
+        def session_counters(self):
+            return SessionCounters(backtests_run=3, author_calls=author_calls)
+
+    class _Session:
+        model = "fake/model"
+        budgets = _Budgets()
+        toolbox = _Toolbox()
+
+        def run(self, *, max_iterations=None, stop_event=None):
+            return summary
+
+    monkeypatch.setattr("noctis.bootstrap.build_research_session", lambda **kwargs: _Session())
+    result = runner.invoke(app, ["research", "-c", _paper_config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert expected in result.output
 
 
 def test_champions_command_runs(tmp_path):
@@ -745,7 +793,7 @@ class _FakeSession:
         self.model = "anthropic/claude-fake"
         self.price_table = default_table()
         self.budgets = SimpleNamespace(name="balanced", max_iterations=5)
-        self.toolbox = SimpleNamespace(author_calls=0, backtests_run=1)
+        self.toolbox = SimpleNamespace(session_counters=lambda: SessionCounters(backtests_run=1))
         self._on_event = on_event
 
     def run(self, *, max_iterations=None):

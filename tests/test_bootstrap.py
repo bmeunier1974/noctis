@@ -1676,13 +1676,16 @@ class _PanelLake:
         return symbol in self.ready
 
 
-def _episodic_session(tmp_path, monkeypatch, lake, *, mandate=None, history_days=None):
+def _episodic_session(
+    tmp_path, monkeypatch, lake, *, mandate=None, history_days=None, sweep_trials=None
+):
     monkeypatch.setattr(
         research_mod,
         "build_llm_client",
         lambda settings: SimpleNamespace(model="fake/model", capabilities=Capabilities()),
     )
     data = [] if history_days is None else ["data:", f"  history_days: {history_days}"]
+    trials = [] if sweep_trials is None else [f"    sweep_trials: {sweep_trials}"]
     settings = load_settings(
         config_path=_config(
             tmp_path,
@@ -1695,6 +1698,7 @@ def _episodic_session(tmp_path, monkeypatch, lake, *, mandate=None, history_days
                 "  fit_set_size: 2",
                 "  agent:",
                 "    loop: episodic",
+                *trials,
             ],
             "panel.yaml",
         )
@@ -1734,6 +1738,27 @@ def test_composition_root_builds_the_fallback_panel_source_over_roster_and_readi
     # the source: the panel is no longer frozen at assembly time.
     lake.ready.add("AAA")
     assert source() == ["AAA", "CCC"]
+
+
+def test_the_root_wires_the_driver_from_the_collaborators_it_holds_itself(tmp_path, monkeypatch):
+    """#260: the lake behind the fallback panel and the driver's sweep-trials budget come from
+    what the composition root already holds — the lake it was handed and its own resolved cost
+    profile — never from a reach back through the toolbox it just built. Dropping those two off
+    the toolbox leaves the wiring, and the values it carries, unchanged."""
+    from noctis.research import driver as driver_mod
+
+    session = _episodic_session(tmp_path, monkeypatch, _PanelLake(ready={"CCC"}), sweep_trials=7)
+    del session.toolbox.lake, session.toolbox.default_sweep_trials
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        driver_mod, "run_episodic_research", lambda **k: seen.update(k) or ResearchSummary()
+    )
+
+    session.run(max_iterations=1)
+
+    assert seen["fallback_panel_source"]() == ["CCC"]
+    assert seen["sweep_trials"] == 7
 
 
 def test_composition_root_passes_no_precomputed_fit_panel(tmp_path, monkeypatch):

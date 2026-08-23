@@ -15,11 +15,10 @@ fully-trimmed briefing still does not fit. These tests lock:
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from noctis.champions import PromotionRules, decide
+from noctis.data.preflight import CostPreflight
 from noctis.research import Mandate
 from noctis.research.agent import _estimate_tokens
 from noctis.research.briefings import (
@@ -29,6 +28,7 @@ from noctis.research.briefings import (
     formulate_briefing,
 )
 from noctis.research.ledger import SessionLedger
+from noctis.research.surface import ChampionBoard, ResearchFacts, ResearchLimits
 from noctis.strategies.library import set_header, write_strategy
 from tests.test_champions import make_scorecard
 from tests.test_research_tools import LENIENT, PROBE, _make_toolbox
@@ -365,12 +365,14 @@ def test_discover_briefing_carries_the_mandate_thesis_profile_inventory_and_budg
 
 
 def test_discover_briefing_surfaces_the_configured_data_budget_when_the_seam_exposes_it(tmp_path):
-    # The spend context is read tolerantly off the lake seam's own cost preflight: present ⇒ the
-    # number the refusal would be judged against; absent (a fake lake) ⇒ omitted, never invented.
+    # The spend context states the budget the toolbox answers with: present ⇒ the number a
+    # refusal would be judged against; absent (a fake lake with no cost preflight) ⇒ omitted,
+    # never invented. The preflight is the real one a lake with a vendor is built with, so the
+    # briefing is shown the same object production shows it.
     box, ledger, mandate = _populate(tmp_path)
     assert "budget_usd" not in _discover(box, ledger, mandate, context_window=_HUGE)
 
-    box.lake.preflight = SimpleNamespace(budget_usd=125.0)
+    box.lake.preflight = CostPreflight(125.0)
     assert "125.0" in _discover(box, ledger, mandate, context_window=_HUGE)
 
 
@@ -414,3 +416,117 @@ def test_briefings_land_in_target_token_band_on_realistic_state(tmp_path):
     assert 800 < formulate < 3500, formulate
     assert 800 < decide < 3500, decide
     assert 500 < discover < 3500, discover  # the smallest of the three asks
+
+
+# ── the seam: a briefing reads the facts, never the collaborators behind them (#258) ────────
+# What a renderer is handed is a ResearchFacts (noctis.research.surface): the derived facts, and
+# nothing that could change the session. The stand-in below implements exactly that Protocol and
+# owns no journal, registry, memory, lake, library path or scalar ceiling — so a builder that
+# still reaches THROUGH the toolbox into a collaborator fails here by attribute error, rather
+# than by quietly rendering a session other than the one it was handed.
+_FACTS_MARKET = "FACTSMARKET-round-trip"
+_FACTS_EXHAUSTED = "factsclass exhausted here"
+_FACTS_BREADTH = "FACTSBREADTH"
+_FACTS_CROWNED = "facts_fam"
+_FACTS_LIBRARY = "facts_probe"
+_FACTS_FINDING = "FACTSFINDING kept advisory"
+_FACTS_DEAD_END = "FACTSDEADEND do not re-mine"
+_FACTS_INVENTORY = "FACTSHELD"
+_FACTS_EVIDENCE = "FACTSEVIDENCE the journaled case for it"
+_FACTS_BUDGET = 42.5
+
+
+class _FactsOnly:
+    """One session's derived facts, and nothing else — the whole surface a renderer may read."""
+
+    limits = ResearchLimits(min_trials=4, max_backtests=9, sweep_trials=3, max_author_calls=2)
+
+    def market_context(self) -> dict:
+        return {
+            "round_trip_cost_bp": _FACTS_MARKET,
+            "symbols": {"ZZZ": {"character": _FACTS_BREADTH}},
+            "exhausted_classes": [_FACTS_EXHAUSTED],
+        }
+
+    def journal_evidence(self, name: str) -> dict:
+        return {"strategy": name, "thesis": _FACTS_EVIDENCE, "min_trials_gate": 4}
+
+    def champion_board(self) -> ChampionBoard:
+        return ChampionBoard(
+            rows=({"family": _FACTS_CROWNED, "test_metric": 1.25},),
+            crowned_families=(_FACTS_CROWNED,),
+            capacity=3,
+        )
+
+    def library_index(self) -> list[dict]:
+        return [{"name": _FACTS_LIBRARY, "status": "draft"}]
+
+    def template_text(self) -> str:
+        return "# the shipped template, stated by the facts"
+
+    def memory_tail(self, *, prefix_trim: bool = False) -> tuple[list, list]:
+        return [_FACTS_FINDING], [_FACTS_DEAD_END]
+
+    def lake_inventory(self, *, limit: int = 60) -> list[str]:
+        return [_FACTS_INVENTORY]
+
+    def data_budget(self) -> float | None:
+        return _FACTS_BUDGET
+
+
+def _facts_ledger(tmp_path) -> SessionLedger:
+    ledger = SessionLedger(tmp_path / "state", session_id="facts-1")
+    ledger.record_thesis("facts_probe", f"{_LEDGER_SENTINEL} the session narrative")
+    return ledger
+
+
+def test_the_facts_stand_in_holds_no_collaborator_a_briefing_could_reach_through():
+    facts = _FactsOnly()
+
+    assert isinstance(facts, ResearchFacts)
+    for collaborator in ("journal", "registry", "memory", "lake", "strategies_dir", "min_trials"):
+        assert not hasattr(facts, collaborator), collaborator
+
+
+def test_formulate_renders_every_block_from_the_facts_alone(tmp_path):
+    brief = formulate_briefing(_FactsOnly(), _facts_ledger(tmp_path), context_window=_HUGE)
+
+    for marker in (
+        _FACTS_MARKET,
+        _FACTS_BREADTH,
+        _FACTS_EXHAUSTED,
+        _FACTS_CROWNED,
+        _FACTS_LIBRARY,
+        _FACTS_FINDING,
+        _FACTS_DEAD_END,
+        _LEDGER_SENTINEL,
+    ):
+        assert marker in brief
+
+
+def test_decide_renders_the_journaled_evidence_the_facts_state(tmp_path):
+    brief = decide_briefing(
+        _FactsOnly(), _facts_ledger(tmp_path), "facts_probe", context_window=_HUGE
+    )
+
+    assert "EVIDENCE FOR facts_probe (gate-facing)" in brief
+    assert _FACTS_EVIDENCE in brief
+    assert '"min_trials_gate": 4' in brief
+    for marker in (_FACTS_MARKET, _FACTS_CROWNED, _FACTS_LIBRARY, _LEDGER_SENTINEL):
+        assert marker in brief
+
+
+def test_discover_renders_the_inventory_and_the_budget_the_facts_state(tmp_path):
+    brief = discover_briefing(
+        _FactsOnly(),
+        _facts_ledger(tmp_path),
+        thesis=_DISCOVER_THESIS,
+        symbol_character=_DISCOVER_CHARACTER,
+        profile=_PROFILE,
+        window=_DISCOVER_WINDOW,
+        context_window=_HUGE,
+    )
+
+    assert _FACTS_INVENTORY in brief
+    assert f'"budget_usd": {_FACTS_BUDGET}' in brief
+    assert _DISCOVER_THESIS in brief and "2026-03-09" in brief

@@ -1742,10 +1742,18 @@ class ResearchSession:
     loop that actually drives the session — the conversation transcript or the episodic driver —
     is resolved from ``research.agent.loop`` inside :meth:`run`, so both entrypoints follow the
     same selection without a code change.
+
+    The bundle holds the *collaborators the root assembled*, not just the toolbox they were
+    handed to (#260): the ``lake`` the run's data seam resolved to, the ``budgets`` the active
+    cost profile produced, the resolved ``mandate``. Wiring the loop reads them from here — a
+    root that fetched them back out of the toolbox would be trusting a copy for a value it holds.
     """
 
     settings: Settings
     toolbox: ResearchToolbox
+    #: The market-data lake this session researches on — the one the root built, handed to the
+    #: toolbox and kept here so the episodic fallback panel resolves over the same lake.
+    lake: Any
     client: Any
     budgets: CostProfile
     mandate: Mandate | None
@@ -1847,7 +1855,7 @@ class ResearchSession:
             # panel (#112). It rides the same runner as the other two, so its completions count
             # against the one ``max_episodes`` budget below.
             discover=discover,
-            fallback_panel_source=build_fallback_panel_source(settings, self.toolbox.lake),
+            fallback_panel_source=build_fallback_panel_source(settings, self.lake),
             budget_minutes=settings.research_time_budget_minutes,
             max_episodes=max_iterations or self.budgets.max_iterations,
             completions=lambda: runner.completions,
@@ -1861,7 +1869,7 @@ class ResearchSession:
             mandate_symbols=self.mandate.symbols if self.mandate else (),
             history_days=settings.data.history_days,
             models={"driver": self.model, "coder": agent_cfg.coder_model},
-            sweep_trials=self.toolbox.default_sweep_trials,
+            sweep_trials=self.budgets.sweep_trials,
             on_event=self.on_event,
             price_table=self.price_table,
         )
@@ -2009,6 +2017,7 @@ def build_research_session(
     return ResearchSession(
         settings=settings,
         toolbox=toolbox,
+        lake=lake,
         client=client,
         budgets=resolve_budgets(settings.research),
         mandate=mandate,

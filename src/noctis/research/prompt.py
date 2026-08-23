@@ -6,6 +6,11 @@ embedded), the MARKET REALITY cost digest, the optional operator-mandate block, 
 current state + memory tail. :func:`build_system_prompt` is the one entry; the loop in
 :mod:`noctis.research.agent` treats the result as an opaque byte-stable string (it must
 stay byte-stable within a session so prompt caching can hit).
+
+Every number and block below comes off one input: the session's
+:class:`~noctis.research.surface.ResearchFacts` — its ceilings, its template seed, its champion
+board, its library index, its memory tail. This module frames what it is told; it never reaches
+through the session for a fact the session could have stated.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ import json
 from typing import TYPE_CHECKING
 
 from noctis.research import digests
-from noctis.strategies import library
+from noctis.research.surface import ResearchFacts
 
 if TYPE_CHECKING:
     from noctis.research.mandate import Mandate
@@ -196,7 +201,7 @@ preview_bars works on any symbol in it.
 
 
 def build_system_prompt(
-    toolbox,
+    toolbox: ResearchFacts,
     *,
     budget_minutes: float,
     max_iterations: int,
@@ -214,21 +219,18 @@ def build_system_prompt(
     context (recent findings / known dead-ends) — never the protocol, the contract, the gates, or
     the champion board — so it changes cost, not what the agent may conclude.
     """
-    template_path = (
-        library.LibraryPaths.coerce(toolbox.strategies_dir).seeds / library.TEMPLATE_NAME
-    )
-    template = template_path.read_text(encoding="utf-8") if template_path.is_file() else "(none)"
-    contract = _CONTRACT.format(template=template)
+    contract = _CONTRACT.format(template=toolbox.template_text())
+    limits = toolbox.limits
     prompt = _PROTOCOL.format(
-        min_trials=toolbox.min_trials,
+        min_trials=limits.min_trials,
         contract=contract,
-        max_backtests=toolbox.max_backtests,
+        max_backtests=limits.max_backtests,
         max_iterations=max_iterations,
         budget_minutes=budget_minutes,
     )
-    # The four state facts are built by the shared digest builders (noctis.research.digests) so
-    # the episodic research driver renders the same facts by construction; this loop owns only
-    # the prose framing around them. The market digest serializes with sorted keys (byte-stable
+    # The four state facts are the session's own derived facts (noctis.research.surface), so the
+    # episodic research driver renders the same facts by construction; this loop owns only the
+    # prose framing around them. The market digest serializes with sorted keys (byte-stable
     # across insertion order) and degrades gracefully on a lake hiccup.
     prompt += _MARKET_REALITY_BLOCK.format(digest=digests.market_digest(toolbox))
     if mandate is not None:
@@ -237,17 +239,18 @@ def build_system_prompt(
             block_text += f"\n\n--- reference: {ref.path} ---\n{ref.text.strip()}"
         prompt += _MANDATE_BLOCK.format(mandate=block_text)
 
-    index = digests.library_index(toolbox.strategies_dir)
-    champions = digests.champion_digest(toolbox.registry)
-    crowned = digests.crowned_families(toolbox.registry)
-    findings, rejected = digests.memory_block(toolbox.memory, prefix_trim=prefix_trim)
+    index = toolbox.library_index()
+    # Rows, crowned families and slot count as one value: a board whose row count and capacity
+    # were read separately is how a prefix comes to claim four champions in three slots.
+    board = toolbox.champion_board()
+    findings, rejected = toolbox.memory_tail(prefix_trim=prefix_trim)
 
     state = (
         f"\nCURRENT STATE\n"
         f"Strategy library (rejected entries stubbed; list_strategies/get_strategy show any "
         f"in full): {json.dumps(index, default=str)}\n"
-        f"Champion board ({toolbox.registry.capacity} slots): {json.dumps(champions)}\n"
-        f"Crowned families (cannot re-promote): {json.dumps(crowned)}\n"
+        f"Champion board ({board.capacity} slots): {json.dumps(list(board.rows))}\n"
+        f"Crowned families (cannot re-promote): {json.dumps(list(board.crowned_families))}\n"
         f"{digests.ONE_SLOT_PER_FAMILY}\n"
         f"Memory — findings: {json.dumps(findings)}\n"
         f"Memory — known dead ends (do not re-mine): {json.dumps(rejected)}\n"

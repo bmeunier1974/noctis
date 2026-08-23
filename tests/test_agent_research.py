@@ -20,6 +20,7 @@ from noctis.research import (
     build_system_prompt,
     run_agent_research,
 )
+from noctis.research.surface import SessionCounters
 from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.library import parse_header, strategy_source
 from tests.test_research_tools import LENIENT, PROBE, FakeLake, _make_toolbox, make_bars
@@ -461,6 +462,60 @@ def test_prose_nudges_are_bounded_then_stall_ends_labeled(tmp_path):
     assert summary.iterations == _MAX_PROSE_NUDGES + 1
     assert len(client.calls) == _MAX_PROSE_NUDGES + 1
     assert summary.promotions == 0 and summary.rejections == 0
+
+
+# ── the counters come off ONE snapshot, never the live attributes (#260) ─────────────────────
+# The toolbox's counters are mutable attributes its own tools bump; the surface answers them as a
+# frozen ``SessionCounters`` (noctis.research.surface). Pinning the snapshot while leaving every
+# live attribute at zero splits the two apart, so a read that still spells ``toolbox.promotions``
+# reports a different session than the one the snapshot describes — and fails here.
+def _pin_counters(toolbox, **fields) -> None:
+    snapshot = SessionCounters(**fields)
+    toolbox.session_counters = lambda: snapshot
+
+
+def test_session_summary_and_log_report_the_counters_snapshot(tmp_path, caplog):
+    """Every number the summary and the end-of-session log carry comes from the snapshot."""
+    toolbox = _make_toolbox(tmp_path)
+    _pin_counters(
+        toolbox,
+        backtests_run=7,
+        promotions=3,
+        rejections=2,
+        author_calls=5,
+        strategies_touched=("snap_alpha", "snap_beta"),
+        undecided=frozenset({"snap_beta"}),
+    )
+    client = FakeLLM([text_turn("Session complete.")], capabilities=NO_CAPS)
+
+    with caplog.at_level("INFO", logger="noctis.research.agent"):
+        summary = run_agent_research(
+            toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=5
+        )
+
+    assert (summary.promotions, summary.rejections, summary.author_calls) == (3, 2, 5)
+    assert summary.candidates == ["snap_alpha", "snap_beta"]
+    assert summary.undecided == ["snap_beta"]
+    (line,) = [r.getMessage() for r in caplog.records if "session finished" in r.getMessage()]
+    assert "7 backtests, 5 coder calls, 3 promotions, 2 rejections" in line
+    assert "strategies=snap_alpha,snap_beta" in line
+    # The live attributes never moved: this session decided nothing itself.
+    assert (toolbox.promotions, toolbox.rejections, toolbox.backtests_run) == (0, 0, 0)
+
+
+def test_the_zero_verdict_liveness_guard_reads_the_snapshot(tmp_path):
+    """The guard asks the snapshot whether anything was decided, so a session whose snapshot
+    already shows a verdict concludes on its first prose turn instead of being nudged."""
+    toolbox = _make_toolbox(tmp_path)
+    _pin_counters(toolbox, promotions=1)
+    client = FakeLLM([text_turn("Champion promoted; session complete.")], capabilities=NO_CAPS)
+
+    summary = run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=5
+    )
+
+    assert summary.stopped_reason == "agent_done"
+    assert len(client.calls) == 1  # concluded, not nudged
 
 
 def test_pause_turn_resumes_verbatim(tmp_path):

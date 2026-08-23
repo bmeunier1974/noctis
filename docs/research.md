@@ -17,6 +17,18 @@ working area and drives the whole loop through curated tools —
 `preview_bars`, `screen_symbols`, `get_champions`, `get_experiment_log`, `ensure_data`,
 `write_strategy`, `run_backtest`, `run_sweep`, `evaluate_vs_champion`, `reject_strategy`.
 
+**One surface, two tiers.** Everything a session reads off that toolbox is declared in
+`noctis.research.surface`. `ResearchFacts` is the *derived facts* tier a renderer reads — the market
+economics digest, the champion board, the library index, the advisory memory tail, the lake
+inventory, the data budget, the four session ceilings as one frozen `limits` value, and one
+candidate's journaled evidence — and `Toolbox` adds what a driver needs on top: the tools above, the
+capture seams, and a frozen `session_counters()` snapshot. The briefings and the system prompt are
+rendered from those facts and never from the collaborators behind them (`evidence_block` in
+`noctis.research.journal` is the one builder of a candidate's gate-facing evidence, which the DECIDE
+briefing and the `get_experiment_log` tool both read), so a test double conforms to the Protocol
+rather than to the toolbox's internals — see
+[development.md](development.md#the-research-toolbox-surface-and-its-reach-through-guard).
+
 **A session always belongs to a run.** Whether it comes from the night loop or from a standalone
 `noctis research`, the session reads and writes *one run's* tree — its champions, paper account,
 experiment journals, strategy `__tmp/`/`champions/` tiers and per-run `MEMORY.md`. A bare

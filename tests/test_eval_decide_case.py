@@ -46,8 +46,8 @@ from noctis.eval.decide_case import (
     decide_case_id,
     read_outcome,
 )
-from noctis.research.briefings import _decide_evidence, _ledger_tail
-from noctis.research.journal import ExperimentJournal
+from noctis.research.briefings import _ledger_tail
+from noctis.research.journal import ExperimentJournal, evidence_block
 from noctis.research.ledger import SessionLedger
 
 from ._promotion_cases import card, rules
@@ -158,14 +158,6 @@ def _revise_record(at: str, result: str = "reask") -> dict[str, Any]:
 
 def _decide_stage_record(at: str, name: str = STRATEGY) -> dict[str, Any]:
     return {"event": "stage", "at": at, "stage": "decide", "strategy": name}
-
-
-class _Toolbox:
-    """The two attributes the production evidence builder reads off a research toolbox."""
-
-    def __init__(self, journal: ExperimentJournal, min_trials: int) -> None:
-        self.journal = journal
-        self.min_trials = min_trials
 
 
 def _outcome(journal_records: list[dict[str, Any]], ledger_records: list[dict[str, Any]]):
@@ -563,7 +555,7 @@ def test_the_payload_carries_exactly_the_evidence_the_decide_briefing_read_at_th
     answered it was ever journaled."""
     journal = _journal(tmp_path)
     _sweep(journal, trials=12)
-    at_the_ask = _decide_evidence(_Toolbox(journal, MIN_TRIALS), STRATEGY)
+    at_the_ask = evidence_block(journal, STRATEGY, min_trials=MIN_TRIALS)
     _approve(journal, promoted=True)
 
     document = decide_case_document(
