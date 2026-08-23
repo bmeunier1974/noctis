@@ -623,10 +623,11 @@ def open_reading(
     and stops; the command body assembles its collaborators from ``reading.settings``.
 
     Raises :class:`~noctis.reporting.run_tree.RunNotFoundError` (and its ``RunAmbiguousError``
-    subclass) for an address nobody — or too many runs — answer, :class:`RunPrunedError` for a run
-    whose tree retention deleted unless ``readable_pruned`` says this verb can read one anyway, and
-    whatever the chain itself refuses (:class:`~noctis.config.SafetyGateError` under
-    ``require_gate``, :class:`~noctis.research.MandateError` under the overlay).
+    subclass) for an address nobody — or too many runs — answer, and for a run whose record is
+    there but unreadable; :class:`RunPrunedError` for a run whose tree retention deleted, unless
+    ``readable_pruned`` says this verb can read one anyway; and whatever the chain itself refuses
+    (:class:`~noctis.config.SafetyGateError` under ``require_gate``,
+    :class:`~noctis.research.MandateError` under the overlay).
     """
     if address is None:
         inputs = _session_from_files(
@@ -636,15 +637,24 @@ def open_reading(
     # Deferred exactly as every other run-tree read in this module is: the composition root is on
     # the ``--help`` path, and the run tree drags in the record schema behind it.
     from noctis.config.settings import bind_run_dir
-    from noctis.reporting.run_tree import read_run_record, resolve_run_dir
+    from noctis.reporting.run_tree import (
+        RUN_RECORD_NAME,
+        RunNotFoundError,
+        read_record,
+        resolve_run_dir,
+    )
 
     settings = load_settings(config_path=config_path)
     mode = resolve_execution_mode(settings) if require_gate else None
-    runs_dir = Path(settings.runs_dir)
-    # Two pure reads of the same records, and deliberately so: one resolver owns the four address
-    # forms, and the read that follows raises on a record a reading has nothing to read *under*.
-    run_dir = resolve_run_dir(runs_dir, address)
-    record = read_run_record(runs_dir, address)
+    run_dir = resolve_run_dir(Path(settings.runs_dir), address)
+    # The listing's tolerant read, turned back into a refusal here: a reading has nothing to read
+    # *under* a record it cannot parse. The reason is the record module's own, and it is raised
+    # naming the file rather than the address, because "which file, and what is wrong with it" is
+    # the whole of what a reader of a broken record needs — and it is the line ``noctis
+    # run-record`` has always printed for one (story #297).
+    record, note = read_record(run_dir)
+    if record is None:
+        raise RunNotFoundError(f"{run_dir / RUN_RECORD_NAME}: {note}")
     run_id = _addressed_id(record, run_dir.name)
     if _state_pruned(record) and not readable_pruned:
         raise RunPrunedError(

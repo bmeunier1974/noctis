@@ -14,8 +14,10 @@ with a mark only that run carries, so "which run did this read?" is answered by 
 The reader table is the point: one row per verb on the band, so a verb that stops at
 ``load_settings`` again fails its own row. ``status`` joined it in #296 — the one reader that
 narrates the resolved mode, so the one that arms the safety gate and warns where the others
-refuse. The pruned-run-readable trio ``run-record`` / ``run --finish`` / ``run-prune`` (#297)
-joins as it moves.
+refuse. The trio whose subject is the *record* rather than the tree — ``run-record``,
+``run --finish``, ``run-prune`` — moved in #297 and has a table of its own below: they read a
+pruned run where every reader here is refused one, and two of them keep a verb prefix on their
+refusals.
 """
 
 from __future__ import annotations
@@ -349,6 +351,84 @@ def test_a_pruned_run_is_refused_with_the_line_that_points_at_the_record(tmp_pat
     assert "`noctis run-prune` deleted its reports/ and state/" in line
     assert line.endswith(f"still in its record — `noctis run-record {run_dir.name}`.")
     assert not (run_dir / "state").exists()  # nothing was resurrected
+
+
+# ── the three verbs whose subject is the record itself (story #297) ────────────────────────
+# Retention deletes a run's heavy directories and keeps its ``run.json``, because the record *is*
+# the progress history. So the two verbs that write that record — ``run --finish``, ``run-prune``
+# — and the one that prints it read a pruned run anyway (``readable_pruned=True``), where every
+# reader above is refused. Their refusal lines are the other half: the two lifecycle verbs say
+# which of an operator's commands refused, and the reader says only the resolver's own sentence.
+
+
+@dataclass(frozen=True)
+class RecordVerb:
+    """One verb whose subject is the record rather than the tree: its argv, and its prefix."""
+
+    id: str
+    argv: Callable[[str], list[str]]
+    prefix: str
+
+
+RECORD_VERBS = (
+    RecordVerb("run-record", lambda address: ["run-record", address], ""),
+    RecordVerb("finish", lambda address: ["run", "--resume", address, "--finish"], "FINISH: "),
+    RecordVerb("run-prune", lambda address: ["run-prune", address], "PRUNE: "),
+)
+
+EVERY_RECORD_VERB = [pytest.param(verb, id=verb.id) for verb in RECORD_VERBS]
+
+
+@pytest.mark.parametrize("verb", EVERY_RECORD_VERB)
+def test_the_record_verbs_still_reach_a_pruned_run(tmp_path, verb):
+    """Sealing, pruning and printing a record never depend on the heavy directories: a run whose
+    tree retention deleted is still addressable by all three, and none of them meets the
+    pruned-run refusal every tree-reading verb above does."""
+    cfg = _config(tmp_path)
+    run_dir = _prune(tmp_path, cfg)
+
+    result = runner.invoke(app, [*verb.argv(run_dir.name), "--config", cfg])
+
+    assert result.exit_code == 0, result.output
+    assert "was pruned" not in result.output  # the D4 refusal is not for these three
+    assert run_dir.name in result.output
+    assert not (run_dir / "state").exists()  # nothing was resurrected
+
+
+@pytest.mark.parametrize("verb", EVERY_RECORD_VERB)
+def test_a_missing_run_keeps_each_verbs_own_refusal_prefix(tmp_path, verb):
+    """An operator must know which of their commands refused — so the two lifecycle verbs keep
+    their prefix, and a plain reading keeps saying the resolver's sentence and nothing else."""
+    cfg = _config(tmp_path)
+    _mint_run(tmp_path, cfg)
+
+    result = runner.invoke(app, [*verb.argv("20260101T000000Z-nope00"), "--config", cfg])
+
+    assert result.exit_code == 1
+    assert result.output.startswith(verb.prefix), result.output
+    for other in {"FINISH: ", "PRUNE: "} - {verb.prefix}:
+        assert other not in result.output
+    assert "20260101T000000Z-nope00" in result.output
+
+
+def test_run_record_on_an_unreadable_record_names_the_file_and_the_reason(tmp_path):
+    """The one line a script over ``run-record`` reads when a record will not parse: the path to
+    the file, then the record module's own reason for it — unchanged by the move onto the band.
+
+    A listing tolerates a broken record because it has others to show; a command asked for
+    exactly one refuses, and the address the operator typed is not the useful half of that
+    sentence — the file is.
+    """
+    cfg = _config(tmp_path)
+    run_dir = _mint_run(tmp_path, cfg)
+    (run_dir / "run.json").write_text("{ not json")
+
+    result = runner.invoke(app, ["run-record", run_dir.name, "--config", cfg])
+
+    assert result.exit_code == 1
+    assert result.output.strip() == (
+        f"{run_dir / 'run.json'}: an unreadable run.json (JSONDecodeError)"
+    )
 
 
 @pytest.mark.parametrize("reader", EVERY_READER)

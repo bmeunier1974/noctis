@@ -1411,6 +1411,114 @@ def test_readers_see_the_post_overlay_metric(tmp_path, setup, argv, present, abs
         assert text not in result.output
 
 
+# --- sealing a run under the metric the run ran under (bug fix 3, story #297) ----------
+# ``--finish`` and ``run-prune`` are the two read-only-ish verbs that *rewrite* the record, and
+# the record carries the engine's ``comparable_key`` — whose last component is the election
+# metric two runs must match on before their numbers may be pooled. Taken off a raw
+# ``load_settings``, a run steered onto ``sortino`` was sealed under ``sharpe``: the bucket its
+# numbers were produced in changed the moment an operator published them, and `noctis runs`
+# printed the sealed one. Both verbs read it off the reading now — the run's **own** frozen
+# metric, which is why the steering is taken away here before either verb runs.
+
+
+def _minted_run_dir(tmp_path) -> Path:
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    return run_dir
+
+
+def _printed_comparable_key(cfg: str, address: str) -> str:
+    """The run's bucket label as an operator reads it back: through ``noctis run-record``."""
+    import json
+
+    result = runner.invoke(app, ["run-record", address, "--config", cfg])
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output)["engine"]["comparable_key"]
+
+
+def _run_steered_onto_sortino(tmp_path) -> tuple[str, Path]:
+    """Mint one run under the mandate that binds ``promotion.metric: sortino``, then take the
+    binding away — so the only thing that still says ``sortino`` is the run's own record."""
+    cfg = _mandate_config(tmp_path, "homelab", _WIDE_OVERLAY)
+    minted = runner.invoke(app, ["run", "--config", cfg])
+    assert minted.exit_code == 0, minted.output
+    run_dir = _minted_run_dir(tmp_path)
+    _mandate_config(tmp_path, "homelab")  # the same profile, now binding nothing
+    return cfg, run_dir
+
+
+def _forget_the_engine_section(run_dir: Path) -> None:
+    """Leave the record with no *readable* engine identity to carry forward.
+
+    The shape a record written before engine epochs has — and the one a hand-edit produces — which
+    the run tree tolerates by restamping the run with the identity of whatever engine writes
+    next (``run_tree.store._frozen_engine``). It is therefore the one shape in which the election
+    metric a sealing verb passes actually reaches ``engine.comparable_key``, which is what makes
+    it the honest test of *which* metric that is: on every other record the key is frozen at
+    creation and carried forward verbatim, so a wrong metric is latent rather than absent.
+    """
+    import json
+
+    record = json.loads((run_dir / "run.json").read_text())
+    record["engine"] = {}
+    (run_dir / "run.json").write_text(json.dumps(record))
+
+
+def test_finish_seals_a_run_under_the_election_metric_it_ran_under(tmp_path):
+    """The key a run was sealed with is the key it ran under: same bucket at the end as at the
+    start, whatever ``config.yaml`` says by the time an operator publishes the result."""
+    cfg, run_dir = _run_steered_onto_sortino(tmp_path)
+    before = _printed_comparable_key(cfg, run_dir.name)
+    assert before.endswith("|sortino")
+
+    sealed = runner.invoke(app, ["run", "--config", cfg, "--resume", run_dir.name, "--finish"])
+
+    assert sealed.exit_code == 0, sealed.output
+    assert _printed_comparable_key(cfg, run_dir.name) == before
+
+
+def test_run_prune_keeps_the_election_metric_the_run_ran_under(tmp_path):
+    """Retention rewrites the record too, and the record is all a pruned run has left."""
+    cfg, run_dir = _run_steered_onto_sortino(tmp_path)
+    before = _printed_comparable_key(cfg, run_dir.name)
+    assert before.endswith("|sortino")
+    sealed = runner.invoke(app, ["run", "--config", cfg, "--resume", run_dir.name, "--finish"])
+    assert sealed.exit_code == 0, sealed.output
+
+    pruned = runner.invoke(app, ["run-prune", run_dir.name, "--config", cfg])
+
+    assert pruned.exit_code == 0, pruned.output
+    assert _printed_comparable_key(cfg, run_dir.name) == before
+
+
+@pytest.mark.parametrize(
+    ("argv", "seal_first"),
+    [
+        pytest.param(lambda run_id: ["run", "--resume", run_id, "--finish"], False, id="finish"),
+        # Only a completed run may be pruned, so this one is sealed while its record still
+        # carries an engine — and it is the prune that restamps.
+        pytest.param(lambda run_id: ["run-prune", run_id], True, id="run-prune"),
+    ],
+)
+def test_a_sealing_verb_restamps_a_record_with_the_runs_own_election_metric(
+    tmp_path, argv, seal_first
+):
+    """Where the election metric a sealing verb passes actually reaches the record, it is the
+    run's — not whatever ``config.yaml`` resolves to today, and not the pre-overlay value a raw
+    ``load_settings`` would have handed over."""
+    cfg, run_dir = _run_steered_onto_sortino(tmp_path)
+    before = _printed_comparable_key(cfg, run_dir.name)
+    assert before.endswith("|sortino")
+    if seal_first:
+        sealed = runner.invoke(app, ["run", "--config", cfg, "--resume", run_dir.name, "--finish"])
+        assert sealed.exit_code == 0, sealed.output
+    _forget_the_engine_section(run_dir)
+
+    result = runner.invoke(app, [*argv(run_dir.name), "--config", cfg])
+
+    assert result.exit_code == 0, result.output
+    assert _printed_comparable_key(cfg, run_dir.name) == before
+
+
 def test_debug_manifest_digests_post_overlay_settings(tmp_path):
     """Regression: the QA manifest's config digest is taken over the settings the run actually
     assembled from, so a recorded run's manifest reflects the mandate's overlay — a knob set by

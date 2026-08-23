@@ -427,6 +427,13 @@ def _finish_run(config: str | None, resume: str | None) -> None:
     no engine starts, and the liveness lock is read only far enough to refuse a run another process
     is working. Sealing a run that is already completed is a **no-op** that says so — terminal means
     terminal, so the moment a published result was sealed is never rewritten.
+
+    The election metric it seals under is the **run's** (D9, story #297), read off the reading —
+    the metric the run froze at creation, or the post-overlay one for a run that froze none. It
+    rides in the record's ``comparable_key``, the bucket two runs must match on before their
+    numbers may be pooled, so taking it from the current ``config.yaml`` would change what a run's
+    results are comparable *with* at the moment an operator published them. The reading reaches a
+    pruned run on purpose: the record is exactly what retention keeps.
     """
     from datetime import UTC, datetime
     from pathlib import Path
@@ -442,13 +449,16 @@ def _finish_run(config: str | None, resume: str | None) -> None:
                 "produced nothing to publish."
             )
         )
-    settings = load_settings(config_path=config)
+    reading = _reading_or_exit(config, resume, verb="finish", readable_pruned=True)
     with _refusals_or_exit(verb="finish"):
+        # The operator's address, passed through unchanged: the resolver runs a second time, and
+        # both runs are pure reads of the same record (D9), so a refusal says the same sentence
+        # whichever of them raised it.
         outcome = finish_run(
-            Path(settings.runs_dir),
+            Path(reading.settings.runs_dir),
             resume,
             clock=lambda: datetime.now(UTC),
-            election_metric=settings.promotion.metric,
+            election_metric=reading.settings.promotion.metric,
         )
     if not outcome.sealed:
         typer.echo(
@@ -1171,19 +1181,21 @@ def run_record(
     and exits non-zero when there is one.
     """
     import json
-    from pathlib import Path
 
     from noctis.reporting import schema
-    from noctis.reporting.run_tree import RunNotFoundError, read_record, resolve_run_dir
 
-    settings = load_settings(config_path=config)
-    try:
-        run_dir = resolve_run_dir(Path(settings.runs_dir), run_id)
-    except RunNotFoundError as exc:
-        _exit_red(exc)
-    record, note = read_record(run_dir)
-    if record is None:
-        _exit_red(RuntimeError(f"{run_dir / 'run.json'}: {note}"))
+    # The record *is* the history retention keeps, so this is one of the three verbs that read a
+    # pruned run (D4). An unreadable record refuses through the band, which raises the record
+    # module's own reason under the file's path — the line this command has always printed for
+    # one: a listing tolerates a broken record because it has others to show, and a command asked
+    # for exactly one does not.
+    reading = _reading_or_exit(config, run_id, readable_pruned=True)
+    run_dir, record = reading.run_dir, reading.record
+    # Only an *unaddressed* reading carries no record, and this verb's address is required — so
+    # the band above either read one or refused. The narrowing is for the type checker, which
+    # cannot know that from the signature; it is never silent if it ever does happen.
+    if record is None:  # pragma: no cover
+        _exit_red(RuntimeError(f"{run_dir / 'run.json'}: no readable record"))
     if not validate:
         typer.echo(json.dumps(record, indent=2))
         return
@@ -1239,13 +1251,17 @@ def run_prune(
 
     from noctis.reporting.run_tree import prune_run_state
 
-    settings = load_settings(config_path=config)
+    # The run's own election metric, off the reading (D9, story #297): retention rewrites the
+    # record, and the record is all a pruned run has left — so the bucket it is left labelled with
+    # must be the one it ran under, not the one ``config.yaml`` resolves to today. Pruning a run
+    # already pruned is the documented no-op, so this reading reaches a pruned run.
+    reading = _reading_or_exit(config, run_id, verb="prune", readable_pruned=True)
     with _refusals_or_exit(verb="prune"):
         outcome = prune_run_state(
-            Path(settings.runs_dir),
+            Path(reading.settings.runs_dir),
             run_id,
             clock=lambda: datetime.now(UTC),
-            election_metric=settings.promotion.metric,
+            election_metric=reading.settings.promotion.metric,
             dry_run=dry_run,
         )
     _echo_prune(outcome)
