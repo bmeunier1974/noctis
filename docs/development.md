@@ -278,6 +278,44 @@ area and cases root, the execution seam a `--workers` count selects, the site-in
 own LLM seam. Assemble a bench there, not in a verb body — the same rule `bootstrap.py` holds the
 engine's entrypoints to, on the other side of the line.
 
+## The research-toolbox surface and its reach-through guard
+
+The fourth guard in this family protects a *seam* rather than a direction or a hash: an agent
+research session carries exactly one object — the `ResearchToolbox` — and every reader of it holds
+the declared surface `src/noctis/research/surface.py`, never the collaborators behind it. Two tiers:
+`ResearchFacts`, the derived facts a *renderer* reads (the briefings, the system prompt, an eval site
+rebuilding a past ask), and `Toolbox` on top of it, which adds the tools, the capture seams and the
+frozen counters snapshot a *driver* needs.
+
+Why it is a rule and not a preference: before the surface existed, each reader reached *through* the
+toolbox for whichever collaborator happened to hold the answer (`toolbox.journal`,
+`toolbox.registry.capacity`, `toolbox.lake.preflight.budget_usd`), usually behind a
+`getattr(…, default)` probe — so a rename changed what the model was told without changing a
+renderer, and a probe that missed stated a number nobody configured as though it had been measured.
+Every fact on the surface is answerable instead: a lake with no cost preflight answers `None`, an
+unreadable coverage registry answers an empty inventory.
+
+`tests/test_toolbox_boundary.py` is the enforcement, in two halves. A static scan over `src/noctis`
+names every module outside `noctis.research.tools` — the module that *owns* the collaborators — that
+reads one off a toolbox or probes it with `getattr`, naming module, file and line; and four objects
+are measured against the Protocol they claim: the production toolbox, the episodic driver's fake,
+and the bench's neutral session and case toolbox.
+
+```bash
+uv run pytest tests/test_toolbox_boundary.py -q   # the toolbox reach-through guard
+```
+
+```text
+noctis.research.briefings reaches toolbox.journal (noctis/research/briefings.py:365)
+```
+
+The scan tokenizes each file and drops every comment and string literal before matching, so an
+explanation may quote the reach it replaced — the surface module's own docstring does — without
+tripping the guard; and it lives in the test rather than in the package because nothing in
+production reads its verdict. Its twin is `tests/test_prompt_goldens.py`, which pins the three
+briefings and the system prompt byte-for-byte: the boundary says who may read a fact, the goldens
+say that re-pointing a reader changed nothing the model is told.
+
 ## Dev scripts
 
 `scripts/` holds dev tools that are deliberately *not* CLI subcommands. One is the ratchet

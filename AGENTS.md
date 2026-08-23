@@ -143,7 +143,13 @@ A champion file is immutable — improving one means a new name. Full contract: 
 
 **Two research paths, one contract.** `src/noctis/research/agent.py` (Claude + `src/noctis/research/tools.py`
 `ResearchToolbox`) and the legacy proposer/Optuna loop return the *same* `ResearchSummary`, so the
-runtime calls either behind one seam. Within the agent path, `research.agent.loop` selects the
+runtime calls either behind one seam. Every reader of the toolbox is typed against one surface,
+`src/noctis/research/surface.py`: `ResearchFacts` (what the briefings, the system prompt and the eval
+sites *read*) ⊂ `Toolbox` (what the two drivers *hold*). A consumer reads **facts** —
+`journal_evidence`, `champion_board`, `limits`, `session_counters()` — never a collaborator behind
+them, and never a `getattr(toolbox, …)` probe that invents a fact when it misses;
+`tests/test_toolbox_boundary.py` refuses the reach-through and `tests/test_prompt_goldens.py` pins
+what the model is told across the move. Within the agent path, `research.agent.loop` selects the
 conversation transcript or the episodic driver; `auto` flips to episodic when the declared
 `context_window` is ≤ 32,768 (#76 — evidence-gated by the parity harness, decided in one place:
 `bootstrap.resolve_research_loop`). The agent's discipline is entirely structural: the exhaustion

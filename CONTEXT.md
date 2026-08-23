@@ -113,3 +113,19 @@ wins), and `checkpoint` is the incremental record write the day loop's `on_cycle
 A body that never reports closes at the `"startup"` sentinel — **measured nothing, never zeros**.
 The band never imports Typer, so a live lock leaves as `RunLockedError` and the CLI maps it to red
 text and an exit code, once.
+
+## Research toolbox
+
+The one object a research session holds for its whole life — and the **surface** every reader of it
+holds is `noctis.research.surface` (decided 2026-08-22): tools, derived facts and a counters
+snapshot, declared in two tiers. `ResearchFacts` is what a *renderer* reads — a briefing, the system
+prompt, an eval site rebuilding a past ask: the champion board, the library index, the market
+economics, one candidate's journaled evidence, the four ceilings as one frozen `limits` value, and
+nothing that could change the session. `Toolbox` (⊃ `ResearchFacts`) is what a *driver* holds: the
+same facts, plus the tool registry it dispatches through, the capture seams and `session_counters()`
+— a snapshot, because the live counters keep moving under a reporter that held a view of them.
+Nothing a consumer reads is a collaborator: the briefings and the prompt render *facts*, the toolbox
+owns *where they come from* (journal, lake, registry, memory, library tiers), and a reach through it
+for one — `toolbox.journal`, or a `getattr` probe that invents the fact when it misses — is what
+`tests/test_toolbox_boundary.py` refuses. A test double conforms to the Protocol, never to the
+implementation.
