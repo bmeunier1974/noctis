@@ -93,12 +93,13 @@ python -m noctis runs [--all]      # the run board: id, label, status, segments,
 python -m noctis run-record <id>   # print one run's whole self-contained run.json
 python -m noctis run-prune <id> [--dry-run]   # retention: delete a COMPLETED run's state/,
                            # strategies/ and reports/; never its run.json, never a resumable run
-python -m noctis status            # resolved mode, market state, next transition, champions
+python -m noctis status [address]  # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>    # preflight a mandate: provenance + the effective settings diff
 python -m noctis engine            # engine identity: version, component fingerprint, comparable key
-python -m noctis backtest <name>   # replay a library strategy on its shipped Params defaults
-python -m noctis champions [--reset]   # list champions; --reset re-fills slots under current gates
-python -m noctis report [<address>] [--as-of DATE]   # one run's close-of-day report ('legacy' by default)
+python -m noctis backtest <name> [address]   # replay a library strategy on its shipped Params defaults
+python -m noctis champions [address] [--reset]   # list champions; --reset re-fills slots under gates
+python -m noctis report [address] [--as-of DATE]   # one run's close-of-day report ('legacy' by default)
+                           # every reader takes the four address forms; bare = the reserved run
 python -m noctis data status|sync|ingest <SYM> --start ... --end ... [--dry-run]
 ```
 
@@ -223,7 +224,11 @@ double-count. Config is **frozen at creation** and rehydrated by the pure
 which are never recorded and never restored — the safety gate re-resolves fresh every start, and a
 frozen mode disagreeing with the resolved one is a hard error (rule 1). The mandate is frozen as
 **resolved text**, not as a selector, so editing a profile tomorrow cannot change what a running
-experiment was told to do. Drift is normal and frozen wins.
+experiment was told to do. Drift is normal and frozen wins — and that is what *reading* the run
+sees too: `bootstrap.open_reading` runs the same rehydration recipe `--resume` does, so
+`noctis champions @nightly-momo` or `noctis backtest <name> latest` is told exactly what a resumed
+segment would be, minus the lock and minus the acting (a reading takes no lock, writes no byte,
+asserts nothing, and refuses only a run whose tree retention deleted).
 
 **Config + mandate overlay.** `config.yaml` + `.env` → typed `src/noctis/config/settings.py` (env vars
 override YAML; `NOCTIS_CONFIG` points at an alternate file). The active mandate's front-matter
@@ -232,11 +237,12 @@ as allowed — the arena (safety mode, fill costs, promotion thresholds, holdout
 secrets) is refused there by name; a `--metric` CLI flag wins over the overlay,
 and `--mandate`/`--directive` (mutually exclusive) override the config selector for one session
 (all three are refused on a `--resume`, whose steering is frozen).
-That precedence chain, the two entries every session-opening verb shares (`resolve_session` for the
-inputs, `open_segment` for the run segment they do the work in), and the collaborator builders
-(lake, memory, the event sink, the strategy-family registry, the agent research session), live in
-one composition root — `src/noctis/bootstrap.py`. Assemble sessions there, not by hand in a command
-body.
+That precedence chain, the three entries a verb opens through — `resolve_session` for a session's
+inputs, `open_segment` for the run segment `run`/`research` do the work in, and `open_reading` for
+what a **read-only** verb sees (the reserved run under that same chain, or an addressed run's own
+frozen inputs — no lock, no record write) — and the collaborator builders (lake, memory, the
+event sink, the strategy-family registry, the agent research session), live in one composition
+root — `src/noctis/bootstrap.py`. Assemble sessions there, not by hand in a command body.
 
 ## Conventions and gotchas
 
@@ -259,11 +265,13 @@ body.
   [`docs/run-record.md`](docs/run-record.md)). `workspace_dir` (env `NOCTIS_WORKSPACE`) is still
   the one output root; the four
   per-run paths (`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from **`run_dir`**,
-  which defaults to the reserved `runs/legacy/` run — what an invocation that never opened a run
-  reads (`status`, `champions`, `account`, `report`) — and is rebound to the run's own tree the
-  moment a segment opens (`bootstrap.open_segment` → `open_run_store`), which is what `noctis run`
-  and `noctis research` each do when they mint or resume an id. Derive paths
-  in `config/settings.py` and rebind them in the composition root, never in a command body.
+  which defaults to the reserved `runs/legacy/` run — what a **bare** reader gets (`status`,
+  `champions`, `account`, `backtest`, `strategies`, `report`) — and is rebound to the run's own
+  tree from exactly two places, both in the composition root: `bootstrap.open_segment` →
+  `open_run_store` when `noctis run` or `noctis research` mints or resumes an id, and
+  `bootstrap.open_reading` when one of those readers is handed an address
+  (`noctis champions @nightly-momo`). Derive paths in `config/settings.py` and rebind them in the
+  composition root, never in a command body.
   `noctis init` scaffolds the local input copies; `noctis migrate` moves a pre-workspace layout
   in **and** adopts a pre-run-scoped `workspace/state/` into the `legacy` run; one startup guard
   covers both — it refuses beside abandoned pre-workspace data (`status` only warns) and warns

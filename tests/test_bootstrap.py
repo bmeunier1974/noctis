@@ -28,6 +28,7 @@ from noctis.bootstrap import (
     build_recorder,
     build_research_session,
     effective_memory_distill_every,
+    open_reading,
     resolve_research_loop,
     resolve_session,
 )
@@ -89,6 +90,14 @@ def test_metric_precedence_config_then_overlay_then_flag(tmp_path):
     flagged = resolve_session(cfg, metric="total_return")
     assert flagged.settings.promotion.metric == "total_return"
     assert flagged.overrides == ["promotion.metric=sortino"]  # the echo still records the overlay
+
+    # A *reading* of the same files runs the same chain minus the flag tier (story #293): it is
+    # told what a session minted right now would be told, so a reader can never see the file's
+    # pre-overlay metric while the run it reads was steered onto another one.
+    reading = open_reading(cfg)
+    assert reading.settings.promotion.metric == "sortino"
+    assert reading.inputs.overrides == ["promotion.metric=sortino"]
+    assert reading.inputs.mandate is not None and reading.inputs.mandate.source == "profile:spicy"
 
 
 def test_a_resolved_session_carries_the_pre_overlay_value_of_every_override(tmp_path):
@@ -908,6 +917,17 @@ def test_no_kwarg_of_the_store_opener_is_an_unpacked_session_input(tmp_path, fie
     settings = _run_settings(tmp_path)
     with pytest.raises(TypeError):
         open_run_store(settings, argv=["run"], **{field: None})
+
+
+# ── one read entry: `bind_addressed_run` is gone, superseded by `open_reading` (#294) ─────
+def test_the_composition_root_has_no_second_way_to_point_settings_at_a_run():
+    """``bind_addressed_run`` bound an addressed run's *paths* and stopped there, so a verb that
+    used it read the run's tree under the current ``config.yaml``'s meaning. ``open_reading`` is
+    its superset — it binds the tree **and** rehydrates what the run was steered with — so the
+    half-answer is deleted rather than left beside it for the next reader to reach for."""
+    import noctis.bootstrap as bootstrap
+
+    assert not hasattr(bootstrap, "bind_addressed_run")
 
 
 # ── the environment probes: the one place hardware, git and extras are actually read ──────

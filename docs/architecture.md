@@ -70,7 +70,7 @@ warning (see [development.md](development.md)).
 | Area | Module | What it does |
 |---|---|---|
 | 🔐 Config + safety gate | `src/noctis/config` | Typed settings (`config.yaml` + `.env`); the paper/live double gate |
-| 🧩 Composition root | `src/noctis/bootstrap.py` | One session-assembly seam: the settings → gate → mandate → CLI-flag precedence chain (`resolve_session`), the run segment's one entry (`open_segment`), plus the shared builders (lake, memory, the event sink, the agent research session) every entrypoint uses instead of hand-wiring |
+| 🧩 Composition root | `src/noctis/bootstrap.py` | One session-assembly seam: the settings → gate → mandate → CLI-flag precedence chain (`resolve_session`), the run segment's one entry (`open_segment`), the read-only verbs' one entry (`open_reading` — the reserved run under that same chain, or an addressed run's own frozen inputs, with no lock and no record write), plus the shared builders (lake, memory, the event sink, the agent research session) every entrypoint uses instead of hand-wiring |
 | 🗄️ Fetch-once data lake | `src/noctis/data` | Parquet catalog + coverage registry + coverage-diffed ingest + tail-only sync + integrity check + cost preflight |
 | 📚 Strategy library | `strategies/` + `src/noctis/strategies/library.py` | One `.py` per strategy — thesis, code, tuned params, and research provenance in a docstring header; `write_strategy` validates in a subprocess so a broken file can never land. Three tiers: committed seeds in `strategies/`, plus the run's `__tmp/` working files and `champions/` (a later tier overrides an earlier one) |
 | 📐 Strategies | `src/noctis/strategies` | `TraderStrategy` base: event-driven `on_bar()` plus a default `signals()` that replays it (parity by construction; a vectorised override stays possible); indicator helpers; SMA / RSI / Donchian worked examples; the candidate proposer |
@@ -376,13 +376,14 @@ account, and a run's numbers describe only what that run produced — which is w
 states `assumptions.state_scope: "run"`, so a comparison between two runs is a comparison of two
 experiments rather than of two views of one board. The four per-run paths
 (`state_dir`, `reports_dir`, `qa_dir`, `memory_path`) derive from `run_dir` in
-`config/settings.py`; opening a segment (`bootstrap.open_segment` → `open_run_store`) rebinds
-`run_dir` to the run it just minted or resumed, so no command body does path arithmetic. `run_dir`
-defaults to the reserved `runs/legacy/` run — what an invocation that never opened a run reads
-(`status`, `champions`, `account`, `report`), and the run `noctis migrate` adopts existing state
-into. The **committed `strategies/` seeds stay read-only input for every run**: the three-tier
-discovery contract (seeds → `__tmp/` → `champions/`) is unchanged; only the two writable tiers
-moved under the run.
+`config/settings.py`, and exactly two seams rebind it, both in the composition root: opening a
+segment (`bootstrap.open_segment` → `open_run_store`) binds the run just minted or resumed, and
+opening a reading (`bootstrap.open_reading`) binds the run an operator addressed — so no command
+body does path arithmetic. `run_dir` defaults to the reserved `runs/legacy/` run — what a **bare**
+reader gets (`status`, `champions`, `account`, `backtest`, `strategies`, `report`), and the run
+`noctis migrate` adopts existing state into. The **committed `strategies/` seeds stay read-only
+input for every run**: the three-tier discovery contract (seeds → `__tmp/` → `champions/`) is
+unchanged; only the two writable tiers moved under the run.
 
 **The operator surface (input — the engine treats all of it as read-only):**
 
@@ -447,6 +448,28 @@ band imports no Typer: a live lock leaves as the typed `RunLockedError`, and map
 and an exit code is the CLI's job. During the work, `Segment.checkpoint` is the day loop's
 `on_cycle_close` seam — the incremental record write that keeps a multi-week run's evidence
 current on disk.
+
+**One entry reads a run: `bootstrap.open_reading`.** A *reading* is the read-only twin of a
+segment — one process's look at a run's tree and at the inputs that run was frozen with — and it
+sits in the same composition root for the same reason: a reader that stopped at `load_settings`
+saw the **pre-overlay** settings, so `noctis champions` under a mandate binding
+`promotion.metric` stamped `(stale)` on a whole board the run had crowned under exactly that
+metric. Two shapes, one per address. **Unaddressed** is the precedence chain over the current
+files (settings → gate when asked → mandate overlay) binding nothing, because the reserved
+`legacy` tree is what those settings already point at — what a run minted right now would be
+told. **Addressed** resolves the operator's string through the same
+`run_tree.resolve_run_dir` forms `--resume` takes, reads the record **without a lock**, binds
+that run's tree and rehydrates its frozen inputs through the *same* private recipe `resume_session`
+runs — so a reading of a run sees what a resume of it would run under. Minus the lock and minus
+the acting: none of `assert_resumable`, `assert_mode_unchanged`, the engine-change note or the
+config rebase runs, so a `completed` run is readable, a run another engine is live on is readable,
+and the tree is left byte-identical. It builds nothing either — no registry, no lake, no memory,
+no report; the command body assembles those from `reading.settings`. A **pruned** run is refused
+(`RunPrunedError`) unless the verb's subject is the record itself (`run-record`, `--finish`,
+`run-prune`, which pass `readable_pruned=True`). The band imports no Typer: the CLI's one wrapper,
+`_reading_or_exit`, maps every refusal to red text through the one startup table and runs the
+legacy-layout guard for an **unaddressed** reading only, because that guard asks "which tree does
+this command read?" and an address is the answer.
 
 **`segments[].environment` — per segment, never per run.** Each process invocation records the
 machine it actually ran on: hardware (CPU model, physical/logical cores, max frequency, total RAM,

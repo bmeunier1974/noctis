@@ -1316,6 +1316,286 @@ def test_status_beside_a_legacy_layout_still_warns_rather_than_exits(tmp_path, m
     assert "mandate:           profile:homelab" in result.output
 
 
+# --- every reader resolves the same chain a run does (epic #292) ----------------------
+# ``promotion.metric`` is the one ``promotion.*`` key a mandate may bind, and it was exactly the
+# key the read-only verbs read *pre*-overlay, off a raw ``load_settings`` that stopped before the
+# mandate — so a run steered onto ``sortino`` was reported on in ``sharpe``'s terms. One row per
+# reader that has moved onto the reading band (``bootstrap.open_reading``, through
+# ``_reading_or_exit``); a reader that stops at ``load_settings`` again fails its own row. Each
+# row brings whatever that verb needs in order to *say* a metric at all.
+
+
+def _needs_nothing(tmp_path) -> None:
+    """This reader shows what it resolved with no state to read."""
+
+
+def _crown_a_sortino_champion(tmp_path) -> None:
+    """The board a run under this mandate produces: crowned under the metric it bound.
+
+    Seeded directly rather than researched — the promotion itself is not what is under test here,
+    the label the board is then read back under is.
+    """
+    from noctis.backtest.scorecard import Scorecard
+    from noctis.champions.registry import ChampionEntry, ChampionRegistry
+
+    registry = ChampionRegistry(tmp_path / "state" / "champions.json", 3)
+    registry.champions.append(
+        ChampionEntry(
+            family="steered_winner",
+            params={"fast": 3},
+            scorecard=Scorecard(family="steered_winner", params={"fast": 3}, metric_name="sortino"),
+            crowned_at="2026-01-01",
+            rationale="seed",
+        )
+    )
+    registry.save()
+
+
+def _fill_the_lake(tmp_path) -> None:
+    """One symbol of catalog data, so ``backtest`` reaches a scorecard rather than the no-data
+    path — the scorecard is where the metric it scored on is printed."""
+    from noctis.data import MarketDataLake
+    from noctis.data.types import to_ns
+
+    from ._data_helpers import MockVendor
+
+    lake = MarketDataLake(tmp_path / "lake", MockVendor(), budget_usd=10_000.0, calendar="XNYS")
+    lake.ensure_coverage(
+        "EQUS.MINI", "ohlcv-1m", ["AAPL"], to_ns("2026-01-01"), to_ns("2026-12-31")
+    )
+
+
+@pytest.mark.parametrize(
+    ("setup", "argv", "present", "absent"),
+    [
+        pytest.param(_needs_nothing, ["report"], (), (), id="report"),
+        # The bug this epic is named for: every entry on the board reads ``sortino(stale)``
+        # when the label is taken off the pre-overlay metric.
+        pytest.param(
+            _crown_a_sortino_champion,
+            ["champions"],
+            ("steered_winner", "sortino"),
+            ("sortino(stale)", "sharpe"),
+            id="champions",
+        ),
+        # The scorecard a replay prints must be the one that promoted the champion.
+        pytest.param(
+            _fill_the_lake,
+            ["backtest", "sma_crossover"],
+            ("metric:           sortino",),
+            ("sharpe",),
+            id="backtest",
+        ),
+        # ``status`` narrates the steering itself: the mandate it resolved, every knob that
+        # mandate moved, and the post-overlay model — none of which a raw ``load_settings``
+        # would have, so a status that stopped there prints "none (unconstrained)" instead.
+        pytest.param(
+            _needs_nothing,
+            ["status"],
+            ("mandate:           profile:homelab", "promotion.metric=sortino"),
+            ("sharpe", "mandate:           none"),
+            id="status",
+        ),
+    ],
+)
+def test_readers_see_the_post_overlay_metric(tmp_path, setup, argv, present, absent):
+    cfg = _mandate_config(tmp_path, "homelab", _WIDE_OVERLAY)
+    setup(tmp_path)
+
+    result = runner.invoke(app, [*argv, "--config", cfg])
+
+    assert result.exit_code == 0, result.output
+    for text in present:
+        assert text in result.output
+    for text in absent:
+        assert text not in result.output
+
+
+# --- the three lake verbs read the steered lake (story #298) --------------------------
+# The lake is SHARED by every run and run-neutral, so ``data status|sync|ingest`` take no
+# address — but they are readings all the same, and a verb that stopped at ``load_settings``
+# inspected and filled a lake nobody had steered. What a mandate may bind here is narrow by
+# design: the acquisition window (``data.history_days``, ``data.auto_backfill``), the seed
+# ``universe``, and — towards discipline only — the vendor budget every fetch is priced
+# against. ``data.dataset`` and ``data.lake_dir`` are refused by the overlay (vendor identity
+# and state redirection are the arena), so the steering that *can* reach these three verbs
+# arrives through the lake builder, and the one that cannot is refused out loud.
+
+_THRIFTY_OVERLAY = "  data:\n    budget_usd: 0.0\n"
+
+
+def _track_one_series(tmp_path) -> None:
+    """One tracked series whose coverage stops well short of the T+1 boundary — so ``data sync``
+    has a tail to price rather than a noop to report."""
+    from noctis.data import MarketDataLake
+    from noctis.data.types import to_ns
+
+    from ._data_helpers import MockVendor
+
+    lake = MarketDataLake(tmp_path / "lake", MockVendor(), budget_usd=10_000.0, calendar="XNYS")
+    lake.ensure_coverage(
+        "EQUS.MINI", "ohlcv-1m", ["AAPL"], to_ns("2026-01-05"), to_ns("2026-01-09")
+    )
+
+
+def test_data_ingest_prices_against_the_post_overlay_budget(tmp_path, monkeypatch):
+    """A mandate may only spend *less* of the operator's money — and the ingest it steers is
+    priced against that number, not against the ceiling ``config.yaml`` set. Off a raw
+    ``load_settings`` the fetch was made under the unsteered $125 budget."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABENTO_API_KEY", "fake-key")
+    vendor = _install_mock_vendor(monkeypatch)
+    cfg = _mandate_config(tmp_path, "thrifty", _THRIFTY_OVERLAY)
+
+    result = runner.invoke(
+        app,
+        ["data", "ingest", "AAPL", "--start", "2026-01-05", "--end", "2026-01-09", "-c", cfg],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "AAPL: refused" in result.output
+    assert "budget $0.00" in result.output
+    assert vendor.fetch_calls == 0  # priced only; the steered budget stopped the spend
+
+
+def test_data_sync_extends_no_series_past_the_post_overlay_budget(tmp_path, monkeypatch):
+    """The nightly tail extension is the same spend, so it meets the same steered ceiling."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABENTO_API_KEY", "fake-key")
+    vendor = _install_mock_vendor(monkeypatch)
+    cfg = _mandate_config(tmp_path, "thrifty", _THRIFTY_OVERLAY)
+    _track_one_series(tmp_path)
+
+    result = runner.invoke(app, ["data", "sync", "-c", cfg])
+
+    assert result.exit_code == 0, result.output
+    assert "AAPL: refused" in result.output
+    assert vendor.fetch_calls == 0
+
+
+def test_data_status_refuses_the_steering_it_cannot_apply(tmp_path, monkeypatch):
+    """``data.dataset`` is refused by the overlay — which vendor dataset a lake holds is the
+    arena, not steering. Read through the band, a mandate that tries to bind it is said out loud
+    in the one refusal voice; before, the three lake verbs were the last place an operator's
+    steering could be silently ignored, and they answered as if no mandate existed."""
+    monkeypatch.chdir(tmp_path)
+    cfg = _mandate_config(tmp_path, "wrongway", "  data:\n    dataset: XNAS.ITCH\n")
+
+    result = runner.invoke(app, ["data", "status", "-c", cfg])
+
+    assert result.exit_code == 1
+    assert "MANDATE: " in result.stderr
+    assert "data.dataset" in result.stderr
+
+
+# --- sealing a run under the metric the run ran under (bug fix 3, story #297) ----------
+# ``--finish`` and ``run-prune`` are the two read-only-ish verbs that *rewrite* the record, and
+# the record carries the engine's ``comparable_key`` — whose last component is the election
+# metric two runs must match on before their numbers may be pooled. Taken off a raw
+# ``load_settings``, a run steered onto ``sortino`` was sealed under ``sharpe``: the bucket its
+# numbers were produced in changed the moment an operator published them, and `noctis runs`
+# printed the sealed one. Both verbs read it off the reading now — the run's **own** frozen
+# metric, which is why the steering is taken away here before either verb runs.
+
+
+def _minted_run_dir(tmp_path) -> Path:
+    (run_dir,) = [p for p in (tmp_path / "workspace" / "runs").iterdir() if p.is_dir()]
+    return run_dir
+
+
+def _printed_comparable_key(cfg: str, address: str) -> str:
+    """The run's bucket label as an operator reads it back: through ``noctis run-record``."""
+    import json
+
+    result = runner.invoke(app, ["run-record", address, "--config", cfg])
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output)["engine"]["comparable_key"]
+
+
+def _run_steered_onto_sortino(tmp_path) -> tuple[str, Path]:
+    """Mint one run under the mandate that binds ``promotion.metric: sortino``, then take the
+    binding away — so the only thing that still says ``sortino`` is the run's own record."""
+    cfg = _mandate_config(tmp_path, "homelab", _WIDE_OVERLAY)
+    minted = runner.invoke(app, ["run", "--config", cfg])
+    assert minted.exit_code == 0, minted.output
+    run_dir = _minted_run_dir(tmp_path)
+    _mandate_config(tmp_path, "homelab")  # the same profile, now binding nothing
+    return cfg, run_dir
+
+
+def _forget_the_engine_section(run_dir: Path) -> None:
+    """Leave the record with no *readable* engine identity to carry forward.
+
+    The shape a record written before engine epochs has — and the one a hand-edit produces — which
+    the run tree tolerates by restamping the run with the identity of whatever engine writes
+    next (``run_tree.store._frozen_engine``). It is therefore the one shape in which the election
+    metric a sealing verb passes actually reaches ``engine.comparable_key``, which is what makes
+    it the honest test of *which* metric that is: on every other record the key is frozen at
+    creation and carried forward verbatim, so a wrong metric is latent rather than absent.
+    """
+    import json
+
+    record = json.loads((run_dir / "run.json").read_text())
+    record["engine"] = {}
+    (run_dir / "run.json").write_text(json.dumps(record))
+
+
+def test_finish_seals_a_run_under_the_election_metric_it_ran_under(tmp_path):
+    """The key a run was sealed with is the key it ran under: same bucket at the end as at the
+    start, whatever ``config.yaml`` says by the time an operator publishes the result."""
+    cfg, run_dir = _run_steered_onto_sortino(tmp_path)
+    before = _printed_comparable_key(cfg, run_dir.name)
+    assert before.endswith("|sortino")
+
+    sealed = runner.invoke(app, ["run", "--config", cfg, "--resume", run_dir.name, "--finish"])
+
+    assert sealed.exit_code == 0, sealed.output
+    assert _printed_comparable_key(cfg, run_dir.name) == before
+
+
+def test_run_prune_keeps_the_election_metric_the_run_ran_under(tmp_path):
+    """Retention rewrites the record too, and the record is all a pruned run has left."""
+    cfg, run_dir = _run_steered_onto_sortino(tmp_path)
+    before = _printed_comparable_key(cfg, run_dir.name)
+    assert before.endswith("|sortino")
+    sealed = runner.invoke(app, ["run", "--config", cfg, "--resume", run_dir.name, "--finish"])
+    assert sealed.exit_code == 0, sealed.output
+
+    pruned = runner.invoke(app, ["run-prune", run_dir.name, "--config", cfg])
+
+    assert pruned.exit_code == 0, pruned.output
+    assert _printed_comparable_key(cfg, run_dir.name) == before
+
+
+@pytest.mark.parametrize(
+    ("argv", "seal_first"),
+    [
+        pytest.param(lambda run_id: ["run", "--resume", run_id, "--finish"], False, id="finish"),
+        # Only a completed run may be pruned, so this one is sealed while its record still
+        # carries an engine — and it is the prune that restamps.
+        pytest.param(lambda run_id: ["run-prune", run_id], True, id="run-prune"),
+    ],
+)
+def test_a_sealing_verb_restamps_a_record_with_the_runs_own_election_metric(
+    tmp_path, argv, seal_first
+):
+    """Where the election metric a sealing verb passes actually reaches the record, it is the
+    run's — not whatever ``config.yaml`` resolves to today, and not the pre-overlay value a raw
+    ``load_settings`` would have handed over."""
+    cfg, run_dir = _run_steered_onto_sortino(tmp_path)
+    before = _printed_comparable_key(cfg, run_dir.name)
+    assert before.endswith("|sortino")
+    if seal_first:
+        sealed = runner.invoke(app, ["run", "--config", cfg, "--resume", run_dir.name, "--finish"])
+        assert sealed.exit_code == 0, sealed.output
+    _forget_the_engine_section(run_dir)
+
+    result = runner.invoke(app, [*argv(run_dir.name), "--config", cfg])
+
+    assert result.exit_code == 0, result.output
+    assert _printed_comparable_key(cfg, run_dir.name) == before
+
+
 def test_debug_manifest_digests_post_overlay_settings(tmp_path):
     """Regression: the QA manifest's config digest is taken over the settings the run actually
     assembled from, so a recorded run's manifest reflects the mandate's overlay — a knob set by

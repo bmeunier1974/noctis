@@ -61,7 +61,7 @@ see [The mandate overlay](#the-mandate-overlay) for the full precedence chain.
 | `embed_all_sources` | Embed **every** candidate's strategy source in the run record, not just the champions' (`--embed-all-sources`, frozen at creation). Default `false`: champions are embedded in full, every other candidate is a run-relative path plus a content hash. See [cli.md](cli.md#archiving-a-run-whole----embed-all-sources) |
 | `workspace_dir` | **The one output root** (default `workspace/`; env `NOCTIS_WORKSPACE`) — every path below derives from it when not set |
 | `runs_dir`, `data.lake_dir` | The workspace-level pair: the run tree (`workspace/runs`) and the data lake (`workspace/data_lake`), which is **shared by every run** |
-| `run_dir` | **The one run root** (default `workspace/runs/legacy`, the reserved run an invocation that never opened a run reads). `noctis run` / `noctis research` rebind it to the run they mint or resume |
+| `run_dir` | **The one run root** (default `workspace/runs/legacy`, the reserved run every *bare* reader gets). `noctis run` / `noctis research` rebind it to the run they mint or resume, and an addressed reader (`noctis report @label`) to the run it names |
 | `state_dir`, `reports_dir`, `memory_path`, `qa_dir` | Per-artifact overrides; each defaults to its **run**-derived location (`<run_dir>/state`, `<run_dir>/reports`, `<run_dir>/memory/MEMORY.md`, `<run_dir>/qa`) |
 | `strategies_dir`, `mandate_dir`, `cases_dir` | The committed input surfaces: the seed strategy library, the mandate scaffold, and the curated benchmark corpus (read as a tier under `<workspace>/cases/`) |
 
@@ -78,12 +78,14 @@ workspace/
 ```
 
 So two runs in one workspace cannot crown champions onto one board or trade one paper account.
-`state_dir`, `reports_dir`, `qa_dir` and `memory_path` derive from `run_dir`; `noctis run`
-rebinds `run_dir` to the run it mints, and unset it is the reserved `runs/legacy/` run that the
-read-only commands (`status`, `champions`, `account`, `report`, `backtest`) and a bare
-`research` read. Setting the env var `NOCTIS_WORKSPACE` relocates all of it at once (useful when
-running the CLI from outside the repo); an explicit per-artifact knob is an absolute override and
-survives the rebinding.
+`state_dir`, `reports_dir`, `qa_dir` and `memory_path` derive from `run_dir`, and the composition
+root rebinds it from two places and no others: `open_segment` binds the run `noctis run` /
+`noctis research` mints or resumes, and `open_reading` binds the run a reader **addressed**
+(`noctis champions @nightly-momo`, `noctis backtest sma_cross latest`). Unset and unaddressed it is
+the reserved `runs/legacy/` run that every bare reader (`status`, `champions`, `account`, `report`,
+`backtest`, `strategies`) and a bare `research` read. Setting the env var `NOCTIS_WORKSPACE`
+relocates all of it at once (useful when running the CLI from outside the repo); an explicit
+per-artifact knob is an absolute override and survives the rebinding.
 
 `noctis init` creates the workspace alongside the local config; `noctis migrate` moves a
 pre-workspace layout (`state/`, `data_lake/`, `reports/`, root `MEMORY.md`,
@@ -153,6 +155,17 @@ Because the mandate and the metric are frozen, `--mandate` / `--directive` / `--
 **refused with a reason** on a resume rather than silently ignored. Start a new run to research
 something else — identity is minted, never derived, so a fresh run under any configuration is one
 command away.
+
+**Reading a run is the same rehydration, minus the lock.** `report`, `champions`, `account`,
+`backtest`, `strategies` and `status` all take the same
+[address forms](cli.md#the-four-address-forms-and-how-they-are-told-apart), and an addressed one
+resolves through `open_reading`, which runs the *same* recipe `--resume` does: the frozen tier from
+the record, the live tier from this process, the refused pair from neither. So
+`noctis backtest sma_cross @nightly-momo` replays on the metric and universe that run was steered
+by, months after `config.yaml` moved on. A reading takes no lock, writes no byte and asserts
+nothing, so it is safe beside an engine working that same run; and a run that froze nothing (an
+adopted history) is read under the current file with **no** overlay — exactly what a resume of it
+would do.
 
 ### Seeing the drift, and adopting it
 
@@ -269,6 +282,16 @@ environment, and the whole point of pinning one is that the run is configured by
 `src/noctis/bootstrap.py`, the composition root — so the ordering can never drift between
 commands, and every overlay it performs is bracketed by a gate-unmoved assertion over the
 refused subtree.
+
+**A read-only command resolves the same chain**, through the composition root's other entry,
+`open_reading`: bare, it runs settings → gate (only where the verb narrates the mode) → overlay and
+reads the reserved run, so `noctis champions` and `noctis backtest <name>` see the **post-overlay**
+`promotion.metric` and `universe` a run would be steered by, not what `config.yaml` said before the
+mandate touched it. Given an address it resolves that run's **frozen** inputs instead (see
+[Config freezing](#config-freezing--what-a-resumed-run-reads)) — the same rehydration `--resume`
+performs — so reading a past run needs no memory of what the file used to say. There is no third
+path: a reader that stopped at the raw settings is the bug both entries exist to make
+unreachable.
 
 ### `research.mandate: auto` makes a profile's `config:` block inert
 

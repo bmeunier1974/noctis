@@ -159,6 +159,34 @@ Beside the package, `reporting/run_record.py` (`build(artifacts) -> dict`) and
 `reporting/schema.py` (`validate`) stay pure — that boundary is what the package exists to hold.
 The record's own field-by-field contract is [`docs/run-record.md`](docs/run-record.md).
 
+## Reading a run
+
+One process's **look** at a run — its tree, and the inputs the run was frozen with — opened once
+through `open_reading` (`noctis.bootstrap`, decided 2026-08-23), never through a raw `load_settings`.
+The read-only twin of a **run segment**, and defined by what it does *not* do: **no lock is taken,
+no record is written**, nothing is created, and none of `assert_resumable`, `assert_mode_unchanged`,
+the engine-change note or the config rebase runs. A reader acts on nothing — so a `completed` run is
+readable (terminal is about *working* a run, not reading one), and so is one another engine is live
+on.
+
+An **address** names the run (the four forms of `run_tree.resolve_run_dir`), and what the reading
+resolves is that run's own frozen inputs — the same recipe `--resume` runs, so a reading of a run
+sees what a resume of it would run under. No address means the reserved `legacy` run, read through
+the whole precedence chain over the current files (settings → gate when asked → mandate overlay):
+what a run minted right now would be told. That is the bug the term exists to prevent — a reader
+that stopped at the raw settings labelled a champion board with a `promotion.metric` the run it was
+reading had been steered off.
+
+`Reading` is a **value, not a context manager**: nothing was opened, so nothing has to be closed. It
+carries the resolved settings, the `run_dir` every collaborator is built from, the address an
+operator typed and the record itself — and it *builds* nothing (no registry, no lake, no memory, no
+report); the command body assembles its collaborators from `reading.settings`. A **pruned** run is
+refused with `RunPrunedError` unless the verb says it can read one (`readable_pruned`: `run-record`,
+`--finish` and `run-prune`, whose subject is the record retention kept). The CLI's one wrapper,
+`_reading_or_exit`, adds only what a terminal needs — red text through the one refusal table, and
+the legacy-layout guard asked of an **unaddressed** reading alone, because that guard's question is
+"which tree does this command read?" and an address is the answer.
+
 ## Research toolbox
 
 The one object a research session holds for its whole life — and the **surface** every reader of it

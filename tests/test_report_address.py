@@ -207,6 +207,28 @@ def test_a_pruned_run_refuses_rather_than_inventing_a_report_from_deleted_state(
     assert json.loads((run_dir / "run.json").read_text())["run"]["state_pruned"] is True
 
 
+def test_the_pruned_run_refusal_is_the_bands_own_line_said_under_no_prefix(tmp_path):
+    """The refusal is decided once, in the reading band (``RunPrunedError``), and printed by the
+    one refusal table — with no verb prefix, exactly as ``report`` said it when the wording lived
+    in a helper of its own. It names the run, what deleted the tree, and the one thing retention
+    deliberately kept."""
+    cfg = _config(tmp_path)
+    run_dir = _mint_run(tmp_path, cfg)
+    sealed = runner.invoke(app, ["run", "--config", cfg, "--resume", run_dir.name, "--finish"])
+    assert sealed.exit_code == 0, sealed.output
+    pruned = runner.invoke(app, ["run-prune", run_dir.name, "--config", cfg])
+    assert pruned.exit_code == 0, pruned.output
+
+    result = runner.invoke(app, ["report", run_dir.name, "--config", cfg])
+
+    assert result.exit_code == 1
+    line = result.output.strip()
+    assert line.startswith(f"Run {run_dir.name} was pruned:")  # no prefix ahead of the sentence
+    assert "`noctis run-prune` deleted its reports/ and state/" in line
+    assert "nothing honest to assemble from" in line
+    assert line.endswith(f"still in its record — `noctis run-record {run_dir.name}`.")
+
+
 def test_an_address_is_authoritative_beside_an_un_migrated_legacy_layout(tmp_path, monkeypatch):
     """The legacy guard answers "which tree does an *unaddressed* command read?" — and an address
     answers it instead, so a named run still prints beside a pre-workspace layout that refuses a

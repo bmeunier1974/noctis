@@ -20,10 +20,10 @@ from typing import TYPE_CHECKING, Literal, NoReturn
 
 import typer
 
-from noctis.config import SafetyGateError, load_settings, resolve_execution_mode
+from noctis.config import SafetyGateError, load_settings
 
 if TYPE_CHECKING:  # the composition root imports at call time (fast `--help`), types don't
-    from noctis.bootstrap import OverrideChange, Segment, SessionInputs
+    from noctis.bootstrap import OverrideChange, Reading, Segment, SessionInputs
 
 
 def _logging_level(verbose: int) -> int:
@@ -56,8 +56,10 @@ def _exit_red(exc: Exception, prefix: str = "") -> NoReturn:
 # it: an operator needs to know which of their commands refused, while the sentence beneath the
 # prefix stays the run store's own, whichever way the run was reached. `--resume` can meet all four
 # of the run/rehydration refusals; `--finish` and `run-prune` reach only the missing-run one — they
-# map through the same table anyway, so a fifth refusal cannot arrive at one verb unspoken.
-_VERB_PREFIXES = {"resume": "RESUME: ", "finish": "FINISH: ", "prune": "PRUNE: "}
+# map through the same table anyway, so a fifth refusal cannot arrive at one verb unspoken. A
+# plain *reading* (epic #292) prefixes nothing: `noctis report @x` on a run that is not there says
+# the resolver's own sentence, because there is no second thing the verb could have been doing.
+_VERB_PREFIXES = {"resume": "RESUME: ", "finish": "FINISH: ", "prune": "PRUNE: ", "read": ""}
 
 
 @lru_cache(maxsize=1)
@@ -76,7 +78,7 @@ def _startup_refusals() -> tuple[tuple[type[Exception], str | None], ...]:
     is pure — because naming these types means importing the composition root, and ``--help`` must
     stay fast.
     """
-    from noctis.bootstrap import UsageError
+    from noctis.bootstrap import RunPrunedError, UsageError
     from noctis.config.rehydrate import RehydrationError
     from noctis.observability.engine_change import EngineChangeError
     from noctis.reporting.run_tree import (
@@ -93,6 +95,10 @@ def _startup_refusals() -> tuple[tuple[type[Exception], str | None], ...]:
         (SafetyGateError, "SAFETY GATE: "),
         (RunLockedError, "RUN LOCKED: "),
         (RunNotPrunableError, "PRUNE REFUSED: "),
+        # Retention's other side, and the reason it says its own name: a reader of a pruned run is
+        # refused a tree that no longer exists, and the sentence already names the run, the verb
+        # that deleted it and the record that survived it.
+        (RunPrunedError, ""),
         (RunNotFoundError, None),
         (RunCompletedError, None),
         (RehydrationError, None),
@@ -126,14 +132,6 @@ def _refusals_or_exit(
         raise
 
 
-def _resolve_mode_or_exit(config: str | None):
-    """Load settings and resolve the execution mode, exiting non-zero on a gate error."""
-    settings = load_settings(config_path=config)
-    with _refusals_or_exit():
-        mode = resolve_execution_mode(settings)
-    return settings, mode
-
-
 def _resolve_session_or_exit(config: str | None, **kwargs):
     """Resolve the session inputs (the composition root's precedence chain), mapping each
     typed startup error to red text + a non-zero exit. Errors are loud at startup by design:
@@ -146,31 +144,6 @@ def _resolve_session_or_exit(config: str | None, **kwargs):
 
     with _refusals_or_exit():
         return resolve_session(config, **kwargs)
-
-
-def _resolve_status_session(config: str | None) -> tuple[SessionInputs, str | None]:
-    """Resolve the whole session for ``status``, degrading an unusable mandate to a report.
-
-    ``status`` is the command an operator runs *because* something is wrong, so a mandate the
-    overlay refuses must not take the rest of the diagnosis down with it: the refusal is
-    returned as text for the mandate line, the remaining values fall back to the pre-overlay
-    settings, and the command still exits 0 — the same warn-don't-exit contract this one
-    already keeps beside an un-migrated legacy layout. ``run``/``research`` still refuse
-    outright, which is where a fatal configuration error belongs.
-
-    The safety gate is deliberately **not** degraded (a mode that will not resolve is not a
-    configuration ``status`` can narrate), and it resolves before the mandate, so the fallback
-    reload below is only ever reached with the gate already open.
-    """
-    from noctis.bootstrap import SessionInputs, resolve_session
-    from noctis.research import MandateError
-
-    try:
-        with _refusals_or_exit(only=(SafetyGateError,)):
-            return resolve_session(config, require_gate=True), None
-    except MandateError as exc:
-        settings, mode = _resolve_mode_or_exit(config)
-        return SessionInputs(settings=settings, mode=mode, mandate=None, overrides=[]), str(exc)
 
 
 def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
@@ -222,6 +195,89 @@ def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
         typer.secho(message, fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
     typer.secho(f"WARNING: {message}", fg=typer.colors.YELLOW, err=True)
+
+
+# The one spelling of the address argument's help, shared by every verb that takes one, because
+# five verbs describing the same four forms in four wordings is how a form quietly grows a fifth
+# meaning. The forms themselves are one resolver's (``run_tree.resolve_run_dir``), and the last
+# sentence is the promise the bare form keeps: nothing an operator types today changes meaning.
+_ADDRESS_HELP = (
+    "Run address: an id as `noctis runs` lists it, a path to a run.json, @LABEL, or "
+    "`latest`. The same four forms `run --resume` takes, resolved by the same rules. "
+    "Omitted, this reads the reserved `legacy` run, as every unaddressed verb does."
+)
+
+
+# Three command bodies in this module still call ``load_settings`` raw, and they are the **only**
+# three: ``runs``, ``init`` and ``migrate`` (epic #292). Each is an exception for a reason a fourth
+# verb almost certainly does not share, so read this before adding one by analogy:
+#
+# * ``runs`` lists **every** run, so no run is addressed — a reading resolves one tree, and this
+#   verb's whole job is the roll-up over all of them. All it needs is ``runs_dir``.
+# * ``init`` and ``migrate`` run **before there is a tree to read**: one scaffolds the local input
+#   files and the workspace, the other moves a legacy layout into it and adopts what it finds into
+#   the reserved run. A reading of a run that does not exist yet is not a thing to want, and the
+#   legacy-layout guard a reading runs is precisely the condition ``migrate`` exists to clear.
+#
+# Everything else that reads — ``status``, ``report``, ``champions``, ``account``, ``backtest``,
+# ``strategies``, ``run-record``, ``run-prune``, ``--finish`` and the three ``data`` verbs — goes
+# through :func:`_reading_or_exit` below, because a body that stops at ``load_settings`` sees the
+# **pre-overlay** settings: the bug that labelled a whole champion board ``(stale)`` under a mandate
+# binding ``promotion.metric``. ``run``, ``research``, ``engine``, ``mandate`` and
+# ``--show-config-drift`` open a *session* instead (:func:`_resolve_session_or_exit`) — a preflight
+# of what a run would get, which is a different question from what a run got.
+def _reading_or_exit(
+    config: str | None,
+    address: str | None = None,
+    *,
+    verb: str = "read",
+    require_gate: bool = False,
+    warn_only: bool = False,
+    mandate_overlay: bool = True,
+    readable_pruned: bool = False,
+    degrade: tuple[type[Exception], ...] = (),
+) -> Reading:
+    """The one prelude of every read-only verb: resolve the reading, or refuse out loud (#292).
+
+    :func:`~noctis.bootstrap.open_reading` does the resolving — the precedence chain over the
+    current files for a bare verb, the run's own frozen inputs for an addressed one — and this
+    wrapper owns the two policies the composition root must not know, because they are about a
+    terminal rather than about a run:
+
+    * **Red text + exit 1** for every refusal the one startup table names
+      (:func:`_startup_refusals`), so a reading refuses in the same voice a resume does.
+      ``verb`` picks the prefix for the refusals that are about an addressed run — ``finish`` and
+      ``prune`` keep theirs, an ordinary reading says the resolver's own sentence unprefixed.
+    * **The legacy-layout guard, asked only of an unaddressed reading.** That guard's question is
+      "which tree does this command read?", and an address *is* the answer: the operator named the
+      run, so nothing about a pre-workspace layout elsewhere can make a named run unreadable.
+      Bare, it is exactly the invocation the guard exists for — the reserved run, which
+      un-migrated data beside ``config.yaml`` would make read as silently empty. ``warn_only``
+      is ``status``'s standing exception (the diagnostic warns where every other verb refuses).
+
+    ``degrade`` names the refusals this verb answers *itself* instead of exiting on — one caller,
+    ``status``, which reports an unusable mandate as a line and re-reads with the overlay off
+    (D6). It is an exclusion, never a list of what to catch, and it is taken from the table
+    itself: everything the table names still maps to red text here, so a refusal nobody has
+    thought about yet cannot reach a terminal unspoken through the one verb that handles one.
+
+    It builds nothing and prints nothing else; the command body assembles its collaborators from
+    ``reading.settings`` and does its work.
+    """
+    from noctis.bootstrap import open_reading
+
+    only = tuple(kind for kind, _ in _startup_refusals() if kind not in degrade) if degrade else ()
+    with _refusals_or_exit(verb=verb, only=only):
+        reading = open_reading(
+            config,
+            address,
+            require_gate=require_gate,
+            mandate_overlay=mandate_overlay,
+            readable_pruned=readable_pruned,
+        )
+    if not reading.addressed:
+        _guard_legacy_or_exit(reading.settings, warn_only=warn_only)
+    return reading
 
 
 @contextmanager
@@ -389,6 +445,13 @@ def _finish_run(config: str | None, resume: str | None) -> None:
     no engine starts, and the liveness lock is read only far enough to refuse a run another process
     is working. Sealing a run that is already completed is a **no-op** that says so — terminal means
     terminal, so the moment a published result was sealed is never rewritten.
+
+    The election metric it seals under is the **run's** (D9, story #297), read off the reading —
+    the metric the run froze at creation, or the post-overlay one for a run that froze none. It
+    rides in the record's ``comparable_key``, the bucket two runs must match on before their
+    numbers may be pooled, so taking it from the current ``config.yaml`` would change what a run's
+    results are comparable *with* at the moment an operator published them. The reading reaches a
+    pruned run on purpose: the record is exactly what retention keeps.
     """
     from datetime import UTC, datetime
     from pathlib import Path
@@ -404,13 +467,16 @@ def _finish_run(config: str | None, resume: str | None) -> None:
                 "produced nothing to publish."
             )
         )
-    settings = load_settings(config_path=config)
+    reading = _reading_or_exit(config, resume, verb="finish", readable_pruned=True)
     with _refusals_or_exit(verb="finish"):
+        # The operator's address, passed through unchanged: the resolver runs a second time, and
+        # both runs are pure reads of the same record (D9), so a refusal says the same sentence
+        # whichever of them raised it.
         outcome = finish_run(
-            Path(settings.runs_dir),
+            Path(reading.settings.runs_dir),
             resume,
             clock=lambda: datetime.now(UTC),
-            election_metric=settings.promotion.metric,
+            election_metric=reading.settings.promotion.metric,
         )
     if not outcome.sealed:
         typer.echo(
@@ -896,25 +962,49 @@ def run(
 
 @app.command()
 def status(
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
 ) -> None:
     """Show the resolved execution mode, market state, and a configuration summary.
 
-    Reports the configuration the session actually assembled: ``status`` runs the composition
-    root's whole precedence chain (gate → mandate → overlay), not the mode alone, so every line
-    below shows the **post-overlay** value a run would use rather than what ``config.yaml`` said
-    before the mandate touched it. The mandate, its applied overrides, and the resolved research
-    model are stated alongside, so the steering and its effect are readable together.
+    Reports the configuration the session actually assembled: ``status`` opens the composition
+    root's reading (gate → mandate → overlay), not the mode alone, so every line below shows the
+    **post-overlay** value a run would use rather than what ``config.yaml`` said before the
+    mandate touched it. The mandate, its applied overrides, and the resolved research model are
+    stated alongside, so the steering and its effect are readable together.
+
+    Given an address, it reports **that run** instead: the board, account and forward record from
+    the run's own tree, under the inputs the run froze at creation — so a summary of last week's
+    experiment still describes the experiment, whatever ``config.yaml`` has become since. Bare, it
+    reports the reserved ``legacy`` run, as it always has.
+
+    It is the one reader that narrates the resolved mode, so it is the one that arms the safety
+    gate: a ``mode: live`` that ``ALLOW_LIVE`` does not open refuses here too, because a mode line
+    ``status`` had to guess at would be worse than no mode line at all.
     """
     from noctis.champions import build_registry
     from noctis.engine import MarketClock, initial_phase_for, resolve_trading_driver
     from noctis.engine.report_assembly import gather_account_forward
-    from noctis.research import resolved_research_model
+    from noctis.research import MandateError, resolved_research_model
 
-    inputs, mandate_error = _resolve_status_session(config)
-    settings, mode = inputs.settings, inputs.mode
-    # status stays usable beside a legacy layout — it's the diagnostic you'd run first.
-    _guard_legacy_or_exit(settings, warn_only=True)
+    # The one prelude, run twice at most. ``status`` is the command an operator runs *because*
+    # something is wrong, so a mandate the overlay refuses must not take the rest of the
+    # diagnosis down with it: the refusal becomes the mandate line, the reading is retaken with
+    # the overlay off, and the command still exits 0 — the same warn-don't-exit contract it keeps
+    # beside an un-migrated legacy layout, and the reason ``run``/``research`` refuse where this
+    # reports. The safety gate is deliberately *not* degraded, and the band resolves it before the
+    # mandate, so the second reading is only ever reached with the gate already open.
+    mandate_error: str | None = None
+    try:
+        reading = _reading_or_exit(
+            config, address, require_gate=True, warn_only=True, degrade=(MandateError,)
+        )
+    except MandateError as exc:
+        mandate_error = str(exc)
+        reading = _reading_or_exit(
+            config, address, require_gate=True, warn_only=True, mandate_overlay=False
+        )
+    settings, mode = reading.settings, reading.mode
     clock = MarketClock(settings.session.calendar, settings.session.timezone)
     is_open = clock.is_open()
     next_transition = clock.next_close() if is_open else clock.next_open()
@@ -962,7 +1052,7 @@ def status(
         f"trading driver:    {resolve_trading_driver(settings)} "
         f"(execution={settings.trading.execution})"
     )
-    _echo_status_mandate(inputs.mandate, inputs.overrides, mandate_error)
+    _echo_status_mandate(reading.inputs.mandate, reading.inputs.overrides, mandate_error)
 
 
 @app.command("runs")
@@ -1109,19 +1199,21 @@ def run_record(
     and exits non-zero when there is one.
     """
     import json
-    from pathlib import Path
 
     from noctis.reporting import schema
-    from noctis.reporting.run_tree import RunNotFoundError, read_record, resolve_run_dir
 
-    settings = load_settings(config_path=config)
-    try:
-        run_dir = resolve_run_dir(Path(settings.runs_dir), run_id)
-    except RunNotFoundError as exc:
-        _exit_red(exc)
-    record, note = read_record(run_dir)
-    if record is None:
-        _exit_red(RuntimeError(f"{run_dir / 'run.json'}: {note}"))
+    # The record *is* the history retention keeps, so this is one of the three verbs that read a
+    # pruned run (D4). An unreadable record refuses through the band, which raises the record
+    # module's own reason under the file's path — the line this command has always printed for
+    # one: a listing tolerates a broken record because it has others to show, and a command asked
+    # for exactly one does not.
+    reading = _reading_or_exit(config, run_id, readable_pruned=True)
+    run_dir, record = reading.run_dir, reading.record
+    # Only an *unaddressed* reading carries no record, and this verb's address is required — so
+    # the band above either read one or refused. The narrowing is for the type checker, which
+    # cannot know that from the signature; it is never silent if it ever does happen.
+    if record is None:  # pragma: no cover
+        _exit_red(RuntimeError(f"{run_dir / 'run.json'}: no readable record"))
     if not validate:
         typer.echo(json.dumps(record, indent=2))
         return
@@ -1177,13 +1269,17 @@ def run_prune(
 
     from noctis.reporting.run_tree import prune_run_state
 
-    settings = load_settings(config_path=config)
+    # The run's own election metric, off the reading (D9, story #297): retention rewrites the
+    # record, and the record is all a pruned run has left — so the bucket it is left labelled with
+    # must be the one it ran under, not the one ``config.yaml`` resolves to today. Pruning a run
+    # already pruned is the documented no-op, so this reading reaches a pruned run.
+    reading = _reading_or_exit(config, run_id, verb="prune", readable_pruned=True)
     with _refusals_or_exit(verb="prune"):
         outcome = prune_run_state(
-            Path(settings.runs_dir),
+            Path(reading.settings.runs_dir),
             run_id,
             clock=lambda: datetime.now(UTC),
-            election_metric=settings.promotion.metric,
+            election_metric=reading.settings.promotion.metric,
             dry_run=dry_run,
         )
     _echo_prune(outcome)
@@ -1283,12 +1379,7 @@ def mandate(
 
 @app.command()
 def report(
-    run_id: str = typer.Argument(
-        None,
-        help="Run address: an id as `noctis runs` lists it, a path to a run.json, @LABEL, or "
-        "`latest`. The same four forms `run --resume` takes, resolved by the same rules. "
-        "Omitted, this reads the reserved `legacy` run, as every unaddressed verb does.",
-    ),
+    run_id: str = typer.Argument(None, help=_ADDRESS_HELP),
     as_of: str = typer.Option(None, "--as-of", help="Report date (YYYY-MM-DD); default latest."),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
     sweep_stale: bool = typer.Option(
@@ -1322,8 +1413,11 @@ def report(
     from noctis.engine.report_assembly import assemble_report
     from noctis.reporting import latest_report, sweep_stale_reports, today_str, write_report
 
-    settings = load_settings(config_path=config)
-    _bind_reported_run_or_exit(settings, run_id)
+    # One reading, and it decides everything about *which* run this is: the reserved tree under
+    # the current files (post-overlay, so a mandate steers what a bare report assembles from) or
+    # the addressed run's own tree under the configuration it was frozen with — plus the two
+    # refusals a reader can meet, an address nobody answers and a run retention has pruned.
+    settings = _reading_or_exit(config, run_id).settings
     reports_dir = settings.reports_dir
 
     # Opt-in, never automatic: a legitimately simulated run writes future-dated as-ofs on
@@ -1367,49 +1461,10 @@ def report(
     typer.echo(f"\n(written to {path})")
 
 
-def _bind_reported_run_or_exit(settings, address: str | None) -> None:
-    """Point ``report`` at the run it will read — the reserved one, or the one an operator named.
-
-    Two branches, and they are one decision seen twice:
-
-    * **No address** changes nothing and runs the legacy-layout guard, because an unaddressed
-      ``report`` is exactly the invocation that guard exists for: it reads the reserved run, and
-      un-migrated data beside ``config.yaml`` would make it read as silently empty.
-    * **An address** *is* the answer to the guard's question, so the guard does not ask it. The
-      operator named the tree, one resolver turns the address into a run dir (the four forms, in
-      one fixed order) and the composition root binds ``reports_dir``/``state_dir``/
-      ``memory_path`` onto it — after which nothing about a pre-workspace layout elsewhere can
-      make a named run unreadable.
-
-    A run whose heavy state ``run-prune`` removed is refused rather than reported on: its
-    ``reports/`` are gone and its ``state/`` with them, so the only report left to give would be
-    one assembled from nothing — an empty champion board attributed to a run that had one.
-    """
-    from noctis.bootstrap import bind_addressed_run
-    from noctis.reporting.run_tree import RunNotFoundError, read_record
-
-    if address is None:
-        _guard_legacy_or_exit(settings)
-        return
-    try:
-        run_dir = bind_addressed_run(settings, address)
-    except RunNotFoundError as exc:
-        _exit_red(exc)
-    record, _ = read_record(run_dir)
-    if isinstance(record, Mapping) and (record.get("run") or {}).get("state_pruned"):
-        _exit_red(
-            RuntimeError(
-                f"Run {run_dir.name} was pruned: `noctis run-prune` deleted its reports/ and "
-                f"state/, so there is no report to print and nothing honest to assemble one "
-                f"from. Everything the run accumulated is still in its record — "
-                f"`noctis run-record {run_dir.name}`."
-            )
-        )
-
-
 @app.command()
 def backtest(
     strategy: str = typer.Argument(..., help="Strategy family to backtest."),
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     symbol: str = typer.Option(None, "--symbol", "-s", help="Symbol (default: first in universe)."),
     schema: str = typer.Option("ohlcv-1m", "--schema", help="Bar schema/resolution."),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
@@ -1418,12 +1473,18 @@ def backtest(
 
     Runs with the file's current ``Params`` defaults — after a champion promotion those are
     the tuned values, so this replays exactly what the research loop shipped.
+
+    And it replays on the *run's* footing, not the file's: the metric, the annualization and cost
+    knobs, and the universe the default symbol comes from are all read off the reading, so a
+    session steered onto another metric by a mandate is replayed under that metric rather than
+    under whatever ``config.yaml`` resolves today. ``noctis backtest <name> <address>`` goes one
+    further and replays under the addressed run's **frozen** settings — the scorecard it prints is
+    then the scorecard that promoted the champion, months and config edits later.
     """
     from noctis.backtest import Candidate, PipelineConfig, evaluate
     from noctis.bootstrap import build_families, build_lake
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, address).settings
     # One hydration (seeds → spec-families → library files): the library files are the
     # canonical versions of their families (tuned defaults live in the file), so a human
     # replays exactly what the agent shipped — and a minted spec champion replays too.
@@ -1483,6 +1544,7 @@ def backtest(
 
 @app.command()
 def champions(
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
     reset: bool = typer.Option(
         False,
@@ -1491,11 +1553,10 @@ def champions(
         "current gates and metric.",
     ),
 ) -> None:
-    """Show the current champion registry."""
+    """Show the current champion registry — of the reserved run, or of one you name."""
     from noctis.champions import build_registry
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, address).settings
     registry = build_registry(settings)
     if reset:
         dropped = registry.reset("operator reset via `noctis champions --reset`")
@@ -1505,6 +1566,11 @@ def champions(
     if not entries:
         typer.echo("No champions yet. The research loop promotes them over time.")
         return
+    # The metric this board was *elected* under — off the reading, so it is the post-overlay
+    # metric a mandate steered the run with (or, addressed, the metric that run froze), never the
+    # raw file's. A champion scored under a different one is genuinely stale: cross-metric numbers
+    # are not comparable, and promotion treats such an incumbent as displaceable. Labelling it off
+    # settings the run never saw is how a whole sortino board came to read `sortino(stale)`.
     current_metric = settings.promotion.metric
     typer.echo(
         f"{'family':<20} {'test_metric':>12} {'gap':>10}  {'metric':<14} {'crowned_at':<26} params"
@@ -1521,6 +1587,7 @@ def champions(
 
 @app.command()
 def account(
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
     reset: bool = typer.Option(
         False,
@@ -1532,14 +1599,15 @@ def account(
     """Show the continuous paper account — the cumulative forward track record.
 
     One paper account carries equity and open positions across TRADING sessions (the state
-    dir's paper_account.json). Champion turnover never resets it; only --reset does.
+    dir's paper_account.json). Champion turnover never resets it; only --reset does. The account
+    belongs to a **run**, as its state does: an address reads that run's track record, and the
+    bare form the reserved ``legacy`` run's.
     """
     from pathlib import Path
 
     from noctis.broker.persistence import AccountStore
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, address).settings
     store = AccountStore(Path(settings.state_dir) / "paper_account.json")
     if reset:
         archive = store.reset()
@@ -1831,12 +1899,18 @@ def research(
 
 @app.command()
 def strategies(
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
 ) -> None:
-    """List the strategy library: status, style, symbols, tuned date, thesis."""
+    """List the strategy library: status, style, symbols, tuned date, thesis.
+
+    Three tiers, lowest precedence first: the committed seeds, then the addressed run's own
+    working tier and its locally-promoted champions — so an address lists what *that* run
+    authored, and the bare form the reserved ``legacy`` run's.
+    """
     from noctis.strategies.library import LibraryPaths, list_strategies
 
-    settings = load_settings(config_path=config)
+    settings = _reading_or_exit(config, address).settings
     infos = list_strategies(LibraryPaths.from_settings(settings))
     if not infos:
         typer.echo(f"No strategies in {settings.strategies_dir!r} yet.")
@@ -1985,6 +2059,13 @@ def migrate(
 
 
 # --- data sub-app -----------------------------------------------------------------------
+# All three verbs read through :func:`_reading_or_exit` **unaddressed**, and that is the whole
+# of what an address would mean here: the lake is shared by every run and run-neutral (vendor
+# data is expensive, and a bar of AAPL belongs to no experiment), so there is no per-run lake to
+# name. What the reading still buys them is the rest of the precedence chain — the mandate that
+# steers a run steers the lake it is fed from (``data.history_days``, ``data.auto_backfill``,
+# the seed ``universe``, and ``data.budget_usd`` towards discipline only) — and the legacy-layout
+# guard, which fires from the wrapper for exactly the unaddressed reading these three are (#298).
 
 data_app = typer.Typer(help="Market-data lake operations (fetch-once).", no_args_is_help=True)
 app.add_typer(data_app, name="data")
@@ -2077,8 +2158,7 @@ def data_status(
     """Show tracked series in the coverage registry."""
     from noctis.bootstrap import build_lake
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, None).settings
     lake = build_lake(settings)
     records = lake.coverage_records()
     if not records:
@@ -2097,8 +2177,7 @@ def data_sync(
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
 ) -> None:
     """Incrementally extend every tracked series to the T+1 boundary (tail only)."""
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, None).settings
     lake = _vendor_lake_or_exit(settings)
     with _symbol_progress("syncing") as progress:
         results = lake.sync(on_progress=progress)
@@ -2121,8 +2200,7 @@ def data_ingest(
     """Coverage-diffed ingest of a date range (only missing slices are fetched)."""
     from noctis.data.types import to_ns, to_ns_end_inclusive
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, None).settings
     lake = _vendor_lake_or_exit(settings)
     syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     # ``--end`` is inclusive: a date-only end covers that whole trading day (its intraday
