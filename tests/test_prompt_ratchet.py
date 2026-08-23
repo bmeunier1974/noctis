@@ -1,10 +1,14 @@
-"""The prompt ratchet (#183): a prompt change cannot land undeclared.
+"""The prompt ratchet's *rule* (#183): a prompt change cannot land undeclared.
 
-Every assertion here is external behaviour — the status a comparison returns, the site and file
-names it prints, the exit code the entrypoint gives CI, what the committed record holds, whether a
-file was written. The comparison is pure over two records, so a scenario is a miniature repo in
-``tmp_path``: record it, edit one prompt asset, optionally declare the change in the changelog,
-and record it again — the shape ``tests/test_engine_ratchet.py`` uses.
+The mechanics — building, loading and writing the record, the four-case check, what ``--write``
+does with a verdict, the report — are shared by every ratchet and tested once in
+``tests/test_ratchet.py``. What is left here is the policy this module exists to state: the
+changelog reader, which entry declares what, and which drift ``--write`` refuses to record.
+
+Every assertion is external behaviour — the status a comparison returns, the site and file names it
+prints, the exit code the entrypoint gives CI. The comparison is pure over two records, so a
+scenario is a miniature repo in ``tmp_path``: record it, edit one prompt asset, optionally declare
+the change in the changelog, and record it again.
 
 The declared-change rule is the contract: drift fails until the newest changelog entry *names the
 drifted site* **and** that entry arrived after the committed record was written. Both halves get
@@ -14,27 +18,34 @@ entry that was already the head when the record was written declares nothing new
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
 import pytest
 
+from noctis.observability import prompt_ratchet, ratchet
 from noctis.observability.prompt_id import SITE_ASSETS, fingerprint
 from noctis.observability.prompt_ratchet import (
     CHANGELOG_PATH,
+    RECORD_KIND,
     RECORD_PATH,
     REGENERATE_COMMAND,
+    SPEC,
+    ChangelogEntry,
     build_record,
     check,
     compare_records,
     load_record,
     main,
     newest_entry,
+    regenerate,
     write_record,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RATCHET_SOURCE = REPO_ROOT / "src" / "noctis" / "observability" / "prompt_ratchet.py"
+SCRIPT = REPO_ROOT / "scripts" / "prompt_fingerprint.py"
 
 AUTHOR_FILE = "src/noctis/research/author.py"
 AUTHOR_SIBLING = "src/noctis/research/contract_sheet.py"
@@ -83,6 +94,53 @@ def _edit(root: Path, rel: str) -> None:
     path.write_text(path.read_text() + '\nPROMPT = "a reworded prompt"\n')
 
 
+def _names(result) -> list[str]:
+    """The sites this verdict names, in the order the report prints them."""
+    return [drift.name for drift in result.drifts]
+
+
+def _tagged(result, tag: str) -> list[str]:
+    """The sites this verdict filed under one word of the rule's vocabulary."""
+    return [drift.name for drift in result.drifts if drift.tag == tag]
+
+
+# ── the policy module holds the rule and borrows the mechanics ────────────────────────────
+
+
+def test_the_policy_module_runs_on_the_shared_mechanics(tmp_path):
+    """The verdict types are the shared ones, and every verdict carries this policy's spec."""
+    assert prompt_ratchet.RatchetResult is ratchet.RatchetResult
+    assert prompt_ratchet.WriteOutcome is ratchet.WriteOutcome
+    assert (SPEC.record_path, SPEC.record_kind, SPEC.regenerate_command) == (
+        RECORD_PATH,
+        RECORD_KIND,
+        REGENERATE_COMMAND,
+    )
+
+    root = _build_tree(tmp_path)
+    write_record(root)
+    result = check(root)
+    outcome = regenerate(root)
+
+    assert isinstance(result, ratchet.RatchetResult)
+    assert result.spec is SPEC
+    assert result.status == "ok"
+    assert isinstance(outcome, ratchet.WriteOutcome)
+    assert outcome.written == root / RECORD_PATH
+    assert compare_records(build_record(root), load_record(root)).status == "ok"
+
+
+def test_a_record_declares_the_changelog_entry_it_was_written_against(tmp_path):
+    """The changelog head is this policy's own field in the shared record — the second half of
+    the rule is checkable only because the record carries the entry it was regenerated against."""
+    record = build_record(_build_tree(tmp_path))
+
+    assert record["sites"]["author"]["digest"] == fingerprint(tmp_path).digest("author")
+    assert record["changelog"]["path"] == CHANGELOG_PATH
+    assert "2026-01-01" in record["changelog"]["heading"]
+    assert set(record["changelog"]["declares"]) == set(SITE_ASSETS)
+
+
 # ── the changelog reader, pure ────────────────────────────────────────────────────────────
 
 
@@ -94,7 +152,7 @@ def test_the_newest_entry_is_the_first_one_and_names_its_sites():
 
     entry = newest_entry(text)
 
-    assert entry is not None
+    assert isinstance(entry, ChangelogEntry)
     assert entry.sites == ("author", "ideation")
     assert "2026-02-02" in entry.heading
 
@@ -153,42 +211,7 @@ def test_editing_an_entrys_body_changes_its_identity():
     assert before.digest != after.digest
 
 
-# ── the committed record ──────────────────────────────────────────────────────────────────
-
-
-def test_a_record_holds_every_site_digest_and_the_changelog_head(tmp_path):
-    record = build_record(_build_tree(tmp_path))
-
-    assert set(record["sites"]) == set(SITE_ASSETS)
-    assert record["sites"]["author"]["digest"] == fingerprint(tmp_path).digest("author")
-    # Per-file digests, so a drift report names the file that moved, not its siblings.
-    assert set(record["sites"]["author"]["files"]) == set(SITE_ASSETS["author"])
-    assert record["changelog"]["path"] == CHANGELOG_PATH
-    assert "2026-01-01" in record["changelog"]["heading"]
-    assert record["regenerate_with"] == REGENERATE_COMMAND
-
-
-def test_an_unchanged_tree_checks_ok(tmp_path):
-    root = _build_tree(tmp_path)
-    write_record(root)
-
-    result = check(root)
-
-    assert result.status == "ok"
-    assert result.ok
-    assert not result.drift
-
-
-def test_editing_docs_or_a_test_never_fires_the_check(tmp_path):
-    root = _build_tree(tmp_path)
-    write_record(root)
-    (root / "docs" / "research.md").write_text("# research, rewritten\n")
-    (root / "tests" / "test_prompt_ratchet.py").write_text("# a new test\n")
-
-    assert check(root).status == "ok"
-
-
-# ── undeclared drift fails ────────────────────────────────────────────────────────────────
+# ── undeclared drift fails, and is what --write refuses ───────────────────────────────────
 
 
 def test_drift_with_no_changelog_entry_fails_naming_the_site_and_the_file(tmp_path):
@@ -200,35 +223,12 @@ def test_drift_with_no_changelog_entry_fails_naming_the_site_and_the_file(tmp_pa
 
     assert result.status == "fail"
     assert not result.ok
-    assert result.undeclared_drift
-    assert [drift.site for drift in result.drift] == ["author"]
-    assert result.drift[0].files == (AUTHOR_FILE,)
+    assert result.refuse_write
+    assert _tagged(result, "UNDECLARED") == ["author"]
+    assert result.drifts[0].files == (AUTHOR_FILE,)
     report = result.report()
     assert "author" in report and AUTHOR_FILE in report
     assert AUTHOR_SIBLING not in report  # only what moved, never its untouched siblings
-    assert CHANGELOG_PATH in report
-
-
-def test_the_report_names_the_changelog_entry_it_read(tmp_path):
-    """ "I wrote an entry and it still fails" needs the entry the check actually saw."""
-    root = _build_tree(tmp_path)
-    write_record(root)
-    _edit(root, AUTHOR_FILE)
-
-    report = check(root).report()
-
-    assert "2026-01-01" in report  # the baseline entry, which declares nothing new
-    assert CHANGELOG_PATH in report
-
-
-def test_the_report_says_so_when_the_changelog_has_no_entry_at_all(tmp_path):
-    root = _build_tree(tmp_path, changelog="# Prompt changelog\n\nNothing yet.\n")
-    write_record(root)
-    _edit(root, AUTHOR_FILE)
-
-    report = check(root).report()
-
-    assert "none" in report.lower()
     assert CHANGELOG_PATH in report
 
 
@@ -241,8 +241,8 @@ def test_an_entry_that_names_another_site_does_not_declare_this_one(tmp_path):
     result = check(root)
 
     assert result.status == "fail"
-    assert result.undeclared_drift
-    assert "author" in result.report()
+    assert result.refuse_write
+    assert _tagged(result, "UNDECLARED") == ["author"]
 
 
 def test_an_entry_that_was_already_the_head_when_the_record_was_written_declares_nothing(tmp_path):
@@ -255,8 +255,45 @@ def test_an_entry_that_was_already_the_head_when_the_record_was_written_declares
     result = check(root)
 
     assert result.status == "fail"
-    assert result.undeclared_drift
+    assert result.refuse_write
     assert "changelog" in result.report().lower()
+
+
+# ── the report names the entry the check actually read ────────────────────────────────────
+
+
+def test_the_report_names_the_changelog_entry_it_read(tmp_path):
+    """ "I wrote an entry and it still fails" needs the entry the check actually saw."""
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _edit(root, AUTHOR_FILE)
+
+    report = check(root).report()
+
+    assert f"newest {CHANGELOG_PATH} entry:" in report
+    assert "2026-01-01" in report  # the baseline entry, which declares nothing new
+
+
+def test_the_report_says_so_when_the_changelog_has_no_entry_at_all(tmp_path):
+    root = _build_tree(tmp_path, changelog="# Prompt changelog\n\nNothing yet.\n")
+    write_record(root)
+    _edit(root, AUTHOR_FILE)
+
+    report = check(root).report()
+
+    assert f"newest {CHANGELOG_PATH} entry: none" in report
+
+
+def test_a_missing_record_still_names_the_changelog_entry_it_read(tmp_path):
+    """The baseline is missing, so no drift is named — but "which entry did it read" is exactly
+    as much the question here, and the answer must not depend on there being drift to hang it on."""
+    root = _build_tree(tmp_path)
+
+    report = check(root).report()
+
+    assert load_record(root) is None
+    assert f"newest {CHANGELOG_PATH} entry:" in report
+    assert "2026-01-01" in report
 
 
 # ── a declared change lands ───────────────────────────────────────────────────────────────
@@ -271,7 +308,8 @@ def test_a_new_entry_naming_the_drifted_site_makes_the_drift_declared(tmp_path):
     result = check(root)
 
     assert result.status == "fail"  # the record is still stale...
-    assert not result.undeclared_drift  # ...but the change is declared, so --write may record it
+    assert _tagged(result, "declared") == ["author"]
+    assert not result.refuse_write  # ...but the change is declared, so --write may record it
     assert REGENERATE_COMMAND in result.report()
 
 
@@ -296,8 +334,8 @@ def test_one_entry_may_declare_several_sites_at_once(tmp_path):
 
     result = check(root)
 
-    assert [drift.site for drift in result.drift] == ["author", "ideation"]
-    assert not result.undeclared_drift
+    assert _names(result) == ["author", "ideation"]
+    assert not result.refuse_write
     assert main(["--write", "--root", str(root)]) == 0
     assert check(root).status == "ok"
 
@@ -312,121 +350,13 @@ def test_a_second_undeclared_site_still_blocks_a_declared_one(tmp_path):
 
     result = check(root)
 
-    assert result.undeclared_drift
-    assert [drift.site for drift in result.drift] == ["author", "ideation"]
+    assert result.refuse_write
+    assert _names(result) == ["author", "ideation"]
+    assert _tagged(result, "declared") == ["author"]
     assert main(["--write", "--root", str(root)]) == 1
 
 
-# ── --write refuses undeclared drift ──────────────────────────────────────────────────────
-
-
-def test_regenerating_undeclared_drift_refuses_and_writes_nothing(tmp_path, capsys):
-    """``--write`` is the fix every failure recommends, so it cannot also be how an undeclared
-    prompt change gets recorded — the ratchet would reduce to whether the contributor read the
-    failure before typing the command it printed."""
-    root = _build_tree(tmp_path)
-    write_record(root)
-    before = (root / RECORD_PATH).read_bytes()
-    _edit(root, AUTHOR_FILE)
-    capsys.readouterr()
-
-    code = main(["--write", "--root", str(root)])
-
-    out = capsys.readouterr().out
-    assert code == 1
-    assert (root / RECORD_PATH).read_bytes() == before  # byte-identical: nothing was written
-    assert "author" in out and AUTHOR_FILE in out
-    assert CHANGELOG_PATH in out
-    assert "refusing to regenerate" in out
-
-
-def test_a_refused_regeneration_leaves_the_check_still_failing(tmp_path, capsys):
-    """ "edit, regenerate, commit, CI passes" is not a reachable sequence."""
-    root = _build_tree(tmp_path)
-    write_record(root)
-    _edit(root, AUTHOR_FILE)
-
-    assert main(["--write", "--root", str(root)]) == 1
-    assert main(["--check", "--root", str(root)]) == 1
-    assert "author" in capsys.readouterr().out
-
-
-def test_a_missing_record_still_regenerates_as_the_baseline(tmp_path):
-    """There is nothing to compare against, and this is how the baseline is created."""
-    root = _build_tree(tmp_path)
-    assert load_record(root) is None
-
-    assert main(["--write", "--root", str(root)]) == 0
-
-    assert check(root).status == "ok"
-
-
-def test_regenerating_an_unchanged_tree_is_idempotent(tmp_path):
-    root = _build_tree(tmp_path)
-    main(["--write", "--root", str(root)])
-    before = (root / RECORD_PATH).read_bytes()
-
-    assert main(["--write", "--root", str(root)]) == 0
-
-    assert (root / RECORD_PATH).read_bytes() == before
-
-
-def test_the_pure_writer_stays_available_for_creating_a_baseline(tmp_path):
-    """``write_record`` is the unguarded writer a fresh tree needs; the refusal is a decision in
-    the ``--write`` path, so the comparison itself stays pure and unchanged."""
-    root = _build_tree(tmp_path)
-    write_record(root)
-    _edit(root, AUTHOR_FILE)
-
-    assert check(root).status == "fail"
-    assert write_record(root) == root / RECORD_PATH
-    assert check(root).status == "ok"
-
-
-# ── a missing or malformed baseline ───────────────────────────────────────────────────────
-
-
-def test_a_missing_record_file_fails_with_a_regenerate_message(tmp_path):
-    root = _build_tree(tmp_path)
-
-    result = check(root)
-
-    assert result.status == "fail"
-    assert load_record(root) is None
-    assert RECORD_PATH in result.report()
-    assert REGENERATE_COMMAND in result.report()
-
-
-def test_a_malformed_record_file_fails_with_a_regenerate_message(tmp_path):
-    root = _build_tree(tmp_path)
-    (root / RECORD_PATH).write_text("{ not json at all")
-
-    result = check(root)
-
-    assert result.status == "fail"
-    assert REGENERATE_COMMAND in result.report()
-
-
-def test_a_site_that_is_null_on_both_sides_is_not_drift(tmp_path):
-    root = _build_tree(tmp_path)
-    (root / IDEATION_FILE).unlink()
-    committed = build_record(root)
-
-    result = compare_records(build_record(root), committed)
-
-    assert committed["sites"]["ideation"]["digest"] is None
-    assert result.status == "ok"
-
-
-# ── the entrypoint CI runs ────────────────────────────────────────────────────────────────
-
-
-def test_the_check_is_the_default_action(tmp_path):
-    root = _build_tree(tmp_path)
-
-    assert main(["--root", str(root)]) == 1  # no record committed yet
-    main(["--write", "--root", str(root)])
-    assert main(["--root", str(root)]) == 0
+# ── the exit code CI gets ─────────────────────────────────────────────────────────────────
 
 
 def test_the_check_prints_the_site_and_the_file_that_moved(tmp_path, capsys):
@@ -443,17 +373,6 @@ def test_the_check_prints_the_site_and_the_file_that_moved(tmp_path, capsys):
 
 
 # ── this checkout ─────────────────────────────────────────────────────────────────────────
-
-
-def test_the_committed_prompt_fingerprint_file_records_this_checkout():
-    """The file in the repo is the baseline CI compares against — it must be in sync now."""
-    record = load_record(REPO_ROOT)
-
-    assert record is not None
-    fp = fingerprint(REPO_ROOT)
-    for site in SITE_ASSETS:
-        assert record["sites"][site]["digest"] == fp.digest(site), site
-    assert check(REPO_ROOT).ok, check(REPO_ROOT).report()
 
 
 def _committed_entry_sites() -> set[str]:
@@ -527,3 +446,41 @@ def test_the_declared_change_rule_is_documented_where_a_contributor_reads_it():
 def test_every_site_is_named_on_the_changelog_page(site):
     """A hash has to read back to a human explanation, which starts with knowing the sites."""
     assert site in (REPO_ROOT / CHANGELOG_PATH).read_text()
+
+
+def test_the_script_is_a_shim_a_guard_and_one_main_import():
+    """``scripts/prompt_fingerprint.py`` runs *before* the package is importable, which is the
+    only reason it exists: it holds the ``sys.path`` shim, the ``ImportError`` guard and the one
+    import of ``main`` — no policy, no argument parsing, nothing a module could hold instead."""
+    module = ast.parse(SCRIPT.read_text())
+    docstring, *statements = module.body
+
+    assert isinstance(docstring, ast.Expr) and isinstance(docstring.value, ast.Constant)
+    assert [type(node).__name__ for node in statements] == [
+        "Import",  # sys, for the shim
+        "ImportFrom",  # pathlib.Path, for the shim
+        "Assign",  # _SRC
+        "If",  # the sys.path shim
+        "Try",  # the ImportError guard
+        "If",  # the __main__ dispatch
+    ]
+
+    guard = statements[4]
+    assert isinstance(guard, ast.Try)
+    assert [ast.unparse(node) for node in guard.body] == [
+        "from noctis.observability.prompt_ratchet import main"
+    ]
+
+    dispatch = statements[5]
+    assert isinstance(dispatch, ast.If)
+    assert ast.unparse(dispatch.test) == "__name__ == '__main__'"
+
+
+def test_the_script_docstring_names_what_write_refuses():
+    """A guard nobody has been told about reads as a broken tool, and the script is where an
+    operator lands first — so its docstring keeps the refusal sentence."""
+    docstring = ast.get_docstring(ast.parse(SCRIPT.read_text())) or ""
+
+    assert "refuses" in docstring
+    assert "--write" in docstring
+    assert "undeclared prompt change" in docstring and CHANGELOG_PATH in docstring

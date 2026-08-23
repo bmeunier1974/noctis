@@ -143,7 +143,7 @@ def test_a_docstring_edit_leaves_the_comparable_key_unchanged(tmp_path):
     seed.write_text(seed.read_text() + '\n"""A better sentence about the same behaviour."""\n')
 
     after_fp = fingerprint(root)
-    assert compare(before_fp, after_fp) == {"seeds"}
+    assert compare(before_fp.digests(), after_fp.digests()) == {"seeds"}
     assert comparable_key("sharpe", after_fp) == comparable_key("sharpe", before_fp)
 
 
@@ -156,8 +156,37 @@ def test_compare_returns_the_names_of_the_components_that_differ(tmp_path):
     (root / "MEMORY.seed.md").write_text("a new starting lesson\n")
     (root / COMPONENT_PATHS["gates"][0]).write_text("max_gap = 0.7\n")
 
-    assert compare(before, fingerprint(root)) == {"gates", "memory_seed"}
-    assert compare(before, before) == set()
+    assert compare(before.digests(), fingerprint(root).digests()) == {"gates", "memory_seed"}
+    assert compare(before.digests(), before.digests()) == set()
+
+
+def test_compare_reads_two_digest_maps_and_names_what_moved():
+    """The one null rule, over the plain ``name -> digest`` maps its callers already hold: a
+    fingerprint's ``digests()``, a run record's frozen fingerprint, a ratchet record's projection.
+    One implementation, so "did this move?" can never get two answers in one repo."""
+    moved = compare(
+        {"gates": "aaaaaaaaaaaaaaaa", "backtest": "bbbbbbbbbbbbbbbb"},
+        {"gates": "aaaaaaaaaaaaaaaa", "backtest": "cccccccccccccccc"},
+    )
+
+    assert moved == frozenset({"backtest"})
+    assert isinstance(moved, frozenset)
+
+
+def test_a_name_only_one_side_knows_about_moved_and_two_nulls_did_not():
+    """A name that appeared or vanished is news; two nulls are not — neither side could identify
+    it, so nothing is *known* to have moved."""
+    assert compare({"gates": "aaaaaaaaaaaaaaaa"}, {}) == {"gates"}
+    assert compare({}, {"gates": None}) == {"gates"}
+    assert compare({"gates": None}, {"gates": None}) == frozenset()
+    assert compare({}, {}) == frozenset()
+
+
+def test_a_non_string_digest_reads_as_null():
+    """A frozen record is JSON somebody may have hand-edited: anything that is not a digest
+    string is an unidentified component, never a value to compare."""
+    assert compare({"gates": 7}, {"gates": None}) == frozenset()
+    assert compare({"gates": 7}, {"gates": "aaaaaaaaaaaaaaaa"}) == {"gates"}
 
 
 def test_arbiter_components_is_gates_and_backtest():
@@ -194,7 +223,7 @@ def test_crlf_line_endings_do_not_move_a_digest(tmp_path):
         path = root / rel
         path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
 
-    assert compare(before, fingerprint(root)) == set()
+    assert compare(before.digests(), fingerprint(root).digests()) == set()
 
 
 def test_a_pycache_directory_does_not_move_a_digest(tmp_path):
@@ -204,7 +233,7 @@ def test_a_pycache_directory_does_not_move_a_digest(tmp_path):
     cache.mkdir(parents=True, exist_ok=True)
     (cache / "promotion.cpython-311.pyc").write_bytes(b"\x00stale bytecode")
 
-    assert compare(before, fingerprint(root)) == set()
+    assert compare(before.digests(), fingerprint(root).digests()) == set()
 
 
 # ── sensitivity: the table IS the contract, one test per row ──────────────────────────────
@@ -215,7 +244,7 @@ def test_editing_a_shipped_mandate_profile_moves_profiles_and_nothing_else(tmp_p
     before = fingerprint(root)
     (root / "mandate" / "profiles" / "aggressive.md").write_text("Take more risk than before.\n")
 
-    assert compare(before, fingerprint(root)) == {"profiles"}
+    assert compare(before.digests(), fingerprint(root).digests()) == {"profiles"}
 
 
 def test_editing_a_promotion_threshold_moves_gates(tmp_path):
@@ -225,7 +254,7 @@ def test_editing_a_promotion_threshold_moves_gates(tmp_path):
     before = fingerprint(root)
     promotion.write_text("MAX_GAP = 0.7\n")
 
-    assert compare(before, fingerprint(root)) == {"gates"}
+    assert compare(before.digests(), fingerprint(root).digests()) == {"gates"}
 
 
 def test_the_schema_component_tracks_the_run_records_schema_version(tmp_path):
@@ -243,7 +272,7 @@ def test_the_schema_component_tracks_the_run_records_schema_version(tmp_path):
     schema_source.write_text("SCHEMA_VERSION = 2\n")
 
     assert COMPONENT_PATHS["schema"] == ("src/noctis/reporting/schema.py",)
-    assert compare(before, fingerprint(root)) == {"schema"}
+    assert compare(before.digests(), fingerprint(root).digests()) == {"schema"}
     assert not {"schema"} & ARBITER_COMPONENTS  # a recording change is not an arbiter change
 
 
@@ -252,7 +281,7 @@ def test_editing_the_memory_seed_moves_memory_seed(tmp_path):
     before = fingerprint(root)
     (root / "MEMORY.seed.md").write_text("# Lessons\n- Start here.\n")
 
-    assert compare(before, fingerprint(root)) == {"memory_seed"}
+    assert compare(before.digests(), fingerprint(root).digests()) == {"memory_seed"}
 
 
 def test_editing_docs_moves_nothing(tmp_path):
@@ -262,7 +291,7 @@ def test_editing_docs_moves_nothing(tmp_path):
     (root / "docs" / "adr" / "0002-new.md").write_text("# ADR 2\n")
     (root / "README.md").write_text("# Noctis\n")
 
-    assert compare(before, fingerprint(root)) == set()
+    assert compare(before.digests(), fingerprint(root).digests()) == set()
 
 
 def test_a_private_operator_mandate_and_custom_profile_move_no_digest(tmp_path):
@@ -277,7 +306,7 @@ def test_a_private_operator_mandate_and_custom_profile_move_no_digest(tmp_path):
     references.mkdir(parents=True, exist_ok=True)
     (references / "my-watchlist.md").write_text("AAPL MSFT\n")
 
-    assert compare(before, fingerprint(root)) == set()
+    assert compare(before.digests(), fingerprint(root).digests()) == set()
 
 
 # ── missing inputs ────────────────────────────────────────────────────────────────────────
@@ -294,7 +323,7 @@ def test_a_missing_input_yields_a_null_component_with_a_note(tmp_path):
     assert fp.digest("gates")  # its neighbours are unaffected
     assert fp.note("gates") is None
     # Deterministic, and a null component is not "different" from itself.
-    assert compare(fp, fingerprint(root)) == set()
+    assert compare(fp.digests(), fingerprint(root).digests()) == set()
 
 
 def test_an_entirely_absent_tree_fingerprints_to_all_null_without_crashing(tmp_path):

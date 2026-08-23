@@ -13,6 +13,7 @@ over-partitioning is the honest direction and silence is the failure this module
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -85,7 +86,7 @@ def test_the_fingerprint_is_stable_when_nothing_moves(tmp_path):
     root = _build_tree(tmp_path)
 
     assert fingerprint(root).digests() == fingerprint(root).digests()
-    assert compare(fingerprint(root), fingerprint(root)) == set()
+    assert compare(fingerprint(root).digests(), fingerprint(root).digests()) == set()
 
 
 def test_editing_a_file_outside_the_map_moves_no_site(tmp_path):
@@ -94,7 +95,7 @@ def test_editing_a_file_outside_the_map_moves_no_site(tmp_path):
     (root / "docs" / "research.md").write_text("# research, rewritten\n")
     (root / "src" / "noctis" / "research" / "tools.py").write_text("# tools, rewritten\n")
 
-    assert compare(before, fingerprint(root)) == set()
+    assert compare(before.digests(), fingerprint(root).digests()) == set()
 
 
 def test_a_crlf_checkout_fingerprints_identically(tmp_path):
@@ -105,7 +106,7 @@ def test_a_crlf_checkout_fingerprints_identically(tmp_path):
         path = root / rel
         path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
 
-    assert compare(before, fingerprint(root)) == set()
+    assert compare(before.digests(), fingerprint(root).digests()) == set()
 
 
 # ── per-site independence ─────────────────────────────────────────────────────────────────
@@ -117,7 +118,7 @@ def test_editing_one_sites_asset_moves_that_site_and_no_other(tmp_path, site, re
     before = fingerprint(root)
     _edit(root, rel)
 
-    assert compare(before, fingerprint(root)) == {site}
+    assert compare(before.digests(), fingerprint(root).digests()) == {site}
 
 
 def test_a_shared_asset_moves_every_site_that_assembles_it(tmp_path):
@@ -130,7 +131,7 @@ def test_a_shared_asset_moves_every_site_that_assembles_it(tmp_path):
     before = fingerprint(root)
     _edit(root, SHARED_ASSET)
 
-    moved = compare(before, fingerprint(root))
+    moved = compare(before.digests(), fingerprint(root).digests())
     assert moved == {name for name, paths in SITE_ASSETS.items() if SHARED_ASSET in paths}
     assert len(moved) > 1
 
@@ -180,7 +181,7 @@ def test_two_null_sites_are_not_a_difference(tmp_path):
     root = _build_tree(tmp_path)
     (root / EXCLUSIVE_ASSETS["distill"]).unlink()
 
-    assert compare(fingerprint(root), fingerprint(root)) == set()
+    assert compare(fingerprint(root).digests(), fingerprint(root).digests()) == set()
 
 
 # ── one hashing rule for the repo ─────────────────────────────────────────────────────────
@@ -192,6 +193,26 @@ def test_the_prompt_digest_uses_the_one_file_digest_the_engine_fingerprint_uses(
 
     assert prompt_id.file_digest is engine_id.file_digest
     assert prompt_id.default_root is engine_id.default_root
+
+
+def test_the_null_rule_is_the_engine_fingerprints_one_not_a_second_implementation():
+    """Two answers to "did this digest move?" would eventually disagree, silently."""
+    from noctis.observability import prompt_id
+
+    assert prompt_id.compare is engine_id.compare
+    assert "compare" in prompt_id.__all__
+
+
+def test_the_prompt_module_defines_no_digest_projection_of_its_own():
+    """The site map and the hashing are this module's job; reading a digest map is not."""
+    defined = {
+        node.name
+        for node in ast.walk(ast.parse(PROMPT_ID_SOURCE.read_text()))
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    assert "compare" not in defined
+    assert [name for name in defined if "digest_of" in name] == []
 
 
 def test_the_prompt_fingerprint_is_a_separate_artifact_from_the_engine_one():

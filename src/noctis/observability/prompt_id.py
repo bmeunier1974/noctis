@@ -15,9 +15,11 @@ names the one site it is grading (:func:`site_digest` is that read).
 This is deliberately a **separate artifact** from :mod:`~noctis.observability.engine_id`. Prompts
 and arbiter behaviour drift on different clocks and are consumed by different keys: a prompt
 rewrite must not read as "the judge moved", and a promotion-threshold change must not read as "the
-model was told something new". Neither identity is defined in terms of the other; the *hashing
-rule* is shared (:func:`~noctis.observability.engine_id.file_digest`) precisely so two answers to
-"what is the content of this committed file" can never disagree.
+model was told something new". Neither identity is defined in terms of the other; the two
+*rules* are shared — the hashing (:func:`~noctis.observability.engine_id.file_digest`) and the
+drift reading (:func:`~noctis.observability.engine_id.compare`, re-exported here over the
+``site -> digest`` map :meth:`PromptFingerprint.digests` returns) — precisely so two answers to
+"what is the content of this committed file" or "did this digest move" can never disagree.
 
 **A site digest is the digest of its files' digests.** Sorted repo-relative POSIX paths, each
 paired with the same LF-normalized content hash the engine fingerprint takes, then hashed together
@@ -46,7 +48,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from noctis.observability.engine_id import default_root, file_digest
+from noctis.observability.engine_id import compare, default_root, file_digest
 
 __all__ = [
     "SITE_ASSETS",
@@ -158,16 +160,6 @@ def site_digest(site: str, root: Path | None = None) -> str | None:
     return _site_fingerprint(site, base, SITE_ASSETS[site]).digest
 
 
-def compare(a: PromptFingerprint, b: PromptFingerprint) -> set[str]:
-    """The names of the sites whose digests differ between two fingerprints.
-
-    A site present in only one side counts as differing; two nulls do not (neither side could
-    identify it, so nothing is known to have moved) — the same rule the engine fingerprint takes.
-    """
-    names = set(a.sites) | set(b.sites)
-    return {name for name in names if _digest_of(a, name) != _digest_of(b, name)}
-
-
 def _site_fingerprint(name: str, root: Path, rel_paths: Iterable[str]) -> SiteFingerprint:
     """Hash one site: sorted paths beside their file digests, all or none."""
     hasher = hashlib.sha256()
@@ -194,8 +186,3 @@ def _site_fingerprint(name: str, root: Path, rel_paths: Iterable[str]) -> SiteFi
     return SiteFingerprint(
         name=name, digest=hasher.hexdigest()[:_DIGEST_CHARS], files=tuple(present)
     )
-
-
-def _digest_of(fp: PromptFingerprint, name: str) -> tuple[bool, str | None]:
-    site = fp.sites.get(name)
-    return (site is not None, site.digest if site is not None else None)

@@ -42,7 +42,7 @@ import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 # The behavioural contract version. Plain, incrementing, not semantic, and NOT
 # ``noctis.__version__`` (see the module docstring). Bump it in the PR that changes behaviour.
@@ -227,14 +227,26 @@ def file_digest(path: Path) -> str | None:
     return hashlib.sha256(_normalized(path.read_bytes())).hexdigest()[:_DIGEST_CHARS]
 
 
-def compare(a: EngineFingerprint, b: EngineFingerprint) -> set[str]:
-    """The names of the components whose digests differ between two fingerprints.
+def compare(a: Mapping[str, Any], b: Mapping[str, Any]) -> frozenset[str]:
+    """The names whose digest moved between two ``name -> digest`` maps — **the** null rule.
 
-    A component present in only one side counts as differing; two nulls do not (neither side
-    could identify it, so nothing is known to have moved).
+    Written once for every reader of a digest map, because "did this move?" getting two answers
+    in one repo is how a drift report and a resume policy end up disagreeing about the same
+    edit. The map is whatever the caller already holds: an :meth:`EngineFingerprint.digests`,
+    a prompt fingerprint's sites, a run record's frozen fingerprint, a ratchet record projected
+    to its digests.
+
+    The rule, in three clauses:
+
+    * a name present on **one side only** moved — a component or a site *appearing* is exactly
+      the news a fingerprint surface exists to publish, and silence on it is the failure;
+    * two **nulls** did not move — neither side could identify it, so nothing is *known* to have
+      changed, and reporting a phantom drift would train readers to ignore the report;
+    * a **non-string** value reads as null — a record is JSON a human may have hand-edited, and
+      anything that is not a digest is an unidentified component, never a value to compare.
     """
-    names = set(a.components) | set(b.components)
-    return {name for name in names if _digest_of(a, name) != _digest_of(b, name)}
+    names = set(a) | set(b)
+    return frozenset(name for name in names if _known(a, name) != _known(b, name))
 
 
 def tier_of(component: str) -> Tier:
@@ -295,6 +307,11 @@ def _normalized(raw: bytes) -> bytes:
     return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
-def _digest_of(fp: EngineFingerprint, name: str) -> tuple[bool, str | None]:
-    component = fp.components.get(name)
-    return (component is not None, component.digest if component is not None else None)
+def _known(digests: Mapping[str, Any], name: str) -> tuple[bool, str | None]:
+    """One side's reading of a name: whether it knew it at all, and its digest if it is one.
+
+    The pair is what makes "present on one side only" count while two nulls do not: the second
+    field alone cannot tell an absent name from a null one.
+    """
+    digest = digests.get(name)
+    return (name in digests, digest if isinstance(digest, str) else None)

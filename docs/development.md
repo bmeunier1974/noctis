@@ -85,9 +85,12 @@ uv run python scripts/prompt_fingerprint.py --write  # regenerate prompt_fingerp
 `engine_fingerprint.json` (repo root) is the committed statement of what this engine *is*: the
 declared `ENGINE_VERSION` plus one digest per behavioural component — and, under each component,
 a digest per allowlisted file, so a drift report names the file that moved rather than every file
-the component covers. The digests come from `src/noctis/observability/engine_id.py`; the check
-that compares them lives in `src/noctis/observability/engine_ratchet.py` and runs in **CI** and
-in **pre-commit**.
+the component covers. The digests come from `src/noctis/observability/engine_id.py`. The **rule** —
+the tier split below, and the `ENGINE_VERSION` agreement it needs — lives in
+`src/noctis/observability/engine_ratchet.py`; the mechanics every ratchet shares — the record, the
+check, `--write` and the report — live once in `src/noctis/observability/ratchet.py`, so a fix to
+them cannot land in one ratchet and be missed in the other. The check runs in **CI** and in
+**pre-commit**.
 
 Why it exists: `ENGINE_VERSION` is the key two runs' numbers are compared on
 (`noctis engine` prints it), and a declared version nobody remembers to bump is worse than none —
@@ -112,6 +115,12 @@ another `ENGINE_VERSION` than the tree fails as **stale**; arbiter drift fails (
 unchanged that is undeclared drift, with it bumped the record simply was not regenerated); drift
 confined to the searcher tier warns and exits zero. Staleness is always reported and always names
 the regeneration command — which tier moved decides only whether it *blocks*.
+
+A component **new to the map** is drift too, even when this checkout cannot identify it (an
+optional input, a file not landed yet): what moved is one rule, `engine_id.compare` — present on
+one side only moved, two nulls did not — so a fingerprint surface *appearing* is never silent. It
+prints as `null -> null` with no file lines under it, because the name is the news, and the tier
+then decides as usual: a searcher name warns, an arbiter name fails.
 
 So, when you move a component:
 
@@ -154,8 +163,10 @@ gitignored mandate — move no digest and never fire the check.
 `prompt_fingerprint.json` (repo root) is the same idea for what the model is *told*: one content
 hash per LLM call site, plus a digest per allowlisted file under it. The hashes come from
 `src/noctis/observability/prompt_id.py` (`site_digest(site)` is the pure read a future benchmark
-record's key uses); the check lives in `src/noctis/observability/prompt_ratchet.py` and runs in
-**CI** and in **pre-commit**, exactly like the engine one.
+record's key uses); the **rule** — the declared-change rule below, and the changelog reader it
+needs — lives in `src/noctis/observability/prompt_ratchet.py`, on the same shared mechanics
+(`src/noctis/observability/ratchet.py`) the engine ratchet runs on. It runs in **CI** and in
+**pre-commit**, exactly like the engine one.
 
 It is a **separate artifact on a separate clock**, and deliberately so: prompts and arbiter
 behaviour drift independently, so a prompt rewrite must not read as "the judge moved" and a
@@ -173,7 +184,10 @@ threshold change must not read as "the model was told something new".
 `research/digests.py` renders facts four of those prompts embed, so it is listed under each of
 them and its edit moves all four hashes. Over-partitioning is the accepted direction; silence is
 the failure this ratchet exists to end. There is **no tier here** — every site is the same kind of
-thing, so every drift is the same kind of event, and nothing warns-and-passes.
+thing, so every drift is the same kind of event, and nothing warns-and-passes. A site **new to
+the map** whose assets this checkout cannot identify is drift here as well — the same one rule,
+printed `null -> null` with no file lines — and with no entry naming it, it is an undeclared
+change like any other: it fails.
 
 **The declared-change rule** has two halves and needs both: the newest entry in
 [`docs/prompt-changelog.md`](prompt-changelog.md) must *name the drifted site* on its heading line
@@ -209,7 +223,9 @@ FAIL  prompt fingerprint ratchet (prompt_fingerprint.json)
 
 That last line is there because "I wrote an entry and it still fails" is the question this tool
 gets asked: it names the entry the check actually read, so a heading inside a code fence, a
-misspelled site or a `sites:` marker left off is visible rather than mystifying.
+misspelled site or a `sites:` marker left off is visible rather than mystifying. It is printed for
+a missing or unreadable record too — the one verdict no policy judges — so the report always names
+the entry the check read.
 
 Everything else stays a single command: drift the changelog declares (the record had simply not
 caught up), no drift at all, and a missing or unreadable record — that is how the baseline is
