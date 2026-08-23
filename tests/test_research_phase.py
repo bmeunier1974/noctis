@@ -29,7 +29,14 @@ from noctis.bootstrap import build_families
 from noctis.champions import build_registry
 from noctis.champions.promotion import PromotionRules
 from noctis.config import load_settings
-from noctis.engine import CloseResult, ResearchPanel, ResearchPhase, SimulatedSleeper, build_runtime
+from noctis.engine import (
+    CloseResult,
+    ResearchPanel,
+    ResearchPhase,
+    SimulatedSleeper,
+    TradingOutcome,
+    build_runtime,
+)
 from noctis.engine.research import ResearchSummary
 from noctis.memory import InMemoryMemory, MemoryStore
 from noctis.strategies.proposer import CandidateProposer
@@ -234,6 +241,14 @@ class _RecordingPhase:
         return self.summary
 
 
+class _SilentTrading:
+    """Stands in for the TRADING phase: settles nothing, so the cycle the CLOSE renders carries
+    only what RESEARCH folded into it."""
+
+    def run(self, t, sleeper, bars) -> TradingOutcome:
+        return TradingOutcome()
+
+
 def _runtime(tmp_path, lake):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
@@ -264,7 +279,7 @@ def test_the_research_entry_drives_the_phase_with_a_panel_of_fresh_bars(tmp_path
 
     phase = _RecordingPhase(ResearchSummary(iterations=4, promotions=2, undecided=["draft_a"]))
     runtime.research = phase
-    runtime._run_trading = lambda t, sleeper: None
+    runtime.trading = _SilentTrading()
     seen: dict = {}
 
     def _close(t, cycle, *, tracked=None):

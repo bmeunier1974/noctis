@@ -115,7 +115,15 @@ class RuntimeResult:
 
 
 class Runtime:
-    """Drives the RESEARCH → TRADING → CLOSE loop until a time limit or stop request."""
+    """Drives the RESEARCH → TRADING → CLOSE loop until a time limit or stop request.
+
+    It holds one object per phase — :class:`~noctis.engine.research_phase.ResearchPhase`,
+    :class:`~noctis.engine.trading_phase.TradingPhase`,
+    :class:`~noctis.engine.close.ClosePhase` — and nothing else phase-shaped: what a phase
+    *does* is that phase's, and what is left here is the loop itself (the pacing, the stop
+    handling, the per-cycle fold and the run's counters). A caller with a stand-in for one
+    phase swaps the whole object, so no phase can be driven half through its seam.
+    """
 
     def __init__(
         self,
@@ -321,22 +329,6 @@ class Runtime:
         # live-built bars the close reconciles included.
         self._cycle = SessionActivity()
 
-    # --- phases ---
-    def _run_trading(self, t: datetime, sleeper) -> None:
-        """One TRADING entry: refresh the catalog view, drive the phase, fold its outcome."""
-        # Refresh the catalog view first: the CLOSE-phase T+1 sync updates the *lake*, but
-        # bars were loaded once at startup — without a reload the newest session would never
-        # appear and every later day would look like "no new data". The RESEARCH entry
-        # refreshes the same way for the same reason; each phase reads the view it just
-        # loaded, so neither can be driven on the other's bars.
-        outcome = self.trading.run(t, sleeper, self._load_bars())
-        self.result.trades += outcome.orders_submitted
-        if outcome.sessions:
-            # The run's headline equity is the LAST settled session's; untouched when nothing
-            # traded, so a skipped day reports the standing number rather than a fictional zero.
-            self.result.final_equity = outcome.end_equity
-        self._cycle.fold_trading(outcome)
-
     # --- main loop ---
     def run(self, start: datetime | None = None, max_cycles: int | None = None) -> RuntimeResult:
         t = start or self.clock.now()
@@ -399,7 +391,20 @@ class Runtime:
                 # what keeps a start-while-closed (e.g. a Saturday) from ever emitting orders.
                 if self.clock.is_open(sleeper.now()):
                     trading_start = sleeper.now()
-                    self._run_trading(trading_start, sleeper)
+                    # The catalog view is refreshed here, at the entry, and handed in: the
+                    # CLOSE-phase T+1 sync updates the *lake*, but bars were loaded once at
+                    # startup — without a reload the newest session would never appear and every
+                    # later day would look like "no new data". RESEARCH refreshes the same way
+                    # for the same reason; each phase reads the view it just loaded, so neither
+                    # can be driven on the other's bars.
+                    outcome = self.trading.run(trading_start, sleeper, self._load_bars())
+                    self.result.trades += outcome.orders_submitted
+                    if outcome.sessions:
+                        # The run's headline equity is the LAST settled session's; untouched
+                        # when nothing traded, so a skipped day reports the standing number
+                        # rather than a fictional zero.
+                        self.result.final_equity = outcome.end_equity
+                    self._cycle.fold_trading(outcome)
                     self._count_phase_time(phase, trading_start, sleeper.now())
                     # Advance to the session close. The live driver already ran the clock to
                     # the close; the instant replay driver has not, so pace to it here —

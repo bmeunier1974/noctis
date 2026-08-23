@@ -18,6 +18,7 @@ from noctis.engine import (
     Phase,
     ResearchSummary,
     SimulatedSleeper,
+    TradingOutcome,
     build_runtime,
 )
 from noctis.memory import MemoryStore
@@ -274,27 +275,88 @@ class _WallClockSleeper(SimulatedSleeper):
     wall_clock = True
 
 
-def _stub_phases(runtime, captured, *, session_minutes=20):
-    """Replace the three phase bodies with counters. Research consumes wall-clock time (as a
-    real session does), so under real-time pacing the loop advances toward the open through
-    successive sessions; trading/close just tally."""
-    calls = {"research": 0, "trading": 0, "close": 0}
+def test_the_runtime_holds_three_phase_objects_and_no_phase_bodies(tmp_path):
+    """What the runtime *is*: the loop, the pacing, the stop handling and the per-cycle fold,
+    plus one object per phase. Every phase body lives behind its own seam
+    (``research``/``trading``/``close``), so there is no half-phase ``_run_*`` method left for a
+    caller — or a test — to reach past the seam and drive, and no phase's working state (the
+    live-built bars) parked on the runtime between entries."""
+    from noctis.engine import ClosePhase, ResearchPhase, TradingPhase
+    from noctis.engine.runtime import Runtime
 
-    def _research(panel):
-        calls["research"] += 1
-        captured["sleeper"].advance(session_minutes * 60)
+    for gone in (
+        "_run_research",
+        "_run_agent_research",
+        "_evaluate",
+        "_run_trading",
+        "_reconcile",
+        "_mark_equity",
+        "_run_close",
+    ):
+        assert not hasattr(Runtime, gone), f"Runtime still carries a phase body: {gone}"
+
+    settings, lake_dir = _make_settings(tmp_path, time_limit_hours=None)
+    lake, _vendor = _seed_catalog(lake_dir, end="2026-01-09")
+    runtime = build_runtime(
+        settings,
+        market_lake=lake,
+        memory=MemoryStore(tmp_path / "MEMORY.md"),
+        reports_dir=str(tmp_path / "reports"),
+    )
+
+    assert isinstance(runtime.research, ResearchPhase)
+    assert isinstance(runtime.trading, TradingPhase)
+    assert isinstance(runtime.close, ClosePhase)
+    assert not hasattr(runtime, "live_bars")
+
+
+class _FakeResearch:
+    """A stand-in RESEARCH phase that counts its entries and consumes wall-clock time the way a
+    real session does, so under real-time pacing the loop advances toward the open through
+    successive sessions."""
+
+    def __init__(self, calls, captured, session_minutes):
+        self._calls = calls
+        self._captured = captured
+        self._session_minutes = session_minutes
+
+    def run(self, panel):
+        self._calls["research"] += 1
+        self._captured["sleeper"].advance(self._session_minutes * 60)
         return ResearchSummary()
 
-    def _trading(t, sleeper):
-        calls["trading"] += 1
 
-    def _close(t, cycle, *, tracked=None):
-        calls["close"] += 1
+class _FakeTrading:
+    """A stand-in TRADING phase that counts its entries and settles instantly, like a replay day
+    that needs no wall clock. The empty outcome is what the loop folds."""
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    def run(self, t, sleeper, bars):
+        self._calls["trading"] += 1
+        return TradingOutcome()
+
+
+class _FakeClose:
+    """A stand-in CLOSE phase that counts its entries and writes nothing; the loop keeps its own
+    cycle bookkeeping around it."""
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    def run(self, t, cycle, *, tracked=None):
+        self._calls["close"] += 1
         return CloseResult()
 
-    runtime.research.run = _research  # the RESEARCH seam, driven with the entry's panel
-    runtime._run_trading = _trading
-    runtime.close.run = _close  # the CLOSE seam; the loop keeps its own cycle bookkeeping
+
+def _stub_phases(runtime, captured, *, session_minutes=20):
+    """Drive the runtime through three stand-in phase objects, each counting its entries — the
+    loop holds one object per phase, so a test swaps the whole phase, never a method on it."""
+    calls = {"research": 0, "trading": 0, "close": 0}
+    runtime.research = _FakeResearch(calls, captured, session_minutes)
+    runtime.trading = _FakeTrading(calls)
+    runtime.close = _FakeClose(calls)
     return calls
 
 

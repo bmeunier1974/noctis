@@ -617,11 +617,17 @@ def _et(hour: int, minute: int) -> datetime:
 
 
 def _runtime(tmp_path: Path, *, body: str = "", **kwargs):
-    """A runtime over a seeded catalog whose three phase bodies are counters, not real work."""
+    """A runtime over a seeded catalog whose three phases are stand-in objects, not real work."""
     from noctis.config import load_settings
     from noctis.data import MarketDataLake
     from noctis.data.types import to_ns
-    from noctis.engine import CloseResult, ResearchSummary, SimulatedSleeper, build_runtime
+    from noctis.engine import (
+        CloseResult,
+        ResearchSummary,
+        SimulatedSleeper,
+        TradingOutcome,
+        build_runtime,
+    )
     from noctis.memory import MemoryStore
 
     from ._data_helpers import MockVendor
@@ -661,20 +667,32 @@ def _runtime(tmp_path: Path, *, body: str = "", **kwargs):
         **kwargs,
     )
 
-    def _research(panel):
-        captured["sleeper"].advance(20 * 60)
-        return ResearchSummary()
+    class _FakeResearch:
+        """A stand-in RESEARCH phase: a 20-minute session per entry, no real research."""
 
-    def _trading(t, sleeper):
-        sleeper.advance(30 * 60)
+        def run(self, panel):
+            captured["sleeper"].advance(20 * 60)
+            return ResearchSummary()
 
-    def _close(t, cycle, *, tracked=None):
-        captured["sleeper"].advance(60)
-        return CloseResult()
+    class _FakeTrading:
+        """A stand-in TRADING phase: a 30-minute session per entry, settling nothing."""
 
-    runtime.research.run = _research  # the RESEARCH seam, driven with the entry's panel
-    runtime._run_trading = _trading
-    runtime.close.run = _close  # the CLOSE seam; the loop keeps its own cycle bookkeeping
+        def run(self, t, sleeper, bars):
+            sleeper.advance(30 * 60)
+            return TradingOutcome()
+
+    class _FakeClose:
+        """A stand-in CLOSE phase: a minute of upkeep, no report on disk."""
+
+        def run(self, t, cycle, *, tracked=None):
+            captured["sleeper"].advance(60)
+            return CloseResult()
+
+    # The loop holds one object per phase, so the test swaps whole phases — never a method on
+    # one — and keeps its own cycle bookkeeping around them.
+    runtime.research = _FakeResearch()
+    runtime.trading = _FakeTrading()
+    runtime.close = _FakeClose()
     return runtime, captured
 
 
