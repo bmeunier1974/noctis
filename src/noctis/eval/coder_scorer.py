@@ -107,6 +107,8 @@ from noctis.eval.reading import (
     NOT_APPLICABLE,
     PASS_RATES,
     STRATA_KEY,
+    Pair,
+    SiteReading,
     strata,
 )
 from noctis.eval.reading import table as render_table
@@ -124,6 +126,7 @@ __all__ = [
     "FEEDBACK_LABEL",
     "NOT_APPLICABLE",
     "PASS_LABEL_KEY",
+    "RATES_KEY",
     "RETRY_INFORMED_BLOCKS",
     "STRATA_KEY",
     "UNATTEMPTED_KEY",
@@ -133,6 +136,7 @@ __all__ = [
     "EscalationReading",
     "PassRates",
     "coder_block",
+    "coder_reading",
     "job_records",
     "score_coder_jobs",
     "strata_block",
@@ -160,6 +164,11 @@ RETRY_INFORMED_BLOCKS: tuple[str, ...] = ("rates", "effort", "escalation", "cost
 #: The two exclusion counts the reading carries beside the pair — the n/a side, named.
 UNREADABLE_KEY = "unreadable"
 UNATTEMPTED_KEY = "unattempted_jobs"
+
+#: The key the co-primary pair rides under inside the coder's block — the word DECIDE spells
+#: ``approval``. It travels with the manifest and the value on one
+#: :class:`~noctis.eval.reading.Pair`, so a block builder no longer spells it by hand.
+RATES_KEY = "rates"
 
 # ``STRATA_KEY`` is the key the per-axis breakdown rides under, on this site and DECIDE's alike, so
 # one generic reader renders both; ``NOT_APPLICABLE`` is what the shared grouping loop keys a
@@ -414,6 +423,54 @@ def _share(part: int, whole: int) -> float | None:
 # ── the reading a record quotes ───────────────────────────────────────────────────────────
 
 
+def coder_reading(
+    metrics: CoderMetrics,
+    *,
+    attempt_calls: int = 0,
+    warnings: Sequence[Mapping[str, Any]] = (),
+    unreadable: int = 0,
+    strata: Mapping[str, Any] | None = None,
+) -> SiteReading:
+    """One scored batch as the site reading a record quotes — the sections, and where each rides.
+
+    The pair whole, the cost beside it, no blended figure. ``warnings`` are the detector rows,
+    carried verbatim and read by nothing above them; ``unreadable`` counts the jobs whose retained
+    output was not a job record at all; ``strata`` is the per-axis breakdown of the pair
+    (:func:`strata_block`), empty for a caller that computed none — a batch nobody labelled has no
+    axes, which is an absence and not a zero.
+
+    What each section *is* belongs to :class:`~noctis.eval.reading.SiteReading`, which publishes
+    them (#308); what this function decides is which section each of the coder's figures is filed
+    under. Two of those choices are the coder's published order rather than anyone's taste: the
+    batch opens with the population its rates are over, above the pair, and its per-axis breakdown
+    sits between the blocks that explain the two rates and the warning rows beneath them — so the
+    extras name the strata's slot there, and it is filled from the field.
+    """
+    axes = dict(strata or {})
+    return SiteReading(
+        dials_key=CODER_DIALS_KEY,
+        headline={ANSWERS_KEY: ANSWERS_FRESH, ATTEMPT_CALLS_KEY: attempt_calls},
+        pair=Pair(key=RATES_KEY, manifest=PASS_RATES, value=metrics.rates),
+        counts={
+            PASS_LABEL_KEY: FEEDBACK_LABEL,
+            "cases": metrics.rates.cases,
+            "jobs": metrics.rates.jobs,
+            UNATTEMPTED_KEY: metrics.rates.unattempted_jobs,
+            UNREADABLE_KEY: unreadable,
+        },
+        strata=axes,
+        extras={
+            "effort": _effort_block(metrics),
+            "escalation": _escalation_block(metrics.escalation),
+            "cost": _cost_block(metrics),
+            "failures": _failures_block(metrics.failures),
+            STRATA_KEY: axes,
+            "warnings": [dict(row) for row in warnings],
+            "warned_jobs": len({(row["case_id"], row["rep"]) for row in warnings}),
+        },
+    )
+
+
 def coder_block(
     metrics: CoderMetrics,
     *,
@@ -421,28 +478,13 @@ def coder_block(
     unreadable: int = 0,
     strata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One scored batch as record data — the pair whole, the cost beside it, no blended figure.
+    """One scored batch as record data — the block half of :func:`coder_reading`.
 
-    ``warnings`` are the detector rows, carried verbatim and read by nothing above them;
-    ``unreadable`` counts the jobs whose retained output was not a job record at all; ``strata`` is
-    the per-axis breakdown of the pair (:func:`strata_block`), empty for a caller that computed
-    none — a batch nobody labelled has no axes, which is an absence and not a zero.
+    The headline facts above the block (how the bench came by its answers, how many model calls
+    sit behind them) are the *scoring pass*'s to state, so a caller that wants the batch's figures
+    alone reads them here.
     """
-    return {
-        PASS_LABEL_KEY: FEEDBACK_LABEL,
-        "cases": metrics.rates.cases,
-        "jobs": metrics.rates.jobs,
-        UNATTEMPTED_KEY: metrics.rates.unattempted_jobs,
-        UNREADABLE_KEY: unreadable,
-        "rates": _rates_block(metrics.rates),
-        "effort": _effort_block(metrics),
-        "escalation": _escalation_block(metrics.escalation),
-        "cost": _cost_block(metrics),
-        "failures": _failures_block(metrics.failures),
-        STRATA_KEY: dict(strata or {}),
-        "warnings": [dict(row) for row in warnings],
-        "warned_jobs": len({(row["case_id"], row["rep"]) for row in warnings}),
-    }
+    return coder_reading(metrics, warnings=warnings, unreadable=unreadable, strata=strata).block()
 
 
 def strata_block(
@@ -641,7 +683,7 @@ class CoderReadingScorer:
 
     def read(
         self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = CODER_AXES
-    ) -> Mapping[str, Any] | None:
+    ) -> SiteReading | None:
         """The whole coder reading over one live bench's answers — see the module docstring.
 
         ``axes`` is what the site's declaration says its cases are labelled on, handed over by the
@@ -663,16 +705,13 @@ class CoderReadingScorer:
             return None
         read = job_records(answered)
         records = [record for record, _ in read]
-        return {
-            ANSWERS_KEY: ANSWERS_FRESH,
-            ATTEMPT_CALLS_KEY: sum(len(one.replies) for one in answered),
-            CODER_DIALS_KEY: coder_block(
-                score_coder_jobs(records),
-                warnings=_warning_rows(read),
-                unreadable=len(answered) - len(read),
-                strata=strata_block([one.case for one in answered], records, axes=axes),
-            ),
-        }
+        return coder_reading(
+            score_coder_jobs(records),
+            attempt_calls=sum(len(one.replies) for one in answered),
+            warnings=_warning_rows(read),
+            unreadable=len(answered) - len(read),
+            strata=strata_block([one.case for one in answered], records, axes=axes),
+        )
 
 
 #: The scorer the coder declaration carries in its ``scorers`` slot. One instance: it is stateless,

@@ -92,14 +92,22 @@ from noctis.eval.decide_scorer import (
 )
 from noctis.eval.decide_site import (
     ANSWERS_RECORDED,
+    APPROVAL_KEY,
     DECIDE_DIALS_KEY,
     case_row,
-    scored_block,
+    deferral_block,
     strata_block,
 )
 from noctis.eval.identity import SiteIdentity, site_identity
 from noctis.eval.metrics import AttemptOutcome, CaseResult
-from noctis.eval.reading import ANSWERS_KEY, ATTEMPT_CALLS_KEY, RETROSPECTIVE_KEY, STRATA_KEY
+from noctis.eval.reading import (
+    ANSWERS_KEY,
+    APPROVAL_PAIR,
+    ATTEMPT_CALLS_KEY,
+    RETROSPECTIVE_KEY,
+    Pair,
+    SiteReading,
+)
 from noctis.eval.record import (
     BenchArtifacts,
     CaseRun,
@@ -503,18 +511,25 @@ def retrospective_dials(
     Everything a reader needs to recompute the headline and to stratify it: the co-primary pair, the
     deferral figures, one row per mined case (its verdict, its label, its difficulty axes) and the
     same scored block per axis level. The scorer's arithmetic is the only arithmetic here.
+
+    It is assembled as the very :class:`~noctis.eval.reading.SiteReading` the live scoring pass
+    returns (#308) — the same sections, filed under the same names, published by the same method —
+    so the two readings agree *structurally* rather than by two literals somebody keeps in step.
+    What differs is the headline: this one re-read what history recorded and asked nobody anything.
     """
-    return {
+    return SiteReading(
+        dials_key=DECIDE_DIALS_KEY,
         # The three facts that distinguish this record from a live bench, stated up front.
-        RETROSPECTIVE_KEY: True,
-        ANSWERS_KEY: ANSWERS_RECORDED,
-        ATTEMPT_CALLS_KEY: 0,
-        DECIDE_DIALS_KEY: {
-            **scored_block(metrics),
-            "cases": [_case_row(case) for case in sorted(cases, key=lambda one: one.case_id)],
-            STRATA_KEY: strata_block(cases, outcomes),
+        headline={
+            RETROSPECTIVE_KEY: True,
+            ANSWERS_KEY: ANSWERS_RECORDED,
+            ATTEMPT_CALLS_KEY: 0,
         },
-    }
+        pair=Pair(key=APPROVAL_KEY, manifest=APPROVAL_PAIR, value=metrics.approval),
+        extras=deferral_block(metrics),
+        rows=[_case_row(case) for case in sorted(cases, key=lambda one: one.case_id)],
+        strata=strata_block(cases, outcomes),
+    ).as_dials()
 
 
 def _case_row(case: Case) -> dict[str, Any]:

@@ -53,8 +53,11 @@ from noctis.eval.reading import (
     NOT_APPLICABLE,
     PAIR_MANIFESTS,
     PASS_RATES,
+    STRATA_KEY,
+    Pair,
     PairManifest,
     PairRow,
+    SiteReading,
     fmt,
     fold_by_case,
     strata,
@@ -521,6 +524,131 @@ def test_a_site_that_declares_no_axes_stratifies_into_an_empty_mapping() -> None
 def test_an_axis_nothing_was_measured_on_carries_no_levels_at_all() -> None:
     """No items is not a level of its own: the axis is declared, and its breakdown is empty."""
     assert strata(AXES, (), level_of=_level, block_of=_who) == {"margin": {}, "surface": {}}
+
+
+# ── SiteReading: one published reading, assembled from the sections a site files it under ─
+#: A coder-shaped reading: the population it measured first, the co-primary pair beside it, the
+#: site's own sections after, no per-case rows, and a per-axis breakdown its extras leave a slot
+#: for. Shape only — the arithmetic is ``tests/test_eval_coder_scorer.py``'s business.
+CODER_SHAPED = SiteReading(
+    dials_key="coder",
+    headline={"answers": "fresh", "attempt_calls": 3},
+    pair=Pair(key="rates", manifest=PASS_RATES, value=RATES),
+    counts={"cases": 4, "jobs": 4},
+    strata={"api_surface": {"exits": {"jobs": 4}}},
+    extras={"cost": {"usd_total_estimate": 1.5}, STRATA_KEY: {}, "warnings": []},
+)
+
+#: A DECIDE-shaped reading: the pair opens the block, the site's own figures follow, the rows it
+#: read case by case sit beneath them and the breakdown closes it.
+DECIDE_SHAPED = SiteReading(
+    dials_key="decide",
+    headline={"retrospective": False, "answers": "fresh", "attempt_calls": 2},
+    pair=Pair(key="approval", manifest=APPROVAL_PAIR, value=PAIR),
+    rows=({"case_id": "a", "verdict": "approve"}, {"case_id": "b", "verdict": "reject"}),
+    strata={"margin": {"near": {"decided": 2}}},
+    extras={"revise_rate": 0.5, "unreadable": 1},
+)
+
+
+def test_a_reading_publishes_its_block_under_the_dials_key_it_names() -> None:
+    assert set(CODER_SHAPED.as_dials()) == {"answers", "attempt_calls", "coder"}
+
+
+def test_another_sites_reading_routes_the_very_same_sections_under_its_own_word() -> None:
+    """The key is the site's, and nothing else about the assembly changes with it."""
+    assert set(DECIDE_SHAPED.as_dials()) == {
+        "retrospective",
+        "answers",
+        "attempt_calls",
+        "decide",
+    }
+
+
+def test_the_headline_facts_are_stated_above_the_block_in_the_order_the_site_gave_them() -> None:
+    assert list(DECIDE_SHAPED.as_dials()) == [
+        "retrospective",
+        "answers",
+        "attempt_calls",
+        "decide",
+    ]
+
+
+def test_a_reading_with_no_headline_publishes_its_block_and_nothing_above_it() -> None:
+    bare = SiteReading(dials_key="stub")
+
+    assert bare.as_dials() == {"stub": {STRATA_KEY: {}}}
+
+
+def test_the_block_states_the_population_then_the_pair_then_the_sites_own_sections() -> None:
+    published = CODER_SHAPED.as_dials()["coder"]
+
+    assert list(published) == ["cases", "jobs", "rates", "cost", STRATA_KEY, "warnings"]
+
+
+def test_the_pair_rides_whole_under_the_key_its_carrier_names_in_the_manifests_order() -> None:
+    published = CODER_SHAPED.as_dials()["coder"]["rates"]
+
+    assert published == PASS_RATES.block(RATES)
+    assert list(published) == list(PASS_RATES.keys)
+
+
+def test_a_reading_that_carries_no_pair_publishes_none_of_one() -> None:
+    unpaired = SiteReading(dials_key="stub", counts={"jobs": 2})
+
+    assert list(unpaired.as_dials()["stub"]) == ["jobs", STRATA_KEY]
+
+
+def test_a_sites_own_sections_are_passed_through_verbatim_in_the_order_it_declares_them() -> None:
+    """The reading module knows no site's blocks — it publishes them exactly as handed over."""
+    published = DECIDE_SHAPED.as_dials()["decide"]
+
+    assert (published["revise_rate"], published["unreadable"]) == (0.5, 1)
+    assert list(published)[1:3] == ["revise_rate", "unreadable"]
+
+
+def test_the_per_case_rows_ride_under_the_cases_key_in_the_order_they_were_read() -> None:
+    published = DECIDE_SHAPED.as_dials()["decide"]
+
+    assert [row["case_id"] for row in published["cases"]] == ["a", "b"]
+    assert list(published) == ["approval", "revise_rate", "unreadable", "cases", STRATA_KEY]
+
+
+def test_a_coder_shaped_reading_lists_no_rows_so_the_cases_it_counted_survive() -> None:
+    """``cases`` is one word two sites mean differently: a population, and a list of rows."""
+    assert CODER_SHAPED.as_dials()["coder"]["cases"] == 4
+
+
+def test_a_reading_that_listed_no_case_individually_publishes_no_row_list_at_all() -> None:
+    empty = SiteReading(dials_key="decide", rows=())
+
+    assert "cases" not in empty.as_dials()["decide"]
+
+
+def test_the_strata_closes_a_block_that_reserved_it_no_slot() -> None:
+    assert list(DECIDE_SHAPED.as_dials()["decide"])[-1] == STRATA_KEY
+
+
+def test_a_site_that_names_the_strata_slot_publishes_its_breakdown_where_it_put_it() -> None:
+    """Two sites, two published orders — the coder's breakdown sits mid-block, DECIDE's last."""
+    published = CODER_SHAPED.as_dials()["coder"]
+
+    assert list(published).index(STRATA_KEY) == 4
+    assert published[STRATA_KEY] == {"api_surface": {"exits": {"jobs": 4}}}
+
+
+def test_a_reading_that_stratified_by_nothing_still_states_its_breakdown() -> None:
+    """An absence is a finding: a site that declared no axes says so rather than dropping it."""
+    assert SiteReading(dials_key="stub").as_dials()["stub"][STRATA_KEY] == {}
+
+
+def test_a_published_reading_is_a_copy_that_no_reader_can_edit_back_into_the_reading() -> None:
+    published = DECIDE_SHAPED.as_dials()["decide"]
+    published["cases"].append({"case_id": "c"})
+    published[STRATA_KEY]["margin"] = {}
+
+    assert [row["case_id"] for row in DECIDE_SHAPED.as_dials()["decide"]["cases"]] == ["a", "b"]
+    assert DECIDE_SHAPED.as_dials()["decide"][STRATA_KEY] == {"margin": {"near": {"decided": 2}}}
 
 
 # ── purity, structurally ──────────────────────────────────────────────────────────────────

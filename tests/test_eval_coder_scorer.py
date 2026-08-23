@@ -168,7 +168,7 @@ def _block(*records: JobRecord) -> Mapping[str, Any]:
     """The coder reading over a scripted batch, as a record carries it."""
     reading = CODER_SCORER.read(_answered(*records))
     assert reading is not None
-    return reading[CODER_DIALS_KEY]
+    return reading.as_dials()[CODER_DIALS_KEY]
 
 
 def _keys(node: Any, seen: set[str] | None = None) -> set[str]:
@@ -357,7 +357,7 @@ def _strata(*answered: AnsweredCase) -> Mapping[str, Any]:
     """The per-axis breakdown of a reading over cases labelled case by case."""
     reading = CODER_SCORER.read(tuple(answered))
     assert reading is not None
-    return reading[CODER_DIALS_KEY][STRATA_KEY]
+    return reading.as_dials()[CODER_DIALS_KEY][STRATA_KEY]
 
 
 def test_the_reading_stratifies_its_pass_rates_by_every_difficulty_axis_the_site_declares():
@@ -401,7 +401,7 @@ def test_every_axis_stratifies_the_same_jobs_so_each_axis_totals_the_headline():
     reading = CODER_SCORER.read(answered)
     assert reading is not None
 
-    block = reading[CODER_DIALS_KEY]
+    block = reading.as_dials()[CODER_DIALS_KEY]
     for axis, levels in block[STRATA_KEY].items():
         assert sum(level["jobs"] for level in levels.values()) == block["jobs"], axis
 
@@ -535,15 +535,16 @@ def test_a_reply_that_is_not_a_job_record_is_counted_as_unreadable_and_rated_now
 
     reading = CODER_SCORER.read(answered)
     assert reading is not None
-    assert reading[CODER_DIALS_KEY]["unreadable"] == 1
-    assert reading[CODER_DIALS_KEY]["rates"]["job_pass_rate"] == 1.0
+    assert reading.as_dials()[CODER_DIALS_KEY]["unreadable"] == 1
+    assert reading.as_dials()[CODER_DIALS_KEY]["rates"]["job_pass_rate"] == 1.0
 
 
 def test_the_reading_marks_itself_as_freshly_answered_and_counts_the_calls_behind_it():
     reading = CODER_SCORER.read(_answered(_job("a", [True]), _job("b", [True])))
 
     assert reading is not None
-    assert (reading["answers"], reading["attempt_calls"]) == ("fresh", 2)
+    dials = reading.as_dials()
+    assert (dials["answers"], dials["attempt_calls"]) == ("fresh", 2)
 
 
 def test_the_coder_declaration_carries_the_reading_scorer_in_its_scorers_slot():

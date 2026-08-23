@@ -365,7 +365,7 @@ def _coder_reading() -> Mapping[str, Any]:
     """The whole coder reading over the batch above, as a record quotes it under ``harness``."""
     reading = CODER_SCORER.read(CODER_ANSWERED)
     assert reading is not None
-    return reading
+    return reading.as_dials()
 
 
 # ══ the DECIDE batch ════════════════════════════════════════════════════════════════════════
@@ -590,7 +590,7 @@ def _decide_reading() -> Mapping[str, Any]:
     """The whole live DECIDE reading over the bench above, as a record quotes it."""
     reading = DECIDE_SCORER.read(DECIDE_ANSWERED)
     assert reading is not None
-    return reading
+    return reading.as_dials()
 
 
 def _retrospective_reading() -> Mapping[str, Any]:

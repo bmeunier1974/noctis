@@ -867,9 +867,10 @@ class BenchRunner:
         """The composed harness dials, plus every reading the site's declared scorers add.
 
         The site-agnostic scoring pass, and the whole of it: each declared scorer is handed every
-        answered case and whatever mapping it returns is folded in verbatim. Nothing here knows what
-        a reading contains — that is the site's business — so a second site's scorer lands in the
-        record the day its declaration carries one, with no edit to this module.
+        answered case and the dials of whatever reading it returns are folded in verbatim. Nothing
+        here knows what a reading contains — that is the site's business, and
+        :meth:`~noctis.eval.reading.SiteReading.as_dials` is where it says so — so a second site's
+        scorer lands in the record the day its declaration carries one, with no edit to this module.
 
         The declared ``difficulty_axes`` travel with the answers, because a scorer is the stateless
         singleton its declaration carries and cannot import that declaration back. The site's facts
@@ -881,7 +882,8 @@ class BenchRunner:
             reading = scorer.read(answered, axes=declaration.difficulty_axes)
             if reading is None:
                 continue
-            clash = sorted(set(reading) & set(dials))
+            published = reading.as_dials()
+            clash = sorted(set(published) & set(dials))
             if clash:
                 raise ConflictingReading(
                     f"a scorer of site {corpus.site_id!r} would overwrite the harness dial(s) "
@@ -889,7 +891,7 @@ class BenchRunner:
                     "asked and a reading says what the answers earned, so neither may rewrite the "
                     "other"
                 )
-            dials.update(reading)
+            dials.update(published)
         return dials
 
     def _declaration(self, corpus: Corpus) -> AgentSite[Any, Any]:

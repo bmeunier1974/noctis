@@ -54,6 +54,18 @@ folds *into* the job rate's own row, and prints three counts the enclosing block
 one ordering and deriving the other would have meant re-ordering a published document, which is
 exactly what the golden records in ``tests/test_eval_goldens.py`` exist to refuse.
 
+**And a whole reading is declared once too.** :class:`SiteReading` is what a
+:class:`~noctis.eval.site.Scorer` returns and what a bench record quotes: the headline facts stated
+above the block, the co-primary pair inside it (carried with its manifest and its key on a
+:class:`Pair`), the population, the per-case rows, the per-axis strata and the sections only that
+site knows how to compute. Every published reading already had that shape — but it lived in the
+literal each site assembled by hand, and in the golden that pinned it, which is a shape a reviewer
+can only check by diffing two files. It is one type now, and the live coder pass, the live DECIDE
+pass and the retrospective miner all build it, so the three records agree structurally rather than
+by three literals somebody keeps in step (#308). What each section *is* belongs here; which section
+a site files a figure under is the site's, because two sites publish their blocks in genuinely
+different orders — the same disagreement the two ordering tuples above record.
+
 **Pure, and stdlib-only.** No engine import, no other eval module, no file, no clock. Every site's
 reading depends on this module, so this module may drag nothing behind it —
 ``tests/test_eval_reading.py`` holds it to that both statically and as a module closure in a fresh
@@ -64,7 +76,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 #: Whatever a caller is folding — an answered case, a scored reply, a job record. This module never
@@ -82,10 +94,13 @@ __all__ = [
     "PAIR_MANIFESTS",
     "PASS_RATES",
     "RETROSPECTIVE_KEY",
+    "ROWS_KEY",
     "STRATA_KEY",
     "VALUE_WIDTH",
+    "Pair",
     "PairManifest",
     "PairRow",
+    "SiteReading",
     "fmt",
     "fold_by_case",
     "strata",
@@ -229,6 +244,31 @@ class PairManifest:
         """The pair as record data, whole: the flagship is never published without its partner."""
         figures = {figure.key: figure for figure in self.figures}
         return {key: getattr(pair, figures[key].field) for key in self.keys}
+
+
+@dataclass(frozen=True)
+class Pair:
+    """One co-primary value on its way into a published block: the key, the manifest, the value.
+
+    A :class:`PairManifest` says how a pair reads and a site's frozen dataclass
+    (:class:`~noctis.eval.decide_scorer.ApprovalPair`,
+    :class:`~noctis.eval.coder_scorer.PassRates`) computes it; neither of them says which **key** a
+    block publishes it under, and that was the last thing every block builder still spelled by hand.
+    This carrier is those three facts travelling together, so a :class:`SiteReading` can publish a
+    pair it knows nothing about.
+
+    ``value`` is deliberately untyped: this module knows no site's arithmetic, and learning one to
+    carry it would cost the purity every site's reading depends on. The manifest is what reads the
+    figures off it, and refuses at construction to name one the value does not carry.
+    """
+
+    key: str
+    manifest: PairManifest
+    value: Any
+
+    def block(self) -> dict[str, Any]:
+        """The pair as the one entry a block publishes it as — whole, under its own key."""
+        return {self.key: self.manifest.block(self.value)}
 
 
 # ── DECIDE: approval-side agreement, and the approval rate it was bought at ───────────────
@@ -390,3 +430,83 @@ def strata(
             grouped.setdefault(NOT_APPLICABLE if level is None else level, []).append(item)
         stratified[axis] = {level: block_of(grouped[level]) for level in sorted(grouped)}
     return stratified
+
+
+# ── one site's whole published reading ────────────────────────────────────────────────────
+
+#: The key a reading's per-case rows ride under. One word two sites mean differently: DECIDE lists
+#: a row per case beneath it, while the coder publishes ``cases`` as the *population* its rates are
+#: over — which is why a reading that read no rows never overwrites a count of that name.
+ROWS_KEY = "cases"
+
+
+@dataclass(frozen=True)
+class SiteReading:
+    """One site's reading of one finished bench, as the sections it is published from.
+
+    This is what a :class:`~noctis.eval.site.Scorer` returns and what the bench runner folds into a
+    record's ``harness.dials``. It replaces a bare mapping on both ends of that seam: a scorer used
+    to hand back a dict it had assembled by hand, so the *shape* every published reading shares —
+    the headline facts above the block, the co-primary pair inside it, the per-axis breakdown
+    beneath — lived only in the literal each site wrote out and in the golden that pinned it.
+
+    The sections, and what belongs in each:
+
+    * ``dials_key`` — the word the block rides under (``coder``, ``decide``), so a record carries
+      two sites' readings side by side without either knowing the other exists.
+    * ``headline`` — the facts stated **above** the block: whether this is a re-read of what history
+      recorded, how the bench came by its answers, how many model calls sit behind them
+      (:data:`RETROSPECTIVE_KEY`, :data:`ANSWERS_KEY`, :data:`ATTEMPT_CALLS_KEY`).
+    * ``pair`` — the co-primary value, or ``None`` for a site that publishes none. Whole or not at
+      all: the flagship figure is never published without the figures that qualify it.
+    * ``counts`` — the population the figures are over, for a site that opens its block with it.
+    * ``rows`` — one mapping per case the reading lists individually.
+    * ``strata`` — the per-axis breakdown (:func:`strata`), stated even when it is empty: a site
+      whose corpus carries no difficulty labels has an absence to report, not nothing to say.
+    * ``extras`` — the blocks only that site knows how to compute: the coder's effort, escalation,
+      cost and failure taxonomy; DECIDE's deferral figures and its two exclusion counts.
+
+    **Sections are ordered here; filing is the site's.** :meth:`block` assembles them in one fixed
+    order, and where a site's published order disagrees it says so by filing a key under the section
+    its own block really puts it in — DECIDE states its exclusion counts among the deferral figures
+    rather than above the pair, so they ride in ``extras``. The two published orders genuinely
+    differ (exactly as a block and a report differ over the pair rows above), and deriving one from
+    the other would mean re-ordering a document readers already diff, which is what the golden
+    records in ``tests/test_eval_goldens.py`` exist to refuse.
+    """
+
+    dials_key: str
+    headline: Mapping[str, Any] = field(default_factory=dict)
+    pair: Pair | None = None
+    counts: Mapping[str, Any] = field(default_factory=dict)
+    rows: Sequence[Mapping[str, Any]] = ()
+    strata: Mapping[str, Any] = field(default_factory=dict)
+    extras: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dials(self) -> dict[str, Any]:
+        """This reading as the dials a record quotes: the headline facts, then the block."""
+        return {**self.headline, self.dials_key: self.block()}
+
+    def block(self) -> dict[str, Any]:
+        """The reading's own block — the population, the pair, the site's sections, the breakdown.
+
+        Everything is copied on the way out, so a reader that edits what it was handed cannot edit
+        the reading it came from.
+
+        Two placements are worth stating, because both are a site's published order and not this
+        module's taste. The **rows** ride under :data:`ROWS_KEY`, which the coder publishes as a
+        count instead — so a reading that listed no case individually publishes no row list at all,
+        rather than overwriting a measured population with a list nobody read. And the **strata**
+        closes the block unless a section already named its slot: the coder states its per-axis
+        breakdown between the blocks explaining its rates and the warning rows beneath them, so it
+        names the slot in ``extras`` and the breakdown is written there instead, from the typed
+        field either way.
+        """
+        published: dict[str, Any] = dict(self.counts)
+        if self.pair is not None:
+            published.update(self.pair.block())
+        published.update(self.extras)
+        if self.rows:
+            published[ROWS_KEY] = [dict(row) for row in self.rows]
+        published[STRATA_KEY] = dict(self.strata)
+        return published

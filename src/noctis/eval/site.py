@@ -38,13 +38,14 @@ prompt optimizer: sites as data need no further engine change to become an optim
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Generic, Protocol, TypeVar
 
 from noctis.eval.case import Case
 from noctis.eval.harness import HarnessSpec
 from noctis.eval.knobs import SiteKnobs
+from noctis.eval.reading import SiteReading
 from noctis.research.episode import EmitContract
 
 __all__ = ["AgentSite", "AnsweredCase", "Scorer", "SiteInput", "SiteOutput"]
@@ -101,11 +102,20 @@ class Scorer(Protocol[ScoredInput_co, ScoredOutput_co]):
     record quotes under ``harness.dials`` out, or ``None`` from a scorer with nothing to say. The
     runner folds whatever comes back into the dials without interpreting it, which is what keeps the
     bench verbs free of any site's vocabulary.
+
+    **What comes back is a type, not a mapping (#308).** A reading is a
+    :class:`~noctis.eval.reading.SiteReading`: the headline facts a record states above the block,
+    the co-primary pair inside it, the counts, rows, per-axis strata and the site's own sections —
+    and one :meth:`~noctis.eval.reading.SiteReading.as_dials` that publishes them. The shape every
+    published reading shares used to live only in the literal each site assembled by hand and in
+    the golden that pinned it; it is declared once now, and the live sites and the retrospective
+    miner build the same object. The import runs downward on purpose — this module reads
+    :mod:`noctis.eval.reading`, which is stdlib-only and knows no site.
     """
 
     def read(
         self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = ()
-    ) -> Mapping[str, Any] | None:
+    ) -> SiteReading | None:
         """This site's reading over one bench's answers, or ``None`` when it has none to add.
 
         ``axes`` is the site's declared :attr:`AgentSite.difficulty_axes`, handed over by the runner

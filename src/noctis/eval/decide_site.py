@@ -102,7 +102,8 @@ from noctis.eval.reading import (
     ATTEMPT_CALLS_KEY,
     NOT_APPLICABLE,
     RETROSPECTIVE_KEY,
-    STRATA_KEY,
+    Pair,
+    SiteReading,
     fold_by_case,
     strata,
     strict_majority,
@@ -121,6 +122,7 @@ if TYPE_CHECKING:  # the cycle-closing imports, for annotations only — see the
 __all__ = [
     "ANSWERS_FRESH",
     "ANSWERS_RECORDED",
+    "APPROVAL_KEY",
     "BINDING_GATE_AXIS",
     "DECIDE_DIALS_KEY",
     "DECIDE_SCORER",
@@ -140,6 +142,7 @@ __all__ = [
     "contract_for",
     "decide_input",
     "decide_site_input",
+    "deferral_block",
     "pair_block",
     "parse_reply",
     "scored_block",
@@ -169,6 +172,11 @@ DIFFICULTY_AXES: tuple[str, ...] = (MARGIN_AXIS, BINDING_GATE_AXIS, EVIDENCE_DEP
 #: The two exclusion counts a live reading carries beside the pair — the n/a side, named.
 UNREADABLE_KEY = "unreadable"
 UNSETTLED_KEY = "unsettled"
+
+#: The key the co-primary pair rides under inside DECIDE's block — the word the coder spells
+#: ``rates``. It travels with the manifest and the value on one
+#: :class:`~noctis.eval.reading.Pair`, so a block builder no longer spells it by hand.
+APPROVAL_KEY = "approval"
 
 #: Why a case carries no verdict. Spelled once, so the row and its test read the same words.
 NO_VERDICT = "no reply this case gave carried a verdict the emit contract admits"
@@ -508,9 +516,22 @@ class ScoredReply:
 
 
 def scored_block(metrics: DecideMetrics) -> dict[str, Any]:
-    """One scored batch as record data — the pair first, never a bare agreement beside it."""
+    """One scored batch as record data — the pair first, never a bare agreement beside it.
+
+    This is the block a *stratum* publishes, and the whole reading's own two sections read
+    together: :func:`pair_block` and :func:`deferral_block`, in that order.
+    """
+    return {APPROVAL_KEY: pair_block(metrics.approval), **deferral_block(metrics)}
+
+
+def deferral_block(metrics: DecideMetrics) -> dict[str, Any]:
+    """The figures beside the pair: how often the model asked for another lap, and what came of it.
+
+    Everything a DECIDE reading publishes that is not the co-primary pair — so the live scoring
+    pass and the retrospective miner file exactly these under a reading's site-only section rather
+    than each restating the five keys (#308).
+    """
     return {
-        "approval": pair_block(metrics.approval),
         "revise_rate": metrics.revise_rate,
         "revise_flip_rate": metrics.revise_flip_rate,
         "revises": metrics.revises,
@@ -630,7 +651,7 @@ class DecideAgreementScorer:
 
     def read(
         self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = DIFFICULTY_AXES
-    ) -> Mapping[str, Any] | None:
+    ) -> SiteReading | None:
         """The whole DECIDE reading over one live bench's answers — see the module docstring.
 
         ``axes`` is what the site's declaration says its cases are labelled on, handed over by the
@@ -644,20 +665,28 @@ class DecideAgreementScorer:
             return None
         readings = self._readings(answered)
         outcomes = tuple(one.outcome for one in readings if one.outcome is not None)
-        return {
+        metrics = score_decide_batch(outcomes)
+        return SiteReading(
+            dials_key=DECIDE_DIALS_KEY,
             # The three facts that distinguish this record from a retrospective one, stated up
             # front and in that record's own vocabulary.
-            RETROSPECTIVE_KEY: False,
-            ANSWERS_KEY: ANSWERS_FRESH,
-            ATTEMPT_CALLS_KEY: sum(len(one.replies) for one in answered),
-            DECIDE_DIALS_KEY: {
-                **scored_block(score_decide_batch(outcomes)),
+            headline={
+                RETROSPECTIVE_KEY: False,
+                ANSWERS_KEY: ANSWERS_FRESH,
+                ATTEMPT_CALLS_KEY: sum(len(one.replies) for one in answered),
+            },
+            pair=Pair(key=APPROVAL_KEY, manifest=APPROVAL_PAIR, value=metrics.approval),
+            # DECIDE opens its block with the pair and states the two exclusion counts *among* the
+            # deferral figures, so both ride in the site's own section — its published order, not
+            # a filing convenience (:class:`~noctis.eval.reading.SiteReading`).
+            extras={
+                **deferral_block(metrics),
                 UNREADABLE_KEY: sum(1 for one in readings if one.unreadable),
                 UNSETTLED_KEY: sum(1 for one in readings if one.unsettled),
-                "cases": [one.row() for one in readings],
-                STRATA_KEY: strata_block([one.case for one in readings], outcomes, axes=axes),
             },
-        }
+            rows=[one.row() for one in readings],
+            strata=strata_block([one.case for one in readings], outcomes, axes=axes),
+        )
 
     def _readings(self, answered: Sequence[AnsweredCase]) -> tuple[_CaseReading, ...]:
         """Every case this bench asked, folded once, in case-id order.

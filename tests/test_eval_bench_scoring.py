@@ -57,6 +57,7 @@ from noctis.eval.harness import HarnessSpec
 from noctis.eval.identity import SiteIdentity
 from noctis.eval.knobs import SiteKnobs
 from noctis.eval.metrics import AttemptOutcome
+from noctis.eval.reading import SiteReading
 from noctis.eval.registry import index_sites
 from noctis.eval.runner import (
     BENCH_RECORD_NAME,
@@ -118,16 +119,26 @@ STUB_IDENTITY = SiteIdentity(
 class RecordingScorer:
     """A stub site's scorer: keeps everything the pass handed it, publishes a canned reading."""
 
-    reading: Mapping[str, Any] | None = None
+    reading: SiteReading | None = None
     answered: tuple[AnsweredCase, ...] = ()
     axes: tuple[str, ...] | None = None
 
     def read(
         self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = ()
-    ) -> Mapping[str, Any] | None:
+    ) -> SiteReading | None:
         self.answered = tuple(answered)
         self.axes = axes
         return self.reading
+
+
+def _canned(dials_key: str, **headline: Any) -> SiteReading:
+    """One stub reading: an empty block under a key of its own, and whatever facts a test states.
+
+    A reading is a :class:`~noctis.eval.reading.SiteReading` rather than a mapping (#308), and a
+    stub site has no figures to publish — so what a test wants folded into the dials rides in the
+    headline, which is exactly the half of a reading the runner's clash check reads.
+    """
+    return SiteReading(dials_key=dials_key, headline=headline)
 
 
 def _stub_site(*scorers: Any, difficulty_axes: tuple[str, ...] = ()) -> AgentSite[Any, Any]:
@@ -306,7 +317,7 @@ def _headline(report: str) -> list[str]:
 
 def test_a_sites_declared_scorer_folds_its_reading_into_the_records_harness_dials(tmp_path):
     _stub_corpus(tmp_path)
-    scorer = RecordingScorer(reading={"stub_reading": {"answers": 2}})
+    scorer = RecordingScorer(reading=_canned("stub", stub_reading={"answers": 2}))
 
     cli_module.run_bench("stub", seams=_stub_seams(_stub_site(scorer)))
 
@@ -371,7 +382,10 @@ def test_a_site_that_declares_no_axes_hands_its_scorer_none_to_stratify_by(tmp_p
 
 def test_every_declared_scorer_of_a_site_contributes_its_own_reading(tmp_path):
     _stub_corpus(tmp_path)
-    site = _stub_site(RecordingScorer(reading={"first": 1}), RecordingScorer(reading={"second": 2}))
+    site = _stub_site(
+        RecordingScorer(reading=_canned("first_site", first=1)),
+        RecordingScorer(reading=_canned("second_site", second=2)),
+    )
 
     cli_module.run_bench("stub", seams=_stub_seams(site))
 
@@ -383,7 +397,7 @@ def test_a_reading_that_would_overwrite_a_composed_harness_dial_is_refused_namin
     tmp_path, capsys
 ):
     _stub_corpus(tmp_path)
-    site = _stub_site(RecordingScorer(reading={"is_production": False}))
+    site = _stub_site(RecordingScorer(reading=_canned("stub", is_production=False)))
 
     with pytest.raises(typer.Exit):
         cli_module.run_bench("stub", seams=_stub_seams(site))
