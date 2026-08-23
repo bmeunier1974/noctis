@@ -11,7 +11,9 @@ subclass and carries its research record in a structured module-docstring header
     tuned: 2026-07-04            # date the current Params defaults were fitted
     \"\"\"
 
-The header is convention plus the tiny parser here, not a new format. The loader mirrors
+The header is convention plus the tiny parser in :mod:`noctis.strategies.header` — which owns
+the value (a frozen :class:`~noctis.strategies.header.StrategyHeader`, illegal by construction if
+its ``status`` is) and is re-exported here, so no caller's import moved. The loader mirrors
 ``noctis/strategies/spec/strategy.py``'s ``load_and_register``; :func:`write_strategy` is the
 validation gate — a structural lint on the raw source (``noctis.strategies.structure``), then
 import in a **fresh interpreter** (via the swappable :data:`validator` seam), a smoke replay on
@@ -38,7 +40,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -48,6 +50,14 @@ import pandas as pd
 from noctis.strategies import scenarios as scenarios_mod
 from noctis.strategies.base import TraderStrategy, params_to_dict, replay_targets
 from noctis.strategies.families import FamilyRegistry
+from noctis.strategies.header import (  # noqa: F401 — re-exported: no caller's import moves
+    FIELD_RE,
+    HEADER_FIELDS,
+    VALID_STATUSES,
+    HeaderError,
+    StrategyHeader,
+    parse_header,
+)
 from noctis.strategies.scenario_spec import (
     SpecError,
     SpecSuite,
@@ -77,8 +87,6 @@ ARCHIVE_SUBDIR = "archive"
 UNDECIDED_STATUSES = ("draft", "candidate")
 # Keep roughly the last N archived drafts on disk, oldest evicted (mirrors failed_store).
 ARCHIVE_CAP = 50
-HEADER_FIELDS = ("status", "style", "symbols", "tuned")
-VALID_STATUSES = ("draft", "candidate", "champion", "rejected")
 # The one strategy-name rule: lower_snake_case starting with a letter. Exported so the research
 # driver derives names to satisfy exactly the rule the write gate enforces (:func:`write_strategy`)
 # — one definition, so the two can never drift (story #92).
@@ -179,63 +187,8 @@ def fixture_frame(n: int = 180, seed: int = 7) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Header parse / write-back
+# Header write-back  (the value and the parse live in ``noctis.strategies.header``)
 # ─────────────────────────────────────────────────────────────────────────────
-@dataclass
-class StrategyHeader:
-    thesis: str = ""
-    status: str = "draft"
-    style: str = ""
-    symbols: list[str] = field(default_factory=list)
-    tuned: str | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "thesis": self.thesis,
-            "status": self.status,
-            "style": self.style,
-            "symbols": list(self.symbols),
-            "tuned": self.tuned,
-        }
-
-
-_FIELD_RE = re.compile(rf"^({'|'.join(HEADER_FIELDS)})\s*:\s*(.*)$")
-
-
-def parse_header(source: str) -> StrategyHeader:
-    """Parse the docstring header (thesis first paragraph + ``field: value`` lines)."""
-    header = StrategyHeader()
-    try:
-        doc = ast.get_docstring(ast.parse(source)) or ""
-    except SyntaxError:
-        return header
-    thesis_lines: list[str] = []
-    in_thesis = True
-    for line in doc.splitlines():
-        stripped = line.strip()
-        match = _FIELD_RE.match(stripped)
-        if match:
-            in_thesis = False
-            value = match.group(2).split("#", 1)[0].strip()
-            if match.group(1) == "symbols":
-                header.symbols = [
-                    s.strip().upper() for s in re.split(r"[,\s]+", value) if s.strip()
-                ]
-            elif match.group(1) == "tuned":
-                header.tuned = value or None
-            else:
-                setattr(header, match.group(1), value)
-            continue
-        if in_thesis:
-            if not stripped and thesis_lines:
-                in_thesis = False
-                continue
-            if stripped:
-                thesis_lines.append(stripped)
-    header.thesis = " ".join(thesis_lines)
-    return header
-
-
 def _docstring_span(source: str) -> tuple[int, int]:
     """(start, end) line indexes (0-based, end exclusive) of the module docstring."""
     tree = ast.parse(source)
@@ -263,7 +216,7 @@ def _render_header_fields(source: str, **fields) -> str:
         return f"{name}: {value}\n"
 
     for i, line in enumerate(doc_lines):
-        match = _FIELD_RE.match(line.strip())
+        match = FIELD_RE.match(line.strip())
         if match and match.group(1) in pending:
             name = match.group(1)
             indent = line[: len(line) - len(line.lstrip())]
@@ -284,7 +237,7 @@ def _render_header_fields(source: str, **fields) -> str:
             # paragraph above (but packed together with existing header fields).
             closing = len(doc_lines) - 1
             above = doc_lines[closing - 1].strip()
-            if above and not _FIELD_RE.match(above):
+            if above and not FIELD_RE.match(above):
                 inserted = ["\n", *inserted]
             doc_lines = doc_lines[:closing] + inserted + doc_lines[closing:]
 
@@ -1006,7 +959,13 @@ def _validate_file(
         raise StrategyValidationError(
             f"timeframe {cls.timeframe!r} unsupported; want one of {sorted(TIMEFRAMES)}"
         )
-    header = parse_header(source)
+    # ``StrategyHeader.parse`` raising *is* the status check: an illegal declared status cannot
+    # become a value, so the gate only has to say the refusal in its own currency (#312). The
+    # branch below is already dead for that reason; #316 is where it goes.
+    try:
+        header = parse_header(source)
+    except HeaderError as exc:
+        raise StrategyValidationError(str(exc)) from exc
     if header.status not in VALID_STATUSES:
         raise StrategyValidationError(
             f"header status {header.status!r} invalid; want one of {VALID_STATUSES}"
