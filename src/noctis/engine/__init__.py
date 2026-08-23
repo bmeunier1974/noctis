@@ -21,6 +21,7 @@ from noctis.engine.pacing import (
 )
 from noctis.engine.report_assembly import SessionActivity, assemble_report
 from noctis.engine.research import ResearchSummary, run_research
+from noctis.engine.research_phase import ResearchPanel, ResearchPhase
 from noctis.engine.runtime import Runtime, RuntimeResult, build_runtime
 from noctis.engine.trading_phase import (
     TradingDay,
@@ -46,6 +47,8 @@ __all__ = [
     "StopFlag",
     "ResearchSummary",
     "run_research",
+    "ResearchPhase",
+    "ResearchPanel",
     "SessionActivity",
     "assemble_report",
     "Runtime",

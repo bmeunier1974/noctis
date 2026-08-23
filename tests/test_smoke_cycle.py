@@ -13,7 +13,13 @@ from noctis.champions import ChampionRegistry, build_registry
 from noctis.config import load_settings
 from noctis.data import MarketDataLake
 from noctis.data.types import to_ns
-from noctis.engine import CloseResult, Phase, SimulatedSleeper, build_runtime
+from noctis.engine import (
+    CloseResult,
+    Phase,
+    ResearchSummary,
+    SimulatedSleeper,
+    build_runtime,
+)
 from noctis.memory import MemoryStore
 
 from ._data_helpers import MockVendor
@@ -126,12 +132,12 @@ def test_two_cycles_are_cumulative(tmp_path):
         assert header in text
 
 
-def test_run_research_accumulates_undecided_into_the_cycle(tmp_path, monkeypatch):
+def test_research_sessions_accumulate_undecided_into_the_cycle(tmp_path, monkeypatch):
     """Each research session's undecided strategies (authored, never carried to a verdict)
-    fold into the per-cycle accumulator — and a cycle spanning several sessions extends,
-    never replaces, the list."""
-    import noctis.engine.runtime as runtime_mod
-    from noctis.engine.research import ResearchSummary
+    fold into the per-cycle accumulator the way the loop's RESEARCH branch folds them — and a
+    closed market runs sessions back to back, so a cycle spanning several extends the list
+    rather than replacing it."""
+    import noctis.engine.research_phase as research_phase_mod
 
     settings, lake_dir = _make_settings(tmp_path, time_limit_hours=None)
     lake, _vendor = _seed_catalog(lake_dir)
@@ -150,10 +156,11 @@ def test_run_research_accumulates_undecided_into_the_cycle(tmp_path, monkeypatch
             ResearchSummary(iterations=1, undecided=["draft_c"]),
         ]
     )
-    monkeypatch.setattr(runtime_mod, "run_research", lambda **_: next(summaries))
+    monkeypatch.setattr(research_phase_mod, "run_research", lambda **_: next(summaries))
 
-    runtime._run_research()
-    runtime._run_research()
+    panel = runtime._research_panel()
+    runtime._cycle.fold_research(runtime.research.run(panel))
+    runtime._cycle.fold_research(runtime.research.run(panel))
 
     assert runtime._cycle.research_undecided == ["draft_a", "draft_b", "draft_c"]
 
@@ -195,13 +202,16 @@ def test_runtime_research_panel_and_symbol_holdout_are_fixed(tmp_path):
     assert list(runtime.symbol_holdout) == ["JPM"]
     assert runtime.has_data()
 
-    # Every candidate is evaluated on the same panel and the same held-out symbols.
-    runtime._pipeline_config = replace(runtime._pipeline_config, prefilter_min_score=None)
+    # Every candidate is scored against the same panel — the entry's frozen triple, which is
+    # what the RESEARCH phase is handed and all it ever researches on.
+    panel = runtime._research_panel()
+    assert list(panel.fit) == ["AAPL", "MSFT", "NVDA"] and list(panel.symbol_holdout) == ["JPM"]
+    panel = replace(panel, config=replace(panel.config, prefilter_min_score=None))
     for cand in (
         Candidate("sma_crossover", {"fast": 3, "slow": 8}),
         Candidate("donchian_breakout", {"channel": 15}),
     ):
-        sc = runtime._evaluate(cand)
+        sc = runtime.research.evaluate(cand, panel)
         assert sc.stage == "validated"
         assert set(sc.symbols) == {"AAPL", "MSFT", "NVDA"}
         assert sc.symbol_holdout_metric is not None  # JPM was scored, one causal pass
@@ -270,9 +280,10 @@ def _stub_phases(runtime, captured, *, session_minutes=20):
     successive sessions; trading/close just tally."""
     calls = {"research": 0, "trading": 0, "close": 0}
 
-    def _research():
+    def _research(panel):
         calls["research"] += 1
         captured["sleeper"].advance(session_minutes * 60)
+        return ResearchSummary()
 
     def _trading(t, sleeper):
         calls["trading"] += 1
@@ -281,7 +292,7 @@ def _stub_phases(runtime, captured, *, session_minutes=20):
         calls["close"] += 1
         return CloseResult()
 
-    runtime._run_research = _research
+    runtime.research.run = _research  # the RESEARCH seam, driven with the entry's panel
     runtime._run_trading = _trading
     runtime.close.run = _close  # the CLOSE seam; the loop keeps its own cycle bookkeeping
     return calls

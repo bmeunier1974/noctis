@@ -91,6 +91,15 @@ transcript or the small-context **episodic** driver — and the episodic path ad
 machine-fixed scenario oracle (FORMULATE authors the tape, the coder only satisfies it; see
 [research.md](research.md)). See [research.md](research.md) for how a strategy earns promotion.
 
+The RESEARCH entry itself sits behind its own seam, `ResearchPhase`
+(`src/noctis/engine/research_phase.py`), the shape TRADING and CLOSE already have: it holds the
+session's collaborators, chooses the path, drives it, and counts the completed session toward
+the memory distillation that fires at CLOSE. The bars are an **argument**, never state — a
+frozen `ResearchPanel` (fit bars, symbol holdout, split geometry) the runtime rebuilds from a
+fresh catalog read at each entry, exactly as TRADING rebuilds its bars, so a session that
+follows a close researches what that close's T+1 sync brought in and none can be driven on a
+stale panel.
+
 ## The eval layer, and why it is one-way
 
 The engine's LLM judgment sites are declared as data in `src/noctis/eval/` — one frozen
