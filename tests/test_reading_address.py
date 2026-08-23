@@ -23,6 +23,7 @@ refusals.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
@@ -438,8 +439,10 @@ def test_the_address_argument_is_documented_in_the_house_wording(reader):
     result = runner.invoke(app, [*reader.argv(None)[:1], "--help"])
 
     # Typer boxes and wraps help text at the terminal width, and where it breaks a line depends
-    # on the verb's name; flatten the box back into one sentence before reading it.
-    flowed = " ".join(result.output.replace("│", " ").split())
+    # on the verb's name; under a colour-forcing terminal (CI) Rich also wraps `--resume` in
+    # escape codes. Strip the colour and flatten the box back into one sentence before reading it.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    flowed = " ".join(plain.replace("│", " ").split())
     assert result.exit_code == 0, result.output
     assert "Run address: an id as `noctis runs` lists it" in flowed
     assert "The same four forms `run --resume` takes" in flowed
