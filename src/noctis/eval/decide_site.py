@@ -93,6 +93,7 @@ from noctis.eval.decide_scorer import (
     score_decide_batch,
 )
 from noctis.eval.metrics import AttemptOutcome
+from noctis.eval.reading import APPROVAL_PAIR
 from noctis.eval.site import AnsweredCase
 from noctis.research.driver import DECIDE_CONTRACT, DECIDE_FINAL_CONTRACT, DecideOutput
 from noctis.research.episode import EmitContract, _extract_json_object
@@ -490,16 +491,13 @@ def scored_block(metrics: DecideMetrics) -> dict[str, Any]:
 
 
 def pair_block(approval: ApprovalPair) -> dict[str, Any]:
-    """The co-primary value, whole: agreement is never published without the rate it cost."""
-    return {
-        "agreement": approval.agreement,
-        "approval_rate": approval.approval_rate,
-        "decided": approval.decided,
-        "approvals": approval.approvals,
-        "labeled_approvals": approval.labeled_approvals,
-        "unlabeled_approvals": approval.unlabeled_approvals,
-        "promoted": approval.promoted,
-    }
+    """The co-primary value, whole: agreement is never published without the rate it cost.
+
+    The keys and their order are :data:`~noctis.eval.reading.APPROVAL_PAIR`'s, not restated here —
+    the same declaration the pair renders itself from, so a published document and a printed report
+    can never name the figure two different things.
+    """
+    return APPROVAL_PAIR.block(approval)
 
 
 def case_row(

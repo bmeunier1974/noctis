@@ -32,8 +32,9 @@ prompt-asset hashes: a site's declared version paired with the hash of the promp
 with, which is what makes two results comparable). Then the eval core, still without a directory or
 a clock in it: :mod:`noctis.eval.case` and :mod:`noctis.eval.corpus` (the ask, and the frozen
 tuning/holdout split over a pile of them), :mod:`noctis.eval.metrics`, :mod:`noctis.eval.taxonomy`
-and :mod:`noctis.eval.stats` (the arithmetic), and :mod:`noctis.eval.record` (``bench.json``: a pure
-builder, a pure validator, one comparable key).
+and :mod:`noctis.eval.stats` (the arithmetic), :mod:`noctis.eval.reading` (the shared reading
+vocabulary every published figure is formatted and every co-primary pair is declared through) and
+:mod:`noctis.eval.record` (``bench.json``: a pure builder, a pure validator, one comparable key).
 
 :mod:`noctis.eval.runner` is the one impure module — it mints a bench id, owns
 ``<workspace>/bench/<bench_id>/`` and writes the record — and even it makes no model call of its

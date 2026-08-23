@@ -95,6 +95,8 @@ from noctis.eval.metrics import (
     mean_attempts_to_pass,
     retry_yield,
 )
+from noctis.eval.reading import PASS_RATES
+from noctis.eval.reading import table as render_table
 from noctis.eval.site import AnsweredCase
 from noctis.research.pricing import USAGE_FIELDS, PriceTable, default_table
 
@@ -186,19 +188,16 @@ class PassRates:
 
     def render(self) -> str:
         """The pair, as the two lines a report prints — never one of them."""
-        return _table(self._rows())
+        return PASS_RATES.render(self)
 
     def _rows(self) -> list[tuple[str, object]]:
-        """The pair's rows, the opening ask first and the retry-informed rate beneath it."""
-        return [
-            ("First-attempt pass rate", self.first_attempt_pass_rate),
-            (f"Job pass rate ({self.label})", self.job_pass_rate),
-            ("Jobs", self.jobs),
-            ("  cases", self.cases),
-            ("  first ask landed", self.first_attempt_passes),
-            ("  landed in the end", self.passed_jobs),
-            ("  never asked (n/a)", self.unattempted_jobs),
-        ]
+        """The pair's rows, the opening ask first and the retry-informed rate beneath it.
+
+        The rows themselves are :data:`~noctis.eval.reading.PASS_RATES`', not restated here: one
+        declaration serves this rendering and :func:`_rates_block`'s keys, and it is what carries
+        :data:`FEEDBACK_LABEL` into the job rate's own label rather than into a caption.
+        """
+        return PASS_RATES.rows(self)
 
 
 @dataclass(frozen=True)
@@ -252,7 +251,7 @@ class CoderMetrics:
                 f"Coder site — {self.rates.jobs} job(s) over {self.rates.cases} case(s); "
                 f"job passing is {FEEDBACK_LABEL}",
                 "",
-                _table(rows),
+                render_table(rows, label_w=PASS_RATES.label_w),
             ]
         )
 
@@ -483,14 +482,13 @@ def _stratum_block(records: Sequence[JobRecord]) -> dict[str, Any]:
 
 
 def _rates_block(rates: PassRates) -> dict[str, Any]:
-    """The co-primary value, whole: neither rate is published without the other beside it."""
-    return {
-        PASS_LABEL_KEY: rates.label,
-        "first_attempt_pass_rate": rates.first_attempt_pass_rate,
-        "job_pass_rate": rates.job_pass_rate,
-        "first_attempt_passes": rates.first_attempt_passes,
-        "passed_jobs": rates.passed_jobs,
-    }
+    """The co-primary value, whole: neither rate is published without the other beside it.
+
+    The keys and their order are :data:`~noctis.eval.reading.PASS_RATES`', not restated here — the
+    same declaration the pair renders itself from, so a published document and a printed report can
+    never name the figures two different things.
+    """
+    return PASS_RATES.block(rates)
 
 
 def _effort_block(metrics: CoderMetrics) -> dict[str, Any]:
@@ -654,24 +652,6 @@ class CoderReadingScorer:
 CODER_SCORER = CoderReadingScorer()
 
 
-# ── rendering: one place where an absence becomes the word ``n/a`` ────────────────────────
-
-
-def _fmt(value: object) -> str:
-    """A cell: the literal ``n/a`` for ``None``, four decimals for a rate, the value otherwise."""
-    if value is None:
-        return "n/a"
-    if isinstance(value, float):
-        return f"{value:.4f}"
-    return str(value)
-
-
-def _table(rows: Sequence[tuple[str, object]]) -> str:
-    """Label/value rows in two columns — the one place a ``None`` becomes the word ``n/a``."""
-    label_w, value_w = 36, 12
-    return "\n".join(f"{label:<{label_w}}{_fmt(value):>{value_w}}" for label, value in rows)
-
-
 # Read once at import so the pairing rule is a property of the type rather than a comment: the
 # co-primary value must carry both rates, or this module refuses to load at all.
 _RATE_FIELDS = {field.name for field in fields(PassRates)}
@@ -682,3 +662,9 @@ if not set(PassRates.rate_fields()) <= _RATE_FIELDS:  # pragma: no cover — a s
 # reading refuses to publish, so its absence is asserted on the type rather than reviewed for.
 if _RATE_FIELDS & {"score", "blended_score", "combined_score"}:  # pragma: no cover — structural
     raise RuntimeError("the coder reading publishes two co-primary rates and no blended score")
+
+# And the manifest that renders the pair may only name figures the pair really carries: a row
+# reading an attribute that moved would fail one rendering at a time, months later, in whichever
+# report ran first. It fails here instead, at import, for everybody at once.
+if not PASS_RATES.attributes() <= _RATE_FIELDS:  # pragma: no cover — a structural assertion
+    raise RuntimeError("the pass-rate manifest names a figure the co-primary pair does not carry")

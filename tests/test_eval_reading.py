@@ -1,0 +1,318 @@
+"""The eval layer's reading vocabulary (#303): one ``fmt``, one ``table``, two pair manifests.
+
+Three properties carry this suite, and they are the reason the module exists at all:
+
+* **One spelling of an absence.** ``fmt`` is the single place a ``None`` becomes the word ``n/a``,
+  a rate becomes four decimals and a flag becomes ``yes``/``no``. Every reading in the eval layer
+  formats through it, so two blocks printed by two modules cannot disagree about what a missing
+  number looks like.
+* **A co-primary pair is declared once.** A :class:`~noctis.eval.reading.PairManifest` names a
+  pair's figures, the order a block publishes them in, the order a report prints them in, the
+  flagship figure that may never appear alone, and the refusal for when it does. The owning
+  dataclass keeps its arithmetic and routes its rendering through the manifest, so a row cannot be
+  restated in three modules and drift in two of them.
+* **The module is pure, and provably so.** It imports the standard library and nothing else — not
+  the engine, not another eval module, no file and no clock — which is what lets every site's
+  reading depend on it without dragging anything behind it. Both the static import walk and a
+  fresh-interpreter module closure say so.
+
+The byte-for-byte pins against ``ApprovalPair.render()`` and ``PassRates.render()`` are the move's
+own safety net, beside the golden records in ``tests/test_eval_goldens.py``.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import subprocess
+import sys
+from dataclasses import fields
+from pathlib import Path
+
+import pytest
+
+from noctis.eval import reading
+from noctis.eval.coder_scorer import (
+    FEEDBACK_LABEL,
+    PASS_LABEL_KEY,
+    PassRates,
+    coder_block,
+    score_coder_jobs,
+)
+from noctis.eval.coder_site import AttemptRecord, JobRecord
+from noctis.eval.decide_scorer import ApprovalPair
+from noctis.eval.decide_site import pair_block
+from noctis.eval.reading import (
+    APPROVAL_PAIR,
+    PAIR_MANIFESTS,
+    PASS_RATES,
+    PairManifest,
+    PairRow,
+    fmt,
+    table,
+)
+
+READING_SOURCE = Path(str(reading.__file__))
+
+PAIR = ApprovalPair(
+    agreement=0.5,
+    approval_rate=0.25,
+    decided=8,
+    approvals=2,
+    labeled_approvals=2,
+    unlabeled_approvals=0,
+    promoted=1,
+)
+
+RATES = PassRates(
+    first_attempt_pass_rate=0.5,
+    job_pass_rate=0.75,
+    cases=4,
+    jobs=4,
+    first_attempt_passes=2,
+    passed_jobs=3,
+    unattempted_jobs=1,
+)
+
+#: One scored coder batch, so the manifest's block can be held against the published one. The
+#: arithmetic is ``tests/test_eval_coder_scorer.py``'s business; here it is only a source of rates.
+CODER_METRICS = score_coder_jobs(
+    [
+        JobRecord(
+            case_id="a",
+            strategy="momentum_a",
+            passed=True,
+            attempts=(
+                AttemptRecord(attempt=1, passed=False, error="gate refused"),
+                AttemptRecord(attempt=2, passed=True),
+            ),
+        )
+    ]
+)
+
+
+# ── fmt: the one place an absence becomes a word ──────────────────────────────────────────
+def test_a_missing_figure_renders_as_the_literal_n_a() -> None:
+    assert fmt(None) == "n/a"
+
+
+def test_a_rate_renders_at_four_decimals() -> None:
+    assert fmt(0.5) == "0.5000"
+    assert fmt(1.0) == "1.0000"
+
+
+def test_a_flag_renders_as_yes_or_no_rather_than_a_python_repr() -> None:
+    assert fmt(True) == "yes"
+    assert fmt(False) == "no"
+
+
+def test_a_count_and_a_word_render_verbatim() -> None:
+    assert fmt(3) == "3"
+    assert fmt("fresh") == "fresh"
+
+
+def test_the_flag_arm_wins_over_the_number_arms_because_a_bool_is_an_int() -> None:
+    """``isinstance(True, int)`` is the trap: without the flag arm first, a flag prints ``True``."""
+    assert fmt(False) != "0"
+    assert fmt(True) != "1"
+
+
+# ── table: two columns, at the widths a caller asks for ───────────────────────────────────
+def test_a_row_is_the_label_left_padded_and_the_value_right_aligned_beside_it() -> None:
+    assert table([("Approval rate", 0.25)]) == f"{'Approval rate':<28}{'0.2500':>12}"
+
+
+def test_the_default_widths_are_twenty_eight_and_twelve() -> None:
+    (line,) = table([("Label", 1)]).splitlines()
+
+    assert len(line) == 40
+
+
+def test_a_caller_may_widen_the_label_column() -> None:
+    (line,) = table([("Label", 1)], label_w=36).splitlines()
+
+    assert len(line) == 48
+
+
+def test_a_caller_may_widen_the_value_column() -> None:
+    (line,) = table([("Label", 1)], value_w=22).splitlines()
+
+    assert len(line) == 50
+
+
+def test_every_row_is_one_line_in_the_order_it_was_handed_in() -> None:
+    rendered = table([("First", 1), ("Second", 2)])
+
+    assert [line.strip().split()[0] for line in rendered.splitlines()] == ["First", "Second"]
+
+
+def test_a_table_of_no_rows_is_the_empty_string() -> None:
+    assert table([]) == ""
+
+
+def test_a_missing_cell_becomes_n_a_because_the_table_formats_through_fmt() -> None:
+    assert table([("Agreement", None)]).endswith("n/a")
+
+
+def test_the_word_n_a_is_spelled_in_exactly_one_place_in_the_reading_module() -> None:
+    """The whole point of a shared vocabulary: one literal, not one per renderer."""
+    tree = ast.parse(READING_SOURCE.read_text(encoding="utf-8"))
+    literals = [
+        node for node in ast.walk(tree) if isinstance(node, ast.Constant) and node.value == "n/a"
+    ]
+
+    assert len(literals) == 1
+
+
+# ── the two manifests: declared once, rendered by the type that owns the arithmetic ───────
+def test_both_pair_manifests_are_exported_together() -> None:
+    assert PAIR_MANIFESTS == (APPROVAL_PAIR, PASS_RATES)
+
+
+def test_the_approval_manifest_names_the_keys_the_approval_block_publishes_in_order() -> None:
+    assert APPROVAL_PAIR.keys == (
+        "agreement",
+        "approval_rate",
+        "decided",
+        "approvals",
+        "labeled_approvals",
+        "unlabeled_approvals",
+        "promoted",
+    )
+
+
+def test_the_pass_rate_manifest_names_the_keys_the_rates_block_publishes_in_order() -> None:
+    assert PASS_RATES.keys == (
+        "pass_label",
+        "first_attempt_pass_rate",
+        "job_pass_rate",
+        "first_attempt_passes",
+        "passed_jobs",
+    )
+
+
+def test_the_pass_rate_manifest_spells_the_label_key_the_coder_reading_publishes() -> None:
+    assert PASS_LABEL_KEY in PASS_RATES.keys
+
+
+def test_the_approval_manifest_renders_exactly_what_the_pair_itself_renders() -> None:
+    assert APPROVAL_PAIR.render(PAIR) == PAIR.render()
+
+
+def test_the_pass_rate_manifest_renders_exactly_what_the_rates_themselves_render() -> None:
+    assert PASS_RATES.render(RATES) == RATES.render()
+
+
+def test_the_approval_manifest_builds_exactly_the_block_the_decide_reading_publishes() -> None:
+    published = APPROVAL_PAIR.block(PAIR)
+
+    assert published == pair_block(PAIR)
+    assert list(published) == list(pair_block(PAIR))
+
+
+def test_the_pass_rate_manifest_builds_exactly_the_block_the_coder_reading_publishes() -> None:
+    published = PASS_RATES.block(RATES)
+    inside = coder_block(CODER_METRICS)["rates"]
+
+    assert list(published) == list(inside)
+    assert published["pass_label"] == FEEDBACK_LABEL
+
+
+def test_the_job_pass_rate_row_carries_the_feedback_label_the_pair_was_told_to_wear() -> None:
+    """The qualification travels in the printed label, filled from the pair's own field."""
+    labels = [label for label, _ in PASS_RATES.rows(RATES)]
+
+    assert f"Job pass rate ({FEEDBACK_LABEL})" in labels
+
+
+# ── the flagship, and the refusal for when it turns up alone ──────────────────────────────
+def test_the_approval_manifest_names_agreement_as_the_figure_that_may_never_stand_alone() -> None:
+    assert APPROVAL_PAIR.flagship == "agreement"
+
+
+def test_the_pass_rate_manifest_names_the_retry_informed_rate_as_its_flagship() -> None:
+    assert PASS_RATES.flagship == "job_pass_rate"
+
+
+def test_every_manifests_flagship_is_one_of_the_keys_it_publishes() -> None:
+    for manifest in PAIR_MANIFESTS:
+        assert manifest.flagship in manifest.keys, manifest.name
+
+
+def test_every_manifests_refusal_names_the_flagship_it_is_refusing_to_print_alone() -> None:
+    for manifest in PAIR_MANIFESTS:
+        assert manifest.flagship in manifest.refusal, manifest.name
+        assert manifest.refusal.startswith("REFUSED"), manifest.name
+
+
+# ── the D2 guard: a manifest may only name figures its pair really carries ─────────────────
+def test_the_approval_manifest_reads_only_fields_the_approval_pair_carries() -> None:
+    assert APPROVAL_PAIR.attributes() <= {field.name for field in fields(ApprovalPair)}
+
+
+def test_the_pass_rate_manifest_reads_only_fields_the_pass_rates_carry() -> None:
+    assert PASS_RATES.attributes() <= {field.name for field in fields(PassRates)}
+
+
+def test_a_manifest_that_publishes_a_key_no_figure_declares_is_refused() -> None:
+    with pytest.raises(ValueError, match="ghost"):
+        PairManifest(
+            name="broken",
+            figures=(PairRow("agreement", "Agreement"),),
+            keys=("agreement", "ghost"),
+            flagship="agreement",
+            refusal="REFUSED — agreement alone.",
+        )
+
+
+def test_a_manifest_whose_flagship_is_not_one_of_its_figures_is_refused() -> None:
+    with pytest.raises(ValueError, match="phantom"):
+        PairManifest(
+            name="broken",
+            figures=(PairRow("agreement", "Agreement"),),
+            keys=("agreement",),
+            flagship="phantom",
+            refusal="REFUSED — phantom alone.",
+        )
+
+
+# ── purity, structurally ──────────────────────────────────────────────────────────────────
+def _import_roots(source: Path) -> set[str]:
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.add(node.module.split(".")[0])
+    return roots
+
+
+def test_the_reading_module_imports_the_standard_library_and_nothing_else() -> None:
+    """Every site's reading depends on this module, so it must drag nothing behind it."""
+    roots = _import_roots(READING_SOURCE)
+
+    assert roots
+    assert roots <= sys.stdlib_module_names
+    assert "noctis" not in roots
+
+
+def test_the_reading_module_reaches_no_file_no_clock_and_no_seeded_draw() -> None:
+    text = READING_SOURCE.read_text(encoding="utf-8")
+
+    for forbidden in ("open(", "Path(", "os.", "random", "datetime", "time."):
+        assert forbidden not in text, forbidden
+
+
+def test_a_fresh_interpreter_that_imports_the_reading_module_loads_no_other_noctis_module() -> None:
+    """The static walk cannot see a transitive import; a module closure in a fresh process can."""
+    probe = (
+        "import json, sys\n"
+        "import noctis.eval.reading\n"
+        "print(json.dumps(sorted(n for n in sys.modules if n.split('.')[0] == 'noctis')))\n"
+    )
+    finished = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+
+    assert json.loads(finished.stdout) == ["noctis", "noctis.eval", "noctis.eval.reading"]
