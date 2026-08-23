@@ -52,6 +52,19 @@ class UsageError(ValueError):
     CLI handler never mistakes a pydantic ``ValidationError`` (also a ValueError) for usage."""
 
 
+class RunPrunedError(RuntimeError):
+    """A reading of a run whose heavy directories retention already deleted (epic #292).
+
+    Raised by :func:`open_reading` when the addressed record says ``state_pruned`` and the verb did
+    not say it can read one anyway (``readable_pruned``). Prunability is decided **once**, here, so
+    the two policies stay one keyword apart: a verb that would assemble something out of the run's
+    ``state/`` or ``reports/`` (``report``, ``champions``, ``account``, ``backtest``,
+    ``strategies``, ``status``) is refused rather than shown a board that reads as empty for a run
+    that had one, while the verbs whose whole subject is the record (``run-record``, ``--finish``,
+    ``run-prune``) still reach it — the record *is* the history retention kept.
+    """
+
+
 @dataclass(frozen=True)
 class OverrideChange:
     """One setting a mandate's overlay moved, from what to what.
@@ -145,8 +158,6 @@ def resolve_session(
     the current files are read, resolved and **adopted** onto the run.
     """
     from noctis.backtest.scorecard import Metric
-    from noctis.config.overlay import patch_snapshot
-    from noctis.research import resolve_mandate
 
     if directive is not None and mandate is not None:
         raise UsageError("Pass either --directive or --mandate, not both.")
@@ -206,8 +217,52 @@ def resolve_session(
             "engine this process is."
         )
 
+    resolved = _session_from_files(
+        config_path, require_gate=require_gate, directive=directive, mandate=mandate
+    )
+    settings = resolved.settings
+    if metric is not None:
+        settings.promotion.metric = metric
+    if time_limit_hours is not None:
+        settings.time_limit_hours = time_limit_hours
+    if run_limit_hours is not None:
+        # Frozen tier, and this is the one moment it may be set: a run is being minted right now,
+        # so the flag is part of what this experiment *is*. Every later segment restores it.
+        settings.run_limit_hours = run_limit_hours
+    if embed_all_sources:
+        # The same rule for the same reason (story #141): what the run's record archives is part
+        # of what the run is, decided once, here.
+        settings.embed_all_sources = True
+    return resolved
+
+
+def _session_from_files(
+    config_path: str | None,
+    *,
+    require_gate: bool,
+    directive: str | None = None,
+    mandate: str | None = None,
+    mandate_overlay: bool = True,
+) -> SessionInputs:
+    """The precedence chain over the **current files**: settings → gate (when asked) → overlay.
+
+    Everything :func:`resolve_session` does except the explicit CLI flags, which land after it and
+    are the one thing a *reading* never applies — so a session being minted and a reading of the
+    reserved run are told the same thing by construction (:func:`open_reading` is the other
+    caller). No path is bound and no run is addressed here: the reserved ``legacy`` tree is what
+    settings assembled from the current files already point at.
+
+    ``mandate_overlay=False`` skips ``resolve_mandate``/:func:`overlay_mandate` entirely and yields
+    ``mandate=None, overrides=[]``. That is ``status``'s degrade, not a second policy: a diagnosis
+    verb whose mandate is the problem must still print the mode line it exists to print.
+    """
+    from noctis.config.overlay import patch_snapshot
+    from noctis.research import resolve_mandate
+
     settings = load_settings(config_path=config_path)
     mode = resolve_execution_mode(settings) if require_gate else None
+    if not mandate_overlay:
+        return SessionInputs(settings=settings, mode=mode, mandate=None, overrides=[])
     active = resolve_mandate(settings, cli_directive=directive, cli_mandate=mandate)
     # The overlay is applied once, and both readings of it are taken around that one call: the
     # applier's ``"k=v"`` echo lines, and the same paths' values snapshotted either side. The
@@ -222,18 +277,6 @@ def resolve_session(
         for path, after in sorted(patch_snapshot(settings, patch).items())
     ]
     warn_if_auto_overlay_is_inert(settings, active)
-    if metric is not None:
-        settings.promotion.metric = metric
-    if time_limit_hours is not None:
-        settings.time_limit_hours = time_limit_hours
-    if run_limit_hours is not None:
-        # Frozen tier, and this is the one moment it may be set: a run is being minted right now,
-        # so the flag is part of what this experiment *is*. Every later segment restores it.
-        settings.run_limit_hours = run_limit_hours
-    if embed_all_sources:
-        # The same rule for the same reason (story #141): what the run's record archives is part
-        # of what the run is, decided once, here.
-        settings.embed_all_sources = True
     return SessionInputs(
         settings=settings, mode=mode, mandate=active, overrides=overrides, changes=changes
     )
@@ -280,9 +323,8 @@ def resume_session(
     happened. It never reaches the refused tier — ``mode``/``allow_live`` are checked before it and
     refused with a message that says no flag lifts them.
     """
-    from noctis.config.rehydrate import assert_mode_unchanged, has_frozen_inputs, rehydrate
+    from noctis.config.rehydrate import assert_mode_unchanged
     from noctis.reporting.run_tree import assert_resumable, read_run_record
-    from noctis.research import mandate_from_frozen
 
     settings = load_settings(config_path=config_path)
     mode = resolve_execution_mode(settings) if require_gate else None
@@ -306,32 +348,53 @@ def resume_session(
             # *settings*, and says nothing about the code that will run them. A rebase is still a
             # resume, so it carries the same address every other resumed session does.
             return replace(adopted, resume=run_id, engine_notes=notes, engine_upgrade=upgrade)
+    frozen = _session_from_record(record, settings, mode=mode, run_id=addressed)
+    # The live tier's last word, exactly as on a first start: an explicit flag beats the file it
+    # would have come from. Only live-tier flags reach here — the frozen ones were refused by
+    # ``resolve_session`` with a reason, rather than silently ignored.
+    if time_limit_hours is not None:
+        frozen.settings.time_limit_hours = time_limit_hours
+    return replace(frozen, resume=run_id, engine_notes=notes, engine_upgrade=upgrade)
+
+
+def _session_from_record(
+    record: Mapping[str, Any],
+    settings: Settings,
+    *,
+    mode: Literal["paper", "live"] | None,
+    run_id: str,
+) -> SessionInputs:
+    """The session one run **froze**: its frozen settings tier, its mandate, its applied overrides.
+
+    The other half of the pair :func:`_session_from_files` opens — and the reason "what the run
+    saw" has exactly one definition: :func:`resume_session` continues a run under it and
+    :func:`open_reading` reads a run under it, so a segment and a reading of the same record can
+    never be told two different things. Pure decisions apart from the log line: the frozen tier
+    comes back through :func:`~noctis.config.rehydrate.rehydrate` (live paths, secrets and
+    per-process budgets stay this process's), the mandate through
+    :func:`~noctis.research.mandate_from_frozen` (resolved *text*, never a selector re-resolved
+    against today's files), and the overrides are the echo lines the record already carries.
+
+    A run that froze **nothing** — history adopted by ``noctis migrate``, or a run predating config
+    freezing — restores nothing and is therefore read under the current ``config.yaml`` with no
+    overlay at all, which is said out loud rather than inferred from a silently ordinary result.
+    """
+    from noctis.config.rehydrate import has_frozen_inputs, rehydrate
+    from noctis.research import mandate_from_frozen
+
     if not has_frozen_inputs(record):
         logger.warning(
             "run %s froze no configuration (it predates config freezing, or it is history adopted "
             "by `noctis migrate`), so this segment runs under the current config.yaml and "
             "mandate/ — and freezes them onto the run for every segment after it.",
-            addressed,
+            run_id,
         )
-    settings = rehydrate(record, settings)
+    resumed = rehydrate(record, settings)
     frozen = record.get("inputs") if has_frozen_inputs(record) else None
     frozen_mandate = frozen.get("mandate") if frozen else None
     active = mandate_from_frozen(frozen_mandate)
     overrides = list(frozen_mandate.get("overrides_applied") or []) if frozen_mandate else []
-    # The live tier's last word, exactly as on a first start: an explicit flag beats the file it
-    # would have come from. Only live-tier flags reach here — the frozen ones were refused by
-    # ``resolve_session`` with a reason, rather than silently ignored.
-    if time_limit_hours is not None:
-        settings.time_limit_hours = time_limit_hours
-    return SessionInputs(
-        settings=settings,
-        mode=mode,
-        mandate=active,
-        overrides=overrides,
-        resume=run_id,
-        engine_notes=notes,
-        engine_upgrade=upgrade,
-    )
+    return SessionInputs(settings=resumed, mode=mode, mandate=active, overrides=overrides)
 
 
 def _engine_change_on_resume(
@@ -462,6 +525,139 @@ def _addressed_id(record: dict, address: str) -> str:
     """
     run = record.get("run")
     return str(run.get("run_id") or address) if isinstance(run, dict) else address
+
+
+def _state_pruned(record: Mapping[str, Any] | None) -> bool:
+    """Whether retention has deleted this run's heavy directories, off the record's own marker."""
+    run = record.get("run") if isinstance(record, Mapping) else None
+    return bool(run.get("state_pruned")) if isinstance(run, Mapping) else False
+
+
+@dataclass(frozen=True)
+class Reading:
+    """One process's look at a run: its resolved inputs, its tree, and the record they came from.
+
+    A **value**, not a context manager — nothing here was opened, so nothing has to be closed. It
+    is what :func:`open_reading` hands a read-only verb, and it carries exactly what such a verb
+    needs to assemble its collaborators: the settings every builder reads (post-overlay for the
+    reserved run, the run's own frozen tier for an addressed one), the tree those settings are
+    bound to, the address an operator typed, and the record itself for the verbs that quote it.
+    """
+
+    inputs: SessionInputs
+    # The tree every collaborator built from ``settings`` reads. The reserved ``legacy`` run when
+    # nothing was addressed — which may not exist on disk at all, and needs not: a reading creates
+    # nothing.
+    run_dir: Path
+    # What the operator *typed* (an id, ``latest``, a path, ``@label``), never the id it resolved
+    # to, so a refusal or an echo is always about a run they can go and look at. ``None`` is the
+    # bare form of every reader: the reserved run.
+    address: str | None = None
+    # The addressed run's record, read once and handed on, so a verb that quotes it does not read
+    # ``run.json`` a second time. ``None`` for the reserved run — an unaddressed reading resolves
+    # no run and therefore reads no record.
+    record: Mapping[str, Any] | None = None
+
+    @property
+    def settings(self) -> Settings:
+        """The settings this reading resolved — what every collaborator is built from."""
+        return self.inputs.settings
+
+    @property
+    def mode(self) -> Literal["paper", "live"] | None:
+        """The gate's verdict, or ``None`` when this reader never asked for one (D1)."""
+        return self.inputs.mode
+
+    @property
+    def run_id(self) -> str:
+        """The run being read — its tree's name, which is the identity that named the tree."""
+        return self.run_dir.name
+
+    @property
+    def addressed(self) -> bool:
+        """Whether an operator named the run. Exactly ``address is not None`` — one field, so a
+        caller can never hold the address and the flag apart (and the legacy-layout guard, whose
+        question an address answers, reads this)."""
+        return self.address is not None
+
+    @property
+    def pruned(self) -> bool:
+        """Whether retention removed this run's ``state/``, ``strategies/`` and ``reports/``.
+
+        Only ever true on a reading that asked for one (``readable_pruned=True``): every other
+        reader is refused by :class:`RunPrunedError` before it gets a value to ask.
+        """
+        return _state_pruned(self.record)
+
+
+def open_reading(
+    config_path: str | None = None,
+    address: str | None = None,
+    *,
+    require_gate: bool = False,
+    mandate_overlay: bool = True,
+    readable_pruned: bool = False,
+) -> Reading:
+    """Read one run — or the reserved one — the way :func:`resolve_session` opens a session (#292).
+
+    The one entry for a **read-only** verb, and the answer to a whole class of bug: a reader that
+    stopped at ``load_settings`` saw the pre-overlay ``promotion.metric`` while the run whose
+    champions it was labelling had been steered onto another one. Two shapes, one per address:
+
+    * **unaddressed** — today's chain over the current files (:func:`_session_from_files`:
+      settings → gate when asked → mandate overlay), binding nothing, because the reserved
+      ``legacy`` tree is what those settings already point at. This is what a run minted right now
+      would be told.
+    * **addressed** — one resolver turns the operator's string into a run dir (the four forms in
+      one fixed order), the record is read **without a lock**, the run's tree is bound onto the
+      settings and its frozen inputs come back through :func:`_session_from_record` — the same
+      recipe ``--resume`` runs on, so a reading of a run sees what a resume of it would run under.
+
+    Minus the lock, and minus the acting: none of ``assert_resumable``, ``assert_mode_unchanged``,
+    the engine-change note or the ``--rebase-config`` adoption runs here. A reader acts on nothing,
+    so a **completed** run is readable (terminal is about working a run, not reading one), a run
+    another engine is live on is readable (reading must never block or corrupt an engine), and the
+    tree is left byte-identical: no lock taken, no record written, nothing created.
+
+    It builds nothing, either — no registry, no lake, no memory, no report. It resolves and binds
+    and stops; the command body assembles its collaborators from ``reading.settings``.
+
+    Raises :class:`~noctis.reporting.run_tree.RunNotFoundError` (and its ``RunAmbiguousError``
+    subclass) for an address nobody — or too many runs — answer, :class:`RunPrunedError` for a run
+    whose tree retention deleted unless ``readable_pruned`` says this verb can read one anyway, and
+    whatever the chain itself refuses (:class:`~noctis.config.SafetyGateError` under
+    ``require_gate``, :class:`~noctis.research.MandateError` under the overlay).
+    """
+    if address is None:
+        inputs = _session_from_files(
+            config_path, require_gate=require_gate, mandate_overlay=mandate_overlay
+        )
+        return Reading(inputs=inputs, run_dir=Path(inputs.settings.run_dir))
+    # Deferred exactly as every other run-tree read in this module is: the composition root is on
+    # the ``--help`` path, and the run tree drags in the record schema behind it.
+    from noctis.config.settings import bind_run_dir
+    from noctis.reporting.run_tree import read_run_record, resolve_run_dir
+
+    settings = load_settings(config_path=config_path)
+    mode = resolve_execution_mode(settings) if require_gate else None
+    runs_dir = Path(settings.runs_dir)
+    # Two pure reads of the same records, and deliberately so: one resolver owns the four address
+    # forms, and the read that follows raises on a record a reading has nothing to read *under*.
+    run_dir = resolve_run_dir(runs_dir, address)
+    record = read_run_record(runs_dir, address)
+    run_id = _addressed_id(record, run_dir.name)
+    if _state_pruned(record) and not readable_pruned:
+        raise RunPrunedError(
+            f"Run {run_id} was pruned: `noctis run-prune` deleted its reports/ and state/, so "
+            f"there is nothing left to read and nothing honest to assemble from. Everything the "
+            f"run accumulated is still in its record — `noctis run-record {run_id}`."
+        )
+    # Bound *before* rehydration, and that order is the point: the run's tree is the live tier
+    # (``RUN_IDENTITY`` is never in a record), so binding it here is what makes it survive the copy
+    # rehydration takes — and what makes every collaborator afterwards read the addressed run.
+    bind_run_dir(settings, run_dir)
+    inputs = _session_from_record(record, settings, mode=mode, run_id=run_id)
+    return Reading(inputs=inputs, run_dir=run_dir, address=address, record=record)
 
 
 def overlay_mandate(settings: Settings, mandate: Mandate | None) -> list[str]:
