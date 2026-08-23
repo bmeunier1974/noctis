@@ -68,6 +68,7 @@ from noctis.backtest.scorecard import Scorecard
 from noctis.champions.promotion import Decision, GateResult, PromotionRules, decide
 from noctis.eval.case import Case, parse_case
 from noctis.eval.episodic_sites import DECIDE_SITE
+from noctis.eval.reading import NOT_APPLICABLE
 from noctis.research.driver import (
     _APPROVE,
     _EXHAUSTED,
@@ -130,8 +131,9 @@ BINDING_GATE_AXIS = "binding_gate"
 EVIDENCE_DEPTH_AXIS = "evidence_depth"
 DIFFICULTY_AXES: tuple[str, ...] = (MARGIN_AXIS, BINDING_GATE_AXIS, EVIDENCE_DEPTH_AXIS)
 
-# The one word every axis says when its answer cannot be reconstructed. Never a plausible value.
-NOT_APPLICABLE = "n/a"
+# The one word every axis says when its answer cannot be reconstructed — never a plausible value.
+# It is the eval layer's word rather than this module's: spelled once in :mod:`noctis.eval.reading`
+# and re-exported here, where the axes that say it live (#305).
 
 # The agreement label: the gates' own disposition of an approval that was really spent.
 LABEL_PROMOTED = "promoted"

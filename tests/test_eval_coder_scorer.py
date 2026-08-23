@@ -550,17 +550,32 @@ def test_the_coder_declaration_carries_the_reading_scorer_in_its_scorers_slot():
     assert CODER_SITE.scorers == (CODER_SCORER,)
 
 
-def test_a_fresh_answer_is_spelled_the_same_word_the_decide_reading_spells_it():
-    """The vocabulary is shared so two records diff; each module states it without importing."""
+def test_a_fresh_answer_is_the_one_object_the_decide_reading_publishes_too():
+    """The vocabulary is shared so two records diff — and now it is shared by import (#305).
+
+    This used to pin two independently spelled copies equal, which is a test that can only report
+    a drift after a record carrying it has been published. The word lives in the reading module;
+    both sites name the same object, and an identity assertion says so.
+    """
     from noctis.eval.decide_site import ANSWERS_FRESH as DECIDE_FRESH
+    from noctis.eval.reading import ANSWERS_FRESH as SHARED_FRESH
 
-    assert ANSWERS_FRESH == DECIDE_FRESH
+    assert ANSWERS_FRESH is SHARED_FRESH
+    assert DECIDE_FRESH is SHARED_FRESH
 
 
-def test_an_unlabelled_stratum_is_spelled_the_same_word_the_decide_reading_spells_it():
+def test_an_unlabelled_stratum_is_the_one_object_the_decide_reading_publishes_too():
     from noctis.eval.decide_case import NOT_APPLICABLE as DECIDE_NOT_APPLICABLE
+    from noctis.eval.reading import NOT_APPLICABLE as SHARED_NOT_APPLICABLE
 
-    assert NOT_APPLICABLE == DECIDE_NOT_APPLICABLE
+    assert NOT_APPLICABLE is SHARED_NOT_APPLICABLE
+    assert DECIDE_NOT_APPLICABLE is SHARED_NOT_APPLICABLE
+
+
+def test_the_per_axis_breakdown_rides_under_the_one_key_the_reading_module_spells():
+    from noctis.eval.reading import STRATA_KEY as SHARED_STRATA_KEY
+
+    assert STRATA_KEY is SHARED_STRATA_KEY
 
 
 def test_the_block_builder_and_the_scoring_pass_publish_the_same_shape():

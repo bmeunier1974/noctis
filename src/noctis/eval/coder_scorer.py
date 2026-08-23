@@ -95,7 +95,14 @@ from noctis.eval.metrics import (
     mean_attempts_to_pass,
     retry_yield,
 )
-from noctis.eval.reading import PASS_RATES
+from noctis.eval.reading import (
+    ANSWERS_FRESH,
+    ANSWERS_KEY,
+    ATTEMPT_CALLS_KEY,
+    NOT_APPLICABLE,
+    PASS_RATES,
+    STRATA_KEY,
+)
 from noctis.eval.reading import table as render_table
 from noctis.eval.site import AnsweredCase
 from noctis.research.pricing import USAGE_FIELDS, PriceTable, default_table
@@ -128,10 +135,10 @@ __all__ = [
 #: The key the whole coder reading rides under, inside the dials subtree a record quotes verbatim.
 CODER_DIALS_KEY = "coder"
 
-#: What ``dials.answers`` says on a bench that really asked a model. The word is DECIDE's
-#: (:data:`noctis.eval.decide_site.ANSWERS_FRESH`), spelled here rather than imported so this
-#: module stays free of another site's vocabulary; the suite pins the two equal.
-ANSWERS_FRESH = "fresh"
+# ``ANSWERS_FRESH`` — what ``dials.answers`` says on a bench that really asked a model — is not
+# this site's word and not DECIDE's either: it is the eval layer's, spelled once in
+# :mod:`noctis.eval.reading` and re-exported here. It used to be spelled in both sites with a suite
+# test pinning the copies equal, which is a pin that can only report drift after it happens (#305).
 
 #: What retry-informed passing is called, in full, wherever it renders. Never plain ``pass@k``:
 #: the retries were shown the gate's rejection, which is a materially easier question.
@@ -148,15 +155,11 @@ RETRY_INFORMED_BLOCKS: tuple[str, ...] = ("rates", "effort", "escalation", "cost
 UNREADABLE_KEY = "unreadable"
 UNATTEMPTED_KEY = "unattempted_jobs"
 
-#: The key the per-axis breakdown rides under. The word is DECIDE's (its reading publishes
-#: ``strata`` in the same place), so one generic reader renders both sites' breakdowns.
-STRATA_KEY = "strata"
-
-#: What a stratum is keyed by when a job's case carries no level on an axis. Every validated coder
-#: case is labelled on all seven, so this is a defensive spelling rather than an expected row; the
-#: word is DECIDE's (:data:`noctis.eval.decide_case.NOT_APPLICABLE`), spelled here rather than
-#: imported so this module stays free of another site's vocabulary; the suite pins the two equal.
-NOT_APPLICABLE = "n/a"
+# ``STRATA_KEY`` is the key the per-axis breakdown rides under, on this site and DECIDE's alike, so
+# one generic reader renders both; ``NOT_APPLICABLE`` is what a stratum is keyed by when a job's
+# case carries no level on an axis (every validated coder case is labelled on all seven, so it is a
+# defensive spelling rather than an expected row). Both are the eval layer's words, imported from
+# :mod:`noctis.eval.reading` and re-exported here (#305).
 
 
 # ── the co-primary pair ───────────────────────────────────────────────────────────────────
@@ -630,14 +633,22 @@ class CoderReadingScorer:
 
         ``None`` for a bench that answered nothing: a reading over no answers is not a measured
         zero, it is an absence, and publishing empty figures beside real dials would read as one.
+
+        **The population is jobs, and the reps are not folded — on purpose.** DECIDE folds a case's
+        reps into one contribution by strict majority (:func:`~noctis.eval.reading.fold_by_case`),
+        because a case has one right verdict and several answers to it. A coder brief has no such
+        thing: every rep is a real authoring *job* that really asked, really spent and really landed
+        or did not, and the pass rates are rates over those jobs. There is no verdict vocabulary
+        over an authored file to take a majority of, so a fold here would blur the spread the two
+        rates exist to report rather than settle anything (#305).
         """
         if not answered:
             return None
         read = job_records(answered)
         records = [record for record, _ in read]
         return {
-            "answers": ANSWERS_FRESH,
-            "attempt_calls": sum(len(one.replies) for one in answered),
+            ANSWERS_KEY: ANSWERS_FRESH,
+            ATTEMPT_CALLS_KEY: sum(len(one.replies) for one in answered),
             CODER_DIALS_KEY: coder_block(
                 score_coder_jobs(records),
                 warnings=_warning_rows(read),

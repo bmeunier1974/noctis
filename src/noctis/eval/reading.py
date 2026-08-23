@@ -8,11 +8,26 @@ the type that owns them, in the block builder that publishes them and in the rea
 them. Nothing was wrong; everything was duplicated, which is the same thing one release later.
 
 **One spelling of an absence.** :func:`fmt` is the single place a ``None`` becomes the word
-:data:`NOT_AVAILABLE`, a rate becomes four decimals and a flag becomes ``yes``/``no``. The flag arm
+:data:`NOT_APPLICABLE`, a rate becomes four decimals and a flag becomes ``yes``/``no``. The flag arm
 is first on purpose: a ``bool`` *is* an ``int`` in Python, so a later arm would print ``True`` where
 a reader expects a word. :func:`table` lays those cells out in two columns at whatever widths a
 caller asks for — the only reason a width is a parameter is that the coder's labels are longer than
 DECIDE's, and a report lines up with the block it quotes.
+
+**One spelling of the words themselves.** Beside the formatting, this module owns the vocabulary
+more than one site's reading has to say: :data:`NOT_APPLICABLE` for an answer that could not be
+reconstructed, :data:`ANSWERS_FRESH` / :data:`ANSWERS_RECORDED` for how a bench came by its answers,
+the three headline keys a dials block states up front (:data:`RETROSPECTIVE_KEY`,
+:data:`ANSWERS_KEY`, :data:`ATTEMPT_CALLS_KEY`) and :data:`STRATA_KEY` for the per-axis breakdown
+beneath them. Each was spelled site by site, with a suite test pinning the copies equal — a pin that
+can only ever report the drift it was written to prevent. The word is one object now and the sites
+import or re-export it, so two records diff because they *are* one vocabulary (#305).
+
+**Folding a bench's reps is arithmetic, not a site's opinion.** A bench may ask one case many times,
+and the eval core weighs the *case*, so those answers fold into the one contribution the case makes.
+:func:`fold_by_case` groups them and :func:`strict_majority` settles them — generic over a key
+function, because this module knows no site's types — while what an unsettled case is *called* stays
+with the site that owns the word (DECIDE's ``NO_MAJORITY``, in :mod:`noctis.eval.decide_site`).
 
 **A co-primary pair is declared once.** :class:`PairManifest` is one pair's whole vocabulary: the
 figures it is made of, the order a JSON block publishes them in, the order a report prints them in,
@@ -38,25 +53,58 @@ interpreter.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections import Counter
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
+
+#: Whatever a caller is folding — an answered case, a scored reply, a job record. This module never
+#: learns which: it is handed a key function and returns the same objects it was given.
+_T = TypeVar("_T")
 
 __all__ = [
+    "ANSWERS_FRESH",
+    "ANSWERS_KEY",
+    "ANSWERS_RECORDED",
     "APPROVAL_PAIR",
+    "ATTEMPT_CALLS_KEY",
     "LABEL_WIDTH",
-    "NOT_AVAILABLE",
+    "NOT_APPLICABLE",
     "PAIR_MANIFESTS",
     "PASS_RATES",
+    "RETROSPECTIVE_KEY",
+    "STRATA_KEY",
     "VALUE_WIDTH",
     "PairManifest",
     "PairRow",
     "fmt",
+    "fold_by_case",
+    "strict_majority",
     "table",
 ]
 
-#: How every unknown figure renders, everywhere in the eval layer. One token, spelled once.
-NOT_AVAILABLE = "n/a"
+# ── the shared vocabulary: the words a published reading says ─────────────────────────────
+
+#: How every unknown figure renders, everywhere in the eval layer — a rate over nothing, a stratum
+#: a case carries no level on, an axis history is too thin to reconstruct. One token, spelled once,
+#: and never a plausible value: an absence is a finding of its own, not a zero.
+NOT_APPLICABLE = "n/a"
+
+#: What ``dials.answers`` says on a bench that really asked a model, and on one that re-read
+#: history. One vocabulary, so the two records are diffable rather than merely similar.
+ANSWERS_FRESH = "fresh"
+ANSWERS_RECORDED = "recorded"
+
+#: The three facts a dials block states up front, above any site's own figures: whether the reading
+#: is a re-read of what history recorded, how the bench came by its answers, and how many model
+#: calls sit behind them. Every site states all three, in these words.
+RETROSPECTIVE_KEY = "retrospective"
+ANSWERS_KEY = "answers"
+ATTEMPT_CALLS_KEY = "attempt_calls"
+
+#: The key a per-axis breakdown rides under — axis → level → that level's own figures. Both sites
+#: spell it the same way, which is what lets one generic reader render either site's strata.
+STRATA_KEY = "strata"
 
 #: The two-column default: DECIDE's label column, and the value column every reading shares.
 LABEL_WIDTH = 28
@@ -64,14 +112,14 @@ VALUE_WIDTH = 12
 
 
 def fmt(value: object) -> str:
-    """One cell: :data:`NOT_AVAILABLE` for a null, four decimals for a rate, ``yes``/``no`` for a
+    """One cell: :data:`NOT_APPLICABLE` for a null, four decimals for a rate, ``yes``/``no`` for a
     flag, the value itself otherwise.
 
     The flag arm sits above the number arm deliberately — ``isinstance(True, int)`` is ``True``, so
     the obvious ordering prints a Python repr where a reader is owed a word.
     """
     if value is None:
-        return NOT_AVAILABLE
+        return NOT_APPLICABLE
     if isinstance(value, bool):
         return "yes" if value else "no"
     if isinstance(value, float):
@@ -247,3 +295,44 @@ PASS_RATES = PairManifest(
 #: Every co-primary pair the eval layer declares. A reader that renders pairs generically walks
 #: this, so a third pair is one declaration here rather than an edit in every reader.
 PAIR_MANIFESTS: tuple[PairManifest, ...] = (APPROVAL_PAIR, PASS_RATES)
+
+
+# ── folding a bench's reps: one case, one contribution ────────────────────────────────────
+
+
+def fold_by_case(items: Iterable[_T], key: Callable[[_T], str]) -> tuple[tuple[_T, ...], ...]:
+    """The items grouped by the case each of them answered — one group per case id, in id order.
+
+    The eval core's equal-weight unit is the **case**, so a bench that asked one case several times
+    (several reps, more than one configuration) folds those answers into the single contribution
+    that case makes; grouping in case-id order is what makes a reading's rows reproducible from the
+    corpus rather than from the order a runner happened to finish in. Answers keep their arrival
+    order inside their own group, and ``key`` is how a caller reads a case id off whatever it is
+    folding — this module knows no site's types, and must not learn one to group them.
+
+    **Not every site folds, and the coder deliberately does not.** Its reading keeps a population of
+    authoring *jobs*: its rates are rates over jobs asked, and there is no verdict vocabulary over
+    an authored file to take a majority of, so folding reps there would blur the very spread the
+    pass rates exist to report (#305).
+    """
+    grouped: dict[str, list[_T]] = {}
+    for item in items:
+        grouped.setdefault(key(item), []).append(item)
+    return tuple(tuple(grouped[case_id]) for case_id in sorted(grouped))
+
+
+def strict_majority(items: Sequence[_T], key: Callable[[_T], Hashable]) -> _T | None:
+    """The first item whose key **more than half** of them hold, or ``None`` when none does.
+
+    Strict on purpose: an exact tie and a plurality short of half both settle nothing, and a caller
+    owed an answer that no item gave is owed a refusal instead — inventing one would publish a
+    result nobody produced. The *item* comes back rather than the key, so a caller carries a real
+    answer forward with everything else it recorded; ``key`` says which of its parts is being voted
+    on, and the site keeps the word for what an unsettled group is called.
+    """
+    if not items:
+        return None
+    answer, held = Counter(key(item) for item in items).most_common(1)[0]
+    if held * 2 <= len(items):
+        return None
+    return next(item for item in items if key(item) == answer)

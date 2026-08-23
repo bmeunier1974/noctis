@@ -26,7 +26,7 @@ import ast
 import json
 import subprocess
 import sys
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import pytest
@@ -49,6 +49,8 @@ from noctis.eval.reading import (
     PairManifest,
     PairRow,
     fmt,
+    fold_by_case,
+    strict_majority,
     table,
 )
 
@@ -89,6 +91,61 @@ CODER_METRICS = score_coder_jobs(
         )
     ]
 )
+
+
+# ── the shared vocabulary: one spelling, wherever a record says the word ──────────────────
+#: Every word the eval layer's records carry that more than one module has to say (#305).
+SHARED_SPELLINGS = frozenset(
+    {"n/a", "fresh", "recorded", "strata", "retrospective", "answers", "attempt_calls"}
+)
+
+
+def _declared_spellings(source: Path) -> list[str]:
+    """Every shared word a module binds a module-level name to — a spelling of its own, listed."""
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    return [
+        node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and node.value.value in SHARED_SPELLINGS
+    ]
+
+
+def test_the_shared_spellings_are_the_words_a_published_reading_carries() -> None:
+    assert (reading.NOT_APPLICABLE, reading.ANSWERS_FRESH, reading.ANSWERS_RECORDED) == (
+        "n/a",
+        "fresh",
+        "recorded",
+    )
+
+
+def test_the_headline_keys_are_the_three_facts_a_dials_block_states_up_front() -> None:
+    assert (reading.RETROSPECTIVE_KEY, reading.ANSWERS_KEY, reading.ATTEMPT_CALLS_KEY) == (
+        "retrospective",
+        "answers",
+        "attempt_calls",
+    )
+
+
+def test_the_per_axis_breakdown_rides_under_the_one_key_both_sites_spell_the_same_way() -> None:
+    assert reading.STRATA_KEY == "strata"
+
+
+def test_this_module_declares_every_shared_spelling_exactly_once() -> None:
+    """A list, not a set: a second copy *here* would be the same duplication, one file smaller."""
+    assert sorted(_declared_spellings(READING_SOURCE)) == sorted(SHARED_SPELLINGS)
+
+
+def test_no_other_eval_module_declares_a_shared_spelling_of_its_own() -> None:
+    """The words a record carries are imported or re-exported from here — never restated (#305)."""
+    offenders = {
+        source.name: declared
+        for source in sorted(READING_SOURCE.parent.glob("*.py"))
+        if source != READING_SOURCE and (declared := _declared_spellings(source))
+    }
+
+    assert offenders == {}
 
 
 # ── fmt: the one place an absence becomes a word ──────────────────────────────────────────
@@ -274,6 +331,109 @@ def test_a_manifest_whose_flagship_is_not_one_of_its_figures_is_refused() -> Non
             flagship="phantom",
             refusal="REFUSED — phantom alone.",
         )
+
+
+# ── strict_majority: more than half of them said it, or nobody did ────────────────────────
+@dataclass(frozen=True)
+class _Answer:
+    """A stand-in for whatever a site folds: the function knows only the key it is handed."""
+
+    who: str
+    verdict: str
+
+
+def _verdict(answer: _Answer) -> str:
+    return answer.verdict
+
+
+def test_a_verdict_more_than_half_the_answers_hold_is_the_majority() -> None:
+    answers = (_Answer("a", "approve"), _Answer("b", "approve"), _Answer("c", "reject"))
+
+    assert strict_majority(answers, key=_verdict) == _Answer("a", "approve")
+
+
+def test_the_majority_is_the_first_answer_holding_it_so_a_caller_reads_a_real_one() -> None:
+    answers = (
+        _Answer("a", "reject"),
+        _Answer("b", "approve"),
+        _Answer("c", "approve"),
+        _Answer("d", "approve"),
+    )
+
+    assert strict_majority(answers, key=_verdict) == _Answer("b", "approve")
+
+
+def test_an_exact_tie_holds_no_majority_and_none_is_invented_for_it() -> None:
+    answers = (_Answer("a", "approve"), _Answer("b", "reject"))
+
+    assert strict_majority(answers, key=_verdict) is None
+
+
+def test_a_plurality_short_of_half_holds_no_majority_either() -> None:
+    answers = (
+        _Answer("a", "approve"),
+        _Answer("b", "approve"),
+        _Answer("c", "reject"),
+        _Answer("d", "revise"),
+    )
+
+    assert strict_majority(answers, key=_verdict) is None
+
+
+def test_one_answer_is_its_own_majority() -> None:
+    assert strict_majority((_Answer("a", "approve"),), key=_verdict) == _Answer("a", "approve")
+
+
+def test_no_answers_hold_no_majority() -> None:
+    assert strict_majority((), key=_verdict) is None
+
+
+# ── fold_by_case: one case, one group, in case-id order ───────────────────────────────────
+@dataclass(frozen=True)
+class _Rep:
+    """One rep's answer to one case — all ``fold_by_case`` reads of it is the case it answered."""
+
+    case_id: str
+    rep: int
+
+
+def _case_id(one: _Rep) -> str:
+    return one.case_id
+
+
+def test_every_answer_to_one_case_folds_into_that_cases_group() -> None:
+    answered = (_Rep("a", 1), _Rep("b", 1), _Rep("a", 2))
+
+    assert fold_by_case(answered, key=_case_id) == (
+        (_Rep("a", 1), _Rep("a", 2)),
+        (_Rep("b", 1),),
+    )
+
+
+def test_the_groups_come_in_case_id_order_whatever_order_the_answers_arrived_in() -> None:
+    answered = (_Rep("c", 1), _Rep("a", 1), _Rep("b", 1))
+
+    assert tuple(group[0].case_id for group in fold_by_case(answered, key=_case_id)) == (
+        "a",
+        "b",
+        "c",
+    )
+
+
+def test_one_group_per_case_id_however_many_reps_answered_it() -> None:
+    answered = (_Rep("a", 1), _Rep("a", 2), _Rep("a", 3), _Rep("b", 1))
+
+    assert tuple(len(group) for group in fold_by_case(answered, key=_case_id)) == (3, 1)
+
+
+def test_answers_keep_the_order_they_arrived_in_inside_their_own_group() -> None:
+    answered = (_Rep("a", 3), _Rep("a", 1), _Rep("a", 2))
+
+    assert tuple(one.rep for one in fold_by_case(answered, key=_case_id)[0]) == (3, 1, 2)
+
+
+def test_no_answers_fold_into_no_groups() -> None:
+    assert fold_by_case((), key=_case_id) == ()
 
 
 # ── purity, structurally ──────────────────────────────────────────────────────────────────

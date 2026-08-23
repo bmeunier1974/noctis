@@ -78,7 +78,6 @@ import.
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -93,7 +92,17 @@ from noctis.eval.decide_scorer import (
     score_decide_batch,
 )
 from noctis.eval.metrics import AttemptOutcome
-from noctis.eval.reading import APPROVAL_PAIR
+from noctis.eval.reading import (
+    ANSWERS_FRESH,
+    ANSWERS_KEY,
+    ANSWERS_RECORDED,
+    APPROVAL_PAIR,
+    ATTEMPT_CALLS_KEY,
+    RETROSPECTIVE_KEY,
+    STRATA_KEY,
+    fold_by_case,
+    strict_majority,
+)
 from noctis.eval.site import AnsweredCase
 from noctis.research.driver import DECIDE_CONTRACT, DECIDE_FINAL_CONTRACT, DecideOutput
 from noctis.research.episode import EmitContract, _extract_json_object
@@ -132,10 +141,10 @@ __all__ = [
 #: The key the whole DECIDE reading rides under, inside the dials subtree a record quotes verbatim.
 DECIDE_DIALS_KEY = "decide"
 
-#: What ``dials.answers`` says on a bench that really asked a model, and on one that re-read
-#: history. One vocabulary, so the two records are diffable rather than merely similar.
-ANSWERS_FRESH = "fresh"
-ANSWERS_RECORDED = "recorded"
+# ``ANSWERS_FRESH`` / ``ANSWERS_RECORDED`` — what ``dials.answers`` says on a bench that really
+# asked a model, and on one that re-read history — are the eval layer's words rather than this
+# site's: spelled once in :mod:`noctis.eval.reading`, and re-exported here because this module's
+# docstring names them and its readers have always imported them from it (#305).
 
 #: The two exclusion counts a live reading carries beside the pair — the n/a side, named.
 UNREADABLE_KEY = "unreadable"
@@ -606,24 +615,27 @@ class DecideAgreementScorer:
         return {
             # The three facts that distinguish this record from a retrospective one, stated up
             # front and in that record's own vocabulary.
-            "retrospective": False,
-            "answers": ANSWERS_FRESH,
-            "attempt_calls": sum(len(one.replies) for one in answered),
+            RETROSPECTIVE_KEY: False,
+            ANSWERS_KEY: ANSWERS_FRESH,
+            ATTEMPT_CALLS_KEY: sum(len(one.replies) for one in answered),
             DECIDE_DIALS_KEY: {
                 **scored_block(score_decide_batch(outcomes)),
                 UNREADABLE_KEY: sum(1 for one in readings if one.unreadable),
                 UNSETTLED_KEY: sum(1 for one in readings if one.unsettled),
                 "cases": [one.row() for one in readings],
-                "strata": strata_block([one.case for one in readings], outcomes),
+                STRATA_KEY: strata_block([one.case for one in readings], outcomes),
             },
         }
 
     def _readings(self, answered: Sequence[AnsweredCase]) -> tuple[_CaseReading, ...]:
-        """Every case this bench asked, folded once, in case-id order."""
-        grouped: dict[str, list[AnsweredCase]] = {}
-        for one in answered:
-            grouped.setdefault(one.case.case_id, []).append(one)
-        return tuple(self._fold(grouped[case_id]) for case_id in sorted(grouped))
+        """Every case this bench asked, folded once, in case-id order.
+
+        The grouping is :func:`~noctis.eval.reading.fold_by_case`'s — arithmetic every site's
+        reading is entitled to — and what a folded group *means* is :meth:`_fold`'s, below.
+        """
+        return tuple(
+            self._fold(group) for group in fold_by_case(answered, key=lambda one: one.case.case_id)
+        )
 
     def _fold(self, jobs: Sequence[AnsweredCase]) -> _CaseReading:
         """One case's answers as the single outcome it contributes — a strict majority, or none.
@@ -632,6 +644,10 @@ class DecideAgreementScorer:
         answer the job ended on) and the verdicts that parsed are counted. A verdict held by more
         than half of them is this case's; anything else is unreadable or unsettled, and the case
         contributes nothing to a denominator it did not answer.
+
+        The counting is :func:`~noctis.eval.reading.strict_majority`'s, because more-than-half is
+        arithmetic; :data:`NO_VERDICT` and :data:`NO_MAJORITY` stay here, because what an unsettled
+        case is *called* is this site's word and no other site's business.
         """
         case = jobs[0].case
         readable = [
@@ -641,12 +657,10 @@ class DecideAgreementScorer:
         ]
         if not readable:
             return _CaseReading(case=case, error=NO_VERDICT)
-        verdict, held = Counter(one.verdict for one in readable).most_common(1)[0]
-        if held * 2 <= len(readable):
+        settled = strict_majority(readable, key=lambda one: one.verdict)
+        if settled is None:
             return _CaseReading(case=case, error=NO_MAJORITY)
-        return _CaseReading(
-            case=case, outcome=next(one for one in readable if one.verdict == verdict)
-        )
+        return _CaseReading(case=case, outcome=settled)
 
     def score(self, case: Case, reply: str | None) -> ScoredReply:
         """One reply, parsed and scored — never raising, because a bad reply is a result."""

@@ -101,6 +101,7 @@ from noctis.eval.decide_site import (
 )
 from noctis.eval.identity import SiteIdentity, site_identity
 from noctis.eval.metrics import AttemptOutcome, CaseResult
+from noctis.eval.reading import ANSWERS_KEY, ATTEMPT_CALLS_KEY, RETROSPECTIVE_KEY, STRATA_KEY
 from noctis.eval.record import (
     BenchArtifacts,
     CaseRun,
@@ -521,13 +522,13 @@ def retrospective_dials(
     """
     return {
         # The three facts that distinguish this record from a live bench, stated up front.
-        "retrospective": True,
-        "answers": ANSWERS_RECORDED,
-        "attempt_calls": 0,
+        RETROSPECTIVE_KEY: True,
+        ANSWERS_KEY: ANSWERS_RECORDED,
+        ATTEMPT_CALLS_KEY: 0,
         DECIDE_DIALS_KEY: {
             **scored_block(metrics),
             "cases": [_case_row(case) for case in sorted(cases, key=lambda one: one.case_id)],
-            "strata": strata_block(cases, outcomes),
+            STRATA_KEY: strata_block(cases, outcomes),
         },
     }
 

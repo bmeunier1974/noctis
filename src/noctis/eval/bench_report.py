@@ -47,8 +47,10 @@ from noctis.eval import reading
 
 __all__ = ["NOT_AVAILABLE", "render_bench_report"]
 
-#: How every unknown figure renders, at every depth. One token, spelled once.
-NOT_AVAILABLE = "n/a"
+#: How every unknown figure renders, at every depth. One token, spelled once — in the reading
+#: module, for the whole eval layer (#305); this module's long-standing name for it is kept as a
+#: re-export, which is what ``corpus_report`` reads its own absences off.
+NOT_AVAILABLE = reading.NOT_APPLICABLE
 
 # One nesting level, in spaces. A whole block is shifted by it, values included, so a stratum's
 # figures stay column-aligned with the pair's own rendering inside the same block.
