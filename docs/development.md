@@ -294,6 +294,24 @@ area and cases root, the execution seam a `--workers` count selects, the site-in
 own LLM seam. Assemble a bench there, not in a verb body — the same rule `bootstrap.py` holds the
 engine's entrypoints to, on the other side of the line.
 
+**And the seam a site's numbers cross has two anchors.** A bench's figures are two halves: what
+every site shares (did the ask emit, in how many attempts, at what cost) is the eval core's, and a
+*site's* own arithmetic comes back from its declared `Scorer.read(answered, axes=…)` as one
+`SiteReading`, which the runner folds into the record's `harness.dials` through the reading's own
+`as_dials()` without interpreting it. The first anchor is `src/noctis/eval/reading.py`, the layer's
+**reading vocabulary**: the `SiteReading` sections themselves, `fmt`/`table` (the one spelling of
+an absence — `n/a`, never a plausible zero), the shared words, `fold_by_case`/`strict_majority`,
+the one generic `strata` loop both sites stratify through, and the two `PairManifest`s that declare
+a co-primary pair — its rows, its published order and its whole-or-refused rule — once. It is
+**pure and stdlib-only**, because every site's reading depends on it; `tests/test_eval_reading.py`
+holds it to that both by a static walk and by a module closure in a fresh interpreter. The second
+is `runner.publish(artifacts, directory)`, the **one writer of `bench.json`**: build → validate →
+refuse naming every problem → write atomically, taken by the live runner and the retrospective
+miner alike, so a record written without being validated is unreachable rather than merely
+discouraged. Add a figure by putting it in the site's `SiteReading` and printing it from
+`bench_report.py`, whose only noctis import is `noctis.eval.reading` — the goldens under
+`tests/fixtures/` pin the published bytes on both sides.
+
 ## The research-toolbox surface and its reach-through guard
 
 The fourth guard in this family protects a *seam* rather than a direction or a hash: an agent
