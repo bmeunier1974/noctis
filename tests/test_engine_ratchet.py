@@ -1,10 +1,15 @@
-"""The CI ratchet (#128): arbiter drift cannot land without an ENGINE_VERSION bump.
+"""The engine ratchet's *rule*: the tier split, and the version it is declared against.
 
-Every assertion here is external behaviour — the status a comparison returns, the component and
-file names it prints, the exit code the entrypoint gives CI, what the committed record file holds.
-The comparison is pure over two records, so a scenario is built by making a miniature repo in
-``tmp_path``, recording it, editing exactly one file, and recording it again — the same shape
-``tests/test_engine_id.py`` uses.
+The mechanics — building, loading and writing the record, the four-case check, what ``--write``
+does with a verdict, the report — are shared by every ratchet and tested once in
+``tests/test_ratchet.py``. What is left here is the policy this module exists to state: which tier
+fails, which warns and passes, when ``ENGINE_VERSION`` has to move, and which drift ``--write``
+refuses to record.
+
+Every assertion is external behaviour — the status a comparison returns, the component and file
+names it prints, the exit code the entrypoint gives CI. The comparison is pure over two records,
+so a scenario is built by making a miniature repo in ``tmp_path``, recording it, editing exactly
+one file, and recording it again — the same shape ``tests/test_engine_id.py`` uses.
 
 The tier split is the contract: an edit to ``gates`` or ``backtest`` (the arbiter — what passes,
 what a number means) **fails**; an edit to a searcher component **warns and passes**, because a
@@ -13,12 +18,11 @@ ratchet that blocks on a docstring edit gets disabled, and a disabled ratchet as
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
-from noctis.observability import engine_change, engine_id, engine_ratchet
+from noctis.observability import engine_change, engine_id, engine_ratchet, ratchet
 from noctis.observability.engine_id import COMPONENT_PATHS, ENGINE_VERSION, fingerprint
 from noctis.observability.engine_ratchet import (
     RECORD_PATH,
@@ -26,7 +30,6 @@ from noctis.observability.engine_ratchet import (
     build_record,
     check,
     compare_records,
-    load_record,
     main,
     write_record,
 )
@@ -75,54 +78,41 @@ def _record(root: Path, *, engine_version: int | None = None) -> dict:
     return record
 
 
-def _commit_record(root: Path, record: dict) -> None:
-    """Put a record on disk as the committed baseline — including a deliberately doctored one."""
-    (root / RECORD_PATH).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
-
-
 def _edit(root: Path, rel: str) -> None:
     path = root / rel
     path.write_text(path.read_text() + "# a behavioural change\n")
 
 
-# ── the committed record ──────────────────────────────────────────────────────────────────
+def _tagged(result, tag: str) -> list[str]:
+    """The names this verdict filed under one tier, in the order the report prints them."""
+    return [drift.name for drift in result.drifts if drift.tag == tag]
 
 
-def test_a_record_holds_the_declared_version_and_every_component_digest(tmp_path):
+# ── the policy module holds the rule and borrows the mechanics ────────────────────────────
+
+
+def test_the_policy_module_runs_on_the_shared_mechanics(tmp_path):
+    """The verdict types are the shared ones, and every verdict carries this policy's spec."""
+    assert engine_ratchet.RatchetResult is ratchet.RatchetResult
+    assert engine_ratchet.WriteOutcome is ratchet.WriteOutcome
+
+    root = _build_tree(tmp_path)
+    write_record(root)
+    result = check(root)
+
+    assert isinstance(result, ratchet.RatchetResult)
+    assert result.spec is engine_ratchet.SPEC
+    assert result.status == "ok"
+
+
+def test_a_record_declares_the_engine_version_of_the_tree_it_states(tmp_path):
+    """The declared comparison key is this policy's own field in the shared record."""
     record = build_record(_build_tree(tmp_path))
 
     assert record["engine_version"] == ENGINE_VERSION
-    assert set(record["components"]) == set(COMPONENT_PATHS)
     assert record["components"]["gates"]["digest"] == engine_id.fingerprint(tmp_path).digest(
         "gates"
     )
-    # Per-file digests, so a drift report can name the file that moved and not its siblings.
-    assert set(record["components"]["gates"]["files"]) == set(COMPONENT_PATHS["gates"])
-    assert record["regenerate_with"] == REGENERATE_COMMAND
-
-
-def test_the_committed_fingerprint_file_records_this_checkout():
-    """The file in the repo is the baseline CI compares against — it must be in sync now."""
-    record = load_record(REPO_ROOT)
-
-    assert record is not None
-    assert record["engine_version"] == ENGINE_VERSION
-    fp = engine_id.fingerprint(REPO_ROOT)
-    for name in engine_id.ARBITER_COMPONENTS:
-        assert record["components"][name]["digest"] == fp.digest(name), name
-    # Searcher drift is allowed to be pending (it only warns), an arbiter mismatch never is.
-    assert check(REPO_ROOT).ok, check(REPO_ROOT).report()
-
-
-def test_an_unchanged_tree_checks_ok(tmp_path):
-    root = _build_tree(tmp_path)
-    write_record(root)
-
-    result = check(root)
-
-    assert result.status == "ok"
-    assert result.ok
-    assert not result.arbiter_drift and not result.searcher_drift
 
 
 # ── the arbiter tier: fail ────────────────────────────────────────────────────────────────
@@ -137,8 +127,8 @@ def test_a_gates_edit_without_a_version_bump_fails_naming_the_component_and_the_
 
     assert result.status == "fail"
     assert not result.ok
-    assert [drift.component for drift in result.arbiter_drift] == ["gates"]
-    assert result.arbiter_drift[0].files == (GATES_FILE,)
+    assert _tagged(result, "arbiter") == ["gates"]
+    assert result.drifts[0].files == (GATES_FILE,)
     report = result.report()
     assert "gates" in report and GATES_FILE in report
     assert GATES_SIBLING not in report  # only what moved, never its untouched siblings
@@ -153,8 +143,8 @@ def test_a_backtest_edit_without_a_version_bump_fails_naming_the_component_and_t
     result = compare_records(_record(root), committed)
 
     assert result.status == "fail"
-    assert [drift.component for drift in result.arbiter_drift] == ["backtest"]
-    assert result.arbiter_drift[0].files == (BACKTEST_FILE,)
+    assert _tagged(result, "arbiter") == ["backtest"]
+    assert result.drifts[0].files == (BACKTEST_FILE,)
     assert BACKTEST_FILE in result.report()
 
 
@@ -197,15 +187,15 @@ def test_a_searcher_edit_without_a_bump_warns_and_passes(tmp_path, component, re
 
     assert result.status == "warn"
     assert result.ok  # visible, not blocking
-    assert [drift.component for drift in result.searcher_drift] == [component]
-    assert result.searcher_drift[0].files == (rel,)
+    assert _tagged(result, "searcher") == [component]
+    assert result.drifts[0].files == (rel,)
     report = result.report()
     assert component in report and rel in report
-    assert not result.arbiter_drift
+    assert not _tagged(result, "arbiter")
 
 
 def test_a_searcher_edit_beside_an_arbiter_edit_still_fails(tmp_path):
-    """The strict tier wins the verdict; the advisory tier is still named."""
+    """The strict tier wins the verdict; the advisory tier is still named, and named second."""
     root = _build_tree(tmp_path)
     committed = _record(root)
     _edit(root, GATES_FILE)
@@ -214,38 +204,9 @@ def test_a_searcher_edit_beside_an_arbiter_edit_still_fails(tmp_path):
     result = compare_records(_record(root), committed)
 
     assert result.status == "fail"
-    assert [drift.component for drift in result.searcher_drift] == ["prompts"]
+    assert _tagged(result, "searcher") == ["prompts"]
+    assert [drift.name for drift in result.drifts] == ["gates", "prompts"]
     assert SEARCHER_EDITS["prompts"] in result.report()
-
-
-# ── the allowlist ─────────────────────────────────────────────────────────────────────────
-
-
-def test_editing_docs_a_test_or_the_readme_never_fires_the_check(tmp_path):
-    root = _build_tree(tmp_path)
-    committed = _record(root)
-    (root / "docs" / "architecture.md").write_text("# architecture, rewritten\n")
-    (root / "tests" / "test_engine_ratchet.py").write_text("# a new test\n")
-    (root / "README.md").write_text("# Noctis, rewritten\n")
-
-    result = compare_records(_record(root), committed)
-
-    assert result.status == "ok"
-    assert not result.arbiter_drift and not result.searcher_drift
-
-
-# ── null components ───────────────────────────────────────────────────────────────────────
-
-
-def test_a_component_that_is_null_on_both_sides_is_not_drift(tmp_path):
-    root = _build_tree(tmp_path)
-    (root / SCHEMA_FILE).unlink()
-    committed = _record(root)
-
-    result = compare_records(_record(root), committed)
-
-    assert committed["components"]["schema"]["digest"] is None
-    assert result.status == "ok"
 
 
 def test_a_null_component_gaining_a_digest_is_searcher_tier_drift(tmp_path):
@@ -260,7 +221,7 @@ def test_a_null_component_gaining_a_digest_is_searcher_tier_drift(tmp_path):
     result = compare_records(_record(root), committed)
 
     assert result.status == "warn"
-    assert [drift.component for drift in result.searcher_drift] == ["schema"]
+    assert _tagged(result, "searcher") == ["schema"]
     assert SCHEMA_FILE in result.report()
 
 
@@ -278,40 +239,47 @@ def test_a_record_that_no_longer_declares_this_version_fails_with_a_regenerate_m
     assert REGENERATE_COMMAND in result.report()
 
 
-def test_a_missing_record_file_fails_with_a_regenerate_message(tmp_path):
-    root = _build_tree(tmp_path)
+# ── what --write refuses: an arbiter move must arrive declared ────────────────────────────
 
-    result = check(root)
+
+def test_arbiter_drift_with_the_versions_in_agreement_is_what_write_refuses(tmp_path):
+    """The loophole (#145): ``--write`` is the fix the failure itself recommends, and it rewrites
+    every component at once — so if it absorbed an arbiter digest too, the ratchet's promise would
+    reduce to a contributor noticing the failure before typing the command it printed."""
+    root = _build_tree(tmp_path)
+    committed = _record(root)
+    _edit(root, GATES_FILE)
+
+    result = compare_records(_record(root), committed)
+
+    assert result.refuse_write
+
+
+def test_searcher_drift_is_never_what_write_refuses(tmp_path):
+    """The common case must stay one command, or the ratchet becomes a chore and gets disabled."""
+    root = _build_tree(tmp_path)
+    committed = _record(root)
+    _edit(root, SEARCHER_EDITS["prompts"])
+
+    result = compare_records(_record(root), committed)
+
+    assert result.status == "warn"
+    assert not result.refuse_write
+
+
+def test_an_arbiter_move_whose_bump_is_declared_is_not_refused(tmp_path):
+    """The bump is there; the record simply had not been regenerated with it yet."""
+    root = _build_tree(tmp_path)
+    committed = _record(root, engine_version=ENGINE_VERSION - 1)
+    _edit(root, GATES_FILE)
+
+    result = compare_records(_record(root, engine_version=ENGINE_VERSION), committed)
 
     assert result.status == "fail"
-    assert load_record(root) is None
-    assert RECORD_PATH in result.report()
-    assert REGENERATE_COMMAND in result.report()
+    assert not result.refuse_write
 
 
-def test_a_malformed_record_file_fails_with_a_regenerate_message(tmp_path):
-    root = _build_tree(tmp_path)
-    (root / RECORD_PATH).write_text("{ not json at all")
-
-    result = check(root)
-
-    assert result.status == "fail"
-    assert REGENERATE_COMMAND in result.report()
-
-
-# ── the entrypoint CI runs ────────────────────────────────────────────────────────────────
-
-
-def test_the_regeneration_command_writes_a_record_the_check_then_accepts(tmp_path, capsys):
-    root = _build_tree(tmp_path)
-
-    assert main(["--write", "--root", str(root)]) == 0
-    written = json.loads((root / RECORD_PATH).read_text())
-
-    assert written["engine_version"] == ENGINE_VERSION
-    assert main(["--check", "--root", str(root)]) == 0
-    assert (root / RECORD_PATH).read_text().endswith("\n")
-    assert "engine_fingerprint" in capsys.readouterr().out
+# ── the exit code each tier gives CI ──────────────────────────────────────────────────────
 
 
 def test_the_check_exits_non_zero_on_arbiter_drift_naming_the_component_and_file(tmp_path, capsys):
@@ -339,107 +307,6 @@ def test_the_check_exits_zero_on_a_searcher_warning_naming_the_component_and_fil
     assert "warn" in out.lower()
 
 
-def test_the_check_is_the_default_action(tmp_path):
-    root = _build_tree(tmp_path)
-
-    assert main(["--root", str(root)]) == 1  # no record committed yet
-    main(["--write", "--root", str(root)])
-    assert main(["--root", str(root)]) == 0
-
-
-# ── regenerating: --write will not record an undeclared arbiter move ──────────────────────
-
-
-def test_regenerating_an_arbiter_move_with_no_bump_refuses_and_writes_nothing(tmp_path, capsys):
-    """The loophole (#145): ``--write`` is the fix the failure itself recommends, and it rewrites
-    every component at once — so if it absorbed an arbiter digest too, the ratchet's promise would
-    reduce to a contributor noticing the failure before typing the command it printed."""
-    root = _build_tree(tmp_path)
-    main(["--write", "--root", str(root)])
-    before = (root / RECORD_PATH).read_bytes()
-    _edit(root, GATES_FILE)
-    capsys.readouterr()
-
-    code = main(["--write", "--root", str(root)])
-
-    out = capsys.readouterr().out
-    assert code == 1
-    assert (root / RECORD_PATH).read_bytes() == before  # byte-identical: nothing was written
-    assert "gates" in out and GATES_FILE in out
-    assert "ENGINE_VERSION" in out
-    assert "refusing to regenerate" in out
-
-
-def test_a_refused_regeneration_leaves_the_check_still_failing(tmp_path, capsys):
-    """The sequence "edit, regenerate, commit, CI passes" is no longer reachable."""
-    root = _build_tree(tmp_path)
-    main(["--write", "--root", str(root)])
-    _edit(root, GATES_FILE)
-
-    assert main(["--write", "--root", str(root)]) == 1
-    assert main(["--check", "--root", str(root)]) == 1
-    assert "gates" in capsys.readouterr().out
-
-
-def test_a_searcher_edit_still_regenerates_in_one_command(tmp_path):
-    """The common case must stay one command, or the ratchet becomes a chore and gets disabled."""
-    root = _build_tree(tmp_path)
-    main(["--write", "--root", str(root)])
-    _edit(root, SEARCHER_EDITS["prompts"])
-    assert main(["--check", "--root", str(root)]) == 0  # a warning, and a record to refresh
-
-    assert main(["--write", "--root", str(root)]) == 0
-
-    assert load_record(root)["components"]["prompts"]["digest"] == fingerprint(root).digest(
-        "prompts"
-    )
-    assert check(root).status == "ok"
-
-
-def test_an_arbiter_move_with_a_bump_still_regenerates_in_one_command(tmp_path):
-    """The bump is there; the record simply had not been regenerated with it yet."""
-    root = _build_tree(tmp_path)
-    _commit_record(root, _record(root, engine_version=ENGINE_VERSION - 1))
-    _edit(root, GATES_FILE)
-
-    assert main(["--write", "--root", str(root)]) == 0
-
-    assert load_record(root)["engine_version"] == ENGINE_VERSION
-    assert check(root).status == "ok"
-
-
-def test_a_missing_record_still_regenerates_as_the_baseline(tmp_path):
-    """There is nothing to compare against, and this is how the baseline is created."""
-    root = _build_tree(tmp_path)
-    assert load_record(root) is None
-
-    assert main(["--write", "--root", str(root)]) == 0
-
-    assert check(root).status == "ok"
-
-
-def test_regenerating_an_unchanged_tree_is_idempotent(tmp_path):
-    root = _build_tree(tmp_path)
-    main(["--write", "--root", str(root)])
-    before = (root / RECORD_PATH).read_bytes()
-
-    assert main(["--write", "--root", str(root)]) == 0
-
-    assert (root / RECORD_PATH).read_bytes() == before
-
-
-def test_the_pure_writer_stays_available_for_creating_a_baseline(tmp_path):
-    """``write_record`` is the unguarded writer a test (or a fresh tree) uses; the refusal is a
-    decision in the ``--write`` path, so the comparison itself stays pure and unchanged."""
-    root = _build_tree(tmp_path)
-    write_record(root)
-    _edit(root, GATES_FILE)
-
-    assert check(root).status == "fail"  # --check's four-case rule is untouched
-    assert write_record(root) == root / RECORD_PATH
-    assert check(root).status == "ok"
-
-
 # ── one arbiter line, drawn once ──────────────────────────────────────────────────────────
 
 
@@ -465,14 +332,12 @@ def test_the_ratchet_and_the_resume_policy_read_one_arbiter_components_constant(
         _edit(root, paths[0])
 
     result = compare_records(_record(root), committed)
-    ratchet = {
-        drift.component: drift.tier for drift in (*result.arbiter_drift, *result.searcher_drift)
-    }
+    ratchet_tiers = {drift.name: drift.tag for drift in result.drifts}
     policy = {
         change.component: change.tier
         for change in engine_change.engine_change(frozen, fingerprint(root)).components
     }
-    assert policy == ratchet
+    assert policy == ratchet_tiers
     assert set(policy) == set(COMPONENT_PATHS)
 
     # No second literal anywhere a consumer (this ratchet, the resume policy) could read.
