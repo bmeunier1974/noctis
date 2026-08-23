@@ -1411,6 +1411,83 @@ def test_readers_see_the_post_overlay_metric(tmp_path, setup, argv, present, abs
         assert text not in result.output
 
 
+# --- the three lake verbs read the steered lake (story #298) --------------------------
+# The lake is SHARED by every run and run-neutral, so ``data status|sync|ingest`` take no
+# address — but they are readings all the same, and a verb that stopped at ``load_settings``
+# inspected and filled a lake nobody had steered. What a mandate may bind here is narrow by
+# design: the acquisition window (``data.history_days``, ``data.auto_backfill``), the seed
+# ``universe``, and — towards discipline only — the vendor budget every fetch is priced
+# against. ``data.dataset`` and ``data.lake_dir`` are refused by the overlay (vendor identity
+# and state redirection are the arena), so the steering that *can* reach these three verbs
+# arrives through the lake builder, and the one that cannot is refused out loud.
+
+_THRIFTY_OVERLAY = "  data:\n    budget_usd: 0.0\n"
+
+
+def _track_one_series(tmp_path) -> None:
+    """One tracked series whose coverage stops well short of the T+1 boundary — so ``data sync``
+    has a tail to price rather than a noop to report."""
+    from noctis.data import MarketDataLake
+    from noctis.data.types import to_ns
+
+    from ._data_helpers import MockVendor
+
+    lake = MarketDataLake(tmp_path / "lake", MockVendor(), budget_usd=10_000.0, calendar="XNYS")
+    lake.ensure_coverage(
+        "EQUS.MINI", "ohlcv-1m", ["AAPL"], to_ns("2026-01-05"), to_ns("2026-01-09")
+    )
+
+
+def test_data_ingest_prices_against_the_post_overlay_budget(tmp_path, monkeypatch):
+    """A mandate may only spend *less* of the operator's money — and the ingest it steers is
+    priced against that number, not against the ceiling ``config.yaml`` set. Off a raw
+    ``load_settings`` the fetch was made under the unsteered $125 budget."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABENTO_API_KEY", "fake-key")
+    vendor = _install_mock_vendor(monkeypatch)
+    cfg = _mandate_config(tmp_path, "thrifty", _THRIFTY_OVERLAY)
+
+    result = runner.invoke(
+        app,
+        ["data", "ingest", "AAPL", "--start", "2026-01-05", "--end", "2026-01-09", "-c", cfg],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "AAPL: refused" in result.output
+    assert "budget $0.00" in result.output
+    assert vendor.fetch_calls == 0  # priced only; the steered budget stopped the spend
+
+
+def test_data_sync_extends_no_series_past_the_post_overlay_budget(tmp_path, monkeypatch):
+    """The nightly tail extension is the same spend, so it meets the same steered ceiling."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATABENTO_API_KEY", "fake-key")
+    vendor = _install_mock_vendor(monkeypatch)
+    cfg = _mandate_config(tmp_path, "thrifty", _THRIFTY_OVERLAY)
+    _track_one_series(tmp_path)
+
+    result = runner.invoke(app, ["data", "sync", "-c", cfg])
+
+    assert result.exit_code == 0, result.output
+    assert "AAPL: refused" in result.output
+    assert vendor.fetch_calls == 0
+
+
+def test_data_status_refuses_the_steering_it_cannot_apply(tmp_path, monkeypatch):
+    """``data.dataset`` is refused by the overlay — which vendor dataset a lake holds is the
+    arena, not steering. Read through the band, a mandate that tries to bind it is said out loud
+    in the one refusal voice; before, the three lake verbs were the last place an operator's
+    steering could be silently ignored, and they answered as if no mandate existed."""
+    monkeypatch.chdir(tmp_path)
+    cfg = _mandate_config(tmp_path, "wrongway", "  data:\n    dataset: XNAS.ITCH\n")
+
+    result = runner.invoke(app, ["data", "status", "-c", cfg])
+
+    assert result.exit_code == 1
+    assert "MANDATE: " in result.stderr
+    assert "data.dataset" in result.stderr
+
+
 # --- sealing a run under the metric the run ran under (bug fix 3, story #297) ----------
 # ``--finish`` and ``run-prune`` are the two read-only-ish verbs that *rewrite* the record, and
 # the record carries the engine's ``comparable_key`` — whose last component is the election

@@ -168,6 +168,33 @@ class TestLegacyLayoutGuard:
         assert result.exit_code == 2
         assert "noctis migrate" in result.output
 
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            pytest.param(["data", "status"], id="status"),
+            pytest.param(["data", "sync"], id="sync"),
+            pytest.param(
+                ["data", "ingest", "AAPL", "--start", "2026-01-05", "--end", "2026-01-09"],
+                id="ingest",
+            ),
+        ],
+    )
+    def test_the_lake_verbs_refuse_beside_legacy_state_naming_migrate(
+        self, argv, tmp_path, monkeypatch
+    ):
+        """The three lake verbs read the workspace like every other reader, so they refuse the
+        same way beside un-migrated data — including ``ingest`` and ``sync``, which would
+        otherwise spend vendor money filling a lake the engine no longer looks at. The guard is
+        the wrapper's now (story #298); this is the refusal an operator still gets."""
+        from typer.testing import CliRunner
+
+        from noctis.cli import app
+
+        cfg = self._project(tmp_path, monkeypatch, "data_lake")
+        result = CliRunner().invoke(app, [*argv, "--config", str(cfg)])
+        assert result.exit_code == 2, result.output
+        assert "noctis migrate" in result.output
+
     def test_status_warns_but_still_prints(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
 

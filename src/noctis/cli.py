@@ -2041,6 +2041,13 @@ def migrate(
 
 
 # --- data sub-app -----------------------------------------------------------------------
+# All three verbs read through :func:`_reading_or_exit` **unaddressed**, and that is the whole
+# of what an address would mean here: the lake is shared by every run and run-neutral (vendor
+# data is expensive, and a bar of AAPL belongs to no experiment), so there is no per-run lake to
+# name. What the reading still buys them is the rest of the precedence chain — the mandate that
+# steers a run steers the lake it is fed from (``data.history_days``, ``data.auto_backfill``,
+# the seed ``universe``, and ``data.budget_usd`` towards discipline only) — and the legacy-layout
+# guard, which fires from the wrapper for exactly the unaddressed reading these three are (#298).
 
 data_app = typer.Typer(help="Market-data lake operations (fetch-once).", no_args_is_help=True)
 app.add_typer(data_app, name="data")
@@ -2133,8 +2140,7 @@ def data_status(
     """Show tracked series in the coverage registry."""
     from noctis.bootstrap import build_lake
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, None).settings
     lake = build_lake(settings)
     records = lake.coverage_records()
     if not records:
@@ -2153,8 +2159,7 @@ def data_sync(
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
 ) -> None:
     """Incrementally extend every tracked series to the T+1 boundary (tail only)."""
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, None).settings
     lake = _vendor_lake_or_exit(settings)
     with _symbol_progress("syncing") as progress:
         results = lake.sync(on_progress=progress)
@@ -2177,8 +2182,7 @@ def data_ingest(
     """Coverage-diffed ingest of a date range (only missing slices are fetched)."""
     from noctis.data.types import to_ns, to_ns_end_inclusive
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, None).settings
     lake = _vendor_lake_or_exit(settings)
     syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     # ``--end`` is inclusive: a date-only end covers that whole trading day (its intraday
