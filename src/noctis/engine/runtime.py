@@ -336,16 +336,7 @@ class Runtime:
                 max_iterations=self.research_max_iters,
                 ideate=self.ideator.run if self.ideator is not None else None,
             )
-        self._cycle.research_iterations += summary.iterations
-        self._cycle.research_promotions += summary.promotions
-        self._cycle.research_rejections += summary.rejections
-        self._cycle.research_dead_ends += summary.dead_ends
-        self._cycle.research_undecided.extend(summary.undecided)
-        # An episodic session carries its ledger path so CLOSE renders a per-session rollup +
-        # candidate trail (story #74); the conversation loop and legacy loop leave it None.
-        if summary.ledger_path:
-            self._cycle.research_ledgers.append(summary.ledger_path)
-        self._cycle.minted_specs.extend(summary.minted_specs)
+        self._cycle.fold_research(summary)
         self.result.research_iterations += summary.iterations
         self.result.research_promotions += summary.promotions
         # One completed session toward the periodic memory distillation (runs at CLOSE, not
@@ -399,18 +390,10 @@ class Runtime:
         outcome = self.trading.run(t, sleeper, self._load_bars())
         self.result.trades += outcome.orders_submitted
         if outcome.sessions:
-            # Equity/positions are the LAST settled session's — the phase already folded a
-            # multi-session catch-up that way. Untouched when nothing traded, so a skipped
-            # day reports zeros rather than a fictional flat session.
-            self._cycle.positions = outcome.positions
-            self._cycle.start_equity = outcome.start_equity
-            self._cycle.end_equity = outcome.end_equity
+            # The run's headline equity is the LAST settled session's; untouched when nothing
+            # traded, so a skipped day reports the standing number rather than a fictional zero.
             self.result.final_equity = outcome.end_equity
-        self._cycle.trades.extend(outcome.trades)
-        self._cycle.events.extend(outcome.events)
-        # The bars the live feed built ride the cycle to the close, which reconciles them
-        # against the catalog the T+1 sync just refreshed.
-        self._cycle.live_bars = outcome.live_bars
+        self._cycle.fold_trading(outcome)
 
     # --- main loop ---
     def run(self, start: datetime | None = None, max_cycles: int | None = None) -> RuntimeResult:

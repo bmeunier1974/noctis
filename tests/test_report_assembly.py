@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from datetime import date
 
+import pandas as pd
 import pytest
 
 from noctis.backtest.scorecard import Metrics, Scorecard, SplitScore, SymbolScore
@@ -24,6 +25,9 @@ from noctis.engine.report_assembly import (
     assemble_report,
     gather_account_forward,
 )
+from noctis.engine.research import ResearchSummary
+from noctis.engine.trading_phase import TradingOutcome
+from noctis.live.node import TradingSummary
 from noctis.memory.base import InMemoryMemory
 from noctis.reporting.report import Trade, render_report
 
@@ -406,3 +410,181 @@ def test_minted_spec_champions_are_flagged(tmp_path):
 
     assert data.research["promoted_specs"] == ["spec_momo"]
     assert {c["family"] for c in data.champions} == {"spec_momo", "donchian_breakout"}
+
+
+# ── SessionActivity folds the cycle's own evidence ───────────────────────────────────────
+# The cycle's accounting sits beside the cycle's shape (epic #264, story #270): the RESEARCH
+# and TRADING phases hand the accumulator their result and it folds itself, instead of the
+# runtime loop copying field by field.
+
+
+def test_fold_research_copies_the_summary_into_the_cycle():
+    """One research session's summary lands in the cycle verbatim: the four counters, the
+    undecided drafts, the minted spec names, and the episodic session's ledger path."""
+    cycle = SessionActivity()
+
+    cycle.fold_research(
+        ResearchSummary(
+            iterations=5,
+            promotions=2,
+            rejections=1,
+            dead_ends=3,
+            undecided=["draft_a"],
+            minted_specs=["spec_x"],
+            ledger_path="/state/sessions/s1.jsonl",
+        )
+    )
+
+    assert cycle.research_iterations == 5
+    assert cycle.research_promotions == 2
+    assert cycle.research_rejections == 1
+    assert cycle.research_dead_ends == 3
+    assert cycle.research_undecided == ["draft_a"]
+    assert cycle.minted_specs == ["spec_x"]
+    assert cycle.research_ledgers == ["/state/sessions/s1.jsonl"]
+
+
+def test_fold_research_accumulates_across_a_cycles_sessions():
+    """A closed market runs research back to back, so a cycle folds several summaries: the
+    counters add and the lists extend — never replace — and the cycle owns its own copies."""
+    cycle = SessionActivity()
+    first = ResearchSummary(
+        iterations=2,
+        promotions=1,
+        undecided=["draft_a"],
+        minted_specs=["spec_x"],
+        ledger_path="/s1.jsonl",
+    )
+
+    cycle.fold_research(first)
+    cycle.fold_research(
+        ResearchSummary(
+            iterations=3,
+            rejections=2,
+            dead_ends=1,
+            undecided=["draft_b"],
+            minted_specs=["spec_y"],
+            ledger_path="/s2.jsonl",
+        )
+    )
+
+    assert (cycle.research_iterations, cycle.research_promotions) == (5, 1)
+    assert (cycle.research_rejections, cycle.research_dead_ends) == (2, 1)
+    assert cycle.research_undecided == ["draft_a", "draft_b"]
+    assert cycle.minted_specs == ["spec_x", "spec_y"]
+    assert cycle.research_ledgers == ["/s1.jsonl", "/s2.jsonl"]
+    # The cycle accumulated into its own lists; the folded summary is untouched.
+    assert first.undecided == ["draft_a"] and first.minted_specs == ["spec_x"]
+
+
+def test_fold_research_without_a_ledger_records_no_session():
+    """The conversation loop and the legacy loop write no ledger, so nothing is appended —
+    a ledgerless cycle's report renders exactly as it did before episodic sessions."""
+    cycle = SessionActivity()
+
+    cycle.fold_research(ResearchSummary(iterations=1))
+
+    assert cycle.research_ledgers == []
+
+
+def test_fold_trading_leaves_the_cycle_untouched_when_nothing_traded():
+    """An empty outcome — account refusal, no new data, an empty champion board — contributes
+    nothing: a skipped day reports zeros rather than a fictional flat session."""
+    cycle = SessionActivity()
+
+    cycle.fold_trading(TradingOutcome())
+
+    assert (cycle.start_equity, cycle.end_equity) == (0.0, 0.0)
+    assert cycle.positions == {} and cycle.trades == [] and cycle.events == []
+    assert cycle.live_bars == {}
+
+
+def test_fold_trading_states_why_it_did_not_trade_without_inventing_equity():
+    """No session settled, but the outcome still says why: the reason is folded as a report
+    event while equity and positions stay at their untouched zeros."""
+    cycle = SessionActivity()
+
+    cycle.fold_trading(TradingOutcome(events=["No new sessions to trade"]))
+
+    assert cycle.events == ["No new sessions to trade"]
+    assert (cycle.start_equity, cycle.end_equity) == (0.0, 0.0)
+    assert cycle.positions == {}
+
+
+def test_fold_trading_folds_a_settled_session():
+    """One settled session hands over everything the close reads: equity either side,
+    positions, trade rows, report events, and the bars the live feed built."""
+    cycle = SessionActivity()
+    bars = pd.DataFrame({"close": [190.0]})
+    trade = Trade("AAPL", "buy", 10, 190.0, "champion signal")
+
+    cycle.fold_trading(
+        TradingOutcome(
+            sessions=[TradingSummary(session=date(2026, 1, 6))],
+            trades=[trade],
+            events=["1 order refused by risk limits"],
+            positions={"AAPL": 10.0},
+            start_equity=100_000.0,
+            end_equity=100_250.0,
+            orders_submitted=1,
+            live_bars={"AAPL": bars},
+        )
+    )
+
+    assert (cycle.start_equity, cycle.end_equity) == (100_000.0, 100_250.0)
+    assert cycle.positions == {"AAPL": 10.0}
+    assert cycle.trades == [trade]
+    assert cycle.events == ["1 order refused by risk limits"]
+    assert list(cycle.live_bars) == ["AAPL"] and cycle.live_bars["AAPL"] is bars
+
+
+def test_fold_trading_keeps_the_last_settled_sessions_equity():
+    """A replay catch-up settles several sessions; the outcome already folded them, so the
+    cycle carries that phase-level equity — the last session's — as handed over."""
+    cycle = SessionActivity()
+
+    cycle.fold_trading(
+        TradingOutcome(
+            sessions=[
+                TradingSummary(session=date(2026, 1, 5)),
+                TradingSummary(session=date(2026, 1, 6)),
+            ],
+            positions={"MSFT": -3.0},
+            start_equity=100_000.0,
+            end_equity=99_500.0,
+        )
+    )
+
+    assert (cycle.start_equity, cycle.end_equity) == (100_000.0, 99_500.0)
+    assert cycle.positions == {"MSFT": -3.0}
+
+
+def test_a_folded_cycle_assembles_into_the_report(tmp_path):
+    """The folds feed the report they exist for: a cycle that folded one research summary and
+    one traded session assembles into the same ReportData the runtime produced by hand."""
+    cycle = SessionActivity()
+    cycle.fold_research(ResearchSummary(iterations=4, promotions=1, minted_specs=["spec_x"]))
+    cycle.fold_trading(
+        TradingOutcome(
+            sessions=[TradingSummary(session=date(2026, 1, 6))],
+            trades=[Trade("AAPL", "buy", 10, 190.0, "champion signal")],
+            events=["1 order refused by risk limits"],
+            positions={"AAPL": 10.0},
+            start_equity=100_000.0,
+            end_equity=100_250.0,
+        )
+    )
+
+    data = assemble_report(
+        as_of="2026-01-06",
+        mode="paper",
+        registry=ChampionRegistry(tmp_path / "champions.json", capacity=3),
+        memory=InMemoryMemory(),
+        state_dir=tmp_path / "state",
+        session=cycle,
+    )
+
+    assert data.realized_pnl == pytest.approx(250.0)
+    assert data.positions == {"AAPL": 10.0} and len(data.trades) == 1
+    assert data.research["iterations"] == 4 and data.research["minted"] == ["spec_x"]
+    assert data.events == ("1 order refused by risk limits",)

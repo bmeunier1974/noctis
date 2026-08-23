@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from noctis.champions.registry import ChampionRegistry
+    from noctis.engine.research import ResearchSummary
+    from noctis.engine.trading_phase import TradingOutcome
     from noctis.memory.base import Memory
 
 logger = logging.getLogger("noctis.report")
@@ -93,9 +95,12 @@ def gather_account_forward(state_dir: str | Path, entries) -> AccountForward:
 class SessionActivity:
     """What one day-cycle contributes to the close report beyond persisted state.
 
-    The runtime's per-cycle accumulator: research folds its summary in, trading records
-    equity/trades/positions, and anything noteworthy appends to ``events``. A fresh
-    instance is the honest "no session activity" (``noctis report`` outside a run).
+    The runtime's per-cycle accumulator, and the thing that folds its own phases in: RESEARCH
+    hands it a :class:`~noctis.engine.research.ResearchSummary` and TRADING a
+    :class:`~noctis.engine.trading_phase.TradingOutcome`, so the cycle's accounting sits beside
+    the cycle's shape rather than being copied field by field in the loop body. Anything else
+    noteworthy appends to ``events``. A fresh instance is the honest "no session activity"
+    (``noctis report`` outside a run).
     """
 
     start_equity: float = 0.0
@@ -120,6 +125,37 @@ class SessionActivity:
     # against the (T+1 synced) catalog. Empty on the replay path — and on ``noctis report``,
     # which has no session at all — so there is simply nothing external to compare.
     live_bars: dict[str, pd.DataFrame] = field(default_factory=dict)
+
+    def fold_research(self, summary: ResearchSummary) -> None:
+        """Fold one research session's summary in. A closed market runs sessions back to back,
+        so everything here accumulates: the counters add and the lists extend."""
+        self.research_iterations += summary.iterations
+        self.research_promotions += summary.promotions
+        self.research_rejections += summary.rejections
+        self.research_dead_ends += summary.dead_ends
+        self.research_undecided.extend(summary.undecided)
+        # An episodic session carries its ledger path so CLOSE renders a per-session rollup +
+        # candidate trail (story #74); the conversation loop and legacy loop leave it None.
+        if summary.ledger_path:
+            self.research_ledgers.append(summary.ledger_path)
+        self.minted_specs.extend(summary.minted_specs)
+
+    def fold_trading(self, outcome: TradingOutcome) -> None:
+        """Fold one TRADING entry's outcome in — the phase-level view, which the outcome has
+        already folded across however many sessions it settled."""
+        if outcome.sessions:
+            # Equity/positions are the LAST settled session's — the phase already folded a
+            # multi-session catch-up that way. Untouched when nothing traded, so a skipped
+            # day reports zeros rather than a fictional flat session.
+            self.positions = outcome.positions
+            self.start_equity = outcome.start_equity
+            self.end_equity = outcome.end_equity
+        # Trades and events fold either way: an outcome that settled nothing still says why.
+        self.trades.extend(outcome.trades)
+        self.events.extend(outcome.events)
+        # The bars the live feed built ride the cycle to the close, which reconciles them
+        # against the catalog the T+1 sync just refreshed.
+        self.live_bars = outcome.live_bars
 
 
 def assemble_report(
