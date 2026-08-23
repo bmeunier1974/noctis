@@ -46,7 +46,7 @@ def _runtime(tmp_path, *, on_event=None):
 
 
 # ── run wiring: the research feed reaches the injected console ────────────────────────────────
-def test_run_agent_research_tees_the_feed_into_the_console(tmp_path, monkeypatch):
+def test_run_agent_session_tees_the_feed_into_the_console(tmp_path, monkeypatch):
     """The wiring P3 adds: the runtime hands its own console to ``run_agent_research`` as
     ``on_event``, so a ``-vv`` day/night run surfaces the model's reasoning inline — exactly
     what ``noctis research -vv`` shows, now visible from the loop."""
@@ -65,7 +65,7 @@ def test_run_agent_research_tees_the_feed_into_the_console(tmp_path, monkeypatch
 
     monkeypatch.setattr(research_mod, "run_agent_research", fake_loop)
 
-    summary = runtime._run_agent_research()
+    summary = runtime.research.run_agent_session()
 
     assert summary is not None  # a real summary → no legacy fallback
     assert seen["on_event"] is console  # the runtime threaded its own console through
@@ -76,7 +76,7 @@ def test_run_agent_research_tees_the_feed_into_the_console(tmp_path, monkeypatch
     "source, expected",
     [("profile:spicy", "profile:spicy"), (None, "(none)")],
 )
-def test_run_agent_research_logs_the_mandate_the_session_carries(
+def test_run_agent_session_logs_the_mandate_the_session_carries(
     tmp_path, monkeypatch, caplog, source, expected
 ):
     """#260: the RESEARCH line names the provenance of the session's OWN resolved mandate.
@@ -111,13 +111,13 @@ def test_run_agent_research_logs_the_mandate_the_session_carries(
     runtime = _runtime(tmp_path)
 
     with caplog.at_level(logging.INFO, logger="noctis.runtime"):
-        runtime._run_agent_research()
+        runtime.research.run_agent_session()
 
     lines = [r.getMessage() for r in caplog.records if "agent research session:" in r.getMessage()]
     assert lines == [f"agent research session: mandate={expected}, metric=sharpe"]
 
 
-def test_run_agent_research_without_a_console_passes_none(tmp_path, monkeypatch):
+def test_run_agent_session_without_a_console_passes_none(tmp_path, monkeypatch):
     """A bare run (no ``-v``) carries ``on_event=None``, so the research loop falls back to its
     own logger sink — the day/night loop stays silent by default."""
     runtime = _runtime(tmp_path, on_event=None)
@@ -131,7 +131,7 @@ def test_run_agent_research_without_a_console_passes_none(tmp_path, monkeypatch)
 
     monkeypatch.setattr(research_mod, "run_agent_research", fake_loop)
 
-    runtime._run_agent_research()
+    runtime.research.run_agent_session()
     assert seen["on_event"] is None
 
 

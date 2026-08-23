@@ -12,7 +12,7 @@ session open.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
@@ -22,6 +22,7 @@ from noctis.broker.seam import Order, Side
 from noctis.engine.sessions import SessionLedger
 
 from ._session_helpers import (
+    ET,
     _account_path,
     _bars_local,
     _concat,
@@ -31,6 +32,12 @@ from ._session_helpers import (
     _run_phase,
     _uptrend,
 )
+
+
+def _at(trade) -> datetime:
+    """When a report trade filled — the row's own UTC stamp, parsed back."""
+    return datetime.fromisoformat(trade.ts.replace("Z", "+00:00")).astimezone(ET)
+
 
 # --- AccountStore --------------------------------------------------------------------------
 
@@ -117,6 +124,45 @@ def test_store_summary_reads_without_side_effects(tmp_path):
     assert summary.opened == "2026-07-06"
 
 
+def test_store_summarize_is_the_summary_of_one_load(tmp_path):
+    """``summary()`` IS ``summarize(load())``: the view is pure over an already-loaded broker
+    plus the store's own provenance, so a caller that needs both the broker and the summary
+    parses the file once (story #266)."""
+    store = AccountStore(tmp_path / "paper_account.json")
+    broker = store.load()
+    broker.set_price("AAPL", 100.0)
+    broker.submit_order(Order("AAPL", Side.BUY, 10))
+    broker.set_price("AAPL", 120.0)
+    store.save(broker, date(2026, 7, 6))
+    store.save(broker, date(2026, 7, 7))
+
+    reread = AccountStore(store.path)
+    summarized = reread.summarize(reread.load())
+
+    assert summarized == AccountStore(store.path).summary()  # same numbers, same provenance
+    assert summarized.equity == pytest.approx(broker.equity())
+    assert summarized.cumulative_pnl == pytest.approx(broker.equity() - 100_000.0)
+    assert summarized.open_positions == 1
+    assert summarized.opened == "2026-07-06" and summarized.last_session == "2026-07-07"
+
+
+def test_store_summarize_reads_the_broker_it_is_given(tmp_path):
+    """The summary describes the broker handed in — not a re-read of the file — so the close
+    can summarize the account it already loaded."""
+    store = AccountStore(tmp_path / "paper_account.json")
+    store.save(store.load(), date(2026, 7, 6))
+    other = AccountStore(store.path).load()
+    other.set_price("AAPL", 100.0)
+    other.submit_order(Order("AAPL", Side.BUY, 10))
+    other.set_price("AAPL", 150.0)
+
+    summarized = store.summarize(other)
+
+    assert summarized.equity == pytest.approx(other.equity())
+    assert summarized.open_positions == 1
+    assert summarized.opened == "2026-07-06"  # provenance still the store's
+
+
 # --- runtime wiring ------------------------------------------------------------------------
 
 
@@ -134,7 +180,7 @@ def test_two_sessions_carry_equity_and_positions_and_gap_hits_day2(tmp_path):
     outcome = _run_phase(runtime)
 
     assert len(outcome.sessions) == 2
-    s1, s2 = outcome.sessions[0].summary, outcome.sessions[1].summary
+    s1, s2 = outcome.sessions
     qty1 = s1.positions.get("AAPL", 0.0)
     assert qty1 > 0  # day 1 ended long — the position rides overnight
     assert s2.start_equity == pytest.approx(s1.final_equity)
@@ -164,14 +210,15 @@ def test_carried_position_is_not_flattened_at_the_next_open(tmp_path):
 
     outcome = _run_phase(runtime)
 
-    qty1 = outcome.sessions[0].summary.positions["AAPL"]
-    day2_fills = outcome.sessions[1].fills
+    s1, s2 = outcome.sessions
+    qty1 = s1.positions["AAPL"]
+    day2_trades = [t for t in outcome.trades if _at(t).date() == s2.session]
     # No day-2 fill closes the whole carried position (resizes are fine; a flatten-to-zero
     # sell of the full quantity is exactly the forced turnover this guards against).
-    assert all(not (f.side is Side.SELL and f.quantity >= qty1 * 0.999) for f in day2_fills), (
-        day2_fills
+    assert all(not (t.side == Side.SELL and t.quantity >= qty1 * 0.999) for t in day2_trades), (
+        day2_trades
     )
-    assert outcome.sessions[1].summary.positions["AAPL"] > 0  # still long at day-2 close
+    assert s2.positions["AAPL"] > 0  # still long at day-2 close
 
 
 def test_daily_loss_anchors_to_carried_equity(tmp_path):
@@ -189,9 +236,9 @@ def test_daily_loss_anchors_to_carried_equity(tmp_path):
 
     outcome = _run_phase(runtime)
 
-    assert outcome.sessions[0].summary.start_equity == pytest.approx(90_000.0)
+    assert outcome.sessions[0].start_equity == pytest.approx(90_000.0)
     # And the sizing follows the carried equity: 10% max_position_pct of 90k, not 100k.
-    buys = [f for f in outcome.broker.fills if f.side is Side.BUY]
+    buys = [t for t in outcome.trades if t.side == Side.BUY]
     assert buys and buys[0].quantity * buys[0].price <= 9_000.0 * 1.01
 
 
@@ -207,10 +254,11 @@ def test_corrupt_account_refuses_trading_with_event_and_file_untouched(tmp_path,
         outcome = _run_phase(runtime)
 
     assert outcome.sessions == []  # no session ran, nothing traded
-    assert outcome.broker is None  # the corrupt account never loaded
     assert "corrupt paper account" in caplog.text
     assert any(e.startswith("Trading refused — corrupt paper account") for e in outcome.events)
     assert path.read_text() == "{torn write"  # evidence preserved for the operator
+    with pytest.raises(RuntimeError, match="corrupt paper account"):
+        AccountStore(path).load()  # still refuses — nothing was rewritten over the evidence
     assert SessionLedger(_ledger_path(runtime)).load() is None  # high-water mark untouched
 
 
@@ -222,7 +270,7 @@ def test_inception_file_created_after_first_session(tmp_path):
 
     outcome = _run_phase(runtime)
 
-    assert outcome.sessions[0].summary.start_equity == 100_000.0  # inception: fresh 100k
+    assert outcome.sessions[0].start_equity == 100_000.0  # inception: fresh 100k
     data = json.loads(_account_path(runtime).read_text())
     assert data["version"] == 1
     assert data["opened"] == day.isoformat() == data["last_session"]
@@ -240,11 +288,10 @@ def test_no_double_count_of_prior_session_fills(tmp_path):
 
     outcome = _run_phase(runtime)
 
-    broker = outcome.broker
-    s1, s2 = outcome.sessions[0].summary, outcome.sessions[1].summary
-    assert s1.fills > 0
-    assert s1.fills + s2.fills == len(broker.fills)  # per-session counts partition the total
-    assert len(outcome.trades) == len(broker.fills)  # each fill reported exactly once
+    s1, s2 = outcome.sessions
+    assert s1.fills > 0 and s2.fills > 0
+    # Each fill is reported exactly once: the per-session counts partition the phase's trades.
+    assert s1.fills + s2.fills == len(outcome.trades)
 
 
 def test_crash_between_account_and_ledger_saves_retraces_safely(tmp_path, monkeypatch):

@@ -29,6 +29,15 @@ every stop/resume, marking it `completed` at the cap so two runs can be compared
 state — deliberately one route, so a new way to stop can never behave differently from the one an
 operator already trusts.
 
+**The runtime holds one object per phase, and nothing else phase-shaped**: `ResearchPhase`
+(`src/noctis/engine/research_phase.py`), `TradingPhase` (`src/noctis/engine/trading_phase.py`,
+which also owns `TradingDay` — the settle order below) and `ClosePhase`
+(`src/noctis/engine/close.py`), each with one `run(...)` and one return value
+(`ResearchSummary`, `TradingOutcome`, `CloseResult`). What a phase *does* is that phase's; what
+is left in the runtime is the loop itself — the pacing, the stop handling, the per-cycle fold and
+the run's counters. A caller with a stand-in for one phase swaps the whole object, so no phase
+can be driven half through its seam.
+
 ## The full pipeline
 
 End to end, a strategy travels one path from raw data to a live paper record:
@@ -70,7 +79,7 @@ warning (see [development.md](development.md)).
 | 🏦 Broker | `src/noctis/broker` | Paper broker (a SimulatedExchange: fills, slippage, fees, P&L); event simulator; gated live stub |
 | ⏪ Backtest | `src/noctis/backtest` | Two-stage pipeline: vectorbt-style pre-filter → walk-forward validation → `Scorecard` |
 | 🏆 Champions | `src/noctis/champions` | Persistent registry + pure promotion rules (OOS metric, train−test gap guard, one slot per family) |
-| ⚙️ Engine | `src/noctis/engine` | Market clock, state machine, research loop, close orchestration, runtime |
+| ⚙️ Engine | `src/noctis/engine` | Market clock, state machine, the runtime loop, and one module per phase: `research_phase.py`, `trading_phase.py` (which holds `TradingDay`, the settle order) and `close.py` |
 | 📡 Live | `src/noctis/live` | Trading loop + risk manager |
 | 📊 Reporting | `src/noctis/reporting` | Close-of-day report, Markdown + structured JSON (`<run>/reports/<date>.md` / `.json`) + the run record/store |
 | 🧠 Memory | `src/noctis/memory` | The agent-memory store (load / append / reorganize; lives at `<run>/memory/MEMORY.md`) |
@@ -90,6 +99,15 @@ loop itself runs one of two ways behind a further seam — the **conversation**
 transcript or the small-context **episodic** driver — and the episodic path adds the
 machine-fixed scenario oracle (FORMULATE authors the tape, the coder only satisfies it; see
 [research.md](research.md)). See [research.md](research.md) for how a strategy earns promotion.
+
+The RESEARCH entry itself sits behind its own seam, `ResearchPhase`
+(`src/noctis/engine/research_phase.py`), the shape TRADING and CLOSE already have: it holds the
+session's collaborators, chooses the path, drives it, and counts the completed session toward
+the memory distillation that fires at CLOSE. The bars are an **argument**, never state — a
+frozen `ResearchPanel` (fit bars, symbol holdout, split geometry) the runtime rebuilds from a
+fresh catalog read at each entry, exactly as TRADING rebuilds its bars, so a session that
+follows a close researches what that close's T+1 sync brought in and none can be driven on a
+stale panel.
 
 ## The eval layer, and why it is one-way
 
@@ -264,15 +282,23 @@ champions keep trading the whole universe).
 **One driver, one feed contract, one settle order.** The session driver polls a `BarFeed`
 (`src/noctis/live/feed.py`) — the live yfinance adapter (clock-bounded: the session close ends
 the day) or a catalog `ReplayBarFeed` (data-bounded: the slice's exhaustion does) — so live and
-replay can never diverge on how a day is traded. However the day ran, `TradingDay`
-(`src/noctis/engine/trading_day.py`) settles it the same way: attribute forward P&L (derived
-evidence, never blocks), persist the account **first**, advance the session high-water mark
-**second** — a crash between the two re-trades the session rather than silently skipping it.
-The TRADING entry itself sits behind its own seam: `TradingPhase`
-(`src/noctis/engine/trading_phase.py`) assembles the account, forward ledger, and day runner,
-resolves live vs replay, runs the catch-up loop, and folds every settled session into one
-outcome the runtime copies into its report accumulators — the same interface tests drive
-directly with fake bars and feeds.
+replay can never diverge on how a day is traded. However the day ran, `TradingDay` settles it
+the same way: attribute forward P&L (derived evidence, never blocks), persist the account
+**first**, advance the session high-water mark **second** — a crash between the two re-trades
+the session rather than silently skipping it.
+
+**One module holds all of it** (`src/noctis/engine/trading_phase.py`): `TradingPhase` is the
+TRADING entry — it assembles the session collaborators (the continuous paper account, the forward
+ledger, one `TradingDay` runner), reads the fill costs once, resolves live vs replay, and runs the
+catch-up loop — and `TradingDay` beside it owns one session end-to-end. Each `TradingDay.run`
+**folds** its settled session straight into the phase's one `TradingOutcome` (equity and positions
+from the last session, trades and events across all of them) and hands back the session's own
+evidence: the driver's `TradingSummary`, stamped by the settle with the date it speaks for. So a
+replay catch-up's sessions are inspectable — `outcome.sessions[i]` *is* a `TradingSummary` — with
+no per-session wrapper shape in between, and what the outcome carries is facts, never a
+collaborator: the account the sessions settled on is durable, and CLOSE reads that file rather
+than being handed the live broker. The runtime copies the outcome into its report accumulators;
+tests drive `run` directly with fake bars and feeds — the interface is the test surface.
 
 **Catalog replay is a rolling live-holdout.** Each day trades only the newest session(s) past a
 persisted high-water mark (the state dir's `trading_sessions.json`) — bars no tuning ever saw — one
@@ -297,9 +323,29 @@ report.
 
 ## At the close
 
-Noctis writes a report (`<run>/reports/<date>.md` + `.json`), syncs its data catalog
-(tail-only), reconciles live-built bars against the authoritative catalog (see
-[data.md](data.md)), reorganizes its own memory, and loops back to research.
+The CLOSE entry sits behind its own seam, `ClosePhase` (`src/noctis/engine/close.py`), and it
+**finishes the day's evidence before it renders it**. One fixed order, and the order is the
+contract:
+
+1. **Sync** the data catalog (tail-only).
+2. **Check its integrity** and repair what a flag-limited repair can.
+3. **Reconcile** the session's live-built bars against that catalog (see [data.md](data.md)) —
+   after the sync, because it compares against T+1 vendor bars; a flagged drift is appended to
+   the day's events.
+4. **Read the paper account once** — one `gather_account_forward` parse of `paper_account.json`
+   plus the forward ledger.
+5. **Mark the day's equity** from that read, onto the run's own equity ledger.
+6. **Assemble** the day's evidence into one frozen `ReportData`.
+7. **Write both files** from that one final value — `<run>/reports/<date>.md`, then `.json` — so
+   the pair agrees on everything, including what the write itself discovers.
+8. **Distill** memory (periodic), then
+9. **reorganize** it, and loop back to research.
+
+The report is written *last* because a report is evidence: it says what it said, and a fact the
+close discovers after the write would reach no file at all. That is why a flagged feed drift now
+appears under "Events" in both the Markdown and the JSON, and why the equity mark and the report
+state the same account — they are the same read. Every step is isolated: a failure is recorded on
+the `CloseResult`, never fatal, and memory upkeep always runs.
 
 ## Where state lives
 

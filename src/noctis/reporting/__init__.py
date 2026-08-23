@@ -19,6 +19,7 @@ from noctis.reporting.report import (
     today_str,
     write_report,
     write_report_json,
+    write_reports,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "today_str",
     "write_report",
     "write_report_json",
+    "write_reports",
 ]

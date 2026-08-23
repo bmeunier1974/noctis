@@ -28,7 +28,7 @@ from noctis.broker.seam import Order, Side
 from noctis.config import load_settings
 from noctis.data.types import NS_PER_SECOND
 from noctis.engine import ForwardLedger, SimulatedSleeper, build_runtime
-from noctis.engine.trading_day import TradingDay
+from noctis.engine.trading_phase import TradingDay
 from noctis.live import RiskLimits, SessionConfig, run_trading, run_trading_day
 from noctis.memory import MemoryStore
 from noctis.strategies import FamilyRegistry
@@ -84,13 +84,18 @@ def _runtime_with(tmp_path, lake, entries, universe=("AAPL",)):
     )
 
 
-def _seed_position(runtime, symbol, qty, price, day):
-    """A prior session left an open position on the persisted continuous account."""
+def _seed_position(runtime, symbol, qty, price, day) -> float:
+    """A prior session left an open position on the persisted continuous account.
+
+    Returns the price it opened at — the cost basis a later close realises against. The
+    seeding fill pays slippage like any other, so the caller never has to guess it.
+    """
     store = AccountStore(_account_path(runtime))
     broker = store.load()
     broker.set_price(symbol, price)
-    broker.submit_order(Order(symbol, Side.BUY, qty))
+    fill = broker.submit_order(Order(symbol, Side.BUY, qty))
     store.save(broker, day)
+    return fill.price
 
 
 def _forward_path(runtime) -> Path:
@@ -174,12 +179,12 @@ def test_replay_flattens_orphan_and_attributes_to_recorded_holder(tmp_path):
     runtime = _runtime_with(
         tmp_path, lake, [_Entry(live_symbols=["MSFT"])], universe=("AAPL", "MSFT")
     )
-    _seed_position(runtime, "AAPL", 10.0, 100.0, day - timedelta(days=1))
+    basis = _seed_position(runtime, "AAPL", 10.0, 100.0, day - timedelta(days=1))
     _seed_holder(runtime, "AAPL", "old_champ@2026-01-01", "old_champ")
 
     outcome = _run_phase(runtime)
 
-    summary = outcome.sessions[0].summary
+    summary = outcome.sessions[0]
     assert summary.orphans_flattened == ["AAPL"]
     flatten_lines = [e for e in summary.events if "Orphaned position flattened: AAPL" in e]
     assert flatten_lines and "opened by old_champ@2026-01-01" in flatten_lines[0]
@@ -188,16 +193,18 @@ def test_replay_flattens_orphan_and_attributes_to_recorded_holder(tmp_path):
     # The position is genuinely closed on the persisted account.
     assert AccountStore(_account_path(runtime)).load().position("AAPL").quantity == 0.0
     # The closing fill is labeled honestly in the report's trades (not "champion signal").
-    assert ("AAPL", "orphan flatten") in {(t.symbol, t.rationale) for t in outcome.trades}
+    flatten = [t for t in outcome.trades if t.symbol == "AAPL"]
+    assert [t.rationale for t in flatten] == ["orphan flatten"]
 
     # Ledger: the realized delta is the opener's, no session is claimed, the holder drops,
-    # and the still-open MSFT position now records the current champion as holder.
+    # and the still-open MSFT position now records the current champion as holder. The
+    # credit is exactly what the flatten row on the report says the position closed at.
     fl = ForwardLedger(_forward_path(runtime))
     fl.load()
-    broker = outcome.broker
+    credit = flatten[0].quantity * (flatten[0].price - basis)
     entry = fl.entries["old_champ@2026-01-01"]
-    assert entry.realized_pnl == pytest.approx(broker.realized_pnl_by_symbol["AAPL"])
-    assert entry.symbols == {"AAPL": pytest.approx(broker.realized_pnl_by_symbol["AAPL"])}
+    assert entry.realized_pnl == pytest.approx(credit)
+    assert entry.symbols == {"AAPL": pytest.approx(credit)}
     assert entry.sessions_traded == 0
     assert "AAPL" not in fl.holders
     assert fl.holders["MSFT"]["key"] == "sma_crossover@t1"
@@ -251,13 +258,12 @@ def test_reassigned_symbol_is_inherited_not_flattened(tmp_path):
 
     outcome = _run_phase(runtime)
 
-    summary = outcome.sessions[0].summary
+    summary = outcome.sessions[0]
     assert summary.orphans_flattened == []
     assert not any("Orphaned" in e for e in summary.events)
     # The inheritor's first action is its own re-true UP from the carried 5 shares (a buy),
     # not a forced dump at the open; later resizes are the strategy's own choices.
-    broker = outcome.broker
-    assert broker.fills[0].side is Side.BUY
+    assert outcome.trades[0].side == Side.BUY
     assert all(t.rationale == "champion signal" for t in outcome.trades)
     assert summary.positions["AAPL"] > 0  # still long at the close (uptrend hold)
     # Settle re-derives the holder: the inheritor owns the open position now.
@@ -276,7 +282,7 @@ def test_no_orphans_under_a_legacy_whole_universe_champion(tmp_path):
 
     outcome = _run_phase(runtime)
 
-    summary = outcome.sessions[0].summary
+    summary = outcome.sessions[0]
     assert summary.orphans_flattened == []
     assert not any("Orphaned" in e for e in summary.events)
     assert all(t.rationale == "champion signal" for t in outcome.trades)
@@ -430,7 +436,7 @@ def test_champion_opening_a_position_records_itself_as_holder(tmp_path):
 
     outcome = _run_phase(runtime)
 
-    assert outcome.sessions[0].summary.positions["AAPL"] > 0  # the champion ended long
+    assert outcome.sessions[0].positions["AAPL"] > 0  # the champion ended long
     fl = ForwardLedger(_forward_path(runtime))
     fl.load()
     assert fl.holders["AAPL"] == {"key": "sma_crossover@c1", "family": "sma_crossover"}

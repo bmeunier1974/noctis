@@ -12,21 +12,18 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from noctis.backtest import Candidate, PipelineConfig, evaluate
-from noctis.backtest.pool import evaluation_time_limit
+from noctis.backtest import PipelineConfig
 from noctis.champions.promotion import PromotionRules
-from noctis.data.types import empty_bars
 from noctis.engine.clock import MarketClock
-from noctis.engine.close import ReconciliationReport, reconcile_bars, run_close
+from noctis.engine.close import ClosePhase
 from noctis.engine.machine import Phase, TradingMachine
 from noctis.engine.pacing import BoundedWaiter, RealSleeper, StallGuard, StopFlag
-from noctis.engine.report_assembly import SessionActivity, assemble_report
-from noctis.engine.research import run_research
+from noctis.engine.report_assembly import SessionActivity
+from noctis.engine.research_phase import ResearchPanel, ResearchPhase
 from noctis.engine.trading_phase import TradingPhase
 from noctis.live.risk import RiskLimits
 from noctis.observability import Event
@@ -118,7 +115,15 @@ class RuntimeResult:
 
 
 class Runtime:
-    """Drives the RESEARCH → TRADING → CLOSE loop until a time limit or stop request."""
+    """Drives the RESEARCH → TRADING → CLOSE loop until a time limit or stop request.
+
+    It holds one object per phase — :class:`~noctis.engine.research_phase.ResearchPhase`,
+    :class:`~noctis.engine.trading_phase.TradingPhase`,
+    :class:`~noctis.engine.close.ClosePhase` — and nothing else phase-shaped: what a phase
+    *does* is that phase's, and what is left here is the loop itself (the pacing, the stop
+    handling, the per-cycle fold and the run's counters). A caller with a stand-in for one
+    phase swaps the whole object, so no phase can be driven half through its seam.
+    """
 
     def __init__(
         self,
@@ -157,14 +162,8 @@ class Runtime:
         self.registry = registry
         self.families = families
         self.memory = memory
-        self.proposer = proposer
-        # The resolved operator mandate (or None), threaded to each agent research session.
-        self.mandate = mandate
-        # LLM ideation seam (clientless/no-op when no key or [llm] extra). None → seed-only.
-        self.ideator = ideator
         # None ⇒ the settings-resolved location (workspace-derived unless overridden).
         self.reports_dir = reports_dir if reports_dir is not None else settings.reports_dir
-        self.research_max_iters = research_max_iters
         self.schema = schema
         self._sleeper_factory = sleeper_factory or (lambda _start: RealSleeper())
 
@@ -193,6 +192,24 @@ class Runtime:
         self._stop = False
         # The event-protocol view (``is_set()``) of ``_stop`` the research/trading loops poll.
         self._stop_event = StopFlag(lambda: self._stop)
+        # The RESEARCH dispatch behind its own seam (pick the agent or legacy path, drive it,
+        # count the session): assembled once with the collaborators a session needs, driven at
+        # each RESEARCH entry with that entry's freshly rebuilt panel — the bars are the
+        # argument, so a session can no more be run on a stale panel than a trading day can.
+        self.research = ResearchPhase(
+            settings=settings,
+            market_lake=market_lake,
+            registry=registry,
+            families=families,
+            memory=memory,
+            proposer=proposer,
+            rules=self.rules,
+            mandate=mandate,
+            ideator=ideator,
+            research_max_iters=research_max_iters,
+            on_event=on_event,
+            stop_event=self._stop_event,
+        )
         # The TRADING dispatch behind its own seam (assemble the session collaborators, pick
         # the live/replay driver, run the catch-up loop, fold): assembled once, driven at
         # each TRADING entry with that entry's freshly loaded catalog bars. ``feed_factory``
@@ -207,11 +224,25 @@ class Runtime:
             on_event=on_event,
             stop_event=self._stop_event,
         )
+        # The CLOSE entry behind its own seam: the day's evidence (sync, integrity, reconcile,
+        # account, mark) is finished before the report is rendered, so what the close discovers
+        # reaches the files it writes. Assembled once, driven at each CLOSE with that cycle.
+        from noctis.research.distill import maybe_distill
+
+        self.close = ClosePhase(
+            settings=settings,
+            reports_dir=self.reports_dir,
+            memory=memory,
+            registry=registry,
+            market_lake=market_lake,
+            schema=schema,
+            distill_fn=lambda: maybe_distill(self.settings, self.memory),
+        )
 
         # Load catalog bars for the universe (research + replay share them). Re-run at each
-        # TRADING entry so the CLOSE-phase T+1 sync becomes visible on multi-day runs.
+        # RESEARCH and TRADING entry so the CLOSE-phase T+1 sync becomes visible on
+        # multi-day runs.
         self._load_bars()
-        self._pipeline_config = self._make_pipeline_config()
 
         # Per-cycle accumulators.
         self._reset_cycle()
@@ -247,12 +278,23 @@ class Runtime:
         # cannot be driven on stale bars by construction.
         return self.trading_bars
 
-    def _make_pipeline_config(self) -> PipelineConfig:
-        # One geometry/metric home (PipelineConfig.auto), sized from the fit set's shortest
-        # series so every symbol gets identical windows (keeps per-symbol scores comparable).
-        return PipelineConfig.auto_from_settings(
-            self.settings,
-            min((len(df) for df in self.research_panel.values()), default=0),
+    def _research_panel(self) -> ResearchPanel:
+        """The frozen panel this RESEARCH entry researches on, off a fresh catalog read.
+
+        Rebuilt at entry exactly as the TRADING view is, so a session that follows a CLOSE
+        picks up what that close's T+1 sync brought in instead of the bars startup happened
+        to see. The geometry has one home (``PipelineConfig.auto_from_settings``) and is sized
+        from the fit set's shortest series, so every symbol gets identical windows and
+        per-symbol scores stay comparable.
+        """
+        self._load_bars()
+        return ResearchPanel(
+            fit=self.research_panel,
+            symbol_holdout=self.symbol_holdout,
+            config=PipelineConfig.auto_from_settings(
+                self.settings,
+                min((len(df) for df in self.research_panel.values()), default=0),
+            ),
         )
 
     def has_data(self) -> bool:
@@ -283,217 +325,9 @@ class Runtime:
         )
 
     def _reset_cycle(self) -> None:
-        # Everything the day-cycle contributes to the close report, in one accumulator.
+        # Everything the day-cycle contributes to the close report, in one accumulator — the
+        # live-built bars the close reconciles included.
         self._cycle = SessionActivity()
-        # Bars the live feed actually built this session, retained for close reconciliation.
-        self._live_bars: dict[str, pd.DataFrame] = {}
-
-    # --- phases ---
-    def _evaluate(self, candidate: Candidate):
-        # Same hang insurance as the toolbox's _evaluate: a sequential (workers=1)
-        # evaluation has no pool stall guard, so bound it in wall-clock time. The legacy
-        # loop absorbs the EvaluationTimeout as a dead end and keeps running.
-        with evaluation_time_limit():
-            return evaluate(
-                candidate,
-                self.research_panel,
-                config=self._pipeline_config,
-                symbol_holdout=self.symbol_holdout,
-                workers=self.settings.research.agent.sweep_workers,
-                families=self.families,
-            )
-
-    def _run_research(self) -> None:
-        # The budget is real research time (backtests are wall-clock work even when the
-        # session clock jumps), so both loops keep their default wall clock and the
-        # wall-clock budget governs. research_max_iters is None in production (unbounded
-        # for the legacy loop; the agent loop then uses its config cap); tests pass an
-        # explicit cap to bound loops that finish instantly.
-        summary = None
-        if self.settings.research.mode == "agent":
-            summary = self._run_agent_research()
-        if summary is None:
-            # Legacy proposer/Optuna loop — also the fallback when agent mode has no client.
-            summary = run_research(
-                proposer=self.proposer,
-                evaluate_fn=self._evaluate,
-                registry=self.registry,
-                rules=self.rules,
-                memory=self.memory,
-                budget_minutes=self.settings.research_time_budget_minutes,
-                stop_event=self._stop_event,
-                max_iterations=self.research_max_iters,
-                ideate=self.ideator.run if self.ideator is not None else None,
-            )
-        self._cycle.research_iterations += summary.iterations
-        self._cycle.research_promotions += summary.promotions
-        self._cycle.research_rejections += summary.rejections
-        self._cycle.research_dead_ends += summary.dead_ends
-        self._cycle.research_undecided.extend(summary.undecided)
-        # An episodic session carries its ledger path so CLOSE renders a per-session rollup +
-        # candidate trail (story #74); the conversation loop and legacy loop leave it None.
-        if summary.ledger_path:
-            self._cycle.research_ledgers.append(summary.ledger_path)
-        self._cycle.minted_specs.extend(summary.minted_specs)
-        self.result.research_iterations += summary.iterations
-        self.result.research_promotions += summary.promotions
-        # One completed session toward the periodic memory distillation (runs at CLOSE, not
-        # here — a research session's own loop never carries the summarization call).
-        from noctis.research.distill import bump_research_session
-
-        bump_research_session(self.settings.state_dir)
-
-    def _run_agent_research(self):
-        """One agent-driven session, or ``None`` to fall back to the legacy loop (no key)."""
-        from noctis.bootstrap import build_research_session
-
-        # The composition root assembles the same session bundle `noctis research` runs.
-        # on_event tees the research feed into the run's console (None ⇒ the loop's own logger
-        # sink): `run -v` shows the tool feed, `-vv`/`--show-reasoning` opens think/say — the
-        # same streams `noctis research` surfaces, now visible from the day/night loop.
-        session = build_research_session(
-            settings=self.settings,
-            lake=self.market_lake,
-            registry=self.registry,
-            families=self.families,
-            memory=self.memory,
-            mandate=self.mandate,
-            rules=self.rules,
-            on_event=self._on_event,
-        )
-        if session is None:
-            logger.info("research.mode=agent but no research client; using legacy loop")
-            return None
-        # The provenance comes off the session's own resolved mandate (#260) — the session
-        # already carries it, so the line names what steered this session rather than a copy
-        # read back out of its toolbox.
-        logger.info(
-            "agent research session: mandate=%s, metric=%s",
-            (session.mandate.source if session.mandate else None) or "(none)",
-            self.settings.promotion.metric,
-        )
-        return session.run(
-            max_iterations=self.research_max_iters,
-            stop_event=self._stop_event,
-        )
-
-    def _run_trading(self, t: datetime, sleeper) -> None:
-        """One TRADING entry: refresh the catalog view, drive the phase, fold its outcome."""
-        # Refresh the catalog view first: the CLOSE-phase T+1 sync updates the *lake*, but
-        # bars were loaded once at startup — without a reload the newest session would never
-        # appear and every later day would look like "no new data". The refresh re-derives
-        # the research panel/holdout too; that is safe (deterministic from universe order)
-        # and it happens at TRADING entry only, so a research session's view stays frozen
-        # for its duration.
-        outcome = self.trading.run(t, sleeper, self._load_bars())
-        self.result.trades += outcome.orders_submitted
-        if outcome.sessions:
-            # Equity/positions are the LAST settled session's — the phase already folded a
-            # multi-session catch-up that way. Untouched when nothing traded, so a skipped
-            # day reports zeros rather than a fictional flat session.
-            self._cycle.positions = outcome.positions
-            self._cycle.start_equity = outcome.start_equity
-            self._cycle.end_equity = outcome.end_equity
-            self.result.final_equity = outcome.end_equity
-        self._cycle.trades.extend(outcome.trades)
-        self._cycle.events.extend(outcome.events)
-        self._live_bars = outcome.live_bars
-
-    def _reconcile(self, threshold: float = 0.005):
-        """Compare the session's live-built bars against the (T+1 synced) catalog.
-
-        When a live feed ran, each symbol's retained live bars are reconciled against the
-        authoritative catalog and the per-symbol results are aggregated (drift over the
-        threshold on any symbol flags). Without a live feed there is nothing external to
-        compare, so this is a no-op that never flags.
-        """
-        if not self._live_bars:
-            return ReconciliationReport(0, 0.0, 0.0, threshold, flagged=False)
-        vendor_bars = self.market_lake.get_bars(
-            self.settings.data.dataset, self.schema, list(self._live_bars), 0, 2**63 - 1
-        )
-        n = 0
-        max_drift = 0.0
-        weighted_mean = 0.0
-        flagged = False
-        for sym, live in self._live_bars.items():
-            rep = reconcile_bars(live, vendor_bars.get(sym, empty_bars()), threshold=threshold)
-            n += rep.n_compared
-            max_drift = max(max_drift, rep.max_drift)
-            weighted_mean += rep.mean_drift * rep.n_compared
-            flagged = flagged or rep.flagged
-        mean_drift = weighted_mean / n if n else 0.0
-        return ReconciliationReport(n, max_drift, mean_drift, threshold, flagged=flagged)
-
-    def _mark_equity(self, as_of: str) -> None:
-        """Append this CLOSE's daily equity mark to the run's own account ledger (story #142).
-
-        The mark is the **account's** mark-to-market — read back off ``paper_account.json``, the
-        cumulative paper account — not the session's own end equity, so the curve is the account's
-        and a resumed run continues the same line. The session's fills, orders and closing
-        positions ride with it, which is what makes the run record's trade log derivable from one
-        durable artifact instead of from a report that a later ``noctis report`` could overwrite.
-
-        No account file means no mark: a night that never traded has no equity to state, and an
-        invented flat 100 000 would be a claim about trading that never happened (epic D10).
-
-        Never fatal, like every other reporting step at CLOSE: a ledger that cannot be written
-        costs the record a day, never the run.
-        """
-        from noctis.broker.persistence import EQUITY_CURVE_NAME, AccountStore, EquityLedger
-
-        try:
-            state_dir = Path(self.settings.state_dir)
-            summary = AccountStore(state_dir / "paper_account.json").summary()
-            if summary is None:
-                return
-            EquityLedger(state_dir / EQUITY_CURVE_NAME).mark(
-                date=as_of,
-                equity=summary.equity,
-                start_equity=self._cycle.start_equity,
-                end_equity=self._cycle.end_equity,
-                realized_pnl=self._cycle.end_equity - self._cycle.start_equity,
-                orders_submitted=len(self._cycle.trades),
-                positions_end=dict(self._cycle.positions),
-                trades=[trade.as_dict() for trade in self._cycle.trades],
-            )
-        except Exception:  # noqa: BLE001 — the record is evidence, never a gate
-            logger.exception("close: equity mark failed for %s; continuing", as_of)
-
-    def _run_close(self, t: datetime) -> None:
-        as_of = t.astimezone(UTC).date().isoformat()
-        # Before the report and before the cycle accumulator is reset: the mark belongs to the
-        # session that just closed, and the run record re-derives the whole curve from the ledger
-        # at its next write.
-        self._mark_equity(as_of)
-        data = assemble_report(
-            as_of=as_of,
-            mode=self.mode,
-            registry=self.registry,
-            memory=self.memory,
-            state_dir=self.settings.state_dir,
-            session=self._cycle,
-        )
-        from noctis.research.distill import maybe_distill
-
-        result = run_close(
-            report_data=data,
-            reports_dir=self.reports_dir,
-            memory=self.memory,
-            market_lake=self.market_lake,
-            registry=self.registry,
-            reconcile_fn=self._reconcile,
-            tracked=self.tracked,
-            # CLOSE owns memory upkeep (reorganize below), so the periodic distillation
-            # rides the same isolated-step machinery instead of racing a live session.
-            distill_fn=lambda: maybe_distill(self.settings, self.memory),
-        )
-        if result.report_path:
-            self.result.reports.append(result.report_path)
-        self.result.cycles_completed += 1
-        self._reset_cycle()
-        if self._on_cycle_close is not None:
-            self._on_cycle_close(self.result)
 
     # --- main loop ---
     def run(self, start: datetime | None = None, max_cycles: int | None = None) -> RuntimeResult:
@@ -529,7 +363,12 @@ class Runtime:
             )
             if phase is Phase.RESEARCH:
                 research_start = sleeper.now()
-                self._run_research()
+                # The panel is rebuilt here, at the entry, and handed in: the phase holds the
+                # collaborators, never the bars, so this session's view is this session's.
+                summary = self.research.run(self._research_panel())
+                self._cycle.fold_research(summary)
+                self.result.research_iterations += summary.iterations
+                self.result.research_promotions += summary.promotions
                 self._count_phase_time(phase, research_start, sleeper.now())
                 # If research overran into an open session, fall through so the machine can
                 # trade the remaining hours instead of skipping the day. While the market is
@@ -552,7 +391,20 @@ class Runtime:
                 # what keeps a start-while-closed (e.g. a Saturday) from ever emitting orders.
                 if self.clock.is_open(sleeper.now()):
                     trading_start = sleeper.now()
-                    self._run_trading(trading_start, sleeper)
+                    # The catalog view is refreshed here, at the entry, and handed in: the
+                    # CLOSE-phase T+1 sync updates the *lake*, but bars were loaded once at
+                    # startup — without a reload the newest session would never appear and every
+                    # later day would look like "no new data". RESEARCH refreshes the same way
+                    # for the same reason; each phase reads the view it just loaded, so neither
+                    # can be driven on the other's bars.
+                    outcome = self.trading.run(trading_start, sleeper, self._load_bars())
+                    self.result.trades += outcome.orders_submitted
+                    if outcome.sessions:
+                        # The run's headline equity is the LAST settled session's; untouched
+                        # when nothing traded, so a skipped day reports the standing number
+                        # rather than a fictional zero.
+                        self.result.final_equity = outcome.end_equity
+                    self._cycle.fold_trading(outcome)
                     self._count_phase_time(phase, trading_start, sleeper.now())
                     # Advance to the session close. The live driver already ran the clock to
                     # the close; the instant replay driver has not, so pace to it here —
@@ -565,7 +417,13 @@ class Runtime:
                     self._cycle.events.append("Trading phase skipped — market closed")
             elif phase is Phase.CLOSE:
                 close_start = sleeper.now()
-                self._run_close(close_start)
+                closed = self.close.run(close_start, self._cycle, tracked=self.tracked)
+                if closed.report_path:
+                    self.result.reports.append(closed.report_path)
+                self.result.cycles_completed += 1
+                self._reset_cycle()
+                if self._on_cycle_close is not None:
+                    self._on_cycle_close(self.result)
                 self._count_phase_time(phase, close_start, sleeper.now())
                 if max_cycles is not None and self.result.cycles_completed >= max_cycles:
                     self.machine.stop()

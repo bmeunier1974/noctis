@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from noctis.engine.clock import MarketClock
-from noctis.engine.close import CloseResult, ReconciliationReport, reconcile_bars, run_close
+from noctis.engine.close import ClosePhase, CloseResult, ReconciliationReport, reconcile_bars
 from noctis.engine.forward_ledger import (
     ForwardLedger,
     ForwardRecord,
@@ -21,9 +21,10 @@ from noctis.engine.pacing import (
 )
 from noctis.engine.report_assembly import SessionActivity, assemble_report
 from noctis.engine.research import ResearchSummary, run_research
+from noctis.engine.research_phase import ResearchPanel, ResearchPhase
 from noctis.engine.runtime import Runtime, RuntimeResult, build_runtime
 from noctis.engine.trading_phase import (
-    SessionRecord,
+    TradingDay,
     TradingOutcome,
     TradingPhase,
     resolve_trading_driver,
@@ -31,10 +32,10 @@ from noctis.engine.trading_phase import (
 
 __all__ = [
     "MarketClock",
+    "ClosePhase",
     "CloseResult",
     "ReconciliationReport",
     "reconcile_bars",
-    "run_close",
     "Phase",
     "TradingMachine",
     "initial_phase_for",
@@ -46,14 +47,16 @@ __all__ = [
     "StopFlag",
     "ResearchSummary",
     "run_research",
+    "ResearchPhase",
+    "ResearchPanel",
     "SessionActivity",
     "assemble_report",
     "Runtime",
     "RuntimeResult",
     "build_runtime",
     "TradingPhase",
+    "TradingDay",
     "TradingOutcome",
-    "SessionRecord",
     "resolve_trading_driver",
     "ForwardLedger",
     "ForwardRecord",

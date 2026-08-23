@@ -14,7 +14,6 @@ import pandas as pd
 from noctis.config import load_settings
 from noctis.data.types import NS_PER_SECOND, empty_bars
 from noctis.engine import build_runtime
-from noctis.engine.sessions import session_date
 from noctis.memory import MemoryStore
 
 ET = ZoneInfo("America/New_York")
@@ -82,7 +81,7 @@ class _FakeRegistry:
         return []
 
 
-def _make_runtime(tmp_path, lake, universe=("AAPL",)):
+def _make_runtime(tmp_path, lake, universe=("AAPL",), *, on_event=None):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
         "mode: paper\n"
@@ -97,6 +96,7 @@ def _make_runtime(tmp_path, lake, universe=("AAPL",)):
         memory=MemoryStore(tmp_path / "MEMORY.md"),
         registry=_FakeRegistry(),
         reports_dir=str(tmp_path / "reports"),
+        on_event=on_event,
     )
 
 
@@ -116,9 +116,22 @@ def _account_path(runtime) -> Path:
     return Path(runtime.settings.state_dir) / "paper_account.json"
 
 
-def _traded_dates(record) -> set[date]:
-    """The session dates present in one :class:`SessionRecord`'s replay slice."""
-    out: set[date] = set()
-    for df in record.bars.values():
-        out.update(session_date(int(ts), ET) for ts in df["ts_event"])
-    return out
+def _traded_dates(outcome) -> list[date]:
+    """The session dates one TRADING entry settled, in traded order.
+
+    Each session's evidence is the driver's own summary stamped with its date, so which
+    dates traded is read straight off ``outcome.sessions`` — no wrapper to unpack.
+    """
+    return [summary.session for summary in outcome.sessions]
+
+
+def _phase_bars(events, day: date) -> int:
+    """How many bars the replay driver announced for session ``day``.
+
+    The per-session ``phase`` banner carries the slice it is about to trade
+    (``meta["bars"]``), so a test captures the count through ``on_event`` instead of
+    counting rows in a frame the outcome no longer carries.
+    """
+    return next(
+        ev.meta["bars"] for ev in events if ev.kind == "phase" and ev.meta["session"] == str(day)
+    )

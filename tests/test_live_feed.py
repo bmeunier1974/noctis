@@ -331,8 +331,7 @@ def test_reconcile_compares_live_bars_against_catalog(tmp_path):
     assert len(catalog) > 0
 
     # Live bars identical to the catalog → no drift, not flagged.
-    runtime._live_bars = {"AAPL": catalog.copy()}
-    clean = runtime._reconcile()
+    clean = runtime.close.reconcile({"AAPL": catalog.copy()})
     assert clean.n_compared == len(catalog)
     assert clean.flagged is False
 
@@ -340,8 +339,7 @@ def test_reconcile_compares_live_bars_against_catalog(tmp_path):
     # the old self-compare could never flag because both sides came from the catalog).
     diverged = catalog.copy()
     diverged.loc[diverged.index[0], "close"] = float(diverged.iloc[0]["close"]) * 1.10
-    runtime._live_bars = {"AAPL": diverged}
-    flagged = runtime._reconcile()
+    flagged = runtime.close.reconcile({"AAPL": diverged})
     assert flagged.flagged is True
     assert flagged.max_drift > flagged.threshold
 

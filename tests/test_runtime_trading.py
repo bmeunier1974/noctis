@@ -139,23 +139,29 @@ def test_fill_rationale_labels_exit_fills_by_reason():
 
 
 # ── configured fill costs reach the paper account (#23) ──────────────────────────────────
-def test_trading_phase_builds_paper_broker_at_configured_costs(tmp_path):
-    """The paper-fill broker for the TRADING phase is built from backtest.fee_bps/slippage_bps,
-    so paper fills charge the same cost the backtest promoted the champion under."""
+def _charged_bps(trade) -> float:
+    """The fee this trade row actually paid, back out as basis points of its notional."""
+    return trade.fees / (trade.quantity * trade.price) * 10_000.0
+
+
+def test_trading_phase_fills_charge_the_configured_costs(tmp_path):
+    """The paper account for the TRADING phase is built from backtest.fee_bps/slippage_bps,
+    so paper fills charge the same cost the backtest promoted the champion under — stated on
+    every trade row the phase reports."""
     runtime = _runtime(tmp_path, provider="databento", fee_bps=2.5, slippage_bps=3.0)
     outcome = _run_phase(runtime)
-    assert outcome.broker is not None
-    assert outcome.broker.fee_model.bps == 2.5
-    assert outcome.broker.slippage_model.bps == 3.0
+    assert outcome.trades
+    assert all(t.slippage_bps == 3.0 for t in outcome.trades)
+    assert all(_charged_bps(t) == pytest.approx(2.5) for t in outcome.trades)
 
 
-def test_trading_phase_broker_defaults_to_shipped_costs(tmp_path):
+def test_trading_phase_fills_default_to_shipped_costs(tmp_path):
     """Unset config keeps the paper account on the shipped 1bp/1bp baseline — no behavior drift."""
     runtime = _runtime(tmp_path, provider="databento")
     outcome = _run_phase(runtime)
-    assert outcome.broker is not None
-    assert outcome.broker.fee_model.bps == 1.0
-    assert outcome.broker.slippage_model.bps == 1.0
+    assert outcome.trades
+    assert all(t.slippage_bps == 1.0 for t in outcome.trades)
+    assert all(_charged_bps(t) == pytest.approx(1.0) for t in outcome.trades)
 
 
 def test_trading_day_threads_configured_costs_into_session_config(tmp_path):
@@ -165,7 +171,7 @@ def test_trading_day_threads_configured_costs_into_session_config(tmp_path):
     from noctis.broker.seam import FeeModel, SlippageModel
     from noctis.engine.forward_ledger import ForwardLedger
     from noctis.engine.sessions import SessionLedger
-    from noctis.engine.trading_day import TradingDay
+    from noctis.engine.trading_phase import TradingDay
     from noctis.live.risk import RiskLimits
     from noctis.strategies.families import FamilyRegistry
 

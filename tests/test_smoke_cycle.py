@@ -13,7 +13,14 @@ from noctis.champions import ChampionRegistry, build_registry
 from noctis.config import load_settings
 from noctis.data import MarketDataLake
 from noctis.data.types import to_ns
-from noctis.engine import Phase, SimulatedSleeper, build_runtime
+from noctis.engine import (
+    CloseResult,
+    Phase,
+    ResearchSummary,
+    SimulatedSleeper,
+    TradingOutcome,
+    build_runtime,
+)
 from noctis.memory import MemoryStore
 
 from ._data_helpers import MockVendor
@@ -126,12 +133,12 @@ def test_two_cycles_are_cumulative(tmp_path):
         assert header in text
 
 
-def test_run_research_accumulates_undecided_into_the_cycle(tmp_path, monkeypatch):
+def test_research_sessions_accumulate_undecided_into_the_cycle(tmp_path, monkeypatch):
     """Each research session's undecided strategies (authored, never carried to a verdict)
-    fold into the per-cycle accumulator — and a cycle spanning several sessions extends,
-    never replaces, the list."""
-    import noctis.engine.runtime as runtime_mod
-    from noctis.engine.research import ResearchSummary
+    fold into the per-cycle accumulator the way the loop's RESEARCH branch folds them — and a
+    closed market runs sessions back to back, so a cycle spanning several extends the list
+    rather than replacing it."""
+    import noctis.engine.research_phase as research_phase_mod
 
     settings, lake_dir = _make_settings(tmp_path, time_limit_hours=None)
     lake, _vendor = _seed_catalog(lake_dir)
@@ -150,10 +157,11 @@ def test_run_research_accumulates_undecided_into_the_cycle(tmp_path, monkeypatch
             ResearchSummary(iterations=1, undecided=["draft_c"]),
         ]
     )
-    monkeypatch.setattr(runtime_mod, "run_research", lambda **_: next(summaries))
+    monkeypatch.setattr(research_phase_mod, "run_research", lambda **_: next(summaries))
 
-    runtime._run_research()
-    runtime._run_research()
+    panel = runtime._research_panel()
+    runtime._cycle.fold_research(runtime.research.run(panel))
+    runtime._cycle.fold_research(runtime.research.run(panel))
 
     assert runtime._cycle.research_undecided == ["draft_a", "draft_b", "draft_c"]
 
@@ -195,13 +203,16 @@ def test_runtime_research_panel_and_symbol_holdout_are_fixed(tmp_path):
     assert list(runtime.symbol_holdout) == ["JPM"]
     assert runtime.has_data()
 
-    # Every candidate is evaluated on the same panel and the same held-out symbols.
-    runtime._pipeline_config = replace(runtime._pipeline_config, prefilter_min_score=None)
+    # Every candidate is scored against the same panel — the entry's frozen triple, which is
+    # what the RESEARCH phase is handed and all it ever researches on.
+    panel = runtime._research_panel()
+    assert list(panel.fit) == ["AAPL", "MSFT", "NVDA"] and list(panel.symbol_holdout) == ["JPM"]
+    panel = replace(panel, config=replace(panel.config, prefilter_min_score=None))
     for cand in (
         Candidate("sma_crossover", {"fast": 3, "slow": 8}),
         Candidate("donchian_breakout", {"channel": 15}),
     ):
-        sc = runtime._evaluate(cand)
+        sc = runtime.research.evaluate(cand, panel)
         assert sc.stage == "validated"
         assert set(sc.symbols) == {"AAPL", "MSFT", "NVDA"}
         assert sc.symbol_holdout_metric is not None  # JPM was scored, one causal pass
@@ -264,26 +275,88 @@ class _WallClockSleeper(SimulatedSleeper):
     wall_clock = True
 
 
+def test_the_runtime_holds_three_phase_objects_and_no_phase_bodies(tmp_path):
+    """What the runtime *is*: the loop, the pacing, the stop handling and the per-cycle fold,
+    plus one object per phase. Every phase body lives behind its own seam
+    (``research``/``trading``/``close``), so there is no half-phase ``_run_*`` method left for a
+    caller — or a test — to reach past the seam and drive, and no phase's working state (the
+    live-built bars) parked on the runtime between entries."""
+    from noctis.engine import ClosePhase, ResearchPhase, TradingPhase
+    from noctis.engine.runtime import Runtime
+
+    for gone in (
+        "_run_research",
+        "_run_agent_research",
+        "_evaluate",
+        "_run_trading",
+        "_reconcile",
+        "_mark_equity",
+        "_run_close",
+    ):
+        assert not hasattr(Runtime, gone), f"Runtime still carries a phase body: {gone}"
+
+    settings, lake_dir = _make_settings(tmp_path, time_limit_hours=None)
+    lake, _vendor = _seed_catalog(lake_dir, end="2026-01-09")
+    runtime = build_runtime(
+        settings,
+        market_lake=lake,
+        memory=MemoryStore(tmp_path / "MEMORY.md"),
+        reports_dir=str(tmp_path / "reports"),
+    )
+
+    assert isinstance(runtime.research, ResearchPhase)
+    assert isinstance(runtime.trading, TradingPhase)
+    assert isinstance(runtime.close, ClosePhase)
+    assert not hasattr(runtime, "live_bars")
+
+
+class _FakeResearch:
+    """A stand-in RESEARCH phase that counts its entries and consumes wall-clock time the way a
+    real session does, so under real-time pacing the loop advances toward the open through
+    successive sessions."""
+
+    def __init__(self, calls, captured, session_minutes):
+        self._calls = calls
+        self._captured = captured
+        self._session_minutes = session_minutes
+
+    def run(self, panel):
+        self._calls["research"] += 1
+        self._captured["sleeper"].advance(self._session_minutes * 60)
+        return ResearchSummary()
+
+
+class _FakeTrading:
+    """A stand-in TRADING phase that counts its entries and settles instantly, like a replay day
+    that needs no wall clock. The empty outcome is what the loop folds."""
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    def run(self, t, sleeper, bars):
+        self._calls["trading"] += 1
+        return TradingOutcome()
+
+
+class _FakeClose:
+    """A stand-in CLOSE phase that counts its entries and writes nothing; the loop keeps its own
+    cycle bookkeeping around it."""
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    def run(self, t, cycle, *, tracked=None):
+        self._calls["close"] += 1
+        return CloseResult()
+
+
 def _stub_phases(runtime, captured, *, session_minutes=20):
-    """Replace the three phase bodies with counters. Research consumes wall-clock time (as a
-    real session does), so under real-time pacing the loop advances toward the open through
-    successive sessions; trading/close just tally."""
+    """Drive the runtime through three stand-in phase objects, each counting its entries — the
+    loop holds one object per phase, so a test swaps the whole phase, never a method on it."""
     calls = {"research": 0, "trading": 0, "close": 0}
-
-    def _research():
-        calls["research"] += 1
-        captured["sleeper"].advance(session_minutes * 60)
-
-    def _trading(t, sleeper):
-        calls["trading"] += 1
-
-    def _close(t):
-        calls["close"] += 1
-        runtime.result.cycles_completed += 1
-
-    runtime._run_research = _research
-    runtime._run_trading = _trading
-    runtime._run_close = _close
+    runtime.research = _FakeResearch(calls, captured, session_minutes)
+    runtime.trading = _FakeTrading(calls)
+    runtime.close = _FakeClose(calls)
     return calls
 
 

@@ -172,14 +172,11 @@ class AccountStore:
         tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
         tmp.replace(self.path)  # atomic on POSIX
 
-    def summary(self) -> AccountSummary | None:
-        """Account snapshot for display; ``None`` when no account exists yet.
-
-        Raises like :meth:`load` on a corrupt file.
+    def summarize(self, broker: PaperBroker) -> AccountSummary:
+        """The display view of an **already-loaded** account: pure over ``broker`` plus this
+        store's ``opened``/``last_session`` provenance, so a caller that needs both the broker
+        and its summary parses the file once (CLOSE does — story #266).
         """
-        if not self.path.is_file():
-            return None
-        broker = self.load()
         equity = broker.equity()
         return AccountSummary(
             equity=equity,
@@ -189,6 +186,15 @@ class AccountStore:
             opened=self.opened or "?",
             last_session=self.last_session,
         )
+
+    def summary(self) -> AccountSummary | None:
+        """Account snapshot for display; ``None`` when no account exists yet.
+
+        Raises like :meth:`load` on a corrupt file.
+        """
+        if not self.path.is_file():
+            return None
+        return self.summarize(self.load())
 
     def reset(self) -> Path | None:
         """Archive the account file so the next session starts fresh at 100k.

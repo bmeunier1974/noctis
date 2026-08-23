@@ -70,7 +70,8 @@ def evaluation_time_limit(seconds: float = EVAL_TIME_LIMIT_S) -> Iterator[None]:
     inside a C extension is out of reach, but the pool paths already guard those via
     :func:`wait_or_stall`. Not reentrant: never nest it — the inner exit would cancel the outer
     timer. Today it is armed only at the two evaluation seams (the research toolbox's
-    ``_evaluate`` and the runtime's legacy ``_evaluate``), which never nest.
+    ``_evaluate`` and the RESEARCH phase's legacy-loop ``ResearchPhase.evaluate``), which
+    never nest.
     """
     if (
         seconds <= 0

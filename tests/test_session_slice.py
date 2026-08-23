@@ -13,7 +13,8 @@ from datetime import date, datetime, time
 import pandas as pd
 import pytest
 
-import noctis.engine.trading_day as trading_day_mod
+import noctis.engine.trading_phase as trading_phase_mod
+from noctis.broker.persistence import AccountStore
 from noctis.data.types import empty_bars
 from noctis.engine.sessions import (
     SessionLedger,
@@ -22,18 +23,27 @@ from noctis.engine.sessions import (
     slice_session,
     unseen_sessions,
 )
+from noctis.live.node import TradingSummary
 
 from ._session_helpers import (
     ET,
+    _account_path,
     _bars_local,
     _concat,
     _FakeLake,
     _ledger_path,
     _make_runtime,
+    _phase_bars,
     _run_phase,
     _traded_dates,
     _uptrend,
 )
+
+
+def _at(trade) -> datetime:
+    """When a report trade filled — the row's own UTC stamp, parsed back."""
+    return datetime.fromisoformat(trade.ts.replace("Z", "+00:00"))
+
 
 # --- slicing units -------------------------------------------------------------------------
 
@@ -125,7 +135,7 @@ def test_first_run_trades_only_newest_session(tmp_path):
     outcome = _run_phase(runtime)
 
     assert len(outcome.sessions) == 1  # a multi-month catalog still trades exactly one session
-    assert _traded_dates(outcome.sessions[0]) == {days[-1]}
+    assert _traded_dates(outcome) == [days[-1]]
     assert SessionLedger(_ledger_path(runtime)).load() == days[-1]  # high-water mark seeded
     # Non-regression: slicing is trading-only — research still sees the full history.
     assert len(runtime.research_panel["AAPL"]) == 90
@@ -137,7 +147,8 @@ def test_bar_refresh_at_trading_entry_sees_new_lake_sessions(tmp_path):
     runtime feeds ``run`` the reload's return value, so it can never hand stale bars)."""
     d_old, d_new = date(2026, 3, 4), date(2026, 3, 5)
     lake = _FakeLake({"AAPL": _bars_local(d_old, _uptrend())})
-    runtime = _make_runtime(tmp_path, lake)
+    events: list = []
+    runtime = _make_runtime(tmp_path, lake, on_event=events.append)
 
     _run_phase(runtime)  # cycle 1: seeds the mark at d_old
     # CLOSE-phase sync adds the next session to the lake (bars loaded at startup are stale).
@@ -145,13 +156,11 @@ def test_bar_refresh_at_trading_entry_sees_new_lake_sessions(tmp_path):
     outcome = _run_phase(runtime, bars=dict(lake.bars))  # cycle 2: the refreshed view
 
     assert len(outcome.sessions) == 1
-    record = outcome.sessions[0]
-    assert _traded_dates(record) == {d_new}  # only the new bars, none re-traded
-    assert sum(len(df) for df in record.bars.values()) == 30
-    # No fill predates the new session (nothing leaked from already-traded history).
-    day_start_ns = pd.Timestamp(datetime.combine(d_new, time(0, 0), tzinfo=ET)).value
-    fills = outcome.broker.fills
-    assert fills and all(f.ts_event >= day_start_ns for f in fills)
+    assert _traded_dates(outcome) == [d_new]  # only the new bars, none re-traded
+    assert _phase_bars(events, d_new) == 30  # the slice the driver announced it would trade
+    # No trade predates the new session (nothing leaked from already-traded history).
+    day_start = datetime.combine(d_new, time(0, 0), tzinfo=ET)
+    assert outcome.trades and all(_at(t) >= day_start for t in outcome.trades)
     assert SessionLedger(_ledger_path(runtime)).load() == d_new
 
 
@@ -165,11 +174,11 @@ def test_restart_catches_up_in_chronological_order(tmp_path):
 
     outcome = _run_phase(runtime)
 
-    assert [_traded_dates(r) for r in outcome.sessions] == [{days[1]}, {days[2]}, {days[3]}]
+    assert _traded_dates(outcome) == days[1:]
     # The carried account spans the catch-up: each session picks up exactly where the
     # previous one settled.
     for prev, nxt in zip(outcome.sessions, outcome.sessions[1:], strict=False):
-        assert nxt.summary.start_equity == pytest.approx(prev.summary.final_equity)
+        assert nxt.start_equity == pytest.approx(prev.final_equity)
     assert SessionLedger(_ledger_path(runtime)).load() == days[-1]
 
 
@@ -183,7 +192,7 @@ def test_catchup_cap_trades_newest_and_reports_truncation(tmp_path):
     outcome = _run_phase(runtime)
 
     # Newest 5, in order.
-    assert [_traded_dates(r) for r in outcome.sessions] == [{d} for d in days[-5:]]
+    assert _traded_dates(outcome) == days[-5:]
     assert any(
         e.startswith(f"Skipped 5 stale sessions older than {days[5]}") for e in outcome.events
     )
@@ -198,7 +207,7 @@ def test_crash_mid_catchup_resumes_at_the_right_date(tmp_path, monkeypatch):
     runtime = _make_runtime(tmp_path, lake)
     SessionLedger(_ledger_path(runtime)).save(days[0])
 
-    real = trading_day_mod.TradingDay.run
+    real = trading_phase_mod.TradingDay.run
     sessions_run = [0]
 
     def crashy(self, **kwargs):
@@ -207,7 +216,7 @@ def test_crash_mid_catchup_resumes_at_the_right_date(tmp_path, monkeypatch):
         sessions_run[0] += 1
         return real(self, **kwargs)
 
-    monkeypatch.setattr(trading_day_mod.TradingDay, "run", crashy)
+    monkeypatch.setattr(trading_phase_mod.TradingDay, "run", crashy)
     with pytest.raises(RuntimeError, match="boom"):
         _run_phase(runtime)
 
@@ -248,7 +257,52 @@ def test_daily_loss_latch_resets_across_session_dates(tmp_path):
     outcome = _run_phase(runtime)
 
     assert len(outcome.sessions) == 2
-    s1, s2 = outcome.sessions[0].summary, outcome.sessions[1].summary
+    s1, s2 = outcome.sessions
     assert s1.orders_refused > 0  # the latch engaged on day 1
     assert s2.orders_submitted > 0  # day 2 trades again…
     assert s2.orders_refused == 0  # …with a refusal count starting at 0
+
+
+# --- per-session evidence ------------------------------------------------------------------
+
+
+def test_one_session_stamps_its_summary_with_the_settled_date(tmp_path):
+    """Per-session evidence IS the driver's own summary — no wrapper around it — and the
+    settle stamps it with the date it settled."""
+    day = date(2026, 3, 4)
+    lake = _FakeLake({"AAPL": _bars_local(day, _uptrend())})
+    runtime = _make_runtime(tmp_path, lake)
+
+    outcome = _run_phase(runtime)
+
+    (settled,) = outcome.sessions
+    assert isinstance(settled, TradingSummary)
+    assert settled.session == day
+
+
+def test_a_catch_up_stamps_every_summary_in_traded_order(tmp_path):
+    """Three unseen sessions → three stamped summaries, oldest first: a catch-up's sessions
+    are inspectable straight off the outcome."""
+    days = [date(2026, 3, d) for d in (2, 3, 4, 5)]
+    lake = _FakeLake({"AAPL": _concat(*(_bars_local(d, _uptrend()) for d in days))})
+    runtime = _make_runtime(tmp_path, lake)
+    SessionLedger(_ledger_path(runtime)).save(days[0])
+
+    outcome = _run_phase(runtime)
+
+    assert [s.session for s in outcome.sessions] == days[1:]
+
+
+def test_the_outcome_carries_facts_not_the_paper_account(tmp_path):
+    """The outcome hands back what the phase *found*, never the collaborator that found it:
+    the account's state after the phase is read from the file the settle wrote."""
+    day = date(2026, 3, 4)
+    lake = _FakeLake({"AAPL": _bars_local(day, _uptrend())})
+    runtime = _make_runtime(tmp_path, lake)
+
+    outcome = _run_phase(runtime)
+
+    assert not hasattr(outcome, "broker")
+    settled = AccountStore(_account_path(runtime)).load()
+    assert settled.equity() == pytest.approx(outcome.end_equity)
+    assert settled.position("AAPL").quantity == pytest.approx(outcome.positions["AAPL"])

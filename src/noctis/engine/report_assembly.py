@@ -22,7 +22,11 @@ from noctis.reporting.report import ReportData, Trade
 from noctis.strategies.spec import spec_family_names
 
 if TYPE_CHECKING:
+    import pandas as pd
+
     from noctis.champions.registry import ChampionRegistry
+    from noctis.engine.research import ResearchSummary
+    from noctis.engine.trading_phase import TradingOutcome
     from noctis.memory.base import Memory
 
 logger = logging.getLogger("noctis.report")
@@ -64,16 +68,24 @@ def gather_account_forward(state_dir: str | Path, entries) -> AccountForward:
     """One read of ``paper_account.json`` + ``forward_ledger.json`` → account summary and
     per-champion forward records (realized from the ledger + current unrealized on the
     account's open positions; realized-only when the account is unreadable). Evidence-only
-    degradation, never an exception."""
+    degradation, never an exception.
+
+    The account file is parsed **once**: a single ``load()`` feeds both the summary
+    (:meth:`AccountStore.summarize`, pure over that broker) and the forward ledger's
+    unrealized marks. A missing file is account inception — no summary, no broker to mark
+    against — so it is never loaded at all.
+    """
     account = None
     broker = None
     corrupt = False
     store = AccountStore(Path(state_dir) / "paper_account.json")
-    try:
-        account = store.summary()
-        broker = store.load() if account is not None else None
-    except RuntimeError:
-        corrupt = True
+    if store.path.is_file():
+        try:
+            broker = store.load()
+            account = store.summarize(broker)
+        except RuntimeError:
+            broker = None
+            corrupt = True
     forward = ForwardLedger(Path(state_dir) / "forward_ledger.json")
     forward.load()
     return AccountForward(account, corrupt, forward, forward_records(forward, entries, broker))
@@ -83,9 +95,12 @@ def gather_account_forward(state_dir: str | Path, entries) -> AccountForward:
 class SessionActivity:
     """What one day-cycle contributes to the close report beyond persisted state.
 
-    The runtime's per-cycle accumulator: research folds its summary in, trading records
-    equity/trades/positions, and anything noteworthy appends to ``events``. A fresh
-    instance is the honest "no session activity" (``noctis report`` outside a run).
+    The runtime's per-cycle accumulator, and the thing that folds its own phases in: RESEARCH
+    hands it a :class:`~noctis.engine.research.ResearchSummary` and TRADING a
+    :class:`~noctis.engine.trading_phase.TradingOutcome`, so the cycle's accounting sits beside
+    the cycle's shape rather than being copied field by field in the loop body. Anything else
+    noteworthy appends to ``events``. A fresh instance is the honest "no session activity"
+    (``noctis report`` outside a run).
     """
 
     start_equity: float = 0.0
@@ -106,6 +121,41 @@ class SessionActivity:
     research_ledgers: list[str] = field(default_factory=list)
     minted_specs: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
+    # Bars the live feed actually built this session, retained for the close's reconciliation
+    # against the (T+1 synced) catalog. Empty on the replay path — and on ``noctis report``,
+    # which has no session at all — so there is simply nothing external to compare.
+    live_bars: dict[str, pd.DataFrame] = field(default_factory=dict)
+
+    def fold_research(self, summary: ResearchSummary) -> None:
+        """Fold one research session's summary in. A closed market runs sessions back to back,
+        so everything here accumulates: the counters add and the lists extend."""
+        self.research_iterations += summary.iterations
+        self.research_promotions += summary.promotions
+        self.research_rejections += summary.rejections
+        self.research_dead_ends += summary.dead_ends
+        self.research_undecided.extend(summary.undecided)
+        # An episodic session carries its ledger path so CLOSE renders a per-session rollup +
+        # candidate trail (story #74); the conversation loop and legacy loop leave it None.
+        if summary.ledger_path:
+            self.research_ledgers.append(summary.ledger_path)
+        self.minted_specs.extend(summary.minted_specs)
+
+    def fold_trading(self, outcome: TradingOutcome) -> None:
+        """Fold one TRADING entry's outcome in — the phase-level view, which the outcome has
+        already folded across however many sessions it settled."""
+        if outcome.sessions:
+            # Equity/positions are the LAST settled session's — the phase already folded a
+            # multi-session catch-up that way. Untouched when nothing traded, so a skipped
+            # day reports zeros rather than a fictional flat session.
+            self.positions = outcome.positions
+            self.start_equity = outcome.start_equity
+            self.end_equity = outcome.end_equity
+        # Trades and events fold either way: an outcome that settled nothing still says why.
+        self.trades.extend(outcome.trades)
+        self.events.extend(outcome.events)
+        # The bars the live feed built ride the cycle to the close, which reconciles them
+        # against the catalog the T+1 sync just refreshed.
+        self.live_bars = outcome.live_bars
 
 
 def assemble_report(
@@ -116,8 +166,14 @@ def assemble_report(
     memory: Memory,
     state_dir: str | Path,
     session: SessionActivity | None = None,
+    account_forward: AccountForward | None = None,
 ) -> ReportData:
     """Gather persisted state — plus ``session``, when a day-cycle ran — into a ReportData.
+
+    ``account_forward`` is the account view the report states: given one (CLOSE reads the
+    account once and hands that same view to the equity mark and to here), it is used as-is;
+    ``None`` means read it here — the ``noctis report`` path. Either way the report for one
+    account file is the same, so the CLI prints the numbers the close wrote.
 
     Evidence-only degradation: an unreadable paper account omits the cumulative curve (the
     TRADING phase already refused and reported the corruption); a corrupt forward ledger
@@ -135,7 +191,11 @@ def assemble_report(
     promotions = [h for h in registry.history[-50:] if h.get("promoted")]
     demotions = registry.demotions()[-10:]
     # The continuous account's cumulative curve + per-champion forward track record.
-    af = gather_account_forward(state_dir, entries)
+    af = (
+        account_forward
+        if account_forward is not None
+        else gather_account_forward(state_dir, entries)
+    )
     if af.account_corrupt:
         logger.warning("paper account unreadable; report omits cumulative P&L")
     account = af.account
@@ -164,12 +224,14 @@ def assemble_report(
         realized_pnl=session.end_equity - session.start_equity,
         cumulative_pnl=account.cumulative_pnl if account else None,
         account_opened=account.opened if account else None,
-        forward=forward_data,
-        trades=list(session.trades),
+        # The report owns a frozen copy of every sequence: what it was assembled from can go
+        # on accumulating (the cycle does) without the written report changing under it.
+        forward=tuple(forward_data),
+        trades=tuple(session.trades),
         positions=dict(session.positions),
-        promotions=promotions,
-        demotions=demotions,
-        champions=champions,
+        promotions=tuple(promotions),
+        demotions=tuple(demotions),
+        champions=tuple(champions),
         research=research,
-        events=list(session.events),
+        events=tuple(session.events),
     )

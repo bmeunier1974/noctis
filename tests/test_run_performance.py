@@ -233,9 +233,10 @@ def test_the_close_phase_appends_the_accounts_mark_with_the_sessions_trades(tmp_
     construction."""
     lake = _FakeLake({"AAPL": _bars_local(date(2026, 3, 9), _uptrend())})
     runtime = _make_runtime(tmp_path, lake)
-    runtime._run_trading(datetime(2026, 3, 9, 14, 30, tzinfo=UTC), None)
+    outcome = _run_phase(runtime, t=datetime(2026, 3, 9, 14, 30, tzinfo=UTC))
+    runtime._cycle.fold_trading(outcome)  # the fold the loop's TRADING branch does
 
-    runtime._run_close(datetime(2026, 3, 9, 21, 0, tzinfo=UTC))
+    runtime.close.run(datetime(2026, 3, 9, 21, 0, tzinfo=UTC), runtime._cycle)
 
     marks = EquityLedger(Path(runtime.settings.state_dir) / EQUITY_CURVE_NAME).marks()
     account = AccountStore(Path(runtime.settings.state_dir) / "paper_account.json").summary()
@@ -251,7 +252,7 @@ def test_a_close_with_no_account_yet_appends_nothing(tmp_path):
     lake = _FakeLake({"AAPL": _bars_local(date(2026, 3, 9), _uptrend())})
     runtime = _make_runtime(tmp_path, lake)
 
-    runtime._run_close(datetime(2026, 3, 9, 21, 0, tzinfo=UTC))
+    runtime.close.run(datetime(2026, 3, 9, 21, 0, tzinfo=UTC), runtime._cycle)
 
     assert EquityLedger(Path(runtime.settings.state_dir) / EQUITY_CURVE_NAME).marks() == []
 

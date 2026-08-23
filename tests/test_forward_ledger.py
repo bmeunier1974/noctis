@@ -14,7 +14,7 @@ import pytest
 
 from noctis.broker import FeeModel, Order, PaperBroker, Side, SlippageModel
 from noctis.engine import ForwardLedger, champion_key, forward_records
-from noctis.engine.trading_day import TradingDay
+from noctis.engine.trading_phase import TradingDay, TradingOutcome
 from noctis.live import RiskLimits
 from noctis.strategies import FamilyRegistry
 
@@ -226,11 +226,12 @@ def test_exit_fill_credits_the_opener_and_carries_its_reason(tmp_path):
         }
     )
 
-    outcome = day.run(ReplayBarFeed({"S": tape}), date(2026, 7, 6))
+    outcome = TradingOutcome()
+    summary = day.run(ReplayBarFeed({"S": tape}), date(2026, 7, 6), outcome=outcome)
 
-    stop_fills = [f for f in outcome.fills if f.reason == "stop"]
-    assert len(stop_fills) == 1 and stop_fills[0].price == 90.0
+    stop_rows = [t for t in outcome.trades if t.rationale == "protective exit (stop)"]
+    assert len(stop_rows) == 1 and stop_rows[0].price == 90.0
     key = champion_key(entries[0])
     assert fl.entries[key].realized_pnl == pytest.approx(-9500.0)
     assert fl.entries[key].symbols == {"S": pytest.approx(-9500.0)}
-    assert any("protective-exit fill(s): stop ×1" in e for e in outcome.summary.events)
+    assert any("protective-exit fill(s): stop ×1" in e for e in summary.events)
