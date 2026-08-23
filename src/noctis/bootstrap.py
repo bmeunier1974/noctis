@@ -772,7 +772,7 @@ def adopt_run_record(
 
     from noctis.reporting.run_record import RecordEvent, RunArtifacts, build, utc_iso
     from noctis.reporting.run_tree import read_record, update_index, write
-    from noctis.reporting.run_tree.store import read_engine_identity
+    from noctis.reporting.run_tree.evidence import read_engine_identity
 
     run_dir = Path(settings.run_dir)
     if not run_dir.is_dir():

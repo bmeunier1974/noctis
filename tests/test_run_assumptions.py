@@ -303,7 +303,7 @@ def test_the_assumptions_state_the_benchmarks_rebalancing_convention():
 def test_the_stated_rebalancing_convention_is_the_one_the_benchmark_implements():
     """Weights are set at the first session mark and drift thereafter — so a basket whose two
     names diverge lands on the mean of their *ratios*, never on a re-weighted path."""
-    from noctis.reporting.run_tree.store import _equal_weight_levels
+    from noctis.reporting.run_tree.evidence import _equal_weight_levels
 
     closes = {
         "AAA": {"2026-07-01": 100.0, "2026-07-02": 200.0, "2026-07-03": 400.0},

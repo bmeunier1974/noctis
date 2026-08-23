@@ -1,12 +1,13 @@
 """The run record, built — a **pure** function from collected artifacts to one JSON document.
 
-``run_tree.collect(run_dir) -> RunArtifacts`` does every read; this module turns that value into
-the document ``run.json`` holds; ``schema.validate(record)`` checks it. The split is the epic's
-load-bearing decision, and it is worth stating why: the run record has to be snapshot-tested
-against a committed golden, and — once resumption lands — a three-segment run has to be proved
-identical to a one-segment run over the same work. Both tests are trivial when the builder is a
-function over a value you can write by hand, and both are slow, flaky integration tests when the
-builder reads the disk itself.
+``run_tree.read_artifacts(run_dir)`` parses the record and ``run_tree.derive_evidence(run_dir,
+inputs)`` reads the run's own artifacts — between them every read; this module turns the
+:class:`RunArtifacts` they produce into the document ``run.json`` holds; ``schema.validate(record)``
+checks it. The split is the epic's load-bearing decision, and it is worth stating why: the run
+record has to be snapshot-tested against a committed golden, and — once resumption lands — a
+three-segment run has to be proved identical to a one-segment run over the same work. Both tests
+are trivial when the builder is a function over a value you can write by hand, and both are slow,
+flaky integration tests when the builder reads the disk itself.
 
 So **nothing here touches I/O, a clock or the configuration**. Every timestamp arrives as data
 inside :class:`RunArtifacts`, already formatted by :func:`utc_iso` (which takes the moment as an

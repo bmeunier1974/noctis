@@ -427,7 +427,7 @@ def test_the_tiers_the_store_reads_are_the_tiers_the_library_writes(tmp_path):
     spellings together."""
     from types import SimpleNamespace
 
-    from noctis.reporting.run_tree.store import (
+    from noctis.reporting.run_tree.evidence import (
         CHAMPIONS_TIER,
         STRATEGIES_SUBDIR,
         STRATEGY_TIER_SUBDIRS,

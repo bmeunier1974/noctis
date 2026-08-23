@@ -130,9 +130,9 @@ invoice, and a key that said `usd` alone would read as a receipt. `validate()` e
 - **A record from the future is never touched.** Additive-only means a newer document is readable
   by ignoring what this engine does not know; rewriting its version *down* would destroy exactly
   the information a later reader needs.
-- The upgrade runs at `collect()`, so the upgraded document lands on disk with the next ordinary
-  write. A record already at this version is returned untouched and produces no event — a run that
-  is simply resumed does not accumulate a note per night.
+- The upgrade runs at `read_artifacts()`, so the upgraded document lands on disk with the next
+  ordinary write. A record already at this version is returned untouched and produces no event — a
+  run that is simply resumed does not accumulate a note per night.
 
 `index.json` carries the same `schema_version`, read off the same constant.
 

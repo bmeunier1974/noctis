@@ -1,4 +1,4 @@
-"""The run tree's layering, pinned: ``record ← {address, index, lock} ← store`` (story #287).
+"""The run tree's layering, pinned: ``record ← {address, index, lock, evidence} ← store`` (#287).
 
 The package is five modules over one narrow read, and the whole value of that split is that the
 narrow modules stay narrow: resolving ``@label`` needs the record and nothing else, deriving an
@@ -7,10 +7,17 @@ even that. A dependency added by accident — an index that reaches for the stor
 reaches for the lock — would quietly put the collectors back behind every ten-line function, so
 the layering is a **test** rather than a convention, exactly like ``tests/test_eval_boundary.py``.
 
+The second clause is the same shape, pointed outwards (story #288): the six collectors need the
+research package, the champion registry, the broker's ledgers, the data types, the settings model
+and pandas, and **only** ``evidence.py`` may name one. That is what makes "a record write stays as
+cheap as the rest of this package" a shape rather than a comment — the subprocess probe in
+``tests/test_run_tree_store.py`` measures what an import actually costs, and this says where a
+heavy import may ever be *written*, deferred or not.
+
 The scan is pure over source text: it walks every import statement with ``ast`` — module level
 **and** function level, since a deferred import is still a dependency — resolves the relative
-forms, and returns the set of package modules one module names. So a scenario is a string, and the
-real files are scanned the same way the strings are.
+forms, and returns the set of package modules (or of heavy packages) one module names. So a
+scenario is a string, and the real files are scanned the same way the strings are.
 """
 
 from __future__ import annotations
@@ -25,20 +32,33 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "noctis" / "reporti
 
 # What each module of the package may import **from the package**. The layering itself: ``record``
 # is the bottom and imports nothing; ``lock`` is a file with a pid and needs no record at all;
-# ``address`` and ``index`` read records and nothing else; ``store`` is the only module allowed to
-# hold the rest. ``__init__`` is the public surface — it re-exports every module, so it is scanned
-# for nothing here.
-#
-# Story #288 adds the second clause beside this one: no module other than ``evidence`` may name a
-# heavy package (``noctis.research``, ``noctis.champions``, ``noctis.broker``, ``noctis.data``,
-# ``noctis.config.settings``, ``pandas``) in any import, module level or deferred.
+# ``address``, ``index`` and ``evidence`` read records and nothing else; ``store`` is the only
+# module allowed to hold the rest. ``__init__`` is the public surface — it re-exports every module,
+# so it is scanned for nothing here.
 ALLOWED_PACKAGE_IMPORTS = {
     "record": frozenset(),
     "lock": frozenset(),
     "address": frozenset({"record"}),
     "index": frozenset({"record"}),
-    "store": frozenset({"record", "lock", "address", "index"}),
+    "evidence": frozenset({"record"}),
+    "store": frozenset({"record", "lock", "address", "index", "evidence"}),
 }
+
+# The packages a record write must never reach for — the research package and the champion
+# registry behind the run's own journals and board, the broker's ledgers behind its equity curve,
+# the data types and pandas behind the lake, and the settings model that derives a state dir. Every
+# one of them is a *deferred* import in ``evidence.py``, and nowhere else in the package at all.
+HEAVY_PACKAGES = (
+    "noctis.research",
+    "noctis.champions",
+    "noctis.broker",
+    "noctis.data",
+    "noctis.config.settings",
+    "pandas",
+)
+
+# The one module that may name them — the module that *is* the six reads.
+EVIDENCE = "evidence"
 
 
 def package_imports(source: str, *, module: str) -> set[str]:
@@ -72,6 +92,39 @@ def package_imports(source: str, *, module: str) -> set[str]:
     return imported
 
 
+def heavy_imports(source: str, *, module: str) -> set[str]:
+    """Every package of :data:`HEAVY_PACKAGES` this source names in an import.
+
+    Every spelling and every level: ``import pandas as pd``, ``from noctis.research.journal import
+    ExperimentJournal``, ``from noctis.config import settings`` — inside a function body just as
+    much as at the top of the file, because deferring an import hides its cost at import time, not
+    the fact that this module reaches for it.
+    """
+    tree = ast.parse(source, filename=f"{module}.py")
+    named: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                named |= _heavy(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            target = _absolute(node)
+            if target is None:
+                continue
+            named |= _heavy(target)
+            for alias in node.names:  # ``from noctis.config import settings``
+                named |= _heavy(f"{target}.{alias.name}")
+    return named
+
+
+def _heavy(dotted: str) -> set[str]:
+    """The heavy packages a dotted name belongs to — the package itself, or anything under it."""
+    return {
+        package
+        for package in HEAVY_PACKAGES
+        if dotted == package or dotted.startswith(f"{package}.")
+    }
+
+
 def _absolute(node: ast.ImportFrom) -> str | None:
     """The dotted module an ``ImportFrom`` names, with a relative form resolved against PACKAGE."""
     if node.level == 0:
@@ -101,6 +154,10 @@ def _module_source(module: str) -> str:
 
 def _imports_of(module: str) -> set[str]:
     return package_imports(_module_source(module), module=module)
+
+
+def _heavy_imports_of(module: str) -> set[str]:
+    return heavy_imports(_module_source(module), module=module)
 
 
 def test_the_package_is_exactly_the_modules_the_layering_names() -> None:
@@ -137,8 +194,31 @@ def test_the_derived_index_reads_records_and_nothing_else() -> None:
     assert _imports_of("index") == {"record"}
 
 
+def test_the_evidence_reads_records_and_nothing_else() -> None:
+    """The six collectors need the run tree's *names*, not its store, its lock or its addressing."""
+    assert _imports_of("evidence") <= {"record"}
+
+
 def test_the_store_is_the_one_module_that_holds_the_rest() -> None:
-    assert _imports_of("store") == {"record", "lock", "address", "index"}
+    assert _imports_of("store") == {"record", "lock", "address", "index", "evidence"}
+
+
+# ── the heavy imports: evidence, and nowhere else (story #288) ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "module", sorted((set(ALLOWED_PACKAGE_IMPORTS) | {"__init__"}) - {EVIDENCE})
+)
+def test_no_module_but_the_evidence_may_name_a_heavy_package(module: str) -> None:
+    """A record write must stay as cheap as the rest of the package — at every nesting level."""
+    named = _heavy_imports_of(module)
+
+    assert named == set(), f"{module}.py imports {sorted(named)}; only {EVIDENCE}.py may"
+
+
+def test_the_evidence_is_where_every_heavy_import_lives() -> None:
+    """The other side of the clause: the list is not aspirational, it is where these imports are."""
+    assert _heavy_imports_of(EVIDENCE) == set(HEAVY_PACKAGES)
 
 
 # ── the scan itself: every spelling of a dependency, at either level ────────────────────────
@@ -202,3 +282,39 @@ def test_the_guard_refuses_a_module_that_imports_a_sibling_it_may_not() -> None:
     imported = package_imports(reaching, module="index")
 
     assert not imported <= ALLOWED_PACKAGE_IMPORTS["index"]
+
+
+# ── the heavy scan itself ───────────────────────────────────────────────────────────────────
+
+
+def test_a_deferred_pandas_import_is_seen_wherever_it_is_written() -> None:
+    """The exact line the clause exists to refuse — and it is refused inside a function body."""
+    source = "def entry() -> None:\n    import pandas as pd\n"
+
+    assert heavy_imports(source, module="index") == {"pandas"}
+
+
+def test_a_submodule_of_a_heavy_package_is_the_heavy_package() -> None:
+    source = "from noctis.research.journal import ExperimentJournal\n"
+
+    assert heavy_imports(source, module="lock") == {"noctis.research"}
+
+
+def test_importing_the_settings_model_as_a_name_is_seen() -> None:
+    """``from noctis.config import settings`` reaches the settings model by another spelling."""
+    source = "from noctis.config import settings\n"
+
+    assert heavy_imports(source, module="store") == {"noctis.config.settings"}
+
+
+def test_a_lighter_neighbour_of_a_heavy_package_is_not_one() -> None:
+    """The clause names ``noctis.config.settings``, not the whole of ``noctis.config``."""
+    source = "from noctis.config.gate import resolve_mode\nfrom noctis.reporting import schema\n"
+
+    assert heavy_imports(source, module="store") == set()
+
+
+def test_one_line_can_name_more_than_one_heavy_package() -> None:
+    source = "import pandas\n\ndef entry():\n    from noctis.broker.persistence import Ledger\n"
+
+    assert heavy_imports(source, module="record") == {"pandas", "noctis.broker"}

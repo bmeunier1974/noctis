@@ -1,10 +1,11 @@
 """The run record's pure layer — ``run_record.build`` and ``schema.validate`` (story #129).
 
 Every test here builds a :class:`RunArtifacts` **in memory** and asserts on the returned dict.
-That is the whole point of the I/O boundary the epic draws: ``run_tree.collect`` does every read,
-``run_record.build`` is a pure function over what it collected, and ``schema.validate`` is a pure
-check over what ``build`` produced. No filesystem, no clock, no config reaches this file — the
-only disk touch is the committed golden record, which is a fixture, not an input.
+That is the whole point of the I/O boundary the epic draws: ``run_tree.read_artifacts`` and
+``run_tree.derive_evidence`` do every read, ``run_record.build`` is a pure function over what they
+read, and ``schema.validate`` is a pure check over what ``build`` produced. No filesystem, no
+clock, no config reaches this file — the only disk touch is the committed golden record, which is
+a fixture, not an input.
 
 The structural purity test (``test_build_reaches_no_io_no_clock_and_no_config``) enforces that by
 AST, the way ``tests/test_engine_id.py`` does for the engine fingerprint: a future edit that

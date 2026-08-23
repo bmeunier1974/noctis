@@ -4,16 +4,18 @@ A run's tree is its ``run.json`` (the record), its ``run.lock`` (liveness) and e
 produced; ``runs/index.json`` is the derived roll-up beside them. No other package reads or writes
 a byte of it — that boundary is what keeps ``run_record`` and ``schema`` pure.
 
-Four modules are peeled off already, layered ``record ← {address, index, lock} ← store`` and
+Five modules are peeled off, layered ``record ← {address, index, lock, evidence} ← store`` and
 pinned there by ``tests/test_run_tree_boundary.py``: :mod:`~noctis.reporting.run_tree.record` (the
 tree's names, the one narrow read, the one atomic write), :mod:`~noctis.reporting.run_tree.lock`
 (the whole liveness protocol — the one fatal failure), :mod:`~noctis.reporting.run_tree.address`
-(one operator-typed string → one run dir) and :mod:`~noctis.reporting.run_tree.index` (the derived
-listing roll-up). The two readers hold nothing but ``record``, so resolving ``@label`` or deriving
-an index entry takes no lock and runs no collector; ``evidence`` follows in the story after. The
-rest is still :mod:`~noctis.reporting.run_tree.store`. Every public name keeps its spelling, so a
-caller says ``from noctis.reporting.run_tree import open_run, resolve_run_dir`` and never has to
-know which module answers.
+(one operator-typed string → one run dir), :mod:`~noctis.reporting.run_tree.index` (the derived
+listing roll-up) and :mod:`~noctis.reporting.run_tree.evidence` (the six reads a record derives its
+numbers from, and **every** heavy import in the package). The readers hold nothing but ``record``,
+so resolving ``@label`` or deriving an index entry takes no lock and runs no collector. The rest —
+the lifecycle verbs and :class:`~noctis.reporting.run_tree.store.RunStore` — is
+:mod:`~noctis.reporting.run_tree.store`, the one module that holds the others. Every public name
+keeps its spelling, so a caller says ``from noctis.reporting.run_tree import open_run,
+resolve_run_dir`` and never has to know which module answers.
 """
 
 from __future__ import annotations
@@ -23,6 +25,16 @@ from noctis.reporting.run_tree.address import (
     RunNotFoundError,
     read_run_record,
     resolve_run_dir,
+)
+from noctis.reporting.run_tree.evidence import (
+    STRATEGIES_SUBDIR,
+    STRATEGY_TIER_SUBDIRS,
+    Evidence,
+    derive_evidence,
+    read_benchmark,
+    read_sessions,
+    read_strategies,
+    read_trials,
 )
 from noctis.reporting.run_tree.index import (
     RUN_INDEX_KIND,
@@ -47,22 +59,16 @@ from noctis.reporting.run_tree.record import (
 )
 from noctis.reporting.run_tree.store import (
     PRUNED_SUBDIRS,
-    STRATEGIES_SUBDIR,
-    STRATEGY_TIER_SUBDIRS,
     FinishOutcome,
     PruneOutcome,
     RunCompletedError,
     RunNotPrunableError,
     RunStore,
     assert_resumable,
-    collect,
     finish_run,
     open_run,
     prune_run_state,
-    read_benchmark,
-    read_sessions,
-    read_strategies,
-    read_trials,
+    read_artifacts,
 )
 
 __all__ = [
@@ -76,6 +82,7 @@ __all__ = [
     "RUN_RECORD_NAME",
     "SHORT_RUN_S",
     "STALE_HEARTBEAT_S",
+    "Evidence",
     "FinishOutcome",
     "PruneOutcome",
     "RunAmbiguousError",
@@ -85,11 +92,12 @@ __all__ = [
     "RunNotPrunableError",
     "RunStore",
     "assert_resumable",
-    "collect",
+    "derive_evidence",
     "finish_run",
     "index_entry",
     "open_run",
     "prune_run_state",
+    "read_artifacts",
     "read_benchmark",
     "read_record",
     "read_run_record",
