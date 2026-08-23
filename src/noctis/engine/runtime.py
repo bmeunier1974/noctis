@@ -364,9 +364,12 @@ class Runtime:
         if session is None:
             logger.info("research.mode=agent but no research client; using legacy loop")
             return None
+        # The provenance comes off the session's own resolved mandate (#260) — the session
+        # already carries it, so the line names what steered this session rather than a copy
+        # read back out of its toolbox.
         logger.info(
             "agent research session: mandate=%s, metric=%s",
-            session.toolbox.mandate_source or "(none)",
+            (session.mandate.source if session.mandate else None) or "(none)",
             self.settings.promotion.metric,
         )
         return session.run(

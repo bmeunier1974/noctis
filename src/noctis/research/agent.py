@@ -545,7 +545,11 @@ def run_agent_research(
                 emit(f"[misfire] {stumble.note}")
                 messages = messages + [{"role": "user", "content": stumble.retry}]
                 continue
-            if toolbox.promotions + toolbox.rejections == 0 and prose_nudges < _MAX_PROSE_NUDGES:
+            # One snapshot for both liveness reads below (#260): the toolbox's counters are live
+            # attributes its tools bump, so re-reading them between the nudge test and the
+            # conclusion label would let one prose turn be judged against two different sessions.
+            decided = toolbox.session_counters()
+            if decided.promotions + decided.rejections == 0 and prose_nudges < _MAX_PROSE_NUDGES:
                 # The zero-verdict liveness guard: clean prose with nothing decided is a
                 # stall, not a conclusion (the FORMULATE step invites exactly this turn
                 # shape). Unlike the misfire faces above, the prose IS appended — it is
@@ -564,7 +568,7 @@ def run_agent_research(
             # Reaching here with zero verdicts means the nudge cap is spent (earlier prose
             # turns were nudged above) — a stall, labeled as such so the watch (#100) can
             # count it; with a verdict on the board the prose is the deliberate conclusion.
-            concluded = toolbox.promotions + toolbox.rejections > 0
+            concluded = decided.promotions + decided.rejections > 0
             summary.stopped_reason = "agent_done" if concluded else PROSE_STALL
             # The agent's final prose — level-1 so it shows at -v like today; the
             # renderer wraps to width, so no more 500-char truncation special-case.
@@ -590,10 +594,14 @@ def run_agent_research(
             results.append(budget.tool_result(tc.id, tc.name, args, result, messages))
         messages = messages + results
 
-    summary.promotions = toolbox.promotions
-    summary.rejections = toolbox.rejections
-    summary.candidates = list(toolbox.strategies_touched)
-    summary.author_calls = toolbox.author_calls
+    # What this session spent and concluded, frozen once (#260): every number below — the
+    # summary's, the undecided list's and the finished-line's — describes the same moment, which
+    # a set of live reads spread across the epilogue could not promise.
+    counters = toolbox.session_counters()
+    summary.promotions = counters.promotions
+    summary.rejections = counters.rejections
+    summary.candidates = list(counters.strategies_touched)
+    summary.author_calls = counters.author_calls
     # The one comparable spend axis (story #75): all judgment-model tokens this session — input +
     # output + cache-creation + cache-read, exactly the four fields already summed above. The
     # episodic driver fills the same field from its ledger, so the parity harness's tokens/verdict
@@ -610,7 +618,7 @@ def run_agent_research(
     # strategy authored but never carried to a verdict is left undecided. Surface the sorted list
     # on the summary and name each one in a WARNING — they are archived after the TTL, not lost
     # silently. Empty set ⇒ no field, no warning (the clean-session common path adds no noise).
-    summary.undecided = sorted(toolbox.undecided)
+    summary.undecided = sorted(counters.undecided)
     if summary.undecided:
         logger.warning(
             "%d strategies left undecided — they will be archived after the TTL: %s",
@@ -621,8 +629,8 @@ def run_agent_research(
         "agent research session finished: %d rounds, %d backtests, %d coder calls, %d promotions, "
         "%d rejections, strategies=%s (%s)",
         summary.iterations,
-        toolbox.backtests_run,
-        toolbox.author_calls,
+        counters.backtests_run,
+        counters.author_calls,
         summary.promotions,
         summary.rejections,
         ",".join(summary.candidates) or "-",

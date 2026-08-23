@@ -1776,14 +1776,18 @@ def research(
             from noctis.research.distill import bump_research_session
 
             bump_research_session(settings.state_dir)
+            # What the session spent, frozen once (#260): the toolbox's counters are live
+            # attributes its tools bump, so the line below is filled from ONE snapshot rather
+            # than from reads that could straddle two moments of the same session.
+            counters = session.toolbox.session_counters()
             coder_calls = (
-                f" {session.toolbox.author_calls} coder authoring call(s),"
-                if session.toolbox.author_calls
+                f" {counters.author_calls} coder authoring call(s),"
+                if counters.author_calls
                 else ""
             )
             typer.echo(
                 f"Session over ({summary.stopped_reason}): {summary.iterations} tool rounds, "
-                f"{session.toolbox.backtests_run} backtests,{coder_calls} "
+                f"{counters.backtests_run} backtests,{coder_calls} "
                 f"{summary.promotions} promotion(s), {summary.rejections} rejection(s)."
             )
             # What the session spent, and — deliberately — that the dollars are an *estimate*

@@ -30,6 +30,7 @@ from typer.testing import CliRunner
 
 from noctis.cli import app
 from noctis.reporting.run_store import RUN_LOCK_NAME, RUN_RECORD_NAME
+from noctis.research.surface import SessionCounters
 
 runner = CliRunner()
 
@@ -43,8 +44,8 @@ class _Budgets:
 
 
 class _Toolbox:
-    author_calls = 0
-    backtests_run = 3
+    def session_counters(self) -> SessionCounters:
+        return SessionCounters(backtests_run=3)
 
 
 class _FakeSession:
