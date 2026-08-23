@@ -29,6 +29,15 @@ and the eval core weighs the *case*, so those answers fold into the one contribu
 function, because this module knows no site's types — while what an unsettled case is *called* stays
 with the site that owns the word (DECIDE's ``NO_MAJORITY``, in :mod:`noctis.eval.decide_site`).
 
+**Stratifying a reading is one loop, and the axes come from the site's declaration.** Both sites
+split their headline figure by the difficulty axes their corpus labels cases on, and both wrote the
+same grouping loop to do it — each closing an import cycle with a deferred import of its own axis
+vocabulary, because nothing declared a site's axes as data. :func:`strata` is that loop, once:
+generic over a ``level_of`` and a ``block_of`` callable, so it groups a site's items and scores each
+level with the site's *own* arithmetic while knowing neither. What a site's axes **are** is now
+declared where its other facts live (:attr:`~noctis.eval.site.AgentSite.difficulty_axes`) and
+travels in (#306).
+
 **A co-primary pair is declared once.** :class:`PairManifest` is one pair's whole vocabulary: the
 figures it is made of, the order a JSON block publishes them in, the order a report prints them in,
 the **flagship** figure that may never appear on its own, and the refusal text for a block that
@@ -54,7 +63,7 @@ interpreter.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Hashable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -79,6 +88,7 @@ __all__ = [
     "PairRow",
     "fmt",
     "fold_by_case",
+    "strata",
     "strict_majority",
     "table",
 ]
@@ -336,3 +346,47 @@ def strict_majority(items: Sequence[_T], key: Callable[[_T], Hashable]) -> _T | 
     if held * 2 <= len(items):
         return None
     return next(item for item in items if key(item) == answer)
+
+
+# ── stratifying a reading: one grouping loop, whatever a site measures ─────────────────────
+
+
+def strata(
+    axes: Sequence[str],
+    items: Iterable[_T],
+    *,
+    level_of: Callable[[_T, str], str | None],
+    block_of: Callable[[Sequence[_T]], Mapping[str, Any]],
+) -> dict[str, dict[str, Mapping[str, Any]]]:
+    """Each declared difficulty axis's levels, each carrying that level's own block.
+
+    Stratified numbers are the reason the axes exist: an agreement figure that is one thing on
+    near-margin cases and another on comfortable ones is two findings, not one, and a coder pass
+    rate that is one thing on ``bars_only`` briefs and another on ``exits`` ones is two as well.
+    That is one algorithm, and it was written twice — once over DECIDE's outcomes and once over the
+    coder's job records — because nothing site-neutral could express it. It can now: ``level_of``
+    reads a level off whatever a site stratifies and ``block_of`` scores a level's items with the
+    site's *own* arithmetic, so a stratum and the headline it splits can never be computed two
+    different ways.
+
+    Three rules, and they are the same three both sites already kept:
+
+    * an item its site labelled on no level of an axis is stratified under :data:`NOT_APPLICABLE` —
+      the eval layer's one word for an absence, spelled here rather than at either call site;
+    * an axis's levels come back **sorted**, so a published breakdown is reproducible from the
+      corpus rather than from the order a runner happened to finish in;
+    * a level no item carries is **absent** rather than present at zero: nothing was measured
+      there, and an empty row would read as a measurement.
+
+    Axes come back in the order they were declared, and a site declaring none stratifies into an
+    empty mapping — an honest nothing for a site whose cases carry no difficulty labels at all.
+    """
+    stratified: dict[str, dict[str, Mapping[str, Any]]] = {}
+    carried = tuple(items)
+    for axis in axes:
+        grouped: dict[str, list[_T]] = {}
+        for item in carried:
+            level = level_of(item, axis)
+            grouped.setdefault(NOT_APPLICABLE if level is None else level, []).append(item)
+        stratified[axis] = {level: block_of(grouped[level]) for level in sorted(grouped)}
+    return stratified

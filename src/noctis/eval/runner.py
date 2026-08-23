@@ -831,10 +831,15 @@ class BenchRunner:
         answered case and whatever mapping it returns is folded in verbatim. Nothing here knows what
         a reading contains — that is the site's business — so a second site's scorer lands in the
         record the day its declaration carries one, with no edit to this module.
+
+        The declared ``difficulty_axes`` travel with the answers, because a scorer is the stateless
+        singleton its declaration carries and cannot import that declaration back. The site's facts
+        stay in one place, and this module still names no site's vocabulary.
         """
+        declaration = self._declaration(corpus)
         dials = harness_dials(self.harness)
-        for scorer in self._declaration(corpus).scorers:
-            reading = scorer.read(answered)
+        for scorer in declaration.scorers:
+            reading = scorer.read(answered, axes=declaration.difficulty_axes)
             if reading is None:
                 continue
             clash = sorted(set(reading) & set(dials))

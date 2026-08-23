@@ -120,13 +120,17 @@ class RecordingScorer:
 
     reading: Mapping[str, Any] | None = None
     answered: tuple[AnsweredCase, ...] = ()
+    axes: tuple[str, ...] | None = None
 
-    def read(self, answered: Sequence[AnsweredCase]) -> Mapping[str, Any] | None:
+    def read(
+        self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = ()
+    ) -> Mapping[str, Any] | None:
         self.answered = tuple(answered)
+        self.axes = axes
         return self.reading
 
 
-def _stub_site(*scorers: Any) -> AgentSite[Any, Any]:
+def _stub_site(*scorers: Any, difficulty_axes: tuple[str, ...] = ()) -> AgentSite[Any, Any]:
     """One stub declaration carrying exactly the scorers a test wants exercised."""
     return AgentSite(
         id="stub",
@@ -135,6 +139,7 @@ def _stub_site(*scorers: Any) -> AgentSite[Any, Any]:
         render=_render,
         knobs=StubKnobs,
         scorers=tuple(scorers),
+        difficulty_axes=difficulty_axes,
     )
 
 
@@ -341,6 +346,27 @@ def test_the_scoring_pass_is_handed_every_answered_case_with_the_replies_it_gave
         ("case-b", 1, ("answered case-b",)),
         ("case-b", 2, ("answered case-b",)),
     ]
+
+
+def test_the_scoring_pass_is_handed_the_difficulty_axes_its_site_declares(tmp_path):
+    """The declaration is the one place a site's facts live; the runner carries them to the pass."""
+    _stub_corpus(tmp_path)
+    scorer = RecordingScorer()
+
+    cli_module.run_bench(
+        "stub", seams=_stub_seams(_stub_site(scorer, difficulty_axes=("reasoning",)))
+    )
+
+    assert scorer.axes == ("reasoning",)
+
+
+def test_a_site_that_declares_no_axes_hands_its_scorer_none_to_stratify_by(tmp_path):
+    _stub_corpus(tmp_path)
+    scorer = RecordingScorer()
+
+    cli_module.run_bench("stub", seams=_stub_seams(_stub_site(scorer)))
+
+    assert scorer.axes == ()
 
 
 def test_every_declared_scorer_of_a_site_contributes_its_own_reading(tmp_path):

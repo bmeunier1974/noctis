@@ -23,6 +23,13 @@ harness has nothing to look up. This type is that sentence, and nothing more:
 * ``scorers`` — per-site, never shared: the site's own reading of a finished bench (see
   :class:`Scorer`). Empty is the honest default — a site whose answers only the emit contract judges
   publishes the eval core's figures and adds nothing of its own.
+* ``difficulty_axes`` — the axis vocabulary this site's corpus labels its cases on, in the order a
+  reading publishes them. A benchmark splits its headline figure by these (an agreement figure that
+  is one thing on near-margin cases and another on comfortable ones is two findings, not one), and
+  the runner hands the tuple to the site's scorers so one site-neutral loop
+  (:func:`~noctis.eval.reading.strata`) can stratify either site's reading without importing
+  either's vocabulary. Empty is the honest default: cases nobody labelled have no axes, which is an
+  absence and not an empty measurement.
 
 **Declaration-only, and frozen.** Constructing an ``AgentSite`` runs nothing and changes nothing;
 a site is data a harness reads. That is also what keeps the door open for a future DSPy-style
@@ -96,8 +103,16 @@ class Scorer(Protocol[ScoredInput_co, ScoredOutput_co]):
     bench verbs free of any site's vocabulary.
     """
 
-    def read(self, answered: Sequence[AnsweredCase]) -> Mapping[str, Any] | None:
-        """This site's reading over one bench's answers, or ``None`` when it has none to add."""
+    def read(
+        self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = ()
+    ) -> Mapping[str, Any] | None:
+        """This site's reading over one bench's answers, or ``None`` when it has none to add.
+
+        ``axes`` is the site's declared :attr:`AgentSite.difficulty_axes`, handed over by the runner
+        rather than looked up: a scorer is a stateless singleton its declaration carries, so it
+        cannot import the declaration that carries it, and the declaration stays the one place a
+        site's facts live. A pass handed no axes stratifies by none.
+        """
 
 
 @dataclass(frozen=True)
@@ -110,3 +125,4 @@ class AgentSite(Generic[SiteInput, SiteOutput]):
     render: Callable[[SiteInput, HarnessSpec], str]
     knobs: type[SiteKnobs]
     scorers: tuple[Scorer[SiteInput, SiteOutput], ...] = ()
+    difficulty_axes: tuple[str, ...] = ()

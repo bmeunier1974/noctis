@@ -67,6 +67,12 @@ from typing import Any
 from noctis.backtest.scorecard import Scorecard
 from noctis.champions.promotion import Decision, GateResult, PromotionRules, decide
 from noctis.eval.case import Case, parse_case
+from noctis.eval.decide_site import (
+    BINDING_GATE_AXIS,
+    DIFFICULTY_AXES,
+    EVIDENCE_DEPTH_AXIS,
+    MARGIN_AXIS,
+)
 from noctis.eval.episodic_sites import DECIDE_SITE
 from noctis.eval.reading import NOT_APPLICABLE
 from noctis.research.driver import (
@@ -125,11 +131,9 @@ LEDGER_TAIL_KEY = "ledger_tail"
 OUTCOME_KEY = "recorded_outcome"
 ASK_KEYS: tuple[str, ...] = (EVIDENCE_KEY, LEDGER_TAIL_KEY)
 
-# The three difficulty axes a mined corpus stratifies on.
-MARGIN_AXIS = "margin"
-BINDING_GATE_AXIS = "binding_gate"
-EVIDENCE_DEPTH_AXIS = "evidence_depth"
-DIFFICULTY_AXES: tuple[str, ...] = (MARGIN_AXIS, BINDING_GATE_AXIS, EVIDENCE_DEPTH_AXIS)
+# The three difficulty axes a mined corpus stratifies on are this *site's* vocabulary rather than
+# this module's: spelled once in :mod:`noctis.eval.decide_site`, published by the DECIDE
+# declaration, and re-exported here, where the labelling that fills them lives (#306).
 
 # The one word every axis says when its answer cannot be reconstructed — never a plausible value.
 # It is the eval layer's word rather than this module's: spelled once in :mod:`noctis.eval.reading`

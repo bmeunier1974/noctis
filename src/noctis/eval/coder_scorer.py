@@ -52,6 +52,10 @@ a job pass rate that is one thing on ``bars_only`` briefs and another on ``exits
 findings, not one. So the reading carries a :data:`STRATA_KEY` block — axis → level → the same
 co-primary pair over just those jobs, computed by the same arithmetic as the whole batch
 (:func:`strata_block`), exactly as :func:`noctis.eval.decide_site.strata_block` stratifies DECIDE's.
+*Which* axes is the site declaration's answer, not this module's: the seven ride on
+:data:`~noctis.eval.coder_distill_sites.CODER_SITE`'s ``difficulty_axes`` and the runner hands them
+to :meth:`CoderReadingScorer.read`, while the grouping itself is
+:func:`~noctis.eval.reading.strata`'s — the one loop both sites stratify through (#306).
 A stratum publishes the **pass breakdown** and not a second copy of the spend and taxonomy blocks:
 those repeated across twenty levels are a wall nobody reads, while the pair is what an axis was
 invented to split. A level no case in the batch carries is absent rather than present at zero.
@@ -81,6 +85,7 @@ from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
 
 from noctis.eval.case import Case
+from noctis.eval.coder_case import CODER_AXES
 from noctis.eval.metrics import (
     AttemptDistribution,
     AttemptOutcome,
@@ -102,6 +107,7 @@ from noctis.eval.reading import (
     NOT_APPLICABLE,
     PASS_RATES,
     STRATA_KEY,
+    strata,
 )
 from noctis.eval.reading import table as render_table
 from noctis.eval.site import AnsweredCase
@@ -156,10 +162,10 @@ UNREADABLE_KEY = "unreadable"
 UNATTEMPTED_KEY = "unattempted_jobs"
 
 # ``STRATA_KEY`` is the key the per-axis breakdown rides under, on this site and DECIDE's alike, so
-# one generic reader renders both; ``NOT_APPLICABLE`` is what a stratum is keyed by when a job's
-# case carries no level on an axis (every validated coder case is labelled on all seven, so it is a
-# defensive spelling rather than an expected row). Both are the eval layer's words, imported from
-# :mod:`noctis.eval.reading` and re-exported here (#305).
+# one generic reader renders both; ``NOT_APPLICABLE`` is what the shared grouping loop keys a
+# stratum by when a job's case carries no level on an axis (every validated coder case is labelled
+# on all seven, so it is a defensive spelling rather than an expected row). Both are the eval
+# layer's words, imported from :mod:`noctis.eval.reading` and re-exported here (#305).
 
 
 # ── the co-primary pair ───────────────────────────────────────────────────────────────────
@@ -439,7 +445,12 @@ def coder_block(
     }
 
 
-def strata_block(cases: Sequence[Case], records: Sequence[JobRecord]) -> dict[str, Any]:
+def strata_block(
+    cases: Sequence[Case],
+    records: Sequence[JobRecord],
+    *,
+    axes: Sequence[str] = CODER_AXES,
+) -> dict[str, Any]:
     """Each difficulty axis's levels, each carrying the co-primary pair over just those jobs.
 
     Stratified pass rates are the reason the axes exist: a job pass rate that is one thing on
@@ -448,29 +459,29 @@ def strata_block(cases: Sequence[Case], records: Sequence[JobRecord]) -> dict[st
     and the headline pair can never be computed two different ways — DECIDE's
     :func:`~noctis.eval.decide_site.strata_block` is stratified the same way for the same reason.
 
+    The grouping itself is :func:`~noctis.eval.reading.strata`'s, the one loop both sites stratify
+    through: an absent level is :data:`~noctis.eval.reading.NOT_APPLICABLE`, levels come back
+    sorted, and a level no case in the batch carries is absent rather than present at zero —
+    nothing was measured there, and an empty row would read as a measurement. What this function
+    keeps is the coder's own two contributions: how a job finds its level, and what a level scores
+    (:func:`_stratum_block`).
+
     What a stratum publishes is deliberately the **pass breakdown** and not a second copy of the
     whole reading: the spend, effort and taxonomy blocks repeated across twenty levels would be a
     wall of numbers nobody reads, while the pair is exactly what an axis was invented to split. Both
     halves ride together (:func:`_rates_block`), so the pairing rule holds at every depth.
 
-    A level no case in the batch carries is absent rather than present at zero — nothing was
-    measured there, and an empty row would read as a measurement.
+    ``axes`` are the site's declared :attr:`~noctis.eval.site.AgentSite.difficulty_axes`, which a
+    bench's runner hands the scoring pass; a caller that names none reads the coder's whole
+    vocabulary, because that is what a coder corpus labels its briefs on.
     """
-    # Deferred: the axis vocabulary pulls the author engine in for one enum, and every other caller
-    # of this module needs neither.
-    from noctis.eval.coder_case import Axis
-
     levels = {case.case_id: dict(case.difficulty) for case in cases}
-    stratified: dict[str, Any] = {}
-    for axis in Axis:
-        grouped: dict[str, list[JobRecord]] = {}
-        for record in records:
-            level = levels.get(record.case_id, {}).get(axis.value, NOT_APPLICABLE)
-            grouped.setdefault(level, []).append(record)
-        stratified[axis.value] = {
-            level: _stratum_block(grouped[level]) for level in sorted(grouped)
-        }
-    return stratified
+    return strata(
+        axes,
+        records,
+        level_of=lambda record, axis: levels.get(record.case_id, {}).get(axis),
+        block_of=_stratum_block,
+    )
 
 
 def _stratum_block(records: Sequence[JobRecord]) -> dict[str, Any]:
@@ -628,8 +639,14 @@ class CoderReadingScorer:
     hands it every answered case and folds the block it returns into the record's dials.
     """
 
-    def read(self, answered: Sequence[AnsweredCase]) -> Mapping[str, Any] | None:
+    def read(
+        self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = CODER_AXES
+    ) -> Mapping[str, Any] | None:
         """The whole coder reading over one live bench's answers — see the module docstring.
+
+        ``axes`` is what the site's declaration says its cases are labelled on, handed over by the
+        runner (:class:`~noctis.eval.site.Scorer`) rather than looked up here: this scorer is the
+        singleton that declaration carries, so it cannot import it back.
 
         ``None`` for a bench that answered nothing: a reading over no answers is not a measured
         zero, it is an absence, and publishing empty figures beside real dials would read as one.
@@ -653,7 +670,7 @@ class CoderReadingScorer:
                 score_coder_jobs(records),
                 warnings=_warning_rows(read),
                 unreadable=len(answered) - len(read),
-                strata=strata_block([one.case for one in answered], records),
+                strata=strata_block([one.case for one in answered], records, axes=axes),
             ),
         }
 

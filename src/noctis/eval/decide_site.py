@@ -52,7 +52,9 @@ publishes — the co-primary pair, the deferral figures, one row per case and th
 because the two paths share the shaping functions below (:func:`scored_block`, :func:`case_row`,
 :func:`strata_block`) rather than agreeing by convention. What differs is stated at the top of the
 block and nowhere else: ``answers`` is :data:`ANSWERS_FRESH` here and :data:`ANSWERS_RECORDED`
-there.
+there. The axes those strata split by are declared data — :data:`DIFFICULTY_AXES`, published by
+:data:`~noctis.eval.episodic_sites.DECIDE_SITE` and handed to the pass by the runner — and the
+grouping loop belongs to no site at all (:func:`~noctis.eval.reading.strata`, #306).
 
 Three honesty rules govern that fold:
 
@@ -98,9 +100,11 @@ from noctis.eval.reading import (
     ANSWERS_RECORDED,
     APPROVAL_PAIR,
     ATTEMPT_CALLS_KEY,
+    NOT_APPLICABLE,
     RETROSPECTIVE_KEY,
     STRATA_KEY,
     fold_by_case,
+    strata,
     strict_majority,
 )
 from noctis.eval.site import AnsweredCase
@@ -117,8 +121,12 @@ if TYPE_CHECKING:  # the cycle-closing imports, for annotations only — see the
 __all__ = [
     "ANSWERS_FRESH",
     "ANSWERS_RECORDED",
+    "BINDING_GATE_AXIS",
     "DECIDE_DIALS_KEY",
     "DECIDE_SCORER",
+    "DIFFICULTY_AXES",
+    "EVIDENCE_DEPTH_AXIS",
+    "MARGIN_AXIS",
     "NEUTRAL_SESSION",
     "NO_MAJORITY",
     "NO_VERDICT",
@@ -145,6 +153,18 @@ DECIDE_DIALS_KEY = "decide"
 # asked a model, and on one that re-read history — are the eval layer's words rather than this
 # site's: spelled once in :mod:`noctis.eval.reading`, and re-exported here because this module's
 # docstring names them and its readers have always imported them from it (#305).
+
+#: The three difficulty axes a mined DECIDE corpus labels its cases on, in the order every reading
+#: publishes them. They live here, one module below the case builder that labels a case
+#: (:mod:`noctis.eval.decide_case`) and the declaration that publishes them
+#: (:data:`~noctis.eval.episodic_sites.DECIDE_SITE`'s ``difficulty_axes``), because both of those
+#: import this module and neither may be imported back: the declaration carries this module's
+#: scorer, and the case reads its site id off the declaration. One spelling, imported by all three,
+#: is what retired the call-time axis imports this module used to close that cycle with (#306).
+MARGIN_AXIS = "margin"
+BINDING_GATE_AXIS = "binding_gate"
+EVIDENCE_DEPTH_AXIS = "evidence_depth"
+DIFFICULTY_AXES: tuple[str, ...] = (MARGIN_AXIS, BINDING_GATE_AXIS, EVIDENCE_DEPTH_AXIS)
 
 #: The two exclusion counts a live reading carries beside the pair — the n/a side, named.
 UNREADABLE_KEY = "unreadable"
@@ -523,8 +543,6 @@ def case_row(
     ``error`` is an absent *key* when there is none, the way #207's outcome block spells an absent
     label: "this one was readable" is better read off a missing key than off a null to interpret.
     """
-    from noctis.eval.decide_case import DIFFICULTY_AXES, NOT_APPLICABLE
-
     row: dict[str, Any] = {
         "case_id": case.case_id,
         "run_id": case.provenance.mined_from,
@@ -539,25 +557,33 @@ def case_row(
     return row
 
 
-def strata_block(cases: Sequence[Case], outcomes: Sequence[DecideOutcome]) -> dict[str, Any]:
+def strata_block(
+    cases: Sequence[Case],
+    outcomes: Sequence[DecideOutcome],
+    *,
+    axes: Sequence[str] = DIFFICULTY_AXES,
+) -> dict[str, Any]:
     """Each difficulty axis's levels, each scored by the same batch scorer as the whole.
 
     Stratified numbers are the reason the axes exist: an agreement figure that is one thing on
     near-margin cases and another on comfortable ones is two findings, not one.
-    """
-    from noctis.eval.decide_case import DIFFICULTY_AXES, NOT_APPLICABLE
 
+    The grouping is :func:`~noctis.eval.reading.strata`'s, the one loop the coder's reading
+    stratifies through as well; what stays here is DECIDE's own two contributions — how an outcome
+    finds its level, and that a level is scored by the very batch scorer the headline is scored by,
+    so a stratum and the figure it splits can never be computed two different ways.
+
+    ``axes`` are the site's declared :attr:`~noctis.eval.site.AgentSite.difficulty_axes`, which a
+    bench's runner hands the scoring pass; a caller that names none — the retrospective miner reads
+    history this way — stratifies by the whole vocabulary a mined corpus labels its cases on.
+    """
     levels = {case.case_id: dict(case.difficulty) for case in cases}
-    stratified: dict[str, Any] = {}
-    for axis in DIFFICULTY_AXES:
-        grouped: dict[str, list[DecideOutcome]] = {}
-        for outcome in outcomes:
-            level = levels.get(outcome.case_id, {}).get(axis, NOT_APPLICABLE)
-            grouped.setdefault(level, []).append(outcome)
-        stratified[axis] = {
-            level: scored_block(score_decide_batch(grouped[level])) for level in sorted(grouped)
-        }
-    return stratified
+    return strata(
+        axes,
+        outcomes,
+        level_of=lambda outcome, axis: levels.get(outcome.case_id, {}).get(axis),
+        block_of=lambda grouped: scored_block(score_decide_batch(grouped)),
+    )
 
 
 @dataclass(frozen=True)
@@ -602,8 +628,14 @@ class DecideAgreementScorer:
     case and folds the block it returns into the record's dials.
     """
 
-    def read(self, answered: Sequence[AnsweredCase]) -> Mapping[str, Any] | None:
+    def read(
+        self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = DIFFICULTY_AXES
+    ) -> Mapping[str, Any] | None:
         """The whole DECIDE reading over one live bench's answers — see the module docstring.
+
+        ``axes`` is what the site's declaration says its cases are labelled on, handed over by the
+        runner (:class:`~noctis.eval.site.Scorer`) rather than looked up here: this scorer is the
+        singleton that declaration carries, so it cannot import it back.
 
         ``None`` for a bench that answered nothing: a reading over no answers is not a measured
         zero, it is an absence, and publishing empty figures beside real dials would read as one.
@@ -623,7 +655,7 @@ class DecideAgreementScorer:
                 UNREADABLE_KEY: sum(1 for one in readings if one.unreadable),
                 UNSETTLED_KEY: sum(1 for one in readings if one.unsettled),
                 "cases": [one.row() for one in readings],
-                STRATA_KEY: strata_block([one.case for one in readings], outcomes),
+                STRATA_KEY: strata_block([one.case for one in readings], outcomes, axes=axes),
             },
         }
 

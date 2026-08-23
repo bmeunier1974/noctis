@@ -262,8 +262,27 @@ def test_a_scorer_tuple_may_be_typed_against_the_forward_declaration_the_eval_co
     assert declaration.scorers == ()
 
 
+def test_a_site_whose_cases_carry_no_difficulty_labels_declares_no_axes() -> None:
+    """The honest default: an absent axis vocabulary, not an empty measurement (#306)."""
+    assert _site().difficulty_axes == ()
+
+
+def test_a_declaration_carries_the_axis_vocabulary_a_reading_stratifies_by() -> None:
+    declaration = dataclasses.replace(_site(), difficulty_axes=("margin", "evidence_depth"))
+
+    assert declaration.difficulty_axes == ("margin", "evidence_depth")
+
+
 def test_a_declaration_reads_back_as_the_plain_data_a_harness_looks_up() -> None:
     """Declaration-only: a site is data, so a harness can enumerate it without running anything."""
     fields: dict[str, Any] = {field.name: field for field in dataclasses.fields(_site())}
 
-    assert set(fields) == {"id", "version", "contract", "render", "knobs", "scorers"}
+    assert set(fields) == {
+        "id",
+        "version",
+        "contract",
+        "render",
+        "knobs",
+        "scorers",
+        "difficulty_axes",
+    }

@@ -16,6 +16,11 @@ Three properties carry this suite, and they are the reason the module exists at 
   reading depend on it without dragging anything behind it. Both the static import walk and a
   fresh-interpreter module closure say so.
 
+Beside them sit the site-neutral arithmetic the module has grown since: ``fold_by_case`` and
+``strict_majority``, which settle what a case's reps contribute (#305), and ``strata``, the one
+grouping loop both sites' readings are stratified by (#306). Each is generic over a key or a pair
+of callables — which is exactly what lets it live here rather than twice, at a site.
+
 The byte-for-byte pins against ``ApprovalPair.render()`` and ``PassRates.render()`` are the move's
 own safety net, beside the golden records in ``tests/test_eval_goldens.py``.
 """
@@ -26,6 +31,7 @@ import ast
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -44,12 +50,14 @@ from noctis.eval.decide_scorer import ApprovalPair
 from noctis.eval.decide_site import pair_block
 from noctis.eval.reading import (
     APPROVAL_PAIR,
+    NOT_APPLICABLE,
     PAIR_MANIFESTS,
     PASS_RATES,
     PairManifest,
     PairRow,
     fmt,
     fold_by_case,
+    strata,
     strict_majority,
     table,
 )
@@ -434,6 +442,85 @@ def test_answers_keep_the_order_they_arrived_in_inside_their_own_group() -> None
 
 def test_no_answers_fold_into_no_groups() -> None:
     assert fold_by_case((), key=_case_id) == ()
+
+
+# ── strata: one grouping loop, whatever a site stratifies ─────────────────────────────────
+@dataclass(frozen=True)
+class _Labelled:
+    """A stand-in for whatever a site stratifies — a coder job record, a DECIDE outcome."""
+
+    who: str
+    difficulty: dict[str, str]
+
+
+def _level(one: _Labelled, axis: str) -> str | None:
+    """How a caller reads a level off its own item: the label it carries, or nothing."""
+    return one.difficulty.get(axis)
+
+
+def _who(items: Sequence[_Labelled]) -> dict[str, object]:
+    """A stand-in for a site's own block builder — the names in this level, and how many."""
+    return {"count": len(items), "who": [one.who for one in items]}
+
+
+AXES = ("margin", "surface")
+
+LABELLED = (
+    _Labelled("a", {"margin": "near", "surface": "exits"}),
+    _Labelled("b", {"margin": "comfortable", "surface": "exits"}),
+    _Labelled("c", {"margin": "near"}),
+)
+
+
+def test_every_declared_axis_is_stratified_in_the_order_it_was_declared() -> None:
+    assert list(strata(AXES, LABELLED, level_of=_level, block_of=_who)) == ["margin", "surface"]
+
+
+def test_an_axis_carries_the_levels_its_items_were_labelled_on_in_sorted_order() -> None:
+    assert list(strata(AXES, LABELLED, level_of=_level, block_of=_who)["margin"]) == [
+        "comfortable",
+        "near",
+    ]
+
+
+def test_a_levels_block_is_built_over_exactly_the_items_that_carry_that_level() -> None:
+    stratified = strata(AXES, LABELLED, level_of=_level, block_of=_who)
+
+    assert stratified["margin"]["near"] == {"count": 2, "who": ["a", "c"]}
+
+
+def test_an_item_carrying_no_level_on_an_axis_is_stratified_under_the_one_word_for_an_absence() -> (
+    None
+):
+    stratified = strata(AXES, LABELLED, level_of=_level, block_of=_who)
+
+    assert stratified["surface"][NOT_APPLICABLE] == {"count": 1, "who": ["c"]}
+
+
+def test_a_level_nobody_carries_is_absent_rather_than_present_at_zero() -> None:
+    """Nothing was measured there, and an empty row would read as a measurement."""
+    stratified = strata(AXES, LABELLED, level_of=_level, block_of=_who)
+
+    assert "scale_free" not in stratified["surface"]
+    assert set(stratified["surface"]) == {"exits", NOT_APPLICABLE}
+
+
+def test_items_keep_the_order_they_arrived_in_inside_their_own_level() -> None:
+    shuffled = (LABELLED[2], LABELLED[0])
+
+    assert strata(AXES, shuffled, level_of=_level, block_of=_who)["margin"]["near"]["who"] == [
+        "c",
+        "a",
+    ]
+
+
+def test_a_site_that_declares_no_axes_stratifies_into_an_empty_mapping() -> None:
+    assert strata((), LABELLED, level_of=_level, block_of=_who) == {}
+
+
+def test_an_axis_nothing_was_measured_on_carries_no_levels_at_all() -> None:
+    """No items is not a level of its own: the axis is declared, and its breakdown is empty."""
+    assert strata(AXES, (), level_of=_level, block_of=_who) == {"margin": {}, "surface": {}}
 
 
 # ── purity, structurally ──────────────────────────────────────────────────────────────────

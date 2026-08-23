@@ -19,8 +19,9 @@ import importlib
 import inspect
 from typing import Any
 
+from noctis.eval.coder_case import CODER_AXES, Axis
 from noctis.eval.coder_scorer import CODER_SCORER
-from noctis.eval.decide_site import DECIDE_SCORER
+from noctis.eval.decide_site import DECIDE_SCORER, DIFFICULTY_AXES
 from noctis.eval.knobs import SiteKnobs
 from noctis.eval.registry import DECLARED_SITES, SITES, site, sites
 from noctis.research.driver import DECIDE_CONTRACT, DISCOVER_CONTRACT, FORMULATE_CONTRACT
@@ -46,6 +47,15 @@ EXPECTED_CONTRACTS: dict[str, EmitContract[Any] | None] = {
 EXPECTED_SCORERS: dict[str, tuple[Any, ...]] = {
     "coder": (CODER_SCORER,),
     "decide": (DECIDE_SCORER,),
+}
+
+# What each declared site's ``difficulty_axes`` slot must carry: the axis vocabulary its corpus
+# labels cases on, and the tuple the runner hands its scorers to stratify a reading by. A site
+# absent from here declares none — cases nobody labelled have no axes, which is an absence and not
+# an empty measurement.
+EXPECTED_AXES: dict[str, tuple[str, ...]] = {
+    "coder": CODER_AXES,
+    "decide": DIFFICULTY_AXES,
 }
 
 
@@ -126,4 +136,28 @@ def test_every_declared_site_resolves_end_to_end_against_the_objects_it_binds() 
         # every other slot is still honestly empty.
         assert declaration.scorers == EXPECTED_SCORERS.get(site_id, ()), site_id
 
+        # The difficulty axes its corpus labels cases on — declared beside its scorers, so one
+        # site-neutral loop stratifies either site's reading without importing either's
+        # vocabulary (#306).
+        assert declaration.difficulty_axes == EXPECTED_AXES.get(site_id, ()), site_id
+
     assert seen == DECLARED_SITE_IDS
+
+
+# ── the axes themselves: what the two scoring sites stratify their readings by ────────────
+def test_the_coder_declares_the_seven_axes_a_labelled_brief_carries() -> None:
+    """The enum is the vocabulary; the declaration publishes it flat, as a record's keys."""
+    assert site("coder").difficulty_axes == tuple(axis.value for axis in Axis)
+    assert len(site("coder").difficulty_axes) == 7
+
+
+def test_decide_declares_the_three_axes_a_mined_case_carries() -> None:
+    assert site("decide").difficulty_axes == ("margin", "binding_gate", "evidence_depth")
+
+
+def test_a_site_whose_cases_carry_no_difficulty_labels_declares_no_axes() -> None:
+    assert [declared.id for declared in sites() if not declared.difficulty_axes] == [
+        "formulate",
+        "discover",
+        "distill",
+    ]
