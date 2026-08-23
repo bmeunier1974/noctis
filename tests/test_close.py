@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pandas as pd
@@ -118,7 +119,10 @@ def test_close_failing_step_does_not_block_memory(tmp_path):
     assert result.memory_reorganized is True
 
 
-def test_close_reconciliation_drift_flag_added_to_events(tmp_path):
+def test_close_reconciliation_drift_is_flagged_without_crashing_on_a_frozen_report(tmp_path):
+    """A flagged drift is reported on the result, and composing its event onto the (frozen)
+    report never raises. The event still reaches no file: it is composed after both reports
+    are on disk — the known ordering bug epic #264 fixes by rendering last."""
     memory = _FakeMemory([])
     report_data = ReportData(as_of="2026-07-03")
 
@@ -128,13 +132,37 @@ def test_close_reconciliation_drift_flag_added_to_events(tmp_path):
         vendor.loc[1, ["open", "high", "low", "close"]] = [110.0, 110.0, 110.0, 110.0]
         return reconcile_bars(live, vendor, threshold=0.005)
 
-    run_close(
+    result = run_close(
         report_data=report_data,
         reports_dir=str(tmp_path / "reports"),
         memory=memory,
         reconcile_fn=reconcile,
     )
-    assert any("Feed drift" in e for e in report_data.events)
+    assert result.reconciliation is not None and result.reconciliation.flagged is True
+    assert not result.errors
+    assert "Feed drift" not in (tmp_path / "reports" / "2026-07-03.md").read_text()
+
+
+def test_close_writes_the_overwrite_note_into_both_report_files(tmp_path):
+    """The close writes ``.md`` and ``.json`` from one final report value, so a re-run's
+    overwrite note reaches both files — it used to ride an in-place mutation of a shared
+    (then-mutable) report between the two writes."""
+    reports = tmp_path / "reports"
+    note = "Overwrote existing report for 2026-07-03 (prior archived)"
+
+    run_close(
+        report_data=ReportData(as_of="2026-07-03", end_equity=100_000.0),
+        reports_dir=str(reports),
+        memory=_FakeMemory([]),
+    )
+    run_close(
+        report_data=ReportData(as_of="2026-07-03", end_equity=105_000.0),  # differs
+        reports_dir=str(reports),
+        memory=_FakeMemory([]),
+    )
+
+    assert note in (reports / "2026-07-03.md").read_text()
+    assert json.loads((reports / "2026-07-03.json").read_text())["events"] == [note]
 
 
 def test_close_distill_step_is_isolated_and_precedes_reorganize(tmp_path):

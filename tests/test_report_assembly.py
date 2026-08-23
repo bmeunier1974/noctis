@@ -69,16 +69,16 @@ def test_assemble_from_persisted_state_alone(tmp_path):
     )
 
     assert data.as_of == "2026-01-06" and data.mode == "paper"
-    assert data.champions == [
+    assert data.champions == (
         {
             "family": "sma_crossover",
             "params": {"fast": 5, "slow": 20},
             "test_metric": pytest.approx(1.5),
             "gap": pytest.approx(0.2),
-        }
-    ]
+        },
+    )
     assert [h["family"] for h in data.promotions] == ["sma_crossover"]
-    assert data.demotions == []
+    assert data.demotions == ()
     assert data.cumulative_pnl == pytest.approx(0.0)
     assert data.account_opened == "2026-01-02"
     assert len(data.forward) == 1
@@ -87,7 +87,7 @@ def test_assemble_from_persisted_state_alone(tmp_path):
     assert data.research["findings"] == ["PROMOTED sma_crossover"]
     # No session: equity/trades/positions/events/counters are all zero-valued.
     assert data.start_equity == 0.0 and data.realized_pnl == 0.0
-    assert data.trades == [] and data.positions == {} and data.events == []
+    assert data.trades == () and data.positions == {} and data.events == ()
     assert data.research["iterations"] == 0 and data.research["minted"] == []
 
 
@@ -112,12 +112,15 @@ def test_assemble_folds_session_activity(tmp_path):
 
     assert data.start_equity == 100_000.0 and data.end_equity == 100_250.0
     assert data.realized_pnl == pytest.approx(250.0)
-    assert data.trades == session.trades and data.trades is not session.trades
+    assert list(data.trades) == session.trades  # a frozen copy the report owns
     assert data.positions == {"AAPL": 10.0}
     assert data.research["iterations"] == 7 and data.research["promotions"] == 1
     assert data.research["minted"] == ["spec_x"]
-    assert data.events == ["2 orders refused by risk limits"]
-    assert data.events is not session.events  # run_close appends to the report's own copy
+    assert data.events == ("2 orders refused by risk limits",)
+    # The report's own frozen copy: the cycle can go on accumulating events, the assembled
+    # report cannot change under whoever wrote it.
+    session.events.append("a later event the report never saw")
+    assert data.events == ("2 orders refused by risk limits",)
     # The assembled data renders end-to-end (the render is the report contract).
     assert "Close-of-day report — 2026-01-06" in render_report(data)
 

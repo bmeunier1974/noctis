@@ -9,7 +9,7 @@ engine dependency); an empty day still produces a valid report with every sectio
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -59,8 +59,25 @@ class Trade:
         return entry
 
 
-@dataclass
+# The report's sequence fields, listed once: the ones frozen into tuples at construction and
+# rendered as JSON arrays by :func:`report_dict`. ``positions`` and ``research`` stay dicts —
+# ``assemble_report`` hands the report its own copy of each.
+SEQUENCE_FIELDS = ("forward", "trades", "promotions", "demotions", "champions", "events")
+
+
+@dataclass(frozen=True)
 class ReportData:
+    """The day's report as one **frozen value**.
+
+    A report is evidence, so it is complete before it is rendered: every sequence field is a
+    tuple, and appending an event to a report that was already written is an ``AttributeError``
+    rather than a line silently lost to the file that no longer matches it (epic #264).
+    Construction stays tolerant — a caller may pass lists (``assemble_report`` and every test
+    do) and ``__post_init__`` normalises each to a tuple — so the only thing that changed is
+    that nothing can grow afterwards. A late fact means a **new** value
+    (``dataclasses.replace``), rendered again.
+    """
+
     as_of: str
     mode: str = "paper"
     start_equity: float = 0.0
@@ -73,14 +90,20 @@ class ReportData:
     # Per-champion forward track record (live-holdout plan 5): each a dict with family,
     # forward_pnl (= realized + current unrealized), realized_pnl, unrealized_pnl,
     # sessions_traded, opened_session. Empty until a champion trades a live-holdout session.
-    forward: list[dict] = field(default_factory=list)
-    trades: list[Trade] = field(default_factory=list)
+    forward: tuple[dict, ...] = ()
+    trades: tuple[Trade, ...] = ()
     positions: dict[str, float] = field(default_factory=dict)
-    promotions: list[dict] = field(default_factory=list)
-    demotions: list[dict] = field(default_factory=list)
-    champions: list[dict] = field(default_factory=list)
+    promotions: tuple[dict, ...] = ()
+    demotions: tuple[dict, ...] = ()
+    champions: tuple[dict, ...] = ()
     research: dict = field(default_factory=dict)
-    events: list[str] = field(default_factory=list)
+    events: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Tolerant of list-built construction: whatever sequence a caller passed becomes the
+        # report's own tuple. ``object.__setattr__`` is how a frozen dataclass normalises.
+        for name in SEQUENCE_FIELDS:
+            object.__setattr__(self, name, tuple(getattr(self, name)))
 
 
 def _fmt_pct(a: float, b: float) -> str:
@@ -280,12 +303,14 @@ def _archive_if_differs(path: Path, new_content: str) -> Path | None:
     return archive
 
 
-def write_report(data: ReportData, reports_dir: str | Path) -> Path:
-    """Render ``data`` and write it to ``<reports_dir>/<as_of>.md``. Returns the path.
+def _write_markdown(data: ReportData, reports_dir: str | Path) -> tuple[Path, ReportData]:
+    """Write ``<reports_dir>/<as_of>.md``; return its path **and the report it rendered**.
 
-    If a *differing* report already exists for the date, the prior is archived first (see
-    :func:`_archive_if_differs`) and an ``Overwrote existing report`` event is added so the
-    overwrite is visible in the day's own report. An identical rewrite is a silent no-op.
+    The returned value is ``data`` itself unless a differing prior was archived, in which case
+    it is a new report carrying the ``Overwrote existing report`` event — the one fact the
+    Markdown write discovers and the JSON write cannot. Whoever writes both files writes them
+    from *this* value (:func:`write_reports`), so the two agree by construction rather than by
+    a shared mutation.
     """
     directory = Path(reports_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -294,9 +319,24 @@ def write_report(data: ReportData, reports_dir: str | Path) -> Path:
     if _archive_if_differs(path, content) is not None:
         note = f"Overwrote existing report for {data.as_of} (prior archived)"
         if note not in data.events:
-            data.events.append(note)
-        content = render_report(data)  # re-render so the note lands in the report itself
+            data = replace(data, events=(*data.events, note))
+            content = render_report(data)  # re-render so the note lands in the report itself
     path.write_text(content, encoding="utf-8")
+    return path, data
+
+
+def write_report(data: ReportData, reports_dir: str | Path) -> Path:
+    """Render ``data`` and write it to ``<reports_dir>/<as_of>.md``. Returns the path.
+
+    If a *differing* report already exists for the date, the prior is archived first (see
+    :func:`_archive_if_differs`) and an ``Overwrote existing report`` event is added so the
+    overwrite is visible in the day's own report. An identical rewrite is a silent no-op.
+
+    The note lands in the **file**, never in the caller's ``data`` (a report is frozen). A
+    caller that also wants the note in the day's JSON writes both through
+    :func:`write_reports`.
+    """
+    path, _ = _write_markdown(data, reports_dir)
     return path
 
 
@@ -308,8 +348,13 @@ def report_dict(data: ReportData) -> dict:
     bytes of every per-day report ever written. So the trades are re-rendered through
     :meth:`Trade.as_dict`, which omits what it does not have: an un-enriched report is byte
     identical to the one this engine produced before the fields existed.
+
+    The report's sequences are tuples; the document's are lists — the same JSON array either
+    way, so a tuple-built report and a list-built one serialise identically.
     """
     document = asdict(data)
+    for name in SEQUENCE_FIELDS:
+        document[name] = list(document[name])
     document["trades"] = [trade.as_dict() for trade in data.trades]
     return document
 
@@ -320,8 +365,9 @@ def write_report_json(data: ReportData, reports_dir: str | Path) -> Path:
     already JSON-safe; the trades are rendered by :func:`report_dict`.
 
     Like :func:`write_report`, a differing prior for the date is archived, not clobbered. The
-    overwrite event is not added here — :func:`write_report` runs first in CLOSE and already
-    stamped ``data.events``, which the document carries into this JSON.
+    overwrite event is never resolved here — only the Markdown write can discover it — so a
+    JSON written **on its own** archives its prior but records no event. A caller that wants
+    the note in both files writes them through :func:`write_reports`.
     """
     directory = Path(reports_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -330,6 +376,17 @@ def write_report_json(data: ReportData, reports_dir: str | Path) -> Path:
     _archive_if_differs(path, content)
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def write_reports(data: ReportData, reports_dir: str | Path) -> tuple[Path, Path]:
+    """Write the day's Markdown **and** JSON from one final report value.
+
+    The ``Overwrote existing report`` note is resolved once — by the Markdown write, the only
+    one that can discover it — and both files are written from the report that carries it, so
+    the pair never disagrees about what happened. Returns ``(markdown_path, json_path)``.
+    """
+    markdown, final = _write_markdown(data, reports_dir)
+    return markdown, write_report_json(final, reports_dir)
 
 
 def sweep_stale_reports(reports_dir: str | Path, *, apply: bool = False) -> list[Path]:

@@ -164,12 +164,14 @@ def assemble_report(
         realized_pnl=session.end_equity - session.start_equity,
         cumulative_pnl=account.cumulative_pnl if account else None,
         account_opened=account.opened if account else None,
-        forward=forward_data,
-        trades=list(session.trades),
+        # The report owns a frozen copy of every sequence: what it was assembled from can go
+        # on accumulating (the cycle does) without the written report changing under it.
+        forward=tuple(forward_data),
+        trades=tuple(session.trades),
         positions=dict(session.positions),
-        promotions=promotions,
-        demotions=demotions,
-        champions=champions,
+        promotions=tuple(promotions),
+        demotions=tuple(demotions),
+        champions=tuple(champions),
         research=research,
-        events=list(session.events),
+        events=tuple(session.events),
     )

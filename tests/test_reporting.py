@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 from noctis.cli import app
@@ -15,7 +16,9 @@ from noctis.reporting import (
     sweep_stale_reports,
     write_report,
     write_report_json,
+    write_reports,
 )
+from noctis.reporting.report import report_dict
 
 SECTIONS = [
     "## Summary",
@@ -328,9 +331,9 @@ def test_write_report_archives_a_differing_prior(tmp_path):
     assert second == first  # canonical path stays reports/2026-07-03.md
     archives = list((reports / "archive").glob("2026-07-03.*.md"))
     assert len(archives) == 1  # the prior was moved, not clobbered
-    # The overwrite is visible in the day's own report and its events.
-    assert "Overwrote existing report for 2026-07-03 (prior archived)" in data_b.events
+    # The overwrite is visible in the day's own report; the caller's (frozen) value is untouched.
     assert "Overwrote existing report for 2026-07-03 (prior archived)" in second.read_text()
+    assert data_b.events == ()
 
 
 def test_write_report_json_archives_a_differing_prior(tmp_path):
@@ -346,7 +349,7 @@ def test_identical_report_rewrite_is_a_no_op(tmp_path):
     write_report(data, reports)
     write_report(data, reports)  # byte-identical → no archive, no overwrite note
     assert not (reports / "archive").exists()
-    assert data.events == []
+    assert data.events == ()
 
 
 # ── stale future-dated sweep (plan 4) ──────────────────────────────────────────────────────
@@ -375,3 +378,121 @@ def test_sweep_stale_reports_apply_moves_future_only(tmp_path):
     assert not (reports / "2099-01-01.md").exists()
     assert (reports / "2020-01-01.md").is_file()  # past untouched
     assert (reports / "notes.md").is_file()  # non-date file untouched
+
+
+# ── the report is a frozen value (story #265) ──────────────────────────────────────────────
+OVERWRITE_NOTE = "Overwrote existing report for 2026-07-03 (prior archived)"
+
+
+def _populated(**overrides) -> ReportData:
+    """One report carrying every sequence field, built from lists (the historical shape)."""
+    fields = dict(
+        as_of="2026-07-03",
+        end_equity=100_000.0,
+        forward=[{"family": "sma_crossover", "forward_pnl": 12.5}],
+        trades=[Trade("AAPL", "buy", 10, 190.5, "breakout")],
+        positions={"AAPL": 10.0},
+        promotions=[{"family": "sma_crossover", "params": {"fast": 5}, "promoted": True}],
+        demotions=[{"demoted": {"family": "rsi_meanrev", "params": {"n": 14}}}],
+        champions=[{"family": "sma_crossover", "params": {"fast": 5}, "test_metric": 1.5}],
+        research={"iterations": 3, "findings": ["momentum works in the morning"]},
+        events=["Risk halt: daily loss limit reached on TSLA"],
+    )
+    fields.update(overrides)
+    return ReportData(**fields)
+
+
+def test_report_data_is_frozen_and_normalises_its_sequences_to_tuples():
+    """A rendered report cannot grow an event afterwards — appending is an AttributeError,
+    not a line silently lost (epic #264). List-built construction still works: every sequence
+    field is normalised to a tuple at construction."""
+    data = _populated()
+
+    assert isinstance(data.forward, tuple)
+    assert isinstance(data.trades, tuple)
+    assert isinstance(data.promotions, tuple)
+    assert isinstance(data.demotions, tuple)
+    assert isinstance(data.champions, tuple)
+    assert isinstance(data.events, tuple)
+    assert isinstance(data.positions, dict) and isinstance(data.research, dict)
+
+    with pytest.raises(AttributeError):
+        data.events.append("appended after the report was rendered")
+    with pytest.raises(AttributeError):
+        data.trades.append(Trade("MSFT", "sell", 1, 1.0))
+    with pytest.raises(AttributeError):
+        data.as_of = "2026-07-04"
+    with pytest.raises(AttributeError):
+        data.events = ()
+
+
+def test_a_default_report_carries_empty_tuples():
+    data = ReportData(as_of="2026-07-03")
+    assert data.forward == () and data.trades == () and data.events == ()
+    assert data.promotions == () and data.demotions == () and data.champions == ()
+
+
+def test_report_dict_is_identical_for_a_tuple_built_and_a_list_built_report():
+    """The JSON contract does not move: a tuple serialises as an array, so the document a
+    tuple-built report produces is byte-identical to the list-built one."""
+    list_built = _populated()
+    tuple_built = _populated(
+        forward=({"family": "sma_crossover", "forward_pnl": 12.5},),
+        trades=(Trade("AAPL", "buy", 10, 190.5, "breakout"),),
+        promotions=({"family": "sma_crossover", "params": {"fast": 5}, "promoted": True},),
+        demotions=({"demoted": {"family": "rsi_meanrev", "params": {"n": 14}}},),
+        champions=({"family": "sma_crossover", "params": {"fast": 5}, "test_metric": 1.5},),
+        events=("Risk halt: daily loss limit reached on TSLA",),
+    )
+
+    as_json = json.dumps(report_dict(list_built), indent=2, sort_keys=True)
+    assert as_json == json.dumps(report_dict(tuple_built), indent=2, sort_keys=True)
+    document = json.loads(as_json)
+    assert document["events"] == ["Risk halt: daily loss limit reached on TSLA"]
+    assert document["trades"] == [
+        {
+            "symbol": "AAPL",
+            "side": "buy",
+            "quantity": 10,
+            "price": 190.5,
+            "rationale": "breakout",
+        }
+    ]
+    assert render_report(list_built) == render_report(tuple_built)
+
+
+def test_write_reports_writes_both_files_from_one_report(tmp_path):
+    reports = tmp_path / "reports"
+    markdown, structured = write_reports(_populated(), reports)
+
+    assert markdown == reports / "2026-07-03.md"
+    assert structured == reports / "2026-07-03.json"
+    assert markdown.read_text().startswith("# Close-of-day report — 2026-07-03")
+    assert json.loads(structured.read_text())["as_of"] == "2026-07-03"
+    assert OVERWRITE_NOTE not in markdown.read_text()  # nothing was overwritten
+
+
+def test_write_reports_threads_the_overwrite_note_into_both_files(tmp_path):
+    """The note is resolved once and both files are written from the same final value — it
+    used to reach the JSON only because ``write_report`` mutated the object first."""
+    reports = tmp_path / "reports"
+    write_reports(ReportData(as_of="2026-07-03", end_equity=100_000.0), reports)
+    data_b = ReportData(as_of="2026-07-03", end_equity=105_000.0)  # differs
+    markdown, structured = write_reports(data_b, reports)
+
+    assert OVERWRITE_NOTE in markdown.read_text()
+    assert json.loads(structured.read_text())["events"] == [OVERWRITE_NOTE]
+    assert data_b.events == ()  # the caller's value is untouched — the note lives in the files
+    assert len(list((reports / "archive").glob("2026-07-03.*.md"))) == 1
+    assert len(list((reports / "archive").glob("2026-07-03.*.json"))) == 1
+
+
+def test_write_report_json_alone_never_carries_the_overwrite_note(tmp_path):
+    """Unchanged caveat: only the Markdown write resolves the note, so a JSON written on its
+    own archives its prior but records no event."""
+    reports = tmp_path / "reports"
+    write_report_json(ReportData(as_of="2026-07-03", end_equity=1.0), reports)
+    structured = write_report_json(ReportData(as_of="2026-07-03", end_equity=2.0), reports)
+
+    assert json.loads(structured.read_text())["events"] == []
+    assert len(list((reports / "archive").glob("2026-07-03.*.json"))) == 1

@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from noctis.reporting.report import ReportData, write_report, write_report_json
+from noctis.reporting.report import ReportData, write_reports
 
 if TYPE_CHECKING:
     from noctis.data.seam import MarketData
@@ -91,18 +91,15 @@ def run_close(
     """Run the close-phase steps in order, isolating failures so upkeep always completes."""
     result = CloseResult()
 
-    # 1) Report — Markdown (human) + JSON (structured, for a frontend). The JSON is
-    # best-effort: a serialization hiccup must not lose the Markdown report.
+    # 1) Report — Markdown (human) + JSON (structured, for a frontend), written from one final
+    # report value so the pair agrees on everything the write itself discovers (the
+    # "Overwrote existing report" note). The report is frozen: it says what it said.
     try:
-        result.report_path = str(write_report(report_data, reports_dir))
+        markdown, _ = write_reports(report_data, reports_dir)
+        result.report_path = str(markdown)
     except Exception as exc:  # noqa: BLE001
         logger.exception("close: report failed")
         result.errors.append(f"report: {exc}")
-    try:
-        write_report_json(report_data, reports_dir)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("close: report JSON failed")
-        result.errors.append(f"report_json: {exc}")
 
     # 2) Tail-only incremental sync.
     if market_lake is not None:
@@ -134,9 +131,18 @@ def run_close(
         try:
             result.reconciliation = reconcile_fn()
             if result.reconciliation and result.reconciliation.flagged:
-                report_data.events.append(
-                    f"Feed drift {result.reconciliation.max_drift:.4f} exceeds "
-                    f"threshold {result.reconciliation.threshold:.4f}"
+                # The drift event is composed onto a *new* report value, because the report
+                # written in step 1 is frozen — and it is already on disk, so this event
+                # reaches no file. That is today's behaviour, made visible rather than
+                # changed: epic #264 (D1) fixes it by rendering the report last, after the
+                # reconcile. Until then, the honest reading is "the event is lost".
+                report_data = replace(
+                    report_data,
+                    events=(
+                        *report_data.events,
+                        f"Feed drift {result.reconciliation.max_drift:.4f} exceeds "
+                        f"threshold {result.reconciliation.threshold:.4f}",
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001
             logger.exception("close: reconciliation failed")
