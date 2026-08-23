@@ -168,7 +168,7 @@ class FakeClock:
 
 
 def _open(runs_dir: Path, clock: FakeClock, **kwargs):
-    from noctis.reporting.run_store import open_run
+    from noctis.reporting.run_tree import open_run
 
     kwargs.setdefault("argv", ["run", "-v"])
     kwargs.setdefault("election_metric", "sharpe")
@@ -176,7 +176,7 @@ def _open(runs_dir: Path, clock: FakeClock, **kwargs):
 
 
 def _on_disk(run_dir: Path) -> dict:
-    from noctis.reporting.run_store import RUN_RECORD_NAME
+    from noctis.reporting.run_tree import RUN_RECORD_NAME
 
     return json.loads((run_dir / RUN_RECORD_NAME).read_text())
 
@@ -220,7 +220,7 @@ def _completed_with_state(runs: Path, clock: FakeClock, **kwargs) -> tuple[Path,
 
 
 def _prune(runs: Path, address: str, clock: FakeClock, **kwargs):
-    from noctis.reporting.run_store import prune_run_state
+    from noctis.reporting.run_tree import prune_run_state
 
     return prune_run_state(runs, address, clock=clock, election_metric="sharpe", **kwargs)
 
@@ -353,14 +353,14 @@ def _journal(run_dir: Path, *, trials: int) -> None:
 
 
 def _finish(runs: Path, run_id: str, clock: FakeClock) -> None:
-    from noctis.reporting.run_store import finish_run
+    from noctis.reporting.run_tree import finish_run
 
     finish_run(runs, run_id, clock=clock, election_metric="sharpe")
 
 
 @pytest.mark.parametrize("status", ["stopped", "interrupted", "running"])
 def test_pruning_a_run_that_could_still_resume_is_refused_and_removes_nothing(tmp_path, status):
-    from noctis.reporting.run_store import RunNotPrunableError
+    from noctis.reporting.run_tree import RunNotPrunableError
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -399,7 +399,7 @@ def _dir_bytes(path: Path) -> int:
 
 def test_a_stopped_run_is_still_resumable_after_a_refused_prune(tmp_path):
     """The refusal is not a technicality: the run it protected still resumes, with its state."""
-    from noctis.reporting.run_store import RunNotPrunableError
+    from noctis.reporting.run_tree import RunNotPrunableError
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -420,7 +420,7 @@ def test_a_stopped_run_is_still_resumable_after_a_refused_prune(tmp_path):
 def test_pruning_a_run_another_engine_holds_is_refused(tmp_path):
     """A live lock is the second gate: deleting the directories an engine is reading and writing
     is corruption, whatever the record says about the run's status."""
-    from noctis.reporting.run_store import RunLockedError
+    from noctis.reporting.run_tree import RunLockedError
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -461,7 +461,7 @@ def _hold_lock(run_dir: Path, clock: FakeClock) -> None:
 def test_a_pruned_run_can_never_be_resumed(tmp_path):
     """The story's required test — and it needs no new guard: only a ``completed`` run may be
     pruned, and ``completed`` is exactly the status a resume refuses."""
-    from noctis.reporting.run_store import RunCompletedError
+    from noctis.reporting.run_tree import RunCompletedError
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -476,7 +476,7 @@ def test_a_terminal_run_refuses_another_segment_even_without_the_resume_flag(tmp
     """``completed`` is terminal, not "terminal as long as you asked to resume". Opening an
     existing run by id without ``resume=True`` must refuse it too — otherwise a caller that
     passes the two apart could append a segment to a published (or pruned) run."""
-    from noctis.reporting.run_store import RunCompletedError
+    from noctis.reporting.run_tree import RunCompletedError
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -569,7 +569,7 @@ def test_a_file_named_like_a_pruned_directory_is_never_removed(tmp_path):
 def test_a_directory_that_is_not_a_run_cannot_be_pruned_through_the_path_form(tmp_path):
     """The path address form honours wherever it points, so the record is the gate: no ``run.json``
     saying ``completed`` means nothing is deleted, whatever the operator typed."""
-    from noctis.reporting.run_store import RunNotFoundError
+    from noctis.reporting.run_tree import RunNotFoundError
 
     precious = tmp_path / "home"
     (precious / "state").mkdir(parents=True)
@@ -582,14 +582,14 @@ def test_a_directory_that_is_not_a_run_cannot_be_pruned_through_the_path_form(tm
 
 
 def test_pruning_an_unknown_run_is_a_clean_lookup_failure(tmp_path):
-    from noctis.reporting.run_store import RunNotFoundError
+    from noctis.reporting.run_tree import RunNotFoundError
 
     with pytest.raises(RunNotFoundError):
         _prune(tmp_path / "runs", "20260101T000000Z-nope00", FakeClock())
 
 
 def test_a_pruned_run_still_lists_in_the_index(tmp_path):
-    from noctis.reporting.run_store import index_entry, rebuild_index
+    from noctis.reporting.run_tree import index_entry, rebuild_index
 
     runs = tmp_path / "runs"
     clock = FakeClock()

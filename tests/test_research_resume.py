@@ -29,7 +29,7 @@ import pytest
 from typer.testing import CliRunner
 
 from noctis.cli import app
-from noctis.reporting.run_store import RUN_LOCK_NAME, RUN_RECORD_NAME
+from noctis.reporting.run_tree import RUN_LOCK_NAME, RUN_RECORD_NAME
 from noctis.research.surface import SessionCounters
 
 runner = CliRunner()
@@ -206,7 +206,7 @@ def test_a_research_segment_carries_its_own_stamps_reason_argv_and_counters(tmp_
     assert segment["stopped_reason"] == "agent_done"  # the session's own reason, not the loop's
     assert segment["status"] == "stopped"
     # argv is this process's own (the runner's, under test) — that it is recorded at all is the
-    # contract; what a `research` invocation records is pinned in tests/test_run_store.py.
+    # contract; what a `research` invocation records is pinned in tests/test_run_tree_store.py.
     assert isinstance(segment["argv"], list)
     assert segment["counters"] == {
         "sessions": 1,

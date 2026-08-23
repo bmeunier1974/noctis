@@ -3,7 +3,7 @@
 A bare ``noctis report`` reads the reserved ``legacy`` run, which is what an invocation that never
 opened a run *should* read — and is never the run ``noctis run`` just minted. So ``report`` learns
 the same four address forms every other verb that names a run already takes, resolved by the same
-resolver (``run_store.resolve_run_dir``), because an address form invented twice would eventually
+resolver (``run_tree.resolve_run_dir``), because an address form invented twice would eventually
 resolve two different runs from one string.
 
 Everything asserted here is external: what the command prints, what it exits with, and which run's

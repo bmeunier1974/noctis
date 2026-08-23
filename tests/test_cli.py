@@ -751,7 +751,7 @@ def test_a_recorder_that_refuses_to_build_still_releases_the_run_lock(tmp_path, 
     because the builder ran after the lock was taken and outside the try that released it."""
     import json
 
-    from noctis.reporting.run_store import RUN_LOCK_NAME
+    from noctis.reporting.run_tree import RUN_LOCK_NAME
 
     def _refuse(*args, **kwargs):
         raise OSError("qa_dir is unwritable")
@@ -893,7 +893,7 @@ def test_a_research_recorder_that_refuses_to_build_still_releases_the_run_lock(
     sentinel — a closed, resumable run rather than a lock held until the stale-lock timeout."""
     import json
 
-    from noctis.reporting.run_store import RUN_LOCK_NAME
+    from noctis.reporting.run_tree import RUN_LOCK_NAME
 
     def _refuse(*args, **kwargs):
         raise OSError("qa_dir is unwritable")
@@ -1586,7 +1586,7 @@ def _refusing_argv(prefix: str, tmp_path, monkeypatch) -> list[str]:
         return ["run", "--config", _paper_config(tmp_path), "--resume", NO_SUCH_RUN, "--finish"]
     if prefix == "PRUNE: ":
         return ["run-prune", NO_SUCH_RUN, "--config", _paper_config(tmp_path)]
-    from noctis.reporting.run_store import acquire_lock
+    from noctis.reporting.run_tree.store import acquire_lock
 
     cfg = _paper_config(tmp_path)
     assert runner.invoke(app, ["run", "--config", cfg]).exit_code == 0

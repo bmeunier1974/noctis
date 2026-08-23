@@ -56,7 +56,7 @@ seam is imported, and every recorded attempt states a measured zero token usage 
 paid for months ago, and re-reading them costs nothing.
 
 **Boundary.** Writes land under the cases root and the bench area, and nowhere else. The runs tree
-is read-only input (its readers — :mod:`noctis.reporting.run_store`, the journal, the ledger — are
+is read-only input (its readers — :mod:`noctis.reporting.run_tree`, the journal, the ledger — are
 the engine's own), no run lock is taken, and the champions registry is never opened.
 """
 
@@ -118,7 +118,7 @@ from noctis.eval.runner import (
 )
 from noctis.eval.site import AgentSite
 from noctis.observability.debug.runid import RUN_ID_RE
-from noctis.reporting.run_store import read_record
+from noctis.reporting.run_tree import read_record
 from noctis.research.driver import DECIDE
 from noctis.research.journal import ExperimentJournal
 from noctis.research.ledger import SESSIONS_DIRNAME, SessionLedger

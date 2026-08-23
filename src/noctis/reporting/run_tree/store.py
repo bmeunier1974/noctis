@@ -156,7 +156,7 @@ PRUNED_SUBDIRS = ("state", "strategies", "reports")
 # ``strategies.library.LibraryPaths.from_settings`` writes and this reads back for the record's
 # strategies section (story #141). Spelled here rather than imported: the library module pulls
 # pandas and numpy in behind it, and a record write must stay as cheap as the rest of this file
-# (``tests/test_run_store.py`` pins that no heavy package is reachable from here). One test
+# (``tests/test_run_tree_store.py`` pins that no heavy package is reachable from here). One test
 # asserts the two spellings still describe the same directories, which is where a drift would
 # surface. The committed ``strategies/`` seeds are deliberately absent: they are read-only input
 # every run starts from, so they are nobody's candidate.

@@ -1,7 +1,7 @@
 """The run record's pure layer — ``run_record.build`` and ``schema.validate`` (story #129).
 
 Every test here builds a :class:`RunArtifacts` **in memory** and asserts on the returned dict.
-That is the whole point of the I/O boundary the epic draws: ``run_store.collect`` does every read,
+That is the whole point of the I/O boundary the epic draws: ``run_tree.collect`` does every read,
 ``run_record.build`` is a pure function over what it collected, and ``schema.validate`` is a pure
 check over what ``build`` produced. No filesystem, no clock, no config reaches this file — the
 only disk touch is the committed golden record, which is a fixture, not an input.

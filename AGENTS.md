@@ -178,8 +178,9 @@ family's re-tune, only by a different strategy.
 **The run is an entity, and it writes one file.** Every `noctis run` mints a run id
 (`observability/debug/runid.py` — identity is minted, never derived from the config) and opens
 `workspace/runs/<run_id>/`: `run.json` (the record) + `run.lock` (liveness). The I/O boundary is the
-design: `reporting/run_store.py` is the **only** module that touches that tree — it collects, locks,
-appends the process's segment and writes atomically behind a fail-safe latch — while
+design: the `reporting/run_tree/` package is the **only** code that touches that tree — it
+collects, locks, appends the process's segment and writes atomically behind a fail-safe latch —
+while
 `reporting/run_record.py` (`build(artifacts) -> dict`) and `reporting/schema.py` (`validate`) are
 **pure**, which is what makes the golden-record snapshot cheap. Wired in the composition root:
 `bootstrap.open_segment` is a **run segment's one entry** — it opens the run through
@@ -191,7 +192,7 @@ they drive. The record is rewritten at each CLOSE via the runtime's `on_cycle_cl
 honesty rules: a killed segment is marked `interrupted` on the **next** open, never guessed at write
 time, and a live lock is a hard refusal (two engines on one run is corruption) while everything else
 latches off with one warning rather than raising into the engine. **Retention is opt-in and
-completed-only**: `run_store.prune_run_state` (`noctis run-prune <address> [--dry-run]`) is the one
+completed-only**: `run_tree.prune_run_state` (`noctis run-prune <address> [--dry-run]`) is the one
 code path in Noctis that deletes a run's files — the heavy `state/`, `strategies/` and `reports/`
 directories, never `run.json`/`index.json` (they *are* the progress history), and never for a run
 that could still be resumed, since prunable and resumable are the same constant's two sides. The
@@ -202,7 +203,7 @@ record against it.
 
 **A run outlives its process, so it carries its own config.** `noctis run --resume <address>` appends
 a segment to an existing run and keeps accumulating into the same record — the run, not the process,
-is the unit progress is tracked on. One resolver (`run_store.resolve_run_dir`, shared with
+is the unit progress is tracked on. One resolver (`run_tree.resolve_run_dir`, shared with
 `run-record`) understands four address forms in a fixed order — a `run.json` path, `@label`,
 the reserved word `latest`, a run id — and a bare address is *always* the id; `--label` is a
 nickname the record stores, so an ambiguous `@label` refuses naming both ids rather than pick one. Every cumulative number in the record is **derived, never

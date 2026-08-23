@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from noctis.engine.research import ResearchSummary
     from noctis.observability import Console, Event, EventTee
     from noctis.observability.debug import Recorder
-    from noctis.reporting.run_store import RunStore
+    from noctis.reporting.run_tree import RunStore
     from noctis.research import CostProfile, Mandate, ResearchToolbox
     from noctis.strategies.families import FamilyRegistry
 
@@ -257,8 +257,8 @@ def resume_session(
     back from the record (:mod:`noctis.config.rehydrate`).
 
     Four refusals, all before any long-running work starts and all from somewhere else: the
-    address must name a run (:class:`~noctis.reporting.run_store.RunNotFoundError`), the run must
-    not be ``completed`` (:class:`~noctis.reporting.run_store.RunCompletedError`), the freshly
+    address must name a run (:class:`~noctis.reporting.run_tree.RunNotFoundError`), the run must
+    not be ``completed`` (:class:`~noctis.reporting.run_tree.RunCompletedError`), the freshly
     resolved execution mode must match the one the run's earlier segments ran under
     (:class:`~noctis.config.rehydrate.RehydrationError`), and the **arbiter** of the engine — what
     passes, and what a number means — must still be the one the run was created under
@@ -281,7 +281,7 @@ def resume_session(
     refused with a message that says no flag lifts them.
     """
     from noctis.config.rehydrate import assert_mode_unchanged, has_frozen_inputs, rehydrate
-    from noctis.reporting.run_store import assert_resumable, read_run_record
+    from noctis.reporting.run_tree import assert_resumable, read_run_record
     from noctis.research import mandate_from_frozen
 
     settings = load_settings(config_path=config_path)
@@ -771,7 +771,8 @@ def adopt_run_record(
     from datetime import UTC, datetime
 
     from noctis.reporting.run_record import RecordEvent, RunArtifacts, build, utc_iso
-    from noctis.reporting.run_store import read_engine_identity, read_record, update_index, write
+    from noctis.reporting.run_tree import read_record, update_index, write
+    from noctis.reporting.run_tree.store import read_engine_identity
 
     run_dir = Path(settings.run_dir)
     if not run_dir.is_dir():
@@ -1257,7 +1258,7 @@ def open_run_store(
     re-frozen onto this process's engine with that entry appended; absent, the run keeps the engine
     it was created under, which is what every resume is compared against.
 
-    Raises :class:`~noctis.reporting.run_store.RunLockedError` when another engine already holds
+    Raises :class:`~noctis.reporting.run_tree.RunLockedError` when another engine already holds
     the addressed run — the one failure in this subsystem that is fatal rather than latched.
     """
     from datetime import UTC, datetime
@@ -1265,7 +1266,7 @@ def open_run_store(
     from noctis.config.rehydrate import freeze_inputs
     from noctis.config.settings import bind_run_dir
     from noctis.reporting.run_record import utc_iso
-    from noctis.reporting.run_store import open_run
+    from noctis.reporting.run_tree import open_run
 
     tick = clock or (lambda: datetime.now(UTC))
     # The session's frozen-tier fields, read off the one object that carries them. Without a
@@ -1312,19 +1313,19 @@ def bind_addressed_run(settings, address: str) -> Path:
     """Point ``settings`` at one **existing** run's tree, named by an operator address (#148).
 
     The read-only twin of :func:`open_run_store`: the same resolver every verb that names a run
-    already shares (:func:`~noctis.reporting.run_store.resolve_run_dir` — four forms, one fixed
+    already shares (:func:`~noctis.reporting.run_tree.resolve_run_dir` — four forms, one fixed
     order, so an address form is never invented twice) and the same binding
     (:func:`~noctis.config.settings.bind_run_dir`), but no minted id, no liveness lock and no
     record write, because *reading* a finished experiment is not working it. Every collaborator
     assembled afterwards — the champion registry, the memory store, the reports directory — reads
     the addressed run's own tree, with no path arithmetic in a command body.
 
-    Raises :class:`~noctis.reporting.run_store.RunNotFoundError` when no run answers the address,
-    and its :class:`~noctis.reporting.run_store.RunAmbiguousError` subclass when more than one
+    Raises :class:`~noctis.reporting.run_tree.RunNotFoundError` when no run answers the address,
+    and its :class:`~noctis.reporting.run_tree.RunAmbiguousError` subclass when more than one
     does; the caller maps both to red text and a non-zero exit.
     """
     from noctis.config.settings import bind_run_dir
-    from noctis.reporting.run_store import resolve_run_dir
+    from noctis.reporting.run_tree import resolve_run_dir
 
     run_dir = resolve_run_dir(Path(settings.runs_dir), address)
     bind_run_dir(settings, run_dir)
@@ -1607,7 +1608,7 @@ def open_segment(
     commands used — recorder first, then the store, which releases the lock.
 
     The one failure this lets out is a live lock
-    (:class:`~noctis.reporting.run_store.RunLockedError`): two engines writing one run is
+    (:class:`~noctis.reporting.run_tree.RunLockedError`): two engines writing one run is
     corruption, not degradation. It leaves as the typed error, because this module never imports
     Typer and never exits the process — mapping it to red text and an exit code is the command's
     job, and only the command knows which code.

@@ -204,7 +204,7 @@ def test_the_adopted_run_is_a_real_run_with_its_own_record(tmp_path, monkeypatch
 def test_the_reserved_run_is_addressed_like_any_other(tmp_path, monkeypatch):
     """Its id is a fixed string rather than a minted one; nothing else about it is special."""
     from noctis.config import load_settings
-    from noctis.reporting.run_store import resolve_run_dir
+    from noctis.reporting.run_tree import resolve_run_dir
 
     root = _project(tmp_path, monkeypatch)
     (root / "config.yaml").write_text("mode: paper\n")

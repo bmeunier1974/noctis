@@ -1,6 +1,6 @@
 """The run record, built — a **pure** function from collected artifacts to one JSON document.
 
-``run_store.collect(run_dir) -> RunArtifacts`` does every read; this module turns that value into
+``run_tree.collect(run_dir) -> RunArtifacts`` does every read; this module turns that value into
 the document ``run.json`` holds; ``schema.validate(record)`` checks it. The split is the epic's
 load-bearing decision, and it is worth stating why: the run record has to be snapshot-tested
 against a committed golden, and — once resumption lands — a three-segment run has to be proved
@@ -232,7 +232,7 @@ class SpendEntry:
     """One journaled model judgment's spend — the atom every spend roll-up is summed from.
 
     One per ``episode`` line in the run's own session ledgers, read (never counted) by
-    ``run_store.read_spend`` and already priced there, because pricing needs the table and the
+    ``run_tree.read_spend`` and already priced there, because pricing needs the table and the
     table comes from the run's frozen configuration — which is I/O. What is left here is
     arithmetic: sums by model, by stage and by segment, and the efficiency ratios over them.
 
@@ -268,7 +268,7 @@ class StrategyArtifact:
     artifact. That is the whole size policy: a fortnight's record stays in the hundreds of
     kilobytes instead of the megabytes an all-sources record would weigh, and an experiment worth
     archiving whole says so at creation (:data:`EMBED_ALL_SOURCES_SETTING`). The choice of *which*
-    to embed is made where the files are read (``run_store.read_strategies``); this module renders
+    to embed is made where the files are read (``run_tree.read_strategies``); this module renders
     what it was handed.
     """
 
@@ -320,7 +320,7 @@ class RunArtifacts:
     # adopted history, story #131).
     inputs: Mapping[str, object] | None = None
     # Trials this run has journaled, counted at read time off its **own** experiment journals
-    # (``run_store.read_trials``) — the very lines the exhaustion gate counts, never a counter
+    # (``run_tree.read_trials``) — the very lines the exhaustion gate counts, never a counter
     # incremented in memory. It is therefore cumulative across every segment by construction,
     # including the research-only ones a standalone ``noctis research --resume`` appends (story
     # #137), and it is the multiple-testing count a deflated Sharpe will need. ``None`` when the
@@ -335,7 +335,7 @@ class RunArtifacts:
     # happens to be on disk would let a half-restored directory quietly make it false again.
     state_pruned: bool = False
     # Every judgment episode this run journaled, priced (story #140) — read at write time off the
-    # run's own session ledgers (``run_store.read_spend``), exactly like ``trials`` is read off its
+    # run's own session ledgers (``run_tree.read_spend``), exactly like ``trials`` is read off its
     # experiment journals. ``None`` when the run journaled no ledger at all, which is what a run
     # with no LLM key looks like: it reports a ``null`` bill rather than a $0 one. An **empty**
     # sequence is different and deliberate — a session that ran and spent nothing.
@@ -351,18 +351,18 @@ class RunArtifacts:
     # read at all (a pruned or absent state dir), which is not the same as an honest zero.
     champions: int | None = None
     # Every candidate this run considered, read at write time off its own champion board, its
-    # experiment journals and its strategy tiers (``run_store.read_strategies``) — derived like
+    # experiment journals and its strategy tiers (``run_tree.read_strategies``) — derived like
     # every other cumulative fact, never a list carried across a restart. An empty sequence is a
     # run that has considered nothing yet, which is a statement a young run can honestly make.
     strategies: Sequence[StrategyArtifact] = ()
     # Every session this run's paper account has closed (story #142), read at write time off the
-    # run's own account ledger (``run_store.read_sessions``) — the daily marks the equity curve is
+    # run's own account ledger (``run_tree.read_sessions``) — the daily marks the equity curve is
     # **derived** from and the fills the trade log is. Never carried across a restart: a resumed
     # segment re-reads the whole ledger, so three short nights publish exactly the curve one long
     # night would, and a rewrite after a crash cannot double a day.
     sessions: Sequence[DailySession] = ()
     # The equal-weight buy-and-hold comparison over the names this run traded, priced from bars
-    # **already in the shared lake** (``run_store.read_benchmark``) — no vendor call, no new spend.
+    # **already in the shared lake** (``run_tree.read_benchmark``) — no vendor call, no new spend.
     # ``None`` for a run nobody computed one for; a benchmark the lake could not price arrives as a
     # :class:`~noctis.reporting.metrics.Benchmark` carrying no points and a note saying why.
     benchmark: Benchmark | None = None

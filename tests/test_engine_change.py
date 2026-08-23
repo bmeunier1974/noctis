@@ -37,7 +37,7 @@ from noctis.observability.engine_change import (
 )
 from noctis.observability.engine_id import COMPONENT_PATHS, fingerprint
 from noctis.reporting import schema
-from noctis.reporting.run_store import RUN_RECORD_NAME, open_run
+from noctis.reporting.run_tree import RUN_RECORD_NAME, open_run
 
 runner = CliRunner()
 

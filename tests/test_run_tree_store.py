@@ -37,7 +37,7 @@ from noctis.cli import app
 from noctis.observability.debug import RUN_ID_RE
 from noctis.observability.engine_id import ENGINE_VERSION
 from noctis.reporting import schema
-from noctis.reporting.run_store import (
+from noctis.reporting.run_tree import (
     RUN_INDEX_KIND,
     RUN_INDEX_NAME,
     RUN_LOCK_NAME,
@@ -852,11 +852,11 @@ def test_the_run_tree_is_gitignored(tmp_path):
     assert checked.returncode == 0
 
 
-def test_the_run_store_pulls_no_optional_extra_and_reads_no_settings():
+def test_the_run_tree_pulls_no_optional_extra_and_reads_no_settings():
     """The record is written on the core install alone: no vendor seam, no LLM, no config."""
     code = (
         "import sys\n"
-        "from noctis.reporting.run_store import collect, open_run, write\n"
+        "from noctis.reporting.run_tree import collect, open_run, write\n"
         "assert 'noctis.config' not in sys.modules, 'the run store read config'\n"
         "heavy = {'nautilus_trader', 'vectorbt', 'optuna', 'quantstats', "
         "'databento', 'exchange_calendars', 'anthropic', 'litellm', 'pandas'}\n"

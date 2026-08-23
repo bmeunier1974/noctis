@@ -27,7 +27,7 @@ import pytest
 
 from noctis.config import rehydrate
 from noctis.observability import engine_id
-from noctis.reporting import run_store, schema
+from noctis.reporting import run_tree, schema
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = ROOT / "docs" / "run-record.md"
@@ -148,7 +148,7 @@ def test_page_names_every_engine_component(page: str) -> None:
         ("`STRATEGY_CAP` | {}", schema.STRATEGY_CAP),
         ("`RECORD_SIZE_BUDGET_BYTES` | {} KiB", schema.RECORD_SIZE_BUDGET_BYTES // 1024),
         ("**{}** today", engine_id.ENGINE_VERSION),
-        ("(**{} days**", int(run_store.STALE_HEARTBEAT_S // 86400)),
+        ("(**{} days**", int(run_tree.STALE_HEARTBEAT_S // 86400)),
         (
             "**{} frozen, {} live, {} refused**",
             (len(rehydrate.FROZEN), len(rehydrate.LIVE), len(rehydrate.REFUSED)),

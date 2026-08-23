@@ -417,9 +417,9 @@ moved under the run.
 
 ## What the record says about a run's machine and its inputs
 
-`run.json` is written by three modules with one boundary between them: `reporting/run_store.py`
-does every read and the one write, `reporting/run_record.py` is a **pure** builder over what was
-collected, and `reporting/schema.py` is a pure validator. This section is *why* those sections
+`run.json` is written by three parts with one boundary between them: the `reporting/run_tree/`
+package does every read and the one write, `reporting/run_record.py` is a **pure** builder over
+what was collected, and `reporting/schema.py` is a pure validator. This section is *why* those sections
 exist and how they are produced; the field-by-field contract — every key, when it is `null`, the
 versioning promise, the caps, and a worked example — is [run-record.md](run-record.md).
 
