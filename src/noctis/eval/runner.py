@@ -45,11 +45,15 @@ would overwrite a dial the harness composed is refused (:class:`ConflictingReadi
 merged, because a record whose ``is_production`` came from a scorer is a record that lies about what
 was asked.
 
-**The record is the pure builder's, or there is no record.** The runner collects
-:class:`~noctis.eval.record.BenchArtifacts`, hands them to :func:`~noctis.eval.record.build`, checks
-the document with :func:`~noctis.eval.record.validate`, and writes ``bench.json`` atomically only if
-it validates clean. An invalid document is refused, not written — the artifacts it was derived from
-stay on disk, because they are what an operator debugs the refusal with.
+**The record is the pure builder's, or there is no record — and** :func:`publish` **is its one
+writer.** The runner collects :class:`~noctis.eval.record.BenchArtifacts` and hands them, with the
+directory they belong in, to :func:`publish`: build (:func:`~noctis.eval.record.build`), check
+(:func:`~noctis.eval.record.validate`), refuse an unreadable document by name, and only then write
+``bench.json`` atomically. Every path that publishes a bench record goes through that one
+function — the live run here, and the zero-spend retrospective path that scores answers already on
+disk — because two writers would be two places for the discipline to drift apart. An invalid
+document is refused, not written: the artifacts it was derived from stay on disk, because they are
+what an operator debugs the refusal with.
 
 **How the jobs are worked is a seam, not a fact about a bench.** :class:`SequentialExecutor` runs
 each job in order in this process and declares its one worker;
@@ -122,6 +126,7 @@ __all__ = [
     "harness_dials",
     "harness_hash",
     "new_bench_id",
+    "publish",
     "replay",
 ]
 
@@ -495,6 +500,41 @@ class BenchRun:
     complete: bool
 
 
+# ── publishing the record: the one writer of ``bench.json`` ───────────────────────────────
+
+
+def publish(artifacts: BenchArtifacts, directory: Path) -> Mapping[str, Any]:
+    """Build, check and write one bench record into ``directory`` — or refuse and write nothing.
+
+    **The one writer of** :data:`BENCH_RECORD_NAME`. Every path that publishes a bench record comes
+    through here: the live runner below, and the retrospective miner elsewhere in this layer, which
+    spends nothing and asks no model but publishes a record of exactly the same contract. Two
+    writers would be two places for the build→validate→refuse discipline to drift apart, and a
+    bench record that was written *without* being validated is precisely the document this layer
+    exists to refuse.
+
+    The steps, in the only admissible order: the pure builder assembles the document
+    (:func:`~noctis.eval.record.build`), the pure validator checks it
+    (:func:`~noctis.eval.record.validate`), a document carrying any problem is refused by
+    :class:`InvalidBenchRecord` — one message, spelled once, naming every problem — and only a
+    clean one is written, atomically. What was collected before the refusal stays on disk: the
+    artifacts are what an operator debugs the refusal with.
+
+    ``directory`` is the caller's: the live runner makes the bench directory before its jobs run
+    (they write their evidence into it), the miner makes it just before publishing. This function
+    creates nothing, so it can never invent a bench area beside the one its caller owns.
+    """
+    record = build(artifacts)
+    problems = validate(record)
+    if problems:
+        raise InvalidBenchRecord(
+            "the collected artifacts do not build a readable bench record, so none was "
+            f"written: {'; '.join(problems)}"
+        )
+    _write_json(directory / BENCH_RECORD_NAME, record)
+    return record
+
+
 # ── the runner ────────────────────────────────────────────────────────────────────────────
 
 
@@ -614,18 +654,20 @@ class BenchRunner:
         # A partial bench must never pass for a whole one: every job worked, and every one of them
         # recorded an attempt. An errored attempt still ran; a job that produced none did not.
         complete = len(worked) == len(jobs) and all(run.result.ran for run in runs)
-        record = self._record(
-            corpus,
-            bench_id=bench_id,
-            runs=runs,
-            answered=_answered(jobs, worked),
-            complete=complete,
-            configs=tuple(configs),
-            split=split,
-            started=started,
-            finished=finished,
+        record = publish(
+            self._artifacts(
+                corpus,
+                bench_id=bench_id,
+                runs=runs,
+                answered=_answered(jobs, worked),
+                complete=complete,
+                configs=tuple(configs),
+                split=split,
+                started=started,
+                finished=finished,
+            ),
+            directory,
         )
-        _write_json(directory / BENCH_RECORD_NAME, record)
         return BenchRun(
             bench_id=bench_id,
             directory=directory,
@@ -747,7 +789,7 @@ class BenchRunner:
                     )
         return tuple(jobs)
 
-    def _record(
+    def _artifacts(
         self,
         corpus: Corpus,
         *,
@@ -759,9 +801,14 @@ class BenchRunner:
         split: Split | None,
         started: datetime,
         finished: datetime,
-    ) -> Mapping[str, Any]:
-        """Collect, build, validate — and refuse a document a reader could not trust."""
-        artifacts = BenchArtifacts(
+    ) -> BenchArtifacts:
+        """Collect — and only collect. What is collected becomes a record in :func:`publish`.
+
+        The runner's whole share of the record: the identities it resolved, the dials it composed
+        and had scored, the instants its clock observed. Building and checking the document is the
+        publish seam's, so this method holds no knowledge of the schema it feeds.
+        """
+        return BenchArtifacts(
             bench_id=bench_id,
             site=self._identity(corpus),
             engine=self.engine if self.engine is not None else engine_stamp(),
@@ -783,14 +830,6 @@ class BenchRunner:
             configs=tuple(configs),
             client_stack=self.client_stack,
         )
-        record = build(artifacts)
-        problems = validate(record)
-        if problems:
-            raise InvalidBenchRecord(
-                "the collected artifacts do not build a readable bench record, so none was "
-                f"written: {'; '.join(problems)}"
-            )
-        return record
 
     def _plan(
         self,

@@ -30,9 +30,9 @@ them would freeze a prompt that run never saw.
 
 **The retrospective record: what it claims, and what it refuses to claim.**
 :func:`write_retrospective_bench` scores the corpus's recorded verdicts through
-:func:`~noctis.eval.decide_scorer.score_decide_batch` and publishes them through the same pure
-builder every bench record goes through (:func:`noctis.eval.record.build`), with three deliberate
-decisions a reader should not have to reverse-engineer:
+:func:`~noctis.eval.decide_scorer.score_decide_batch` and publishes them through the one writer of
+``bench.json`` (:func:`noctis.eval.runner.publish`, which builds, validates and refuses), with three
+deliberate decisions a reader should not have to reverse-engineer:
 
 1. **``results`` holds exactly the labelled approvals.** Approval-side agreement is defined over the
    candidates the gates actually judged, so those are the rows whose single "attempt" carries a
@@ -63,8 +63,6 @@ opened.
 
 from __future__ import annotations
 
-import json
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -108,16 +106,8 @@ from noctis.eval.record import (
     CorpusIdentity,
     EngineStamp,
     ModelConfig,
-    build,
-    validate,
 )
-from noctis.eval.runner import (
-    BENCH_RECORD_NAME,
-    WHOLE_CORPUS,
-    InvalidBenchRecord,
-    engine_stamp,
-    new_bench_id,
-)
+from noctis.eval.runner import WHOLE_CORPUS, engine_stamp, new_bench_id, publish
 from noctis.eval.site import AgentSite
 from noctis.observability.debug.runid import RUN_ID_RE
 from noctis.reporting.run_tree.record import read_record
@@ -456,10 +446,12 @@ def write_retrospective_bench(
 ) -> RetrospectiveBench:
     """Score a mined corpus's recorded verdicts and publish one validated ``bench.json``.
 
-    Spends nothing: there is no attempt callable, no prompt is rendered and no model is asked. The
-    record is built by :func:`noctis.eval.record.build` and checked by
-    :func:`~noctis.eval.record.validate` before anything is written, exactly as the live runner does
-    — a document a reader could not trust is refused rather than published.
+    Spends nothing: there is no attempt callable, no prompt is rendered and no model is asked. What
+    this function does is *collect* — the record itself is published by
+    :func:`noctis.eval.runner.publish`, the one writer of ``bench.json``, which builds, validates
+    and refuses a document a reader could not trust rather than writing it. Not "exactly as the
+    live runner does": literally the same function the live runner does it with, so a retrospective
+    record and a live one can never come to be checked by two different disciplines.
 
     ``requested_models`` maps a run id to the model that run researched with (a
     :class:`MiningReport` carries it); an unknown run is configured with ``None`` rather than with a
@@ -495,17 +487,9 @@ def write_retrospective_bench(
         price_table=table,
         configs=_configs(corpus.cases, requested_models or {}),
     )
-    record = build(artifacts)
-    problems = validate(record)
-    if problems:  # pragma: no cover - a builder/validator disagreement is a defect, not a state
-        raise InvalidBenchRecord(
-            "the mined corpus does not build a readable bench record, so none was written: "
-            f"{'; '.join(problems)}"
-        )
-
     directory = Path(bench_root) / bench_id
     directory.mkdir(parents=True)
-    _write_json(directory / BENCH_RECORD_NAME, record)
+    record = publish(artifacts, directory)
     return RetrospectiveBench(
         bench_id=bench_id, directory=directory, record=record, metrics=metrics
     )
@@ -624,19 +608,3 @@ def _stamp(moment: datetime) -> str:
     """One instant as every Noctis record spells it: UTC ISO-8601 with a ``Z``."""
     aware = moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
     return aware.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _write_json(target: Path, document: Mapping[str, Any]) -> None:
-    """One atomic JSON write — a temp file, then ``os.replace``, the run store's discipline.
-
-    Restated rather than reached for, exactly as :mod:`noctis.eval.runner` restates it: the modules
-    that own a tree own the writing of it, and borrowing another module's private writer is how a
-    boundary starts to blur.
-    """
-    tmp = target.with_name(f"{target.name}.tmp-{os.getpid()}")
-    try:
-        tmp.write_text(json.dumps(document, indent=2, default=str) + "\n", encoding="utf-8")
-        os.replace(tmp, target)
-    finally:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)

@@ -38,13 +38,21 @@ from noctis.eval.corpus import Corpus
 from noctis.eval.harness import AS_SHIPPED, HarnessSpec
 from noctis.eval.identity import SiteIdentity
 from noctis.eval.knobs import SiteKnobs, UnknownKnob
-from noctis.eval.metrics import AttemptOutcome
-from noctis.eval.record import EngineStamp, ModelConfig, validate
+from noctis.eval.metrics import AttemptOutcome, CaseResult
+from noctis.eval.record import (
+    BenchArtifacts,
+    CaseRun,
+    CorpusIdentity,
+    EngineStamp,
+    ModelConfig,
+    validate,
+)
 from noctis.eval.registry import UnknownSite, index_sites
 from noctis.eval.runner import (
     BENCH_DIRNAME,
     BENCH_INDEX_NAME,
     BENCH_RECORD_NAME,
+    WHOLE_CORPUS,
     Attempt,
     AttemptRequest,
     BenchRunner,
@@ -56,6 +64,7 @@ from noctis.eval.runner import (
     harness_dials,
     harness_hash,
     new_bench_id,
+    publish,
     replay,
 )
 from noctis.eval.site import AgentSite
@@ -751,3 +760,84 @@ def test_a_refused_record_leaves_the_evidence_it_collected_behind(tmp_path):
         _run(runner, _corpus("alpha"))
 
     assert list(runner.bench_root.rglob("prompt.txt"))
+
+
+# ── publish: the one writer of ``bench.json`` ─────────────────────────────────────────────
+
+
+def _artifacts(**overrides: Any) -> BenchArtifacts:
+    """One bench's collected artifacts — everything the publish seam is ever handed."""
+    fields: dict[str, Any] = {
+        "bench_id": "20260720T144233Z-pub123",
+        "site": SITE_IDENTITY,
+        "engine": ENGINE,
+        "corpus": CorpusIdentity(
+            version="2026-07", hash="c0ffee", case_count=1, split=WHOLE_CORPUS
+        ),
+        "harness_hash": "0123456789abcdef",
+        "harness_dials": {"contract_sheet": True},
+        "runs": (
+            CaseRun(
+                result=CaseResult(
+                    case_id="alpha",
+                    attempts=(
+                        AttemptOutcome(passed=True, model="bench/oracle", seconds=2.0, **FOUR_MTOK),
+                    ),
+                ),
+                config_id="primary",
+                served_models=("bench/oracle-20260701",),
+            ),
+        ),
+        "started_utc": "2026-07-20T14:42:33Z",
+        "finished_utc": "2026-07-20T14:42:35Z",
+        "complete": True,
+        "price_table": BENCH_TABLE,
+        "configs": (ORACLE,),
+    }
+    fields.update(overrides)
+    return BenchArtifacts(**fields)
+
+
+def test_publish_writes_the_built_record_under_the_declared_name_and_returns_it(tmp_path):
+    """One call is the whole publication: build, validate, write, hand the document back."""
+    directory = tmp_path / "bench" / "20260720T144233Z-pub123"
+    directory.mkdir(parents=True)
+
+    record = publish(_artifacts(), directory)
+
+    written = json.loads((directory / BENCH_RECORD_NAME).read_text(encoding="utf-8"))
+    assert written == json.loads(json.dumps(record))
+    assert validate(record) == []
+    assert record["bench"]["bench_id"] == "20260720T144233Z-pub123"
+
+
+def test_publish_writes_atomically_and_leaves_no_temp_file_behind(tmp_path):
+    """A temp file then ``os.replace`` — a reader never sees a half-written record."""
+    directory = tmp_path / "bench" / "20260720T144233Z-pub123"
+    directory.mkdir(parents=True)
+
+    publish(_artifacts(), directory)
+
+    assert [path.name for path in sorted(directory.iterdir())] == [BENCH_RECORD_NAME]
+
+
+def test_publish_refuses_a_record_that_would_not_validate_and_writes_nothing(tmp_path):
+    """The refusal is the seam's own, spelled once, and nothing lands beside it."""
+    directory = tmp_path / "bench" / "20260720T144233Z-pub123"
+    directory.mkdir(parents=True)
+
+    with pytest.raises(InvalidBenchRecord, match="deadline_utc") as refusal:
+        publish(_artifacts(harness_dials={"deadline_utc": "yesterday"}), directory)
+
+    assert "do not build a readable bench record, so none was written" in str(refusal.value)
+    assert list(directory.iterdir()) == []
+
+
+def test_the_live_runner_refuses_in_the_publish_seam_s_one_spelling(tmp_path):
+    """One sentence for every path: the runner does not restate the refusal, it routes to it."""
+    runner = _runner(tmp_path, harness=HarnessSpec(knob_overrides={"deadline_utc": "yesterday"}))
+
+    with pytest.raises(InvalidBenchRecord) as refusal:
+        _run(runner, _corpus("alpha"))
+
+    assert "do not build a readable bench record, so none was written" in str(refusal.value)
