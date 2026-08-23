@@ -26,6 +26,7 @@ from noctis.reporting.run_record import (
     RunArtifacts,
     SegmentArtifact,
     build,
+    utc_iso,
 )
 from noctis.reporting.run_tree import write
 from noctis.reporting.run_tree.lock import RUN_LOCK_NAME, touch_lock
@@ -59,6 +60,16 @@ ENGINE = EngineIdentity(
 _OPEN_STATUSES = ("running", "interrupted")
 
 
+def stamp(seconds: float) -> str:
+    """The record stamp ``seconds`` after :data:`START` — how a fixture spaces two runs apart.
+
+    Addressing orders runs by ``last_active_utc`` and the listing filters them by cumulative
+    runtime, so a fixture with two runs in it has to say when each one happened. One arithmetic,
+    in the same UTC-with-``Z`` shape the record itself writes.
+    """
+    return utc_iso(START + timedelta(seconds=seconds))
+
+
 class FakeClock:
     """A deterministic clock the test moves by hand — no wall-clock read reaches the store."""
 
@@ -81,6 +92,7 @@ def write_run(
     status: str = "stopped",
     created_utc: str = CREATED_UTC,
     last_active_utc: str = LAST_ACTIVE_UTC,
+    runtime_s: float | None = None,
     complete: bool = False,
     comparable_key: str | None = None,
 ) -> Path:
@@ -89,10 +101,14 @@ def write_run(
     ``status`` is the record's own derived lifecycle word — ``stopped`` (one closed segment),
     ``running`` / ``interrupted`` (one segment with no stop stamp) or ``completed`` (sealed with
     ``completed_utc``) — so a fixture asks for the state it means instead of hand-patching the
-    record afterwards.
+    record afterwards. ``runtime_s`` says how long the run worked: it moves ``last_active_utc``
+    that many seconds past ``created_utc``, which is what the record derives its cumulative
+    runtime from and what the listing's noise filter reads.
     """
     run_dir = Path(runs_dir) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    if runtime_s is not None:
+        last_active_utc = utc_iso(_parsed(created_utc) + timedelta(seconds=runtime_s))
     engine = ENGINE if comparable_key is None else replace(ENGINE, comparable_key=comparable_key)
     closed = status not in _OPEN_STATUSES
     segment = SegmentArtifact(
@@ -119,6 +135,10 @@ def write_run(
     )
     write(run_dir, build(artifacts))
     return run_dir
+
+
+def _parsed(record_stamp: str) -> datetime:
+    return datetime.fromisoformat(record_stamp.replace("Z", "+00:00"))
 
 
 def hold_lock(

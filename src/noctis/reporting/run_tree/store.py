@@ -11,10 +11,11 @@ from the config — two byte-identical configs are two runs) and the run gets it
 
 **``run.json`` has no sidecars.** One ``fetch()`` of one URL returns everything a run page needs,
 so a website needs no server-side logic; ``index.json`` beside it serves the *listing* page in one
-more fetch. The index is **derived, never authoritative**: :func:`rebuild_index` regenerates it
-from the records on disk at any moment, and a test pins that a rebuild reproduces the
-incrementally-maintained file byte for byte. Anything that could only be learned from the index
-would be a second source of truth, free to drift from the records it summarizes.
+more fetch. Both readers of that tree are modules of their own, holding nothing but the record:
+:mod:`~noctis.reporting.run_tree.address` (one operator-typed string → one run dir) and
+:mod:`~noctis.reporting.run_tree.index` (the roll-up, **derived, never authoritative**). This
+module drives them — it resolves the address a verb was given, and refreshes the index after every
+write it makes.
 
 Everything in this module is I/O; everything about the record's *shape* is next door in
 ``run_record`` (pure) and ``schema`` (pure). :func:`collect` does every read and returns a
@@ -45,11 +46,10 @@ and an injected clock so no ``datetime.now()`` is ever reached from here.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import shutil
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -71,6 +71,8 @@ from noctis.reporting.run_record import (
     seal,
     utc_iso,
 )
+from noctis.reporting.run_tree.address import RunNotFoundError, resolve_run_dir
+from noctis.reporting.run_tree.index import update_index
 from noctis.reporting.run_tree.lock import (
     STALE_HEARTBEAT_S,
     acquire_lock,
@@ -83,7 +85,6 @@ from noctis.reporting.run_tree.record import (
     optional_str,
     read_record,
     write,
-    write_json,
 )
 from noctis.reporting.schema import (
     PROMOTED_OUTCOME,
@@ -95,50 +96,30 @@ __all__ = [
     "PRUNED_SUBDIRS",
     "STRATEGIES_SUBDIR",
     "STRATEGY_TIER_SUBDIRS",
-    "RUN_INDEX_KIND",
-    "RUN_INDEX_NAME",
-    "SHORT_RUN_S",
     "FinishOutcome",
     "PruneOutcome",
-    "RunAmbiguousError",
     "RunCompletedError",
-    "RunNotFoundError",
     "RunNotPrunableError",
     "RunStore",
     "assert_resumable",
     "collect",
     "finish_run",
-    "index_entry",
     "open_run",
     "prune_run_state",
     "read_benchmark",
-    "read_run_record",
     "read_sessions",
     "read_strategies",
     "read_trials",
-    "rebuild_index",
-    "resolve_run_dir",
-    "update_index",
-    "visible_runs",
-    "write_index",
 ]
 
 logger = logging.getLogger(__name__)
 
-# The names this module owns; the record's and the lock's are in the modules that own those
-# (``record.RUN_RECORD_NAME``, ``lock.RUN_LOCK_NAME``) — one place each, so nothing spells one by
-# hand.
-RUN_INDEX_NAME = "index.json"
 # The run's champion board, inside its own state dir — the denominator of the record's
-# per-champion numbers. Named beside the other run-tree file names; the registry owns its schema.
+# per-champion numbers. The one run-tree name this module still owns: the record's, the lock's and
+# the index's are in the modules that own those (``record.RUN_RECORD_NAME``, ``lock.RUN_LOCK_NAME``,
+# ``index.RUN_INDEX_NAME``) — one place each, so nothing spells one by hand. The registry owns this
+# file's schema.
 CHAMPIONS_NAME = "champions.json"
-
-# The index's self-declared type, so a consumer can tell the roll-up from a run record at a glance.
-RUN_INDEX_KIND = "noctis.run-index"
-
-# What the default listing calls noise: a finished run that never accumulated a minute of runtime
-# is a startup failure or a mistyped command, not an experiment. ``--all`` shows them.
-SHORT_RUN_S = 60.0
 
 # The only directories retention may ever remove (story #138), named here **as literal children of
 # one run dir** — this list is the entire blast radius, and it is a constant so that reviewing it is
@@ -162,21 +143,6 @@ CHAMPIONS_TIER = "champions"
 # Lowest precedence first, the order the library itself discovers them in: a champion of the same
 # name overrides a working-tier draft.
 STRATEGY_TIER_SUBDIRS = (TMP_TIER, CHAMPIONS_TIER)
-
-
-class RunNotFoundError(LookupError):
-    """No run answers this address. Raised by :func:`resolve_run_dir`, never by the listing."""
-
-
-class RunAmbiguousError(RunNotFoundError):
-    """More than one run answers this address — a label reassigned to a second run.
-
-    A :class:`RunNotFoundError` by inheritance, so every caller that already refuses an
-    unanswerable address refuses this one too, and deliberately its own type: "no run answers
-    this" and "too many do" want different words, and only one of them can be fixed by typing an
-    id. Never resolved by picking a candidate — an alias that silently chose between two runs
-    would eventually append a night's work to the wrong record.
-    """
 
 
 class RunCompletedError(RuntimeError):
@@ -1309,406 +1275,6 @@ def _upgraded(
     )
 
 
-# ── addressing ─────────────────────────────────────────────────────────────────────────────
-
-# The reserved address forms. ``latest`` is a word, not a lookup: it means the same thing in every
-# workspace, so no run can capture it by being named or labelled that (see :func:`resolve_run_dir`).
-LATEST = "latest"
-LABEL_SIGIL = "@"
-
-# One sentence, appended to every refusal here: an address that resolved to nothing must always
-# say how to find the ones that exist, or an operator's next move is to guess.
-FIND_RUNS = "`noctis runs --all` lists every run this workspace has."
-
-
-def resolve_run_dir(runs_dir: Path | str, address: str) -> Path:
-    """Resolve one run **address** to its directory, or raise :class:`RunNotFoundError`.
-
-    The single place an operator-typed address becomes a path, shared by every verb that
-    addresses a run (``run-record``, ``--resume``). Four forms, tried in this **fixed** order so
-    one string always names one run whatever happens to be on disk:
-
-    1. a **path** — anything containing a separator, or named ``run.json``: the record file you
-       are looking at, or the run dir holding it;
-    2. ``@<label>`` — the ``@`` is the *label sigil*: it looks the name up as a label first, and
-       only falls back to reading it as an id, so an id typed with a leading ``@`` still resolves;
-    3. ``latest`` — a **reserved word**, always the most recently active resumable run
-       (:func:`_resolve_latest`), never a run that happens to be *named* ``latest`` (address that
-       by its path) or *labelled* ``latest`` (address that as ``@latest``);
-    4. a **run id** — the identity itself, and the only form that is ever consulted for a bare
-       string. A run *labelled* like an id is therefore never reachable without the sigil.
-
-    The rules exist to be boring: the meaning of an address may not depend on what a workspace
-    happens to contain, and where two runs could answer one address (a reassigned label) this
-    **refuses** with both ids (:class:`RunAmbiguousError`) rather than silently picking one.
-
-    A run dir with no readable ``run.json`` still resolves by id or path. The record is evidence
-    *about* the run, and refusing to address a run because its evidence is corrupt would put the
-    one case an operator most needs to inspect out of reach. It is skipped by ``latest`` and
-    ``@label``, which have nothing to select it *on* — address it by id.
-    """
-    runs = Path(runs_dir)
-    if _is_path_address(address):
-        return _resolve_path(address)
-    if address.startswith(LABEL_SIGIL):
-        return _resolve_label(runs, address[len(LABEL_SIGIL) :])
-    if address == LATEST:
-        return _resolve_latest(runs)
-    by_id = _by_id(runs, address)
-    if by_id is not None:
-        return by_id
-    raise RunNotFoundError(_unknown(runs, address))
-
-
-def _resolve_latest(runs: Path) -> Path:
-    """The most recently active **resumable** run, or a raised :class:`RunNotFoundError`.
-
-    *Most recently active* is read off the record — ``run.last_active_utc``, falling back to
-    ``created_utc`` — and never off a filesystem mtime, which lies after a copy, a migration or a
-    ``jq`` rewrite. Ties break on the run id (itself a UTC stamp), so the answer is total and
-    deterministic rather than dependent on directory order.
-
-    *Resumable* is :func:`~noctis.reporting.run_record.resume_refusal`, the same function the
-    resume path itself checks, so ``latest`` can never hand back a run the next line refuses: a
-    ``completed`` run is terminal and is skipped. A run whose record cannot be read is skipped
-    too — it carries no stamp to be "most recent" by — and stays addressable by its id. A
-    ``running`` run is *not* skipped: it is the one an operator most often means, and if another
-    engine really is holding it the liveness lock refuses loudly a moment later.
-    """
-    summaries = _summaries(runs)
-    resumable = [summary for summary in summaries if summary.resumable]
-    if not resumable:
-        raise RunNotFoundError(
-            f"`--resume latest` found no resumable run under {runs}: {_shortfall(summaries)}. "
-            f"{FIND_RUNS}"
-        )
-    return max(resumable, key=lambda summary: (summary.last_active, summary.run_id)).run_dir
-
-
-def _resolve_label(runs: Path, label: str) -> Path:
-    """One human alias, resolved off the records — or refused, never guessed.
-
-    Exactly one run carrying the label resolves. **Two or more refuse**
-    (:class:`RunAmbiguousError`, naming both ids): a label may be reassigned, the id is the
-    identity, and choosing between two runs on an operator's behalf is how a night's work lands
-    on the wrong record. None falls back to reading the name as an id, so an id typed with a
-    leading ``@`` — the shape a habit or a copy-paste produces — still names its run instead of
-    failing on punctuation.
-    """
-    matches = [summary for summary in _summaries(runs) if summary.label == label]
-    if len(matches) == 1:
-        return matches[0].run_dir
-    if len(matches) > 1:
-        named = ", ".join(summary.run_id for summary in matches)
-        raise RunAmbiguousError(
-            f"{len(matches)} runs are labelled {label!r}: {named}. A label is convenience — the "
-            f"id is the identity, and it may be reassigned — so this refuses rather than pick "
-            f"one for you. Address the run you mean by its id."
-        )
-    by_id = _by_id(runs, label)
-    if by_id is not None:
-        return by_id
-    raise RunNotFoundError(f"no run labelled {label!r} under {runs}. {FIND_RUNS}")
-
-
-def _shortfall(summaries: Sequence[_RunSummary]) -> str:
-    """Why ``latest`` found nothing — in the operator's terms, never a bare "not found"."""
-    if not summaries:
-        return "there are no runs here yet, and every `noctis run` mints one"
-    completed = sum(1 for summary in summaries if summary.readable and not summary.resumable)
-    unreadable = sum(1 for summary in summaries if not summary.readable)
-    counted = [
-        f"{completed} completed (terminal, so they refuse resume)" if completed else "",
-        f"{unreadable} with no readable record (address one by its id)" if unreadable else "",
-    ]
-    return f"of {len(summaries)} run(s): " + ", ".join(part for part in counted if part)
-
-
-def read_run_record(runs_dir: Path | str, address: str) -> dict:
-    """One addressed run's record, or a raised error — the read a **resume** starts from.
-
-    Where :func:`read_record` reports "no readable record" as a value (a listing must survive one
-    broken file), this raises: a resume that cannot read the record has nothing to resume *under*,
-    and continuing would silently research under the current ``config.yaml`` instead of the run's
-    own frozen one — the exact substitution config freezing exists to prevent.
-    """
-    run_dir = resolve_run_dir(runs_dir, address)
-    record, reason = read_record(run_dir)
-    if record is None:
-        raise RunNotFoundError(
-            f"run {address} has {reason}, so there is no frozen configuration to resume it under. "
-            f"`noctis run-record {address} --validate` says what is wrong with it."
-        )
-    return record
-
-
-def _by_id(runs: Path, name: str) -> Path | None:
-    """The run this name **identifies**, or ``None``. The id form, and ``@label``'s fallback.
-
-    Never joins a path form onto ``runs``: an address that could be a path is one, so ``../..``
-    can never address its way out of the run tree through here.
-    """
-    candidate = runs / name if _is_run_id(name) else None
-    return candidate if candidate is not None and candidate.is_dir() else None
-
-
-def _is_run_id(address: str) -> bool:
-    """A bare directory name — the identity form, and the complement of the path form."""
-    return bool(address) and not _is_path_address(address)
-
-
-def _is_path_address(address: str) -> bool:
-    """Whether this address is a **path** rather than a name a lookup could answer.
-
-    Anything carrying a separator, plus the bare record name (``run.json`` in the directory you
-    are standing in) and the two directory names that are pure navigation. A run id can contain
-    none of those, so the two forms cannot collide.
-    """
-    return "/" in address or "\\" in address or address in (".", "..", RUN_RECORD_NAME)
-
-
-def _resolve_path(address: str) -> Path:
-    """A ``run.json`` path (or the dir holding one) as the run it belongs to.
-
-    Honoured wherever it points, including outside the configured ``runs_dir``: a path is an
-    address an operator typed deliberately — a record copied off a server, a second workspace —
-    and second-guessing it would defeat the one form whose whole purpose is "this file, here".
-    Expanded and made absolute, never ``resolve()``d, so a symlinked workspace still answers as
-    the operator addressed it.
-    """
-    path = Path(os.path.abspath(Path(address).expanduser()))
-    if path.is_dir():
-        return path
-    if path.name == RUN_RECORD_NAME and path.is_file():
-        return path.parent
-    raise RunNotFoundError(
-        f"no run at {path} — the path form addresses a {RUN_RECORD_NAME} file or the run "
-        f"directory holding it. {FIND_RUNS}"
-    )
-
-
-def _unknown(runs: Path, address: str) -> str:
-    """The refusal an address nobody answers gets: what was looked for, and how to find a run.
-
-    A bare string is always read as an id, so the one near-miss worth naming is a *label* typed
-    without its sigil — the operator is one character from the run they meant, and the message
-    is the only place that can say so.
-    """
-    labelled = [summary for summary in _summaries(runs) if summary.label == address]
-    hint = (
-        f" {len(labelled)} run(s) are labelled {address!r} — a bare address is always the id, so "
-        f"write `{LABEL_SIGIL}{address}` to address a run by its label."
-        if labelled
-        else ""
-    )
-    return f"no run {address!r} under {runs}.{hint} {FIND_RUNS}"
-
-
-@dataclass(frozen=True)
-class _RunSummary:
-    """One run as *addressing* sees it: where it is, what it is called, when it was last active.
-
-    Read from the record on disk, never from ``index.json``. The index is derived and may be
-    deleted at any moment, so resolving an address through it would make an answer depend on a
-    cache; the label lives in the record because the record is the source of truth.
-    """
-
-    run_dir: Path
-    run_id: str
-    label: str | None
-    last_active: str
-    resumable: bool
-    readable: bool
-
-
-def _summaries(runs: Path) -> list[_RunSummary]:
-    """Every run under ``runs``, summarized for addressing. Sorted by id, so ordering is total."""
-    directories = sorted(p for p in runs.iterdir() if p.is_dir()) if runs.is_dir() else []
-    return [_summary_of(run_dir) for run_dir in directories]
-
-
-def _summary_of(run_dir: Path) -> _RunSummary:
-    record, _ = read_record(run_dir)
-    run = record.get("run") if isinstance(record, dict) else None
-    if not isinstance(run, Mapping):
-        return _RunSummary(run_dir, run_dir.name, None, "", resumable=False, readable=False)
-    return _RunSummary(
-        run_dir=run_dir,
-        run_id=str(run.get("run_id") or run_dir.name),
-        label=optional_str(run.get("label")),
-        last_active=str(run.get("last_active_utc") or run.get("created_utc") or ""),
-        resumable=resume_refusal(record or {}) is None,
-        readable=True,
-    )
-
-
-# ── the derived index ──────────────────────────────────────────────────────────────────────
-
-
-def index_entry(run_dir: Path | str) -> dict:
-    """One run's listing entry, derived from its record alone — no sidecar, no other file.
-
-    Carries ``comparable_key`` (always, ``null`` when unknown), so a leaderboard partitions
-    structurally instead of trusting a human to remember which runs may be pooled. Every key is
-    always present: an absent value is an explicit ``null``, the record's own convention.
-    """
-    path = Path(run_dir)
-    record, note = read_record(path)
-    if record is not None:
-        try:
-            return _entry_from(record, run_dir=path)
-        except Exception as exc:  # a hand-edited or foreign file, still valid JSON
-            note = f"an unreadable {RUN_RECORD_NAME} ({type(exc).__name__}: {exc})"
-    return _unreadable_entry(path.name, note)
-
-
-def rebuild_index(runs_dir: Path | str) -> dict:
-    """Regenerate the whole roll-up from the records on disk. Cheap, pure of history, idempotent.
-
-    This is what "derived, never authoritative" means operationally: the index can be deleted at
-    any moment and this reproduces it exactly, so nothing downstream ever has to trust it more
-    than the records it summarizes.
-    """
-    runs = Path(runs_dir)
-    directories = [p for p in runs.iterdir() if p.is_dir()] if runs.is_dir() else []
-    return _index_of(index_entry(run_dir) for run_dir in directories)
-
-
-def update_index(runs_dir: Path | str, run_id: str) -> None:
-    """Refresh one run's entry in the index, leaving every other entry alone.
-
-    Re-derived from that run's record **on disk**, never from a caller's in-memory copy, so the
-    incrementally-maintained file cannot describe a record that was never written. An index that
-    is missing, unreadable, or of another shape is rebuilt from scratch rather than patched: it
-    is derived, so throwing it away costs nothing.
-    """
-    runs = Path(runs_dir)
-    index = _read_index(runs)
-    if index is None:
-        write_index(runs, rebuild_index(runs))
-        return
-    others = [entry for entry in index["runs"] if entry.get("run_id") != run_id]
-    write_index(runs, _index_of([*others, index_entry(runs / run_id)]))
-
-
-def write_index(runs_dir: Path | str, index: Mapping[str, object]) -> None:
-    """Write ``index.json`` atomically — the same tmp + ``os.replace`` the record uses."""
-    write_json(Path(runs_dir) / RUN_INDEX_NAME, index)
-
-
-def visible_runs(
-    entries: Sequence[Mapping[str, object]], *, include_all: bool = False
-) -> list[Mapping[str, object]]:
-    """The default listing: every run **except** finished ones shorter than :data:`SHORT_RUN_S`.
-
-    A run that stopped after a handful of seconds produced no evidence — it is a startup failure,
-    a mistyped command or a config typo — and a board full of those hides the experiments an
-    operator came to compare. ``include_all`` (the CLI's ``--all``) widens to everything.
-
-    Three kinds are **never** hidden, whatever their runtime: a run that is still ``running`` (the
-    one you are most likely looking for), a run whose record could not be read (breakage is
-    exactly what a listing exists to surface, so tidiness must not swallow it), and a run with no
-    segments at all — the adopted-history shape (story #131), which is the opposite of noise: a
-    failed start still writes the segment it failed in, so zero segments means the run's contents
-    predate runs entirely rather than that nothing happened.
-    """
-    if include_all:
-        return list(entries)
-    return [entry for entry in entries if not _is_noise(entry)]
-
-
-def _is_noise(entry: Mapping[str, object]) -> bool:
-    if not entry.get("readable", True) or entry.get("status") == "running":
-        return False
-    if entry.get("segments") == 0:  # adopted history, never a startup failure
-        return False
-    runtime = entry.get("cumulative_runtime_s")
-    return isinstance(runtime, int | float) and float(runtime) < SHORT_RUN_S
-
-
-def _index_of(entries: Iterable[Mapping[str, object]]) -> dict:
-    """The index document: newest run first, and nothing that varies between two rebuilds.
-
-    Deliberately carries **no generation stamp** — a derived file that changed on every rebuild
-    could not be compared against the incrementally-maintained one, and that comparison is the
-    only thing keeping the two paths honest.
-    """
-    return {
-        # The listing shares the record's contract version, read off the module for the same
-        # reason the record does: an engine whose schema has moved writes both at its own version.
-        "schema_version": schema_module.SCHEMA_VERSION,
-        "kind": RUN_INDEX_KIND,
-        "runs": sorted(entries, key=lambda entry: str(entry.get("run_id") or ""), reverse=True),
-    }
-
-
-def _entry_from(record: Mapping[str, object], *, run_dir: Path) -> dict:
-    """One record, reduced to its listing entry. Raises on a shape it cannot read."""
-    run = record.get("run")
-    engine = record.get("engine")
-    segments = record.get("segments")
-    if not isinstance(run, Mapping) or not isinstance(engine, Mapping):
-        raise TypeError("the 'run' or 'engine' section is missing or is not an object")
-    if not isinstance(segments, list):
-        raise TypeError("the 'segments' section is missing or is not a list")
-    version = engine.get("engine_version")
-    return {
-        "run_id": str(run.get("run_id") or run_dir.name),
-        "label": optional_str(run.get("label")),
-        "status": optional_str(run.get("status")),
-        "created_utc": optional_str(run.get("created_utc")),
-        "last_active_utc": optional_str(run.get("last_active_utc")),
-        "segments": len(segments),
-        "cumulative_runtime_s": _optional_number(run.get("cumulative_runtime_s")),
-        # The compute the run was given, beside the compute it has used: a listing that shows one
-        # without the other cannot answer "are these two runs comparable?", which is the question
-        # the cap exists to make answerable (100 research hours and 30 are not one experiment).
-        "run_limit_hours": _optional_number(run.get("run_limit_hours")),
-        "complete": bool(run.get("complete", False)),
-        "engine_version": version if isinstance(version, int) else None,
-        "comparable_key": optional_str(engine.get("comparable_key")),
-        "mixed_engine": bool(engine.get("mixed_engine", False)),
-        "readable": True,
-        "note": None,
-    }
-
-
-def _unreadable_entry(run_id: str, note: str | None) -> dict:
-    """A run that could not be read, listed as exactly that — same keys, honest nulls."""
-    return {
-        "run_id": run_id,
-        "label": None,
-        "status": None,
-        "created_utc": None,
-        "last_active_utc": None,
-        "segments": None,
-        "cumulative_runtime_s": None,
-        "run_limit_hours": None,
-        "complete": False,
-        "engine_version": None,
-        "comparable_key": None,
-        "mixed_engine": None,
-        "readable": False,
-        "note": note,
-    }
-
-
-def _read_index(runs_dir: Path) -> dict | None:
-    """The index as written, or ``None`` when there is nothing here worth patching."""
-    try:
-        index = json.loads((runs_dir / RUN_INDEX_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(index, dict) or index.get("kind") != RUN_INDEX_KIND:
-        return None
-    if index.get("schema_version") != schema_module.SCHEMA_VERSION:
-        return None
-    entries = index.get("runs")
-    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
-        return None
-    return index
-
-
 # ── the store ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -2088,10 +1654,6 @@ def _runtime_of(record: Mapping[str, object]) -> float:
     run = record.get("run")
     total = run.get("cumulative_runtime_s") if isinstance(run, Mapping) else None
     return float(total) if isinstance(total, int | float) and not isinstance(total, bool) else 0.0
-
-
-def _optional_number(value: object) -> float | None:
-    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
 def _noctis_version() -> str:

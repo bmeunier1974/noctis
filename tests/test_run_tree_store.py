@@ -21,7 +21,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -38,22 +37,17 @@ from noctis.observability.debug import RUN_ID_RE
 from noctis.observability.engine_id import ENGINE_VERSION
 from noctis.reporting import schema
 from noctis.reporting.run_tree import (
-    RUN_INDEX_KIND,
     RUN_INDEX_NAME,
     RUN_LOCK_NAME,
     RUN_RECORD_NAME,
-    RunAmbiguousError,
     RunLockedError,
-    RunNotFoundError,
-    index_entry,
     open_run,
     rebuild_index,
-    resolve_run_dir,
     write,
     write_index,
 )
 
-from ._run_tree_helpers import FakeClock, hold_lock
+from ._run_tree_helpers import FakeClock, hold_lock, stamp, write_run
 
 runner = CliRunner()
 
@@ -850,11 +844,12 @@ def test_a_two_segment_fixture_run_matches_the_committed_golden_record(tmp_path)
     assert record["run"]["cumulative_trading_s"] == 1800.0
 
 
-# ── the derived index.json roll-up (story #130) ────────────────────────────────────────────
-
-
-def _index(runs_dir: Path) -> dict:
-    return json.loads((runs_dir / RUN_INDEX_NAME).read_text())
+# ── addressing and the index, where the subject is the STORE (story #287) ──────────────────
+#
+# The rules themselves live with the modules that own them: `tests/test_run_tree_address.py`
+# resolves the four address forms over written records, `tests/test_run_tree_index.py` derives the
+# roll-up from them. What stays here is the store's *use* of both — an open reached by an alias,
+# and the listing the CLI renders after a real run.
 
 
 def _finished_run(runs: Path, clock: FakeClock, *, seconds: float = 3600.0, **kwargs):
@@ -864,299 +859,6 @@ def _finished_run(runs: Path, clock: FakeClock, *, seconds: float = 3600.0, **kw
     store.close(reason="time_limit")
     clock.advance(60)
     return store
-
-
-def test_the_run_tree_carries_a_derived_index_of_every_run(tmp_path):
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    store = _finished_run(runs, clock, label="nightly-momo")
-
-    index = _index(runs)
-
-    assert index["schema_version"] == 1
-    assert index["kind"] == RUN_INDEX_KIND
-    (entry,) = index["runs"]
-    assert entry["run_id"] == store.run_id
-    assert entry["label"] == "nightly-momo"
-    assert entry["status"] == "stopped"
-    assert entry["segments"] == 1
-    assert entry["cumulative_runtime_s"] == 3600.0
-    assert entry["created_utc"] == "2026-07-27T14:22:33.418Z"
-    assert entry["readable"] is True
-
-
-def test_the_index_is_rebuildable_from_the_records_alone_byte_for_byte(tmp_path):
-    """The index is DERIVED, never authoritative. A rebuild that read only the records on disk
-    must reproduce the incrementally-maintained file exactly — otherwise the roll-up is a second
-    source of truth, free to drift from the records it summarizes."""
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    for label in ("alpha", "beta", "gamma"):
-        _finished_run(runs, clock, label=label)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-
-    write_index(elsewhere, rebuild_index(runs))
-
-    assert (elsewhere / RUN_INDEX_NAME).read_bytes() == (runs / RUN_INDEX_NAME).read_bytes()
-    assert [e["label"] for e in _index(runs)["runs"]] == ["gamma", "beta", "alpha"]  # newest first
-
-
-def test_every_index_entry_and_every_record_carries_the_same_comparable_key(tmp_path):
-    """The key a leaderboard partitions on structurally, so nobody has to remember which runs
-    are poolable — on the record and on its index entry, never on one alone."""
-    runs = tmp_path / "runs"
-    store = _finished_run(runs, FakeClock(), election_metric="sortino")
-
-    record = _record(store.run_dir)
-    (entry,) = _index(runs)["runs"]
-
-    assert record["engine"]["comparable_key"].endswith("|sortino")
-    assert entry["comparable_key"] == record["engine"]["comparable_key"]
-    assert entry["engine_version"] == record["engine"]["engine_version"] == ENGINE_VERSION
-    assert entry["mixed_engine"] is False
-
-
-def test_a_run_with_no_record_or_an_unreadable_one_is_listed_as_such(tmp_path):
-    """A broken record is evidence, not a crash: the entry says what is wrong and the rest of
-    the listing is unaffected."""
-    runs = tmp_path / "runs"
-    good = _finished_run(runs, FakeClock())
-    (runs / "20260101T000000Z-empty0").mkdir()
-    broken = runs / "20260102T000000Z-brokn0"
-    broken.mkdir()
-    (broken / RUN_RECORD_NAME).write_text('{"schema_version": 1, "run"')
-
-    entries = {entry["run_id"]: entry for entry in rebuild_index(runs)["runs"]}
-
-    assert entries[good.run_id]["readable"] is True
-    assert entries[good.run_id]["note"] is None
-    assert entries["20260101T000000Z-empty0"]["readable"] is False
-    assert "no run.json" in entries["20260101T000000Z-empty0"]["note"]
-    assert entries["20260102T000000Z-brokn0"]["readable"] is False
-    assert "unreadable" in entries["20260102T000000Z-brokn0"]["note"]
-    # Explicit nulls, never missing keys: every entry answers every question (schema convention).
-    assert set(entries["20260101T000000Z-empty0"]) == set(entries[good.run_id])
-    assert entries["20260101T000000Z-empty0"]["comparable_key"] is None
-    assert entries["20260102T000000Z-brokn0"]["status"] is None
-
-
-def test_a_record_of_a_foreign_shape_is_listed_as_unreadable_too(tmp_path):
-    """Valid JSON, foreign shape — hand-edited or another tool's file. Same degradation."""
-    runs = tmp_path / "runs"
-    store = _finished_run(runs, FakeClock())
-    (store.run_dir / RUN_RECORD_NAME).write_text('{"run": 5, "segments": "nope"}')
-
-    (entry,) = rebuild_index(runs)["runs"]
-
-    assert entry["run_id"] == store.run_id
-    assert entry["readable"] is False
-    assert "unreadable" in entry["note"]
-
-
-def test_the_index_is_regenerable_from_scratch_at_any_time(tmp_path):
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    for label in ("alpha", "beta"):
-        _finished_run(runs, clock, label=label)
-    before = (runs / RUN_INDEX_NAME).read_bytes()
-
-    (runs / RUN_INDEX_NAME).unlink()
-    write_index(runs, rebuild_index(runs))
-
-    assert (runs / RUN_INDEX_NAME).read_bytes() == before
-
-
-def test_a_run_is_addressed_by_its_id(tmp_path):
-    runs = tmp_path / "runs"
-    store = _finished_run(runs, FakeClock())
-
-    assert resolve_run_dir(runs, store.run_id) == store.run_dir
-
-
-def test_an_unknown_address_is_a_clean_lookup_failure_naming_the_run_tree(tmp_path):
-    runs = tmp_path / "runs"
-    _finished_run(runs, FakeClock())
-
-    with pytest.raises(RunNotFoundError) as excinfo:
-        resolve_run_dir(runs, "20260101T000000Z-nope00")
-
-    assert "20260101T000000Z-nope00" in str(excinfo.value)
-    assert str(runs) in str(excinfo.value)
-
-
-# ── addressing: `latest`, a record path, `@label` (story #133) ─────────────────────────────
-
-
-def _sealed(store) -> None:
-    """Seal a run the way ``--finish`` will (story #136): ``completed``, so it refuses resume."""
-    record = _record(store.run_dir)
-    record["run"]["status"] = "completed"
-    record["run"]["completed_utc"] = record["run"]["last_active_utc"]
-    (store.run_dir / RUN_RECORD_NAME).write_text(json.dumps(record))
-
-
-def test_latest_addresses_the_most_recently_active_resumable_run(tmp_path):
-    """The common case needs no id lookup — and a ``completed`` run is never it, because a
-    published result refuses resume anyway."""
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    _finished_run(runs, clock)
-    newest_resumable = _finished_run(runs, clock)
-    _sealed(_finished_run(runs, clock))
-
-    assert resolve_run_dir(runs, "latest") == newest_resumable.run_dir
-
-
-def test_latest_reads_the_records_own_stamps_not_the_filesystems_mtimes(tmp_path):
-    """*Most recently active* is what the record says it is. An mtime lies after a copy, a
-    migration or a `jq` rewrite, and a run addressed by mistake is a run polluted by mistake."""
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    older = _finished_run(runs, clock)
-    newest = _finished_run(runs, clock)
-    future = 2_000_000_000
-    os.utime(older.run_dir / RUN_RECORD_NAME, (future, future))
-    os.utime(older.run_dir, (future, future))
-
-    assert resolve_run_dir(runs, "latest") == newest.run_dir
-
-
-def test_latest_with_no_resumable_run_says_so_and_how_to_list_the_runs(tmp_path):
-    runs = tmp_path / "runs"
-    _sealed(_finished_run(runs, FakeClock()))
-
-    with pytest.raises(RunNotFoundError) as excinfo:
-        resolve_run_dir(runs, "latest")
-
-    message = str(excinfo.value)
-    assert "completed" in message
-    assert str(runs) in message
-    assert "noctis runs" in message
-
-
-def test_latest_in_an_empty_workspace_says_there_is_nothing_to_resume(tmp_path):
-    with pytest.raises(RunNotFoundError) as excinfo:
-        resolve_run_dir(tmp_path / "runs", "latest")
-
-    assert "mints one" in str(excinfo.value)
-
-
-def test_a_run_is_addressed_by_the_path_of_the_record_you_are_looking_at(tmp_path):
-    """The file in front of you *is* an address — its own dir, and the dir holding it."""
-    runs = tmp_path / "runs"
-    store = _finished_run(runs, FakeClock())
-
-    assert resolve_run_dir(runs, str(store.run_dir / RUN_RECORD_NAME)) == store.run_dir
-    assert resolve_run_dir(runs, str(store.run_dir)) == store.run_dir
-
-
-def test_a_record_path_outside_the_configured_run_tree_still_addresses_its_run(tmp_path):
-    """A path is an explicit address, so it is honoured wherever it points — a record copied out
-    of a workspace, or a second workspace's tree, is exactly the case the form exists for."""
-    runs = tmp_path / "runs"
-    store = _finished_run(runs, FakeClock())
-
-    assert resolve_run_dir(tmp_path / "elsewhere", str(store.run_dir / RUN_RECORD_NAME)) == (
-        store.run_dir
-    )
-
-
-def test_a_path_that_names_no_record_is_a_clean_lookup_failure(tmp_path):
-    with pytest.raises(RunNotFoundError) as excinfo:
-        resolve_run_dir(tmp_path / "runs", str(tmp_path / "nowhere" / RUN_RECORD_NAME))
-
-    assert "nowhere" in str(excinfo.value)
-    assert "noctis runs" in str(excinfo.value)
-
-
-def test_a_run_is_addressed_by_its_label_behind_the_at_sigil(tmp_path):
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    _finished_run(runs, clock, label="sector-specialist")
-    momo = _finished_run(runs, clock, label="nightly-momo")
-
-    assert resolve_run_dir(runs, "@nightly-momo") == momo.run_dir
-
-
-def test_a_label_is_stored_in_the_record_and_derived_into_the_index(tmp_path):
-    """The alias lives in the record — the source of truth — and reaches ``index.json`` only by
-    derivation, so a rebuild from the records alone still carries it."""
-    runs = tmp_path / "runs"
-    store = _finished_run(runs, FakeClock(), label="nightly-momo")
-
-    assert _record(store.run_dir)["run"]["label"] == "nightly-momo"
-    assert [entry["label"] for entry in _index(runs)["runs"]] == ["nightly-momo"]
-    assert rebuild_index(runs) == _index(runs)
-
-
-def test_an_unknown_label_says_how_to_find_the_runs(tmp_path):
-    runs = tmp_path / "runs"
-    _finished_run(runs, FakeClock(), label="nightly-momo")
-
-    with pytest.raises(RunNotFoundError) as excinfo:
-        resolve_run_dir(runs, "@no-such-label")
-
-    assert "no-such-label" in str(excinfo.value)
-    assert "noctis runs" in str(excinfo.value)
-
-
-def test_a_bare_label_is_not_an_address_and_the_refusal_names_the_sigil(tmp_path):
-    """The bare form is *always* the id, so a label typed without its sigil must not silently
-    resolve — but the refusal says exactly what to type instead."""
-    runs = tmp_path / "runs"
-    _finished_run(runs, FakeClock(), label="nightly-momo")
-
-    with pytest.raises(RunNotFoundError) as excinfo:
-        resolve_run_dir(runs, "nightly-momo")
-
-    assert "@nightly-momo" in str(excinfo.value)
-
-
-def test_a_label_may_be_reassigned_and_each_run_keeps_its_own_id_and_record(tmp_path):
-    """A label is convenience; the id is the identity. Re-using one on a second run neither
-    renames the first nor merges the two — each keeps its own id, record and history."""
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    first = _finished_run(runs, clock, label="nightly-momo")
-    second = _finished_run(runs, clock, label="nightly-momo")
-
-    assert first.run_id != second.run_id
-    assert resolve_run_dir(runs, first.run_id) == first.run_dir
-    assert resolve_run_dir(runs, second.run_id) == second.run_dir
-    assert _record(first.run_dir)["run"]["run_id"] == first.run_id
-    assert _record(second.run_dir)["run"]["run_id"] == second.run_id
-    assert {entry["label"] for entry in _index(runs)["runs"]} == {"nightly-momo"}
-
-
-def test_an_ambiguous_label_refuses_and_names_every_candidate_id(tmp_path):
-    """Two runs answer one alias, so there is no honest single answer: refuse, and name both, so
-    the operator addresses the one they meant by its id."""
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    first = _finished_run(runs, clock, label="nightly-momo")
-    second = _finished_run(runs, clock, label="nightly-momo")
-
-    with pytest.raises(RunAmbiguousError) as excinfo:
-        resolve_run_dir(runs, "@nightly-momo")
-
-    message = str(excinfo.value)
-    assert first.run_id in message and second.run_id in message
-    assert isinstance(excinfo.value, RunNotFoundError)  # every existing caller already handles it
-
-
-def test_a_label_that_looks_like_a_run_id_and_an_id_typed_with_a_sigil_both_resolve(tmp_path):
-    """The two collisions the forms allow, both decided by one rule: bare is the id, ``@`` is the
-    label first. So a run labelled with another run's id is reachable, and so is that other run."""
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    impostor = _finished_run(runs, clock)
-    labelled = _finished_run(runs, clock, label=impostor.run_id)
-    plain = _finished_run(runs, clock)
-
-    assert resolve_run_dir(runs, impostor.run_id) == impostor.run_dir
-    assert resolve_run_dir(runs, f"@{impostor.run_id}") == labelled.run_dir
-    assert resolve_run_dir(runs, f"@{plain.run_id}") == plain.run_dir  # no label: falls back to id
 
 
 def test_a_run_opened_through_an_alias_is_locked_and_recorded_under_its_own_id(tmp_path):
@@ -1174,46 +876,6 @@ def test_a_run_opened_through_an_alias_is_locked_and_recorded_under_its_own_id(t
     assert lock["run_id"] == first.run_id
     assert _record(first.run_dir)["run"]["run_id"] == first.run_id
     assert len(_record(first.run_dir)["segments"]) == 2
-
-
-def test_the_literal_latest_wins_over_a_run_named_or_labelled_latest(tmp_path):
-    """``--resume latest`` means the same thing in every workspace. A run *named* ``latest`` is
-    addressed by its path, one *labelled* ``latest`` by ``@latest``."""
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    named = _finished_run(runs, clock, run_id="latest")
-    labelled = _finished_run(runs, clock, label="latest")
-    newest = _finished_run(runs, clock)
-
-    assert resolve_run_dir(runs, "latest") == newest.run_dir
-    assert resolve_run_dir(runs, "@latest") == labelled.run_dir
-    assert resolve_run_dir(runs, str(named.run_dir)) == named.run_dir
-
-
-def test_the_record_has_no_sidecar_files_and_stands_alone(tmp_path):
-    """One `fetch()` of one URL returns everything a run page needs: the run dir holds exactly
-    one file, and that file alone reproduces the run's whole index entry."""
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    store = _open(runs, clock, label="nightly-momo")
-    clock.advance(600)
-    store.checkpoint(counters={"cycles": 1})
-    clock.advance(600)
-    store.close(reason="time_limit", counters={"cycles": 2})
-
-    assert [p.name for p in store.run_dir.iterdir()] == [RUN_RECORD_NAME]
-    isolated = tmp_path / "isolated" / store.run_id
-    isolated.mkdir(parents=True)
-    shutil.copy(store.run_dir / RUN_RECORD_NAME, isolated / RUN_RECORD_NAME)
-    assert index_entry(isolated) == index_entry(store.run_dir)
-
-
-def test_the_index_lands_under_the_gitignored_workspace(tmp_path):
-    checked = subprocess.run(
-        ["git", "check-ignore", "-q", f"workspace/runs/{RUN_INDEX_NAME}"],
-        cwd=Path(__file__).resolve().parents[1],
-    )
-    assert checked.returncode == 0
 
 
 # ── the CLI: always-on run identity ────────────────────────────────────────────────────────
@@ -1418,80 +1080,87 @@ def test_the_record_is_rewritten_at_every_close_and_at_segment_close(tmp_path):
 
 
 # ── the CLI: `noctis runs` and `noctis run-record` (story #130) ────────────────────────────
+#
+# These verbs are the subject here, not the store: what the listing prints, which runs it hides,
+# what an address prints. So the fixture is a record written through the pure builder — the same
+# one the addressing and index tests use — and the last test in the file pins that the CLI cannot
+# tell such a record from a real store's own.
+
+LISTED = "20260727T142233Z-a1b2c3"
+SECOND_LISTED = "20260727T152233Z-d4e5f6"
+BROKEN = "20260102T000000Z-brokn0"
 
 
 def test_noctis_runs_lists_id_label_status_segments_and_headline_numbers(tmp_path):
     runs = _runs_dir(tmp_path)
-    clock = FakeClock()
-    first = _finished_run(runs, clock, label="nightly-momo", seconds=7200)
-    second = _finished_run(runs, clock, seconds=1800)
+    first = write_run(runs, LISTED, label="nightly-momo", runtime_s=7200)
+    second = write_run(runs, SECOND_LISTED, created_utc=stamp(7200), runtime_s=1800)
 
     result = runner.invoke(app, ["runs", "--config", _config(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    lines = [line for line in result.output.splitlines() if first.run_id in line]
+    lines = [line for line in result.output.splitlines() if first.name in line]
     assert len(lines) == 1
     assert "nightly-momo" in lines[0]
     assert "stopped" in lines[0]
     assert "2h00m" in lines[0]  # the headline runtime, in a shape a human reads
     assert " 1 " in lines[0]  # one segment
-    assert json.loads((runs / RUN_INDEX_NAME).read_text())["runs"][0]["run_id"] == second.run_id
-    assert second.run_id in result.output
+    assert json.loads((runs / RUN_INDEX_NAME).read_text())["runs"][0]["run_id"] == second.name
+    assert second.name in result.output
 
 
 def test_noctis_runs_hides_short_runs_until_all_widens_the_filter(tmp_path):
     """The default listing is the operator's experiment board, so it hides the noise a startup
     failure or a mistyped command leaves behind — and says how many it hid."""
     runs = _runs_dir(tmp_path)
-    clock = FakeClock()
-    real = _finished_run(runs, clock, label="real-work", seconds=7200)
-    aborted = _finished_run(runs, clock, label="aborted", seconds=2)
+    real = write_run(runs, LISTED, label="real-work", runtime_s=7200)
+    aborted = write_run(runs, SECOND_LISTED, label="aborted", created_utc=stamp(7200), runtime_s=2)
     cfg = _config(tmp_path)
 
     default = runner.invoke(app, ["runs", "--config", cfg])
     widened = runner.invoke(app, ["runs", "--all", "--config", cfg])
 
     assert default.exit_code == 0, default.output
-    assert real.run_id in default.output
-    assert aborted.run_id not in default.output
+    assert real.name in default.output
+    assert aborted.name not in default.output
     assert "--all" in default.output  # the hidden ones are never silent
     assert widened.exit_code == 0, widened.output
-    assert real.run_id in widened.output and aborted.run_id in widened.output
+    assert real.name in widened.output and aborted.name in widened.output
 
 
 def test_noctis_runs_says_everything_was_hidden_rather_than_crashing(tmp_path):
     """A workspace whose only run is a failed start has runs to count but none to show. The
     listing must still tell the operator that, and how to see them."""
     runs = _runs_dir(tmp_path)
-    aborted = _finished_run(runs, FakeClock(), label="aborted", seconds=2)
+    aborted = write_run(runs, LISTED, label="aborted", runtime_s=2)
 
     result = runner.invoke(app, ["runs", "--config", _config(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert aborted.run_id not in result.output
+    assert aborted.name not in result.output
     assert "--all" in result.output  # the hidden ones are never silent
 
 
 def test_noctis_runs_lists_an_unreadable_run_rather_than_crashing(tmp_path):
     runs = _runs_dir(tmp_path)
-    good = _finished_run(runs, FakeClock(), seconds=7200)
-    broken = runs / "20260102T000000Z-brokn0"
+    good = write_run(runs, LISTED, runtime_s=7200)
+    broken = runs / BROKEN
     broken.mkdir()
     (broken / RUN_RECORD_NAME).write_text("{ not json")
 
     result = runner.invoke(app, ["runs", "--config", _config(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert good.run_id in result.output
-    assert "20260102T000000Z-brokn0" in result.output
+    assert good.name in result.output
+    assert BROKEN in result.output
     assert "unreadable" in result.output
 
 
 def test_noctis_runs_regenerates_the_index_from_the_records_on_disk(tmp_path):
     runs = _runs_dir(tmp_path)
-    clock = FakeClock()
-    _finished_run(runs, clock, label="alpha", seconds=7200)
-    _finished_run(runs, clock, label="beta", seconds=7200)
+    write_run(runs, LISTED, label="alpha", runtime_s=7200)
+    write_run(runs, SECOND_LISTED, label="beta", created_utc=stamp(7200), runtime_s=7200)
+    write_index(runs, rebuild_index(runs))
     before = (runs / RUN_INDEX_NAME).read_bytes()
     (runs / RUN_INDEX_NAME).unlink()
 
@@ -1510,13 +1179,13 @@ def test_noctis_runs_with_no_runs_yet_says_so(tmp_path):
 
 def test_noctis_run_record_prints_the_record_for_a_run(tmp_path):
     runs = _runs_dir(tmp_path)
-    store = _finished_run(runs, FakeClock(), label="nightly-momo", seconds=7200)
+    run_dir = write_run(runs, LISTED, label="nightly-momo", runtime_s=7200)
 
-    result = runner.invoke(app, ["run-record", store.run_id, "--config", _config(tmp_path)])
+    result = runner.invoke(app, ["run-record", run_dir.name, "--config", _config(tmp_path)])
 
     assert result.exit_code == 0, result.output
     printed = json.loads(result.output)
-    assert printed == _record(store.run_dir)
+    assert printed == _record(run_dir)
     assert schema.validate(printed) == []
     assert printed["engine"]["comparable_key"]
 
@@ -1524,20 +1193,21 @@ def test_noctis_run_record_prints_the_record_for_a_run(tmp_path):
 def test_noctis_run_record_takes_the_same_address_forms_as_resume(tmp_path):
     """One resolver, one set of rules: a verb that addresses a run understands every form."""
     runs = _runs_dir(tmp_path)
-    clock = FakeClock()
-    _finished_run(runs, clock, seconds=7200)
-    momo = _finished_run(runs, clock, label="nightly-momo", seconds=7200)
+    write_run(runs, LISTED, runtime_s=7200)
+    momo = write_run(
+        runs, SECOND_LISTED, label="nightly-momo", created_utc=stamp(7200), runtime_s=7200
+    )
     cfg = _config(tmp_path)
 
-    for address in ("@nightly-momo", "latest", str(momo.run_dir / RUN_RECORD_NAME)):
+    for address in ("@nightly-momo", "latest", str(momo / RUN_RECORD_NAME)):
         result = runner.invoke(app, ["run-record", address, "--config", cfg])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output)["run"]["run_id"] == momo.run_id
+        assert json.loads(result.output)["run"]["run_id"] == momo.name
 
 
 def test_noctis_run_record_on_an_unknown_id_exits_nonzero_naming_the_run_tree(tmp_path):
     runs = _runs_dir(tmp_path)
-    _finished_run(runs, FakeClock(), seconds=7200)
+    write_run(runs, LISTED, runtime_s=7200)
 
     result = runner.invoke(
         app, ["run-record", "20260101T000000Z-nope00", "--config", _config(tmp_path)]
@@ -1549,7 +1219,7 @@ def test_noctis_run_record_on_an_unknown_id_exits_nonzero_naming_the_run_tree(tm
 
 def test_noctis_run_record_on_an_unreadable_record_exits_nonzero_saying_why(tmp_path):
     runs = _runs_dir(tmp_path)
-    broken = runs / "20260102T000000Z-brokn0"
+    broken = runs / BROKEN
     broken.mkdir(parents=True)
     (broken / RUN_RECORD_NAME).write_text("{ not json")
 
@@ -1557,3 +1227,35 @@ def test_noctis_run_record_on_an_unreadable_record_exits_nonzero_saying_why(tmp_
 
     assert result.exit_code == 1
     assert "unreadable" in result.output
+
+
+def test_the_cli_cannot_tell_a_written_record_from_a_real_stores_own(tmp_path):
+    """Why the addressing and index tests may drop the store: the fixture is the same artifact.
+
+    One run opened, run and closed by a real store, one written by ``write_run`` with the same
+    stamps, the same label and the same runtime — and ``noctis runs`` prints the same row for
+    both, down to the comparable key. The one column a hand-written record cannot derive is the
+    engine identity itself (a real fingerprint costs exactly what these fixtures exist to avoid),
+    so the key is handed to the builder; everything else is what the record says.
+    """
+    runs = _runs_dir(tmp_path)
+    real = _finished_run(runs, FakeClock(), label="twin")
+    twin = write_run(
+        runs,
+        "20260101T000000Z-abcdef",
+        label="twin",
+        comparable_key=_record(real.run_dir)["engine"]["comparable_key"],
+    )
+    cfg = _config(tmp_path)
+
+    listed = runner.invoke(app, ["runs", "--config", cfg])
+
+    assert listed.exit_code == 0, listed.output
+    (real_row,) = [line for line in listed.output.splitlines() if real.run_id in line]
+    (twin_row,) = [line for line in listed.output.splitlines() if twin.name in line]
+    assert twin_row.replace(twin.name, real.run_id) == real_row
+    for run_dir in (real.run_dir, twin):
+        printed = runner.invoke(app, ["run-record", run_dir.name, "--config", cfg])
+        assert printed.exit_code == 0, printed.output
+        assert json.loads(printed.output) == _record(run_dir)  # each prints its own, verbatim
+        assert schema.validate(json.loads(printed.output)) == []
