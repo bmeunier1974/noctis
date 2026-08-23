@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import textwrap
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -31,6 +30,8 @@ from typer.testing import CliRunner
 from noctis.cli import app
 from noctis.reporting.run_tree import RUN_LOCK_NAME, RUN_RECORD_NAME
 from noctis.research.surface import SessionCounters
+
+from ._run_tree_helpers import hold_lock
 
 runner = CliRunner()
 
@@ -358,35 +359,17 @@ def test_a_resumed_research_session_refuses_to_be_re_steered(tmp_path, sessions)
 
 def test_a_live_locked_run_refuses_a_research_resume(tmp_path, sessions):
     """Two engines writing one run would corrupt it, whichever verb they were started by."""
-    from noctis.reporting.run_record import utc_iso
-
     cfg = _config(tmp_path)
     runner.invoke(app, ["run", "--config", cfg])
     (run_dir,) = _run_dirs(tmp_path)
-    (run_dir / RUN_LOCK_NAME).write_text(
-        json.dumps(
-            {
-                "run_id": run_dir.name,
-                "pid": __import__("os").getpid(),  # alive on this host: never a stale lock
-                "hostname_hash": _host_hash(),
-                "started_utc": utc_iso(datetime.now(UTC)),
-                "heartbeat_utc": utc_iso(datetime.now(UTC)),
-            }
-        )
-    )
+    # Held by this very process: alive on this host, so never a stale lock.
+    hold_lock(run_dir, run_id=run_dir.name)
 
     result = _research(cfg, "--resume", run_dir.name)
 
     assert result.exit_code == 1
     assert "RUN LOCKED" in result.output
     assert len(_record(run_dir)["segments"]) == 1
-
-
-def _host_hash() -> str:
-    import hashlib
-    import socket
-
-    return hashlib.sha256(socket.gethostname().encode("utf-8")).hexdigest()[:12]
 
 
 def test_a_completed_run_refuses_a_research_resume(tmp_path, sessions):

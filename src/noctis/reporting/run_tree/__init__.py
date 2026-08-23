@@ -4,31 +4,39 @@ A run's tree is its ``run.json`` (the record), its ``run.lock`` (liveness) and e
 produced; ``runs/index.json`` is the derived roll-up beside them. No other package reads or writes
 a byte of it — that boundary is what keeps ``run_record`` and ``schema`` pure.
 
-Today the whole implementation is one module, :mod:`~noctis.reporting.run_tree.store`; it is peeled
-into ``record`` / ``address`` / ``index`` / ``lock`` / ``evidence`` over the stories that follow,
-all behind this surface. Every public name keeps its spelling, so a caller says
-``from noctis.reporting.run_tree import open_run, resolve_run_dir`` and never has to know which
-module answers.
+Two modules are peeled off already: :mod:`~noctis.reporting.run_tree.record` (the tree's names,
+the one narrow read, the one atomic write) and :mod:`~noctis.reporting.run_tree.lock` (the whole
+liveness protocol — the one fatal failure). Neither imports anything from this package, so a
+caller that needs only one of them can say so; ``address`` / ``index`` / ``evidence`` follow in
+the stories after. The rest is still :mod:`~noctis.reporting.run_tree.store`. Every public name
+keeps its spelling, so a caller says ``from noctis.reporting.run_tree import open_run,
+resolve_run_dir`` and never has to know which module answers.
 """
 
 from __future__ import annotations
 
+from noctis.reporting.run_tree.lock import (
+    RUN_LOCK_NAME,
+    STALE_HEARTBEAT_S,
+    RunLockedError,
+)
+from noctis.reporting.run_tree.record import (
+    RUN_RECORD_NAME,
+    RUNS_SUBDIR,
+    read_record,
+    write,
+)
 from noctis.reporting.run_tree.store import (
     PRUNED_SUBDIRS,
     RUN_INDEX_KIND,
     RUN_INDEX_NAME,
-    RUN_LOCK_NAME,
-    RUN_RECORD_NAME,
-    RUNS_SUBDIR,
     SHORT_RUN_S,
-    STALE_HEARTBEAT_S,
     STRATEGIES_SUBDIR,
     STRATEGY_TIER_SUBDIRS,
     FinishOutcome,
     PruneOutcome,
     RunAmbiguousError,
     RunCompletedError,
-    RunLockedError,
     RunNotFoundError,
     RunNotPrunableError,
     RunStore,
@@ -39,7 +47,6 @@ from noctis.reporting.run_tree.store import (
     open_run,
     prune_run_state,
     read_benchmark,
-    read_record,
     read_run_record,
     read_sessions,
     read_strategies,
@@ -48,7 +55,6 @@ from noctis.reporting.run_tree.store import (
     resolve_run_dir,
     update_index,
     visible_runs,
-    write,
     write_index,
 )
 

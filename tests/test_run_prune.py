@@ -31,7 +31,10 @@ from noctis.reporting.run_record import (
     build,
     prune_refusal,
     resume_refusal,
+    utc_iso,
 )
+
+from ._run_tree_helpers import FakeClock, hold_lock
 
 runner = CliRunner()
 
@@ -151,20 +154,6 @@ def test_a_pruned_record_is_still_schema_valid():
 
 
 # ── the store: what pruning does to the disk ───────────────────────────────────────────────
-
-
-class FakeClock:
-    """A deterministic clock the test moves by hand — no wall-clock read reaches the store."""
-
-    def __init__(self, start: datetime = START) -> None:
-        self.now = start
-
-    def __call__(self) -> datetime:
-        return self.now
-
-    def advance(self, seconds: float) -> FakeClock:
-        self.now = self.now + timedelta(seconds=seconds)
-        return self
 
 
 def _open(runs_dir: Path, clock: FakeClock, **kwargs):
@@ -425,7 +414,8 @@ def test_pruning_a_run_another_engine_holds_is_refused(tmp_path):
     runs = tmp_path / "runs"
     clock = FakeClock()
     run_dir, _ = _completed_with_state(runs, clock)
-    _hold_lock(run_dir, clock)
+    # A lock this very process holds — the one lock no staleness check can dismiss.
+    hold_lock(run_dir, run_id=run_dir.name, heartbeat_utc=utc_iso(clock()))
 
     with pytest.raises(RunLockedError) as excinfo:
         _prune(runs, run_dir.name, clock)
@@ -433,29 +423,6 @@ def test_pruning_a_run_another_engine_holds_is_refused(tmp_path):
     assert run_dir.name in str(excinfo.value)
     assert (run_dir / "state" / "champions.json").exists()
     assert _on_disk(run_dir)["run"]["state_pruned"] is False
-
-
-def _hold_lock(run_dir: Path, clock: FakeClock) -> None:
-    """A lock this very process holds — the one lock no staleness check can dismiss."""
-    import hashlib
-    import os
-    import socket
-
-    from noctis.reporting.run_record import utc_iso
-
-    (run_dir / "run.lock").write_text(
-        json.dumps(
-            {
-                "run_id": run_dir.name,
-                "pid": os.getpid(),
-                "hostname_hash": hashlib.sha256(socket.gethostname().encode("utf-8")).hexdigest()[
-                    :12
-                ],
-                "started_utc": utc_iso(clock()),
-                "heartbeat_utc": utc_iso(clock()),
-            }
-        )
-    )
 
 
 def test_a_pruned_run_can_never_be_resumed(tmp_path):

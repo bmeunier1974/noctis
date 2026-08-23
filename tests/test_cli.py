@@ -1586,7 +1586,7 @@ def _refusing_argv(prefix: str, tmp_path, monkeypatch) -> list[str]:
         return ["run", "--config", _paper_config(tmp_path), "--resume", NO_SUCH_RUN, "--finish"]
     if prefix == "PRUNE: ":
         return ["run-prune", NO_SUCH_RUN, "--config", _paper_config(tmp_path)]
-    from noctis.reporting.run_tree.store import acquire_lock
+    from noctis.reporting.run_tree.lock import acquire_lock
 
     cfg = _paper_config(tmp_path)
     assert runner.invoke(app, ["run", "--config", cfg]).exit_code == 0

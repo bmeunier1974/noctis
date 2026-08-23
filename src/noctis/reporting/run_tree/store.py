@@ -18,19 +18,17 @@ would be a second source of truth, free to drift from the records it summarizes.
 
 Everything in this module is I/O; everything about the record's *shape* is next door in
 ``run_record`` (pure) and ``schema`` (pure). :func:`collect` does every read and returns a
-:class:`~noctis.reporting.run_record.RunArtifacts`; :func:`write` does the one write. That
-boundary is what makes the golden-record and segmentation-equivalence tests cheap — they build a
-``RunArtifacts`` in memory and never go near a disk.
+:class:`~noctis.reporting.run_record.RunArtifacts`;
+:func:`~noctis.reporting.run_tree.record.write` does the one write. That boundary is what makes
+the golden-record and segmentation-equivalence tests cheap — they build a ``RunArtifacts`` in
+memory and never go near a disk.
 
-**The lock is the one fatal failure in the whole epic.** Everything else here is latched (below),
-because a reporting artifact must never take down a multi-week run. A lock is different in kind:
-two engines writing one run's record — and, once story #131 moves state under the run, one champion
-registry and one paper account — is *corruption*, not degradation. So a live lock is a hard,
-informative refusal, never a silent downgrade to "write anyway". A **stale** lock is stealable,
-because a crashed run must not need manual cleanup before it can be resumed: stale means a dead pid
-on *this* host (a pid on another host tells you nothing about whether it is alive) or a heartbeat
-gone colder than :data:`STALE_HEARTBEAT_S`. A steal is loud — one warning and an event in the
-record — because it is the one moment a run's history could be attributed to the wrong process.
+**The lock is the one fatal failure in the whole epic**, and it is a module of its own:
+:mod:`~noctis.reporting.run_tree.lock`. Everything here is latched (below), because a reporting
+artifact must never take down a multi-week run; two engines writing one run is *corruption*, not
+degradation, so a live lock is a hard refusal instead. This module only drives the four verbs —
+take the lock at an open, touch it at each checkpoint, release it at close, and assert it unheld
+before sealing or pruning.
 
 **The fail-safe latch**, straight from ``observability/debug/recorder.py``: the first internal
 exception logs exactly one warning, disables the store, and every later call is a no-op — no retry,
@@ -39,9 +37,9 @@ no second warning, nothing raised into the engine. A latched store never gets to
 never pass for a whole one.
 
 **Writes are synchronous and atomic.** No background thread (the engine spent four PRs removing
-shutdown join hazards; a writer thread would put one back), a temp file plus ``os.replace`` so a
-kill mid-write leaves the previous record intact, and an injected clock so no ``datetime.now()`` is
-ever reached from here.
+shutdown join hazards; a writer thread would put one back), the temp file plus ``os.replace`` of
+:mod:`~noctis.reporting.run_tree.record` so a kill mid-write leaves the previous record intact,
+and an injected clock so no ``datetime.now()`` is ever reached from here.
 """
 
 from __future__ import annotations
@@ -51,10 +49,9 @@ import json
 import logging
 import os
 import shutil
-import socket
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from noctis.reporting import schema as schema_module
@@ -74,6 +71,20 @@ from noctis.reporting.run_record import (
     seal,
     utc_iso,
 )
+from noctis.reporting.run_tree.lock import (
+    STALE_HEARTBEAT_S,
+    acquire_lock,
+    assert_unlocked,
+    release_lock,
+    touch_lock,
+)
+from noctis.reporting.run_tree.record import (
+    RUN_RECORD_NAME,
+    optional_str,
+    read_record,
+    write,
+    write_json,
+)
 from noctis.reporting.schema import (
     PROMOTED_OUTCOME,
     REJECTED_OUTCOME,
@@ -82,20 +93,15 @@ from noctis.reporting.schema import (
 
 __all__ = [
     "PRUNED_SUBDIRS",
-    "RUNS_SUBDIR",
     "STRATEGIES_SUBDIR",
     "STRATEGY_TIER_SUBDIRS",
     "RUN_INDEX_KIND",
     "RUN_INDEX_NAME",
-    "RUN_LOCK_NAME",
-    "RUN_RECORD_NAME",
     "SHORT_RUN_S",
-    "STALE_HEARTBEAT_S",
     "FinishOutcome",
     "PruneOutcome",
     "RunAmbiguousError",
     "RunCompletedError",
-    "RunLockedError",
     "RunNotFoundError",
     "RunNotPrunableError",
     "RunStore",
@@ -106,7 +112,6 @@ __all__ = [
     "open_run",
     "prune_run_state",
     "read_benchmark",
-    "read_record",
     "read_run_record",
     "read_sessions",
     "read_strategies",
@@ -115,16 +120,14 @@ __all__ = [
     "resolve_run_dir",
     "update_index",
     "visible_runs",
-    "write",
     "write_index",
 ]
 
 logger = logging.getLogger(__name__)
 
-# The run tree's names — one place, so nothing spells them by hand.
-RUNS_SUBDIR = "runs"
-RUN_RECORD_NAME = "run.json"
-RUN_LOCK_NAME = "run.lock"
+# The names this module owns; the record's and the lock's are in the modules that own those
+# (``record.RUN_RECORD_NAME``, ``lock.RUN_LOCK_NAME``) — one place each, so nothing spells one by
+# hand.
 RUN_INDEX_NAME = "index.json"
 # The run's champion board, inside its own state dir — the denominator of the record's
 # per-champion numbers. Named beside the other run-tree file names; the registry owns its schema.
@@ -136,13 +139,6 @@ RUN_INDEX_KIND = "noctis.run-index"
 # What the default listing calls noise: a finished run that never accumulated a minute of runtime
 # is a startup failure or a mistyped command, not an experiment. ``--all`` shows them.
 SHORT_RUN_S = 60.0
-
-# How cold a heartbeat must be before a lock we cannot otherwise check counts as abandoned.
-# Deliberately generous — a week. The heartbeat is touched at each CLOSE, i.e. roughly once per
-# trading day, and a live engine can sit in RESEARCH right through a long weekend; anything
-# tighter would steal the lock from a running process, which is the exact corruption the refusal
-# exists to prevent. The same-host dead-pid check is what catches the common crash promptly.
-STALE_HEARTBEAT_S = 7 * 24 * 3600.0
 
 # The only directories retention may ever remove (story #138), named here **as literal children of
 # one run dir** — this list is the entire blast radius, and it is a constant so that reviewing it is
@@ -166,10 +162,6 @@ CHAMPIONS_TIER = "champions"
 # Lowest precedence first, the order the library itself discovers them in: a champion of the same
 # name overrides a working-tier draft.
 STRATEGY_TIER_SUBDIRS = (TMP_TIER, CHAMPIONS_TIER)
-
-
-class RunLockedError(RuntimeError):
-    """Another engine holds this run. The one hard refusal — see the module docstring."""
 
 
 class RunNotFoundError(LookupError):
@@ -364,7 +356,7 @@ def finish_run(
             f"run {address} has {reason}, so there is nothing to seal. `noctis run-record "
             f"{address}` shows what is there."
         )
-    _assert_unlocked(
+    assert_unlocked(
         run_dir,
         run_id=run_id,
         now=now,
@@ -378,7 +370,7 @@ def finish_run(
     if resume_refusal(record) is not None:  # already terminal — the documented no-op
         run = record.get("run")
         stamp = run.get("completed_utc") if isinstance(run, Mapping) else None
-        return FinishOutcome(run_id=run_id, sealed=False, completed_utc=_optional_str(stamp))
+        return FinishOutcome(run_id=run_id, sealed=False, completed_utc=optional_str(stamp))
 
     artifacts = mark_interrupted(
         collect(run_dir, election_metric=election_metric, engine_root=engine_root)
@@ -387,28 +379,6 @@ def finish_run(
     (writer or write)(run_dir, build(seal(artifacts, at=stamp)))
     update_index(run_dir.parent, run_id)
     return FinishOutcome(run_id=run_id, sealed=True, completed_utc=stamp)
-
-
-def _assert_unlocked(
-    run_dir: Path, *, run_id: str, now: datetime, stale_after_s: float, consequence: str
-) -> None:
-    """Refuse when another engine is live on this run — the read-only half of :func:`acquire_lock`.
-
-    Deliberately does not *take* the lock: sealing (and pruning) is one write, and a lock file left
-    behind by a command that started nothing would be friction the next invocation has to reason
-    about. A stale lock (a dead pid here, a heartbeat gone cold) is no obstacle at all, for the same
-    reason a resume may steal one — a crashed run must never need manual cleanup.
-
-    ``consequence`` is the caller's half of the sentence: the holder is named identically whatever
-    was asked for, and what would have gone wrong differs.
-    """
-    held = _read_lock(run_dir / RUN_LOCK_NAME)
-    if held is None or _stale_reason(held, now=now, stale_after_s=stale_after_s) is not None:
-        return
-    raise RunLockedError(
-        f"run {run_id} is open by pid {held.get('pid')} on host {held.get('hostname_hash')} "
-        f"(heartbeat {held.get('heartbeat_utc')}), {consequence}"
-    )
 
 
 @dataclass(frozen=True)
@@ -483,7 +453,7 @@ def prune_run_state(
     refusal = prune_refusal(record)
     if refusal is not None:
         raise RunNotPrunableError(f"cannot prune {run_id}: {refusal} Nothing was removed.")
-    _assert_unlocked(
+    assert_unlocked(
         run_dir,
         run_id=run_id,
         now=now,
@@ -589,10 +559,9 @@ def collect(
     fatal: it degrades to a fresh record carrying an event that says so, because a corrupt
     reporting file must never stop a run from starting.
     """
-    path = Path(run_dir) / RUN_RECORD_NAME
     engine = read_engine_identity(election_metric, root=engine_root)
     trials = read_trials(run_dir)
-    prior, note = _read_record(path)
+    prior, note = _read_record(Path(run_dir))
     prior, upgrade_note = _upgraded_schema(prior)
     # Spend is derived here, beside the trial count and for the same reason, and it is priced
     # under the run's **own** frozen configuration — so resuming tomorrow under different prices
@@ -832,15 +801,15 @@ def _trade_fill(trade: Mapping[str, object]) -> TradeFill:
     """One journaled fill. The ledger stores the *report's* field names, which is deliberate — one
     trade shape is written at CLOSE and read back here, rather than two that could drift."""
     return TradeFill(
-        ts=_optional_str(trade.get("ts")),
+        ts=optional_str(trade.get("ts")),
         symbol=str(trade.get("symbol", "")),
         side=str(trade.get("side", "")),
         quantity=_number(trade.get("quantity")) or 0.0,
         price=_number(trade.get("price")) or 0.0,
         fees_usd=_number(trade.get("fees")) or 0.0,
         slippage_bps=_number(trade.get("slippage_bps")),
-        champion=_optional_str(trade.get("champion")),
-        rationale=_optional_str(trade.get("rationale")),
+        champion=optional_str(trade.get("champion")),
+        rationale=optional_str(trade.get("rationale")),
     )
 
 
@@ -1125,7 +1094,7 @@ def _strategy_artifact(
             if isinstance(journaled, Sequence) and not isinstance(journaled, str | bytes)
             else ()
         )
-        rationale = _optional_str(decision.get("rationale"))
+        rationale = optional_str(decision.get("rationale"))
         decided_utc = _record_stamp(decision.get("at"))
     tier, path = located if located is not None else (None, None)
     # A champion by *either* measure — the tier its file sits in, or the verdict the board
@@ -1220,16 +1189,16 @@ def _artifacts_from(
         raise TypeError("the 'run' section is missing or is not an object")
     return RunArtifacts(
         run_id=str(run.get("run_id") or run_dir.name),
-        created_utc=_optional_str(run.get("created_utc")),
-        last_active_utc=_optional_str(run.get("last_active_utc")),
+        created_utc=optional_str(run.get("created_utc")),
+        last_active_utc=optional_str(run.get("last_active_utc")),
         # Frozen at creation and carried forward verbatim, exactly like ``inputs``: the engine a
         # run was created under is the side every later resume is compared against (story #135),
         # so a write must never restamp it with whatever engine happens to be running now.
         engine=_frozen_engine(prior.get("engine")) or current,
         current_engine=current,
         segments=tuple(_segment_from(raw) for raw in _listed(prior, "segments")),
-        label=_optional_str(run.get("label")),
-        completed_utc=_optional_str(run.get("completed_utc")),
+        label=optional_str(run.get("label")),
+        completed_utc=optional_str(run.get("completed_utc")),
         complete=bool(run.get("complete", False)),
         events=tuple(_event_from(raw) for raw in _listed(prior, "events")),
         errors=tuple(_event_from(raw) for raw in _listed(prior, "errors")),
@@ -1338,27 +1307,6 @@ def _upgraded(
         engine_epoch=epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else 1,
         engine_changes=(*frozen.engine_changes, dict(entry)),
     )
-
-
-def write(run_dir: Path | str, record: Mapping[str, object]) -> None:
-    """Write ``run.json`` atomically: a temp file beside it, then ``os.replace``.
-
-    ``os.replace`` is atomic on every platform Noctis supports, so a reader (or a kill) sees
-    either the whole previous record or the whole new one — never a half-written file. The temp
-    file is removed on failure so a crashed write leaves no litter beside the record.
-    """
-    _write_json(Path(run_dir) / RUN_RECORD_NAME, record)
-
-
-def _write_json(target: Path, document: Mapping[str, object]) -> None:
-    """One atomic JSON write, shared by the record and the index — same discipline, one copy."""
-    tmp = target.with_name(f"{target.name}.tmp-{os.getpid()}")
-    try:
-        tmp.write_text(json.dumps(document, indent=2, default=str) + "\n", encoding="utf-8")
-        os.replace(tmp, target)
-    finally:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
 
 
 # ── addressing ─────────────────────────────────────────────────────────────────────────────
@@ -1587,7 +1535,7 @@ def _summary_of(run_dir: Path) -> _RunSummary:
     return _RunSummary(
         run_dir=run_dir,
         run_id=str(run.get("run_id") or run_dir.name),
-        label=_optional_str(run.get("label")),
+        label=optional_str(run.get("label")),
         last_active=str(run.get("last_active_utc") or run.get("created_utc") or ""),
         resumable=resume_refusal(record or {}) is None,
         readable=True,
@@ -1595,16 +1543,6 @@ def _summary_of(run_dir: Path) -> _RunSummary:
 
 
 # ── the derived index ──────────────────────────────────────────────────────────────────────
-
-
-def read_record(run_dir: Path | str) -> tuple[dict | None, str | None]:
-    """One run's record, or ``(None, why)`` when there is not a readable one.
-
-    The reading half of "a broken record is evidence, not a crash": the caller gets a reason it
-    can *show* — no record yet, unreadable JSON, a foreign shape — instead of an exception that
-    would take a whole listing down with one bad file.
-    """
-    return _record_at(Path(run_dir) / RUN_RECORD_NAME)
 
 
 def index_entry(run_dir: Path | str) -> dict:
@@ -1655,7 +1593,7 @@ def update_index(runs_dir: Path | str, run_id: str) -> None:
 
 def write_index(runs_dir: Path | str, index: Mapping[str, object]) -> None:
     """Write ``index.json`` atomically — the same tmp + ``os.replace`` the record uses."""
-    _write_json(Path(runs_dir) / RUN_INDEX_NAME, index)
+    write_json(Path(runs_dir) / RUN_INDEX_NAME, index)
 
 
 def visible_runs(
@@ -1716,10 +1654,10 @@ def _entry_from(record: Mapping[str, object], *, run_dir: Path) -> dict:
     version = engine.get("engine_version")
     return {
         "run_id": str(run.get("run_id") or run_dir.name),
-        "label": _optional_str(run.get("label")),
-        "status": _optional_str(run.get("status")),
-        "created_utc": _optional_str(run.get("created_utc")),
-        "last_active_utc": _optional_str(run.get("last_active_utc")),
+        "label": optional_str(run.get("label")),
+        "status": optional_str(run.get("status")),
+        "created_utc": optional_str(run.get("created_utc")),
+        "last_active_utc": optional_str(run.get("last_active_utc")),
         "segments": len(segments),
         "cumulative_runtime_s": _optional_number(run.get("cumulative_runtime_s")),
         # The compute the run was given, beside the compute it has used: a listing that shows one
@@ -1728,7 +1666,7 @@ def _entry_from(record: Mapping[str, object], *, run_dir: Path) -> dict:
         "run_limit_hours": _optional_number(run.get("run_limit_hours")),
         "complete": bool(run.get("complete", False)),
         "engine_version": version if isinstance(version, int) else None,
-        "comparable_key": _optional_str(engine.get("comparable_key")),
+        "comparable_key": optional_str(engine.get("comparable_key")),
         "mixed_engine": bool(engine.get("mixed_engine", False)),
         "readable": True,
         "note": None,
@@ -1769,126 +1707,6 @@ def _read_index(runs_dir: Path) -> dict | None:
     if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
         return None
     return index
-
-
-# ── the lock ───────────────────────────────────────────────────────────────────────────────
-
-
-def acquire_lock(
-    run_dir: Path,
-    *,
-    run_id: str,
-    now: datetime,
-    stale_after_s: float = STALE_HEARTBEAT_S,
-) -> RecordEvent | None:
-    """Take the run's liveness lock, or refuse. Returns the steal note when one was needed.
-
-    **Refusal is the point.** A held lock means another engine is working this run, and two
-    engines writing one run corrupt it, so this raises :class:`RunLockedError` naming the holder
-    and the lock file rather than degrading to a shared write. Only a *stale* lock is taken
-    (:func:`_stale_reason`), and taking one is recorded: a warning here and an event on the
-    record, so a run's history is never silently re-attributed.
-    """
-    lock_path = run_dir / RUN_LOCK_NAME
-    held = _read_lock(lock_path)
-    note: RecordEvent | None = None
-    if held is not None:
-        reason = _stale_reason(held, now=now, stale_after_s=stale_after_s)
-        if reason is None:
-            raise RunLockedError(
-                f"run {run_id} is already open by pid {held.get('pid')} on host "
-                f"{held.get('hostname_hash')} (heartbeat {held.get('heartbeat_utc')}). "
-                f"Two engines writing one run would corrupt it, so this one refuses to start. "
-                f"Stop the other engine, or remove {lock_path} once you are certain it is gone."
-            )
-        text = f"stole a stale run lock held by pid {held.get('pid')}: {reason}"
-        logger.warning("run %s: %s", run_id, text)
-        note = RecordEvent(t=utc_iso(now), kind="warn", text=text)
-    _write_lock(lock_path, run_id=run_id, started=now, heartbeat=now)
-    return note
-
-
-def _stale_reason(lock: Mapping[str, object], *, now: datetime, stale_after_s: float) -> str | None:
-    """Why this lock may be taken, or ``None`` when it must be respected.
-
-    Two independent pieces of evidence, in order of strength: a pid that is provably gone **on
-    this host** (checking a pid on another host would be meaningless — the number belongs to a
-    different process table), and a heartbeat colder than the threshold, which is the only signal
-    available for a holder we cannot inspect.
-    """
-    pid = lock.get("pid")
-    if lock.get("hostname_hash") == _hostname_hash() and isinstance(pid, int):
-        if not _pid_alive(pid):
-            return f"pid {pid} is not running on this host"
-    age = _heartbeat_age_s(lock.get("heartbeat_utc"), now=now)
-    if age is not None and age > stale_after_s:
-        return f"its heartbeat is {int(age)}s cold (older than the {int(stale_after_s)}s threshold)"
-    return None
-
-
-def _heartbeat_age_s(heartbeat: object, *, now: datetime) -> float | None:
-    if not isinstance(heartbeat, str):
-        return None
-    try:
-        stamp = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=UTC)
-    return (now - stamp).total_seconds()
-
-
-def _pid_alive(pid: int) -> bool:
-    """Whether ``pid`` exists on this host. ``kill(pid, 0)`` signals nothing; it only asks."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:  # someone else's process — alive, just not ours to signal
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def _hostname_hash() -> str:
-    """A stable, non-identifying host id: ``sha256(hostname)[:12]``.
-
-    Hashed, not raw, because the record is meant to be shareable — two segments on one machine
-    are still provably the same host, without publishing a machine name. The hashing itself lives
-    in ``observability.environment`` (story #139), so the lock and the record's per-segment
-    environment block cannot drift into two different answers for one machine.
-    """
-    from noctis.observability.environment import hostname_hash
-
-    return hostname_hash(socket.gethostname())
-
-
-def _write_lock(path: Path, *, run_id: str, started: datetime, heartbeat: datetime) -> None:
-    path.write_text(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "pid": os.getpid(),
-                "hostname_hash": _hostname_hash(),
-                "started_utc": utc_iso(started),
-                "heartbeat_utc": utc_iso(heartbeat),
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
-def _read_lock(path: Path) -> dict | None:
-    try:
-        held = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return held if isinstance(held, dict) else None
 
 
 # ── the store ──────────────────────────────────────────────────────────────────────────────
@@ -2039,7 +1857,7 @@ class RunStore:
         because a lock nobody holds must never be the thing that blocks the next invocation.
         """
         self._guarded(self._close, reason, counters, phase_seconds)
-        self._release_lock()
+        release_lock(self._run_dir)
 
     # ── the fail-safe latch ────────────────────────────────────────────────────────────────
 
@@ -2143,12 +1961,7 @@ class RunStore:
 
     def _touch(self, now: datetime) -> None:
         self._replace_artifacts(last_active_utc=utc_iso(now))
-        _write_lock(
-            self._run_dir / RUN_LOCK_NAME,
-            run_id=self._artifacts.run_id,
-            started=now,
-            heartbeat=now,
-        )
+        touch_lock(self._run_dir, run_id=self._artifacts.run_id, now=now)
 
     def _replace_artifacts(self, **changes: object) -> None:
         current = self._artifacts
@@ -2202,45 +2015,19 @@ class RunStore:
         # record that is not on disk. A failed write latches the store and skips this entirely.
         update_index(self._run_dir.parent, self._artifacts.run_id)
 
-    def _release_lock(self) -> None:
-        """Best effort, always attempted: a stale lock file is friction for the next invocation,
-        never a reason to fail this one."""
-        try:
-            (self._run_dir / RUN_LOCK_NAME).unlink(missing_ok=True)
-        except OSError:  # pragma: no cover - a lock we cannot remove is the next open's problem
-            pass
-
 
 # ── reading a record back ──────────────────────────────────────────────────────────────────
 
 
-def _record_at(path: Path) -> tuple[dict | None, str | None]:
-    """The parsed record, or ``(None, reason)`` — the one place a record is read off disk.
-
-    The reason is written to be shown to an operator as-is, because both callers show it: the
-    listing puts it in the run's index entry, and the opening path folds it into the record's own
-    events. One phrasing, so a broken record is described the same way wherever it surfaces.
-    """
-    if not path.is_file():
-        return None, f"no {path.name} yet"
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return None, f"an unreadable {path.name} ({type(exc).__name__})"
-    if not isinstance(record, dict):
-        return None, f"an unreadable {path.name} (not an object)"
-    return record, None
-
-
-def _read_record(path: Path) -> tuple[dict | None, RecordEvent | None]:
+def _read_record(run_dir: Path) -> tuple[dict | None, RecordEvent | None]:
     """The prior record for an *opening* run, or ``(None, note)`` when it cannot be read.
 
     A missing record is the normal case for a fresh run and carries no note; anything else is
     worth an event, because a run whose history could not be read must say so in the record it
     starts in its place.
     """
-    record, reason = _record_at(path)
-    if record is not None or not path.is_file():
+    record, reason = read_record(run_dir)
+    if record is not None or not (run_dir / RUN_RECORD_NAME).is_file():
         return record, None
     return None, RecordEvent(
         t=None,
@@ -2269,8 +2056,8 @@ def _segment_from(raw: Mapping[str, object]) -> SegmentArtifact:
         index=index if isinstance(index, int) else 0,
         started_utc=str(raw.get("started_utc")),
         engine=engine,
-        stopped_utc=_optional_str(raw.get("stopped_utc")),
-        stopped_reason=_optional_str(raw.get("stopped_reason")),
+        stopped_utc=optional_str(raw.get("stopped_utc")),
+        stopped_reason=optional_str(raw.get("stopped_reason")),
         status=str(raw.get("status", "running")),
         argv=tuple(str(part) for part in argv) if isinstance(argv, Sequence) else (),
         command=str(raw.get("command", "run")),
@@ -2289,15 +2076,11 @@ def _segment_from(raw: Mapping[str, object]) -> SegmentArtifact:
 def _event_from(raw: Mapping[str, object]) -> RecordEvent:
     segment = raw.get("segment")
     return RecordEvent(
-        t=_optional_str(raw.get("t")),
+        t=optional_str(raw.get("t")),
         kind=str(raw.get("kind", "info")),
         text=str(raw.get("text", "")),
         segment=segment if isinstance(segment, int) else None,
     )
-
-
-def _optional_str(value: object) -> str | None:
-    return None if value is None else str(value)
 
 
 def _runtime_of(record: Mapping[str, object]) -> float:

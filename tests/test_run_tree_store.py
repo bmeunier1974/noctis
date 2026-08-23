@@ -26,7 +26,7 @@ import socket
 import subprocess
 import sys
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -42,7 +42,6 @@ from noctis.reporting.run_tree import (
     RUN_INDEX_NAME,
     RUN_LOCK_NAME,
     RUN_RECORD_NAME,
-    STALE_HEARTBEAT_S,
     RunAmbiguousError,
     RunLockedError,
     RunNotFoundError,
@@ -54,23 +53,9 @@ from noctis.reporting.run_tree import (
     write_index,
 )
 
+from ._run_tree_helpers import FakeClock, hold_lock
+
 runner = CliRunner()
-
-START = datetime(2026, 7, 27, 14, 22, 33, 418000, tzinfo=UTC)
-
-
-class FakeClock:
-    """A deterministic clock the test moves by hand — no wall-clock read reaches the store."""
-
-    def __init__(self, start: datetime = START) -> None:
-        self.now = start
-
-    def __call__(self) -> datetime:
-        return self.now
-
-    def advance(self, seconds: float) -> FakeClock:
-        self.now = self.now + timedelta(seconds=seconds)
-        return self
 
 
 def _open(runs_dir: Path, clock: FakeClock, **kwargs):
@@ -85,18 +70,6 @@ def _record(run_dir: Path) -> dict:
 
 def _lock(run_dir: Path) -> dict:
     return json.loads((run_dir / RUN_LOCK_NAME).read_text())
-
-
-def _write_lock(run_dir: Path, **fields) -> None:
-    lock = {
-        "run_id": run_dir.name,
-        "pid": os.getpid(),
-        "hostname_hash": _our_host_hash(),
-        "started_utc": "2026-07-27T14:22:33.418Z",
-        "heartbeat_utc": "2026-07-27T14:22:33.418Z",
-    }
-    lock.update(fields)
-    (run_dir / RUN_LOCK_NAME).write_text(json.dumps(lock))
 
 
 def _our_host_hash() -> str:
@@ -562,7 +535,7 @@ def test_a_run_killed_mid_segment_is_marked_interrupted_on_the_next_open(tmp_pat
     # At write time the record says exactly what was true: a segment is open. Nothing is guessed.
     assert _record(killed.run_dir)["segments"][0]["status"] == "running"
     # The kill: the process is gone, its lock left behind holding a pid that no longer exists.
-    _write_lock(killed.run_dir, pid=_dead_pid())
+    hold_lock(killed.run_dir, run_id=killed.run_id, pid=_dead_pid())
 
     clock.advance(7200)
     with caplog.at_level(logging.WARNING):
@@ -581,7 +554,7 @@ def test_an_interrupted_run_left_unopened_still_reads_as_interrupted(tmp_path):
     runs = tmp_path / "runs"
     clock = FakeClock()
     killed = _open(runs, clock)
-    _write_lock(killed.run_dir, pid=_dead_pid())
+    hold_lock(killed.run_dir, run_id=killed.run_id, pid=_dead_pid())
 
     reopened = _open(runs, clock, run_id=killed.run_id)
     reopened.close(reason="stopped")
@@ -605,68 +578,6 @@ def test_a_second_process_refuses_to_open_a_live_locked_run(tmp_path):
     assert live.run_id in message
     assert str(os.getpid()) in message  # names the holder
     assert "run.lock" in message  # …and where the evidence is
-
-
-def test_a_live_lock_from_another_host_is_never_stolen(tmp_path):
-    """A pid on another host tells you nothing, so only a cold heartbeat may condemn it."""
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    live = _open(runs, clock)
-    live.close(reason="stopped")
-    _write_lock(
-        live.run_dir,
-        hostname_hash="0" * 12,
-        pid=999_999,
-        heartbeat_utc="2026-07-27T14:22:33.418Z",
-    )
-
-    with pytest.raises(RunLockedError):
-        _open(runs, clock, run_id=live.run_id)
-
-
-def test_a_dead_pid_on_this_host_is_a_stale_lock_stolen_with_a_warning_and_an_event(
-    tmp_path, caplog
-):
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    first = _open(runs, clock)
-    first.close(reason="stopped")
-    dead = _dead_pid()
-    _write_lock(first.run_dir, pid=dead)
-
-    with caplog.at_level(logging.WARNING):
-        store = _open(runs, clock, run_id=first.run_id)
-
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert str(dead) in warnings[0].getMessage()
-    events = _record(store.run_dir)["events"]
-    assert [e["kind"] for e in events] == ["warn"]
-    assert str(dead) in events[0]["text"]
-    assert events[0]["segment"] == 1
-    assert _lock(store.run_dir)["pid"] == os.getpid()  # …and the lock is ours now
-
-
-def test_a_cold_heartbeat_is_a_stale_lock_stolen_with_a_warning_and_an_event(tmp_path, caplog):
-    runs = tmp_path / "runs"
-    clock = FakeClock()
-    first = _open(runs, clock)
-    first.close(reason="stopped")
-    cold = clock.now - timedelta(seconds=STALE_HEARTBEAT_S + 60)
-    _write_lock(
-        first.run_dir,
-        hostname_hash="0" * 12,
-        pid=999_999,
-        heartbeat_utc=f"{cold:%Y-%m-%dT%H:%M:%S}.000Z",
-    )
-
-    with caplog.at_level(logging.WARNING):
-        store = _open(runs, clock, run_id=first.run_id)
-
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "heartbeat" in warnings[0].getMessage()
-    assert "heartbeat" in _record(store.run_dir)["events"][0]["text"]
 
 
 def test_closing_the_run_releases_the_lock(tmp_path):
@@ -913,8 +824,12 @@ def test_a_two_segment_fixture_run_matches_the_committed_golden_record(tmp_path)
     )
 
     clock.advance(36000)
-    _write_lock(
-        first.run_dir, pid=999_999, hostname_hash="0" * 12, heartbeat_utc="2020-01-01T00:00:00.000Z"
+    hold_lock(
+        first.run_dir,
+        run_id=first.run_id,
+        pid=999_999,
+        hostname_hash="0" * 12,
+        heartbeat_utc="2020-01-01T00:00:00.000Z",
     )
     second = _open(
         runs, clock, run_id=first.run_id, argv=["run"], environment=_machine("bbbb2222", cores=32)
