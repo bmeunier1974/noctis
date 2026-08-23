@@ -36,6 +36,7 @@ from noctis.observability.engine_id import (
     ARBITER_COMPONENTS,
     EngineFingerprint,
     Tier,
+    compare,
     tier_of,
 )
 
@@ -137,27 +138,32 @@ def engine_change(record: Mapping[str, Any], current: EngineFingerprint) -> Engi
     are not the same news, and a single hash could only say that *something* differs — which would
     force either refusing every resume after any edit, or trusting none of them.
 
-    Two nulls are not drift (neither side could identify the component, so nothing is *known* to
-    have moved) — the same missing-input rule :func:`~noctis.observability.engine_id.compare` takes.
-    A record carrying no readable engine identity yields no change at all: history adopted by
-    ``noctis migrate`` froze no engine, and stranding exactly the history that path exists to
-    preserve would be the wrong answer.
+    Which names moved is not decided here: it is :func:`~noctis.observability.engine_id.compare`,
+    the one null rule, over the two digest maps — so a component present on one side only is drift
+    while two nulls are not, and "may this run continue" can never disagree with "may this change
+    land" about the same edit. A record carrying no readable engine identity yields no change at
+    all: history adopted by ``noctis migrate`` froze no engine, and stranding exactly the history
+    that path exists to preserve would be the wrong answer.
     """
     engine = _engine(record)
     frozen = engine.get("fingerprint")
     if not isinstance(frozen, Mapping):
         return EngineChange(current_version=current.engine_version)
     computed = current.digests()
+    # A record is JSON: read it the way ``compare`` does — a non-string is an unidentified
+    # component, so it is the null a drift line prints, never a value.
+    recorded: dict[str, str | None] = {
+        name: value if isinstance(value, str) else None for name, value in frozen.items()
+    }
     components = tuple(
         ComponentChange(
             component=name,
             tier=tier_of(name),
-            frozen=_digest(frozen, name),
-            current=_digest(computed, name),
+            frozen=recorded.get(name),
+            current=computed.get(name),
             files=_files(current, name),
         )
-        for name in sorted(set(frozen) | set(computed))
-        if _known(frozen, name) != _known(computed, name)
+        for name in sorted(compare(recorded, computed))
     )
     return EngineChange(
         components=components,
@@ -267,21 +273,6 @@ def _named(changes: Sequence[ComponentChange]) -> str:
 def _engine(record: Mapping[str, Any]) -> Mapping[str, Any]:
     engine = record.get("engine")
     return engine if isinstance(engine, Mapping) else {}
-
-
-def _digest(digests: Mapping[str, Any], name: str) -> str | None:
-    """One component's digest as a value — ``None`` for absent, unknown or non-string."""
-    digest = digests.get(name)
-    return digest if isinstance(digest, str) else None
-
-
-def _known(digests: Mapping[str, Any], name: str) -> tuple[bool, str | None]:
-    """The same digest, paired with whether this side knew the component at all.
-
-    The pair is what makes "present on one side only" count as drift while two nulls do not:
-    neither side could identify the component, so nothing is *known* to have moved.
-    """
-    return (name in digests, _digest(digests, name))
 
 
 def _files(current: EngineFingerprint, name: str) -> tuple[str, ...]:
