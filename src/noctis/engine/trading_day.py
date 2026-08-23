@@ -157,6 +157,11 @@ class TradingDay:
             poll_interval_s=poll_interval_s,
             stop_event=stop_event,
         )
+        # Stamp the driver's own summary with the date it settled: the summary IS the
+        # per-session evidence the phase hands on, so which session it speaks for travels
+        # with it rather than in a wrapper around it. The settle is the one place that
+        # knows the date — the drivers only see a feed.
+        result.summary.session = day
         # Attribute this session's realized P&L to the champions that earned it (plan 5).
         # Guarded so a ledger failure never blocks the account save below — the forward
         # record is derived evidence, not the money state.

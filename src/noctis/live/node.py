@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -41,6 +41,11 @@ logger = logging.getLogger("noctis.trading")
 
 @dataclass
 class TradingSummary:
+    # Which session this summary is the evidence for. The *settle* stamps it
+    # (:class:`~noctis.engine.trading_day.TradingDay` knows the date it is settling); the
+    # batch wrapper :func:`run_trading` drains a whole static timeline with no session date
+    # of its own, so it leaves it ``None``.
+    session: date | None = None
     bars_processed: int = 0
     orders_submitted: int = 0
     orders_refused: int = 0

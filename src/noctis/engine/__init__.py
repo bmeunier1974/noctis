@@ -23,7 +23,6 @@ from noctis.engine.report_assembly import SessionActivity, assemble_report
 from noctis.engine.research import ResearchSummary, run_research
 from noctis.engine.runtime import Runtime, RuntimeResult, build_runtime
 from noctis.engine.trading_phase import (
-    SessionRecord,
     TradingOutcome,
     TradingPhase,
     resolve_trading_driver,
@@ -53,7 +52,6 @@ __all__ = [
     "build_runtime",
     "TradingPhase",
     "TradingOutcome",
-    "SessionRecord",
     "resolve_trading_driver",
     "ForwardLedger",
     "ForwardRecord",

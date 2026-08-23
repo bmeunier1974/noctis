@@ -125,6 +125,16 @@ def test_champions_emit_paper_orders_on_replay():
         assert abs(qty) * last_close <= summary.final_equity * 0.10 + 50.0, sym
 
 
+def test_batch_wrapper_leaves_the_session_stamp_unset():
+    """The session stamp belongs to the *settle*: ``run_trading`` drains a whole static
+    timeline with no session date of its own, so its summary carries ``None``."""
+    summary = run_trading(
+        candidates=[Candidate("sma_crossover", {"fast": 3, "slow": 8})],
+        bars_by_symbol={"AAPL": _uptrend()},
+    )
+    assert summary.session is None
+
+
 def test_gross_cap_holds_when_multiple_symbols_enter_same_bar():
     # Two symbols going long the same bar must share the gross cap, not each get the
     # full room from a stale pre-minute snapshot (60% + 60% > 100% cap).

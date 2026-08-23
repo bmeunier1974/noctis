@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,7 +29,6 @@ from noctis.observability import Event
 from noctis.reporting.report import Trade
 
 if TYPE_CHECKING:
-    from noctis.broker.paper import PaperBroker
     from noctis.engine.clock import MarketClock
     from noctis.live.node import TradingSummary
     from noctis.live.risk import RiskLimits
@@ -88,33 +87,24 @@ def _default_feed_factory(*, symbols):
 
 
 @dataclass
-class SessionRecord:
-    """One settled session, kept on the outcome as per-session evidence.
-
-    ``bars`` is the replay slice the session traded — empty on the live path, whose
-    externally built bars land on the outcome's ``live_bars`` instead.
-    """
-
-    day: date
-    bars: dict[str, pd.DataFrame]
-    summary: TradingSummary
-    fills: list[Fill]
-
-
-@dataclass
 class TradingOutcome:
     """Everything one TRADING entry hands back for the run/report accumulators.
 
     ``sessions`` carries the per-session evidence in traded order (a replay catch-up settles
-    several); the scalar fields are the phase-level fold the close report reads —
-    equity/positions from the *last* session, trades and report events across all of them.
-    Empty ``sessions`` means nothing traded (account refusal, no new data, or an empty
-    champion board); ``events`` still says why whenever there is a reason worth reporting.
-    ``broker`` is the one continuous paper account every session settled on (``None`` only
-    when the persisted account refused to load).
+    several): each entry is the driver's own :class:`~noctis.live.node.TradingSummary`,
+    stamped by the settle with the date it speaks for, so a catch-up's sessions are
+    inspectable without a wrapper shape around them. The scalar fields are the phase-level
+    fold the close report reads — equity/positions from the *last* session, trades and report
+    events across all of them. Empty ``sessions`` means nothing traded (account refusal, no
+    new data, or an empty champion board); ``events`` still says why whenever there is a
+    reason worth reporting.
+
+    What the outcome carries is **facts, never a collaborator**: the paper account the
+    sessions settled on is durable (``state/paper_account.json``), and CLOSE reads that file
+    once rather than being handed the live broker object.
     """
 
-    sessions: list[SessionRecord] = field(default_factory=list)
+    sessions: list[TradingSummary] = field(default_factory=list)
     trades: list[Trade] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
     positions: dict[str, float] = field(default_factory=dict)
@@ -122,7 +112,6 @@ class TradingOutcome:
     end_equity: float = 0.0
     orders_submitted: int = 0
     live_bars: dict[str, pd.DataFrame] = field(default_factory=dict)
-    broker: PaperBroker | None = None
 
 
 class TradingPhase:
@@ -173,7 +162,6 @@ class TradingPhase:
             logger.error("trading refused: %s", exc)
             outcome.events.append(f"Trading refused — {exc}")
             return outcome
-        outcome.broker = broker
         forward = ForwardLedger(Path(self.settings.state_dir) / "forward_ledger.json")
         forward.load()  # never raises: a corrupt ledger warns and starts empty, never blocks
         day_runner = TradingDay(
@@ -267,7 +255,7 @@ class TradingPhase:
             # catch-up, anchored to that day's carried starting equity.
             feed = ReplayBarFeed(session_bars)
             settled = day_runner.run(feed=feed, day=day)
-            self._fold(outcome, day, session_bars, settled)
+            self._fold(outcome, settled)
 
     def _run_live(
         self,
@@ -298,20 +286,16 @@ class TradingPhase:
             stop_event=self._stop_event,
         )
         outcome.live_bars = settled.live_bars
-        self._fold(outcome, day, {}, settled)
+        self._fold(outcome, settled)
 
-    def _fold(
-        self,
-        outcome: TradingOutcome,
-        day: date,
-        session_bars: dict[str, pd.DataFrame],
-        settled: SessionOutcome,
-    ) -> None:
+    def _fold(self, outcome: TradingOutcome, settled: SessionOutcome) -> None:
         """Fold one settled session — its OWN fills only — into the phase outcome. The
         carried broker accumulates fills across a catch-up, and re-recording earlier ones
         would double-count trades; ``SessionOutcome.fills`` is already per-session."""
         summary = settled.summary
-        outcome.sessions.append(SessionRecord(day, session_bars, summary, settled.fills))
+        # The session's evidence is its own stamped summary — appended as it stands, with no
+        # wrapper shape to unpack on the way out.
+        outcome.sessions.append(summary)
         outcome.orders_submitted += summary.orders_submitted
         outcome.positions = summary.positions
         outcome.start_equity = summary.start_equity
