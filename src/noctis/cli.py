@@ -23,7 +23,7 @@ import typer
 from noctis.config import SafetyGateError, load_settings, resolve_execution_mode
 
 if TYPE_CHECKING:  # the composition root imports at call time (fast `--help`), types don't
-    from noctis.bootstrap import OverrideChange, Segment, SessionInputs
+    from noctis.bootstrap import OverrideChange, Reading, Segment, SessionInputs
 
 
 def _logging_level(verbose: int) -> int:
@@ -56,8 +56,10 @@ def _exit_red(exc: Exception, prefix: str = "") -> NoReturn:
 # it: an operator needs to know which of their commands refused, while the sentence beneath the
 # prefix stays the run store's own, whichever way the run was reached. `--resume` can meet all four
 # of the run/rehydration refusals; `--finish` and `run-prune` reach only the missing-run one — they
-# map through the same table anyway, so a fifth refusal cannot arrive at one verb unspoken.
-_VERB_PREFIXES = {"resume": "RESUME: ", "finish": "FINISH: ", "prune": "PRUNE: "}
+# map through the same table anyway, so a fifth refusal cannot arrive at one verb unspoken. A
+# plain *reading* (epic #292) prefixes nothing: `noctis report @x` on a run that is not there says
+# the resolver's own sentence, because there is no second thing the verb could have been doing.
+_VERB_PREFIXES = {"resume": "RESUME: ", "finish": "FINISH: ", "prune": "PRUNE: ", "read": ""}
 
 
 @lru_cache(maxsize=1)
@@ -76,7 +78,7 @@ def _startup_refusals() -> tuple[tuple[type[Exception], str | None], ...]:
     is pure — because naming these types means importing the composition root, and ``--help`` must
     stay fast.
     """
-    from noctis.bootstrap import UsageError
+    from noctis.bootstrap import RunPrunedError, UsageError
     from noctis.config.rehydrate import RehydrationError
     from noctis.observability.engine_change import EngineChangeError
     from noctis.reporting.run_tree import (
@@ -93,6 +95,10 @@ def _startup_refusals() -> tuple[tuple[type[Exception], str | None], ...]:
         (SafetyGateError, "SAFETY GATE: "),
         (RunLockedError, "RUN LOCKED: "),
         (RunNotPrunableError, "PRUNE REFUSED: "),
+        # Retention's other side, and the reason it says its own name: a reader of a pruned run is
+        # refused a tree that no longer exists, and the sentence already names the run, the verb
+        # that deleted it and the record that survived it.
+        (RunPrunedError, ""),
         (RunNotFoundError, None),
         (RunCompletedError, None),
         (RehydrationError, None),
@@ -222,6 +228,52 @@ def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
         typer.secho(message, fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
     typer.secho(f"WARNING: {message}", fg=typer.colors.YELLOW, err=True)
+
+
+def _reading_or_exit(
+    config: str | None,
+    address: str | None = None,
+    *,
+    verb: str = "read",
+    require_gate: bool = False,
+    warn_only: bool = False,
+    mandate_overlay: bool = True,
+    readable_pruned: bool = False,
+) -> Reading:
+    """The one prelude of every read-only verb: resolve the reading, or refuse out loud (#292).
+
+    :func:`~noctis.bootstrap.open_reading` does the resolving — the precedence chain over the
+    current files for a bare verb, the run's own frozen inputs for an addressed one — and this
+    wrapper owns the two policies the composition root must not know, because they are about a
+    terminal rather than about a run:
+
+    * **Red text + exit 1** for every refusal the one startup table names
+      (:func:`_startup_refusals`), so a reading refuses in the same voice a resume does.
+      ``verb`` picks the prefix for the refusals that are about an addressed run — ``finish`` and
+      ``prune`` keep theirs, an ordinary reading says the resolver's own sentence unprefixed.
+    * **The legacy-layout guard, asked only of an unaddressed reading.** That guard's question is
+      "which tree does this command read?", and an address *is* the answer: the operator named the
+      run, so nothing about a pre-workspace layout elsewhere can make a named run unreadable.
+      Bare, it is exactly the invocation the guard exists for — the reserved run, which
+      un-migrated data beside ``config.yaml`` would make read as silently empty. ``warn_only``
+      is ``status``'s standing exception (the diagnostic warns where every other verb refuses).
+
+    It builds nothing and prints nothing else; the command body assembles its collaborators from
+    ``reading.settings`` and does its work.
+    """
+    from noctis.bootstrap import open_reading
+
+    with _refusals_or_exit(verb=verb):
+        reading = open_reading(
+            config,
+            address,
+            require_gate=require_gate,
+            mandate_overlay=mandate_overlay,
+            readable_pruned=readable_pruned,
+        )
+    if not reading.addressed:
+        _guard_legacy_or_exit(reading.settings, warn_only=warn_only)
+    return reading
 
 
 @contextmanager
@@ -1322,8 +1374,11 @@ def report(
     from noctis.engine.report_assembly import assemble_report
     from noctis.reporting import latest_report, sweep_stale_reports, today_str, write_report
 
-    settings = load_settings(config_path=config)
-    _bind_reported_run_or_exit(settings, run_id)
+    # One reading, and it decides everything about *which* run this is: the reserved tree under
+    # the current files (post-overlay, so a mandate steers what a bare report assembles from) or
+    # the addressed run's own tree under the configuration it was frozen with — plus the two
+    # refusals a reader can meet, an address nobody answers and a run retention has pruned.
+    settings = _reading_or_exit(config, run_id).settings
     reports_dir = settings.reports_dir
 
     # Opt-in, never automatic: a legitimately simulated run writes future-dated as-ofs on
@@ -1365,46 +1420,6 @@ def report(
     path = write_report(data, reports_dir)
     typer.echo(path.read_text())
     typer.echo(f"\n(written to {path})")
-
-
-def _bind_reported_run_or_exit(settings, address: str | None) -> None:
-    """Point ``report`` at the run it will read — the reserved one, or the one an operator named.
-
-    Two branches, and they are one decision seen twice:
-
-    * **No address** changes nothing and runs the legacy-layout guard, because an unaddressed
-      ``report`` is exactly the invocation that guard exists for: it reads the reserved run, and
-      un-migrated data beside ``config.yaml`` would make it read as silently empty.
-    * **An address** *is* the answer to the guard's question, so the guard does not ask it. The
-      operator named the tree, one resolver turns the address into a run dir (the four forms, in
-      one fixed order) and the composition root binds ``reports_dir``/``state_dir``/
-      ``memory_path`` onto it — after which nothing about a pre-workspace layout elsewhere can
-      make a named run unreadable.
-
-    A run whose heavy state ``run-prune`` removed is refused rather than reported on: its
-    ``reports/`` are gone and its ``state/`` with them, so the only report left to give would be
-    one assembled from nothing — an empty champion board attributed to a run that had one.
-    """
-    from noctis.bootstrap import bind_addressed_run
-    from noctis.reporting.run_tree import RunNotFoundError, read_record
-
-    if address is None:
-        _guard_legacy_or_exit(settings)
-        return
-    try:
-        run_dir = bind_addressed_run(settings, address)
-    except RunNotFoundError as exc:
-        _exit_red(exc)
-    record, _ = read_record(run_dir)
-    if isinstance(record, Mapping) and (record.get("run") or {}).get("state_pruned"):
-        _exit_red(
-            RuntimeError(
-                f"Run {run_dir.name} was pruned: `noctis run-prune` deleted its reports/ and "
-                f"state/, so there is no report to print and nothing honest to assemble one "
-                f"from. Everything the run accumulated is still in its record — "
-                f"`noctis run-record {run_dir.name}`."
-            )
-        )
 
 
 @app.command()

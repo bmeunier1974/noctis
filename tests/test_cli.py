@@ -1316,6 +1316,32 @@ def test_status_beside_a_legacy_layout_still_warns_rather_than_exits(tmp_path, m
     assert "mandate:           profile:homelab" in result.output
 
 
+# --- every reader resolves the same chain a run does (epic #292) ----------------------
+# ``promotion.metric`` is the one ``promotion.*`` key a mandate may bind, and it was exactly the
+# key the read-only verbs read *pre*-overlay, off a raw ``load_settings`` that stopped before the
+# mandate — so a run steered onto ``sortino`` was reported on in ``sharpe``'s terms. One row per
+# reader that has moved onto the reading band (``bootstrap.open_reading``, through
+# ``_reading_or_exit``); a reader that stops at ``load_settings`` again fails its own row.
+
+
+@pytest.mark.parametrize(
+    ("argv", "present", "absent"),
+    [
+        pytest.param(["report"], (), (), id="report"),
+    ],
+)
+def test_readers_see_the_post_overlay_metric(tmp_path, argv, present, absent):
+    cfg = _mandate_config(tmp_path, "homelab", _WIDE_OVERLAY)
+
+    result = runner.invoke(app, [*argv, "--config", cfg])
+
+    assert result.exit_code == 0, result.output
+    for text in present:
+        assert text in result.output
+    for text in absent:
+        assert text not in result.output
+
+
 def test_debug_manifest_digests_post_overlay_settings(tmp_path):
     """Regression: the QA manifest's config digest is taken over the settings the run actually
     assembled from, so a recorded run's manifest reflects the mandate's overlay — a knob set by

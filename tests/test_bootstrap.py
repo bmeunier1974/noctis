@@ -919,6 +919,17 @@ def test_no_kwarg_of_the_store_opener_is_an_unpacked_session_input(tmp_path, fie
         open_run_store(settings, argv=["run"], **{field: None})
 
 
+# ── one read entry: `bind_addressed_run` is gone, superseded by `open_reading` (#294) ─────
+def test_the_composition_root_has_no_second_way_to_point_settings_at_a_run():
+    """``bind_addressed_run`` bound an addressed run's *paths* and stopped there, so a verb that
+    used it read the run's tree under the current ``config.yaml``'s meaning. ``open_reading`` is
+    its superset — it binds the tree **and** rehydrates what the run was steered with — so the
+    half-answer is deleted rather than left beside it for the next reader to reach for."""
+    import noctis.bootstrap as bootstrap
+
+    assert not hasattr(bootstrap, "bind_addressed_run")
+
+
 # ── the environment probes: the one place hardware, git and extras are actually read ──────
 
 
