@@ -54,6 +54,7 @@ from noctis.research.episode import (
 )
 from noctis.research.ledger import SessionLedger
 from noctis.research.llm import ToolCall, Turn
+from noctis.research.surface import ChampionBoard, ResearchLimits, SessionCounters, Toolbox
 from noctis.strategies import library
 from noctis.strategies.scenario_spec import (
     Behavior,
@@ -272,16 +273,6 @@ def sw(params=None, test=None, n_trials=3, **extra):
     return out
 
 
-# ── a fake exhausted-class registry mirroring ExhaustedClassRegistry.is_exhausted ───────────
-class FakeExhausted:
-    def __init__(self, tags=()):
-        self._tags = {" ".join(str(t).split()).lower() for t in tags}
-
-    def is_exhausted(self, tag):
-        key = " ".join(str(tag).split()).lower()
-        return {"reason": "a prior session ruled it out"} if key in self._tags else None
-
-
 # The market digest the driver's cost-arithmetic check compares against; the numbers here (4, 2,
 # 0, 8) overlap the default ``formulate_ok`` cost arithmetic (1m, 8bp, 4bp) so the check passes.
 _FAKE_DIGEST = {
@@ -292,8 +283,25 @@ _FAKE_DIGEST = {
 }
 
 
-# ── a fake toolbox: only the gated surface the driver drives, with honest bookkeeping ───────
+# ── a fake toolbox: the Toolbox surface the driver holds, and nothing behind it ─────────────
 class FakeToolbox:
+    """The driver's one collaborator, reduced to :class:`~noctis.research.surface.Toolbox` (#259).
+
+    The driver holds the seam, so this fake *is* the seam: every member the Protocol names (the
+    test below enforces it), the per-call result scripts a stage test needs, and the counters the
+    session summary reports. Nothing stands in for a collaborator *behind* it — the driver no
+    longer reaches through the toolbox, so there is no lake and no exhausted-class registry here
+    to fake, only the two facts they used to be probed for.
+
+    ``ready`` is the lake readiness those two facts answer from: ``None`` (the default) means every
+    name is already researchable — nothing to fetch, a no-op preflight — while a set names exactly
+    the researchable ones, and ``tool_ensure_data`` joins what it lands to it as a real fetch does
+    through the coverage registry.
+    """
+
+    VERDICT_TOOLS = frozenset({"evaluate_vs_champion", "reject_strategy"})
+    STRATEGY_HISTORY_TOOLS = frozenset({"run_backtest", "run_sweep", "get_experiment_log"})
+
     def __init__(
         self,
         *,
@@ -306,8 +314,18 @@ class FakeToolbox:
         exhausted=(),
         max_author_calls=12,
         capture=None,
+        ready=None,
+        ensure_result=None,
+        ensure_raises=False,
     ):
-        self.exhausted = FakeExhausted(exhausted)
+        # The session's ceilings as the one frozen value the driver reads (#257). It reads two:
+        # ``max_author_calls`` (the #94 authoring preflight) and ``sweep_trials`` — zero here, so
+        # a sweep the caller does not size keeps the ``n_trials=None`` it always had.
+        self.limits = ResearchLimits(
+            min_trials=0, max_backtests=0, sweep_trials=0, max_author_calls=max_author_calls
+        )
+        self._dead_classes = {" ".join(str(t).split()).lower() for t in exhausted}
+        self.ready = None if ready is None else {str(s).upper() for s in ready}
         # The coder-site capture store (#184), or None — the latched-off case, where nothing is
         # captured and the AUTHOR row carries no hashes.
         self.capture = capture
@@ -315,10 +333,6 @@ class FakeToolbox:
         self.promotions = 0
         self.rejections = 0
         self.author_calls = 0
-        # The coder Class-B ceiling the author-budget preflight (#94) reads — mirrors the real
-        # toolbox: `can_author_brief` is the negation of `author_calls >= max_author_calls`, so a
-        # default well above any test session keeps the preflight inert unless a test opts in.
-        self.max_author_calls = max_author_calls
         self.escalations = 0
         self.strategies_touched: list[str] = []
         self.undecided: set[str] = set()
@@ -328,6 +342,7 @@ class FakeToolbox:
         self.sweeps: list[dict] = []
         self.rejects: list[dict] = []
         self.evaluations: list[dict] = []
+        self.ensure_calls: list[dict] = []
         self._write_result = write_result or {"ok": True}
         self._verdicts = list(verdict_results or [{"ok": True, "status": "rejected"}])
         self._log = log or {"top_trials": [{"params": {"lookback": 20}}]}
@@ -335,6 +350,10 @@ class FakeToolbox:
         # repeating. ``None`` ⇒ the pre-#70 constant return (a bare ``ok`` / a completed sweep).
         self._backtest_results = list(backtest_results) if backtest_results else None
         self._sweep_results = list(sweep_results) if sweep_results else None
+        # A scripted fetch outcome (a budget refusal, the tool's own error result) and the raise a
+        # dead vendor key produces; unscripted, the fetch lands every requested name.
+        self._ensure_result = ensure_result
+        self._ensure_raises = ensure_raises
         # Default: an empty structural screen (no lake match) — the driver then falls back to
         # the composition-root fit panel exactly as the pre-#69 passthrough did.
         self._screen_result = (
@@ -349,14 +368,37 @@ class FakeToolbox:
             return dict(default)
         return dict(script.pop(0) if len(script) > 1 else script[0])
 
+    # ── the two delegating facts the driver gates on (#259) ─────────────────────────────────
+    def symbol_ready(self, symbol):
+        """Whether the lake can research ``symbol`` — what the mandate preflight and DISCOVER's
+        ticker validator gate on. No declared readiness ⇒ every name is researchable."""
+        return True if self.ready is None else str(symbol).upper() in self.ready
+
+    def class_exhausted(self, tag):
+        """The record proving ``tag``'s class was declared a dead end, or ``None`` — the shape the
+        real exhausted-class registry answers the FORMULATE class check with."""
+        key = " ".join(str(tag).split()).lower()
+        return {"reason": "a prior session ruled it out"} if key in self._dead_classes else None
+
+    def session_counters(self):
+        """The frozen snapshot the driver takes once, at session end, to fill the summary."""
+        return SessionCounters(
+            backtests_run=len(self.backtests),
+            promotions=self.promotions,
+            rejections=self.rejections,
+            author_calls=self.author_calls,
+            escalations=self.escalations,
+            strategies_touched=tuple(self.strategies_touched),
+            undecided=frozenset(self.undecided),
+        )
+
     def market_context(self):
         return dict(_FAKE_DIGEST)
 
     def can_author_brief(self):
         """The author-budget preflight seam the driver calls before each FORMULATE (#94): whether a
-        new brief could still start. Mirrors the real toolbox — the negation of the ceiling the
-        write gate refuses a brief on."""
-        return self.author_calls < self.max_author_calls
+        new brief could still start — the negation of the ceiling the write gate refuses one on."""
+        return self.author_calls < self.limits.max_author_calls
 
     def capture_brief(self, brief, spec=None):
         """The coder-site capture seam the driver's AUTHOR stage calls (#184). Runs the REAL
@@ -380,10 +422,21 @@ class FakeToolbox:
         self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
         return dict(self._screen_result)
 
+    def tool_ensure_data(self, symbols, start, end):
+        """The gated, budget-aware fetch the mandate preflight (#111) and DISCOVER (#112) spend
+        through: records the call and, unscripted, joins every requested name to the ready set."""
+        self.ensure_calls.append({"symbols": list(symbols), "start": start, "end": end})
+        if self._ensure_raises:
+            raise RuntimeError("databento key rejected")
+        if self._ensure_result is not None:
+            return dict(self._ensure_result)
+        self.ready = (self.ready or set()) | {str(s).upper() for s in symbols}
+        return {"results": {s: dict(_INGESTED) for s in symbols}}
+
     def tool_write_strategy(self, **kwargs):
         self.writes.append(kwargs)
-        # Mirror the real toolbox: an escalated write bumps the session escalation counter (the
-        # summary surfaces it) whether the paid model then authors the file or also fails.
+        # An escalated write bumps the session escalation counter (the summary surfaces it)
+        # whether the paid model then authors the file or also fails.
         if self._write_result.get("escalated"):
             self.escalations += 1
         if "error" in self._write_result:
@@ -425,6 +478,48 @@ class FakeToolbox:
         if len(self._verdicts) > 1:
             return dict(self._verdicts.pop(0))
         return dict(self._verdicts[0])
+
+    # ── the rest of the surface: the facts a BRIEFING renders and this driver never reads ────
+    # Present because the seam names them and the driver holds the seam — each answers the empty
+    # fact rather than inventing one. The end-to-end tests below drive the real toolbox's.
+    def tool_specs(self):
+        return []
+
+    def dispatch(self, name, args):
+        return {"error": f"unknown tool {name!r}"}
+
+    def capture_episode(self, briefing, knobs):
+        return {}
+
+    def journal_evidence(self, name):
+        return {}
+
+    def champion_board(self):
+        return ChampionBoard()
+
+    def library_index(self):
+        return []
+
+    def template_text(self):
+        return "(none)"
+
+    def memory_tail(self, *, prefix_trim=False):
+        return ([], [])
+
+    def lake_inventory(self, *, limit=60):
+        return []
+
+    def data_budget(self):
+        return None
+
+
+def test_the_fake_toolbox_satisfies_the_toolbox_seam():
+    """The fake the deterministic tests drive is measured against the real seam (#259).
+
+    The driver holds a :class:`~noctis.research.surface.Toolbox`, so a fake that has drifted off
+    that surface — a method renamed in production, a fact the driver started reading — fails here,
+    loudly, instead of leaving a green suite that proves nothing about the production object."""
+    assert isinstance(FakeToolbox(), Toolbox)
 
 
 def _drive(episodes, toolbox, *, max_episodes, ledger, **over):
@@ -1492,52 +1587,13 @@ _REFUSED = {
 }
 
 
-class _ReadyLake:
-    """A lake fake exposing only ``check_symbol_ready`` — the readiness surface the preflight
-    feature-detects. Readiness is a mutable set: a landed fetch adds to it, exactly what the
-    coverage registry does in production."""
-
-    def __init__(self, ready=()):
-        self.ready = {s.upper() for s in ready}
-
-    def check_symbol_ready(self, symbol, dataset=None, schema=None):
-        return symbol.upper() in self.ready
-
-
-class MandateToolbox(FakeToolbox):
-    """FakeToolbox + the data surface the mandate preflight drives.
-
-    ``tool_ensure_data`` records every call and, by default, ingests each requested name into the
-    lake's ready set (what a successful fetch does in production). ``ensure_result`` scripts
-    another outcome (a budget refusal, the tool's own error result); ``ensure_raises`` makes the
-    call blow up the way a dead vendor key does.
-    """
-
-    def __init__(self, *, ready=(), ensure_result=None, ensure_raises=False, **kw):
-        super().__init__(**kw)
-        self.lake = _ReadyLake(ready)
-        self.ensure_calls: list[dict] = []
-        self._ensure_result = ensure_result
-        self._ensure_raises = ensure_raises
-
-    def tool_ensure_data(self, symbols, start, end):
-        self.ensure_calls.append({"symbols": list(symbols), "start": start, "end": end})
-        if self._ensure_raises:
-            raise RuntimeError("databento key rejected")
-        if self._ensure_result is not None:
-            return dict(self._ensure_result)
-        for sym in symbols:
-            self.lake.ready.add(str(sym).upper())
-        return {"results": {s: dict(_INGESTED) for s in symbols}}
-
-
-class ScreensTheReadyLake(MandateToolbox):
-    """A screen that ranks the lake-READY names, as the real roster-wide screen does — so whatever
-    the preflight fetched is visible to MATCH's fit/holdout split."""
+class ScreensTheReadyLake(FakeToolbox):
+    """A screen that ranks the READY names, as the real roster-wide screen does — so whatever the
+    preflight fetched is visible to MATCH's fit/holdout split."""
 
     def tool_screen_symbols(self, trend="any", volatility="any", liquidity="any", symbols=None):
         self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
-        ready = sorted(self.lake.ready)
+        ready = sorted(self.ready or ())
         return {"suggested_fit": ready[:2], "reserved_holdout": ready[2:3]}
 
 
@@ -1566,7 +1622,7 @@ def _preflight_line(ledger):
 def test_preflight_fetches_only_the_unready_mandate_symbols_over_the_history_window(tmp_path):
     # AAA is already lake-ready, so only the two unready declared names are fetched — in ONE
     # ensure_data call over the history_days window (never one paid call per symbol).
-    box = MandateToolbox(ready=["AAA"])
+    box = FakeToolbox(ready=["AAA"])
     _drive_preflight(tmp_path, "pf1", box, mandate_symbols=["AAA", "QQQ", "IWM"])
 
     assert box.ensure_calls == [{"symbols": ["QQQ", "IWM"], **_WINDOW}]
@@ -1576,7 +1632,7 @@ def test_preflight_fetches_only_the_unready_mandate_symbols_over_the_history_win
 def test_preflight_window_is_history_days_ending_at_the_session_date(tmp_path, session_now):
     # The window is anchored to the session date and never crosses the vendor's T+1 boundary: an
     # overnight session whose UTC date already rolled still asks for the last full vendor day.
-    box = MandateToolbox()
+    box = FakeToolbox(ready=())
     episodes = Episodes([formulate_ok()], [decide_ok("reject")])
     _drive(
         episodes,
@@ -1596,7 +1652,7 @@ def test_preflight_ledgers_the_per_symbol_outcome_and_emits_the_tool_line(tmp_pa
     # CLOSE rollup can report data spend without parsing MATCH — beside the same observable
     # ensure_data tool line the conversation loop emits, opened by a preflight stage boundary.
     events: list = []
-    box = MandateToolbox(ready=["AAA"])
+    box = FakeToolbox(ready=["AAA"])
     ledger, _ = _drive_preflight(
         tmp_path, "pf3", box, mandate_symbols=["QQQ"], on_event=events.append
     )
@@ -1655,13 +1711,13 @@ def test_fetched_symbols_join_the_screen_fit_set_and_the_holdout_reservation(tmp
 def test_fetched_symbols_join_the_lazily_resolved_fallback_panel(tmp_path):
     # The #110 source resolves at MATCH over lake readiness, so a preflight fetch is in the panel a
     # no-lake-match MATCH falls back to — the whole point of unfreezing it.
-    box = MandateToolbox(ready=["AAA"])  # the default empty screen ⇒ this MATCH falls back
+    box = FakeToolbox(ready=["AAA"])  # the default empty screen ⇒ this MATCH falls back
     ledger, _ = _drive_preflight(
         tmp_path,
         "pf5",
         box,
         mandate_symbols=["QQQ"],
-        fallback_panel_source=lambda: sorted(box.lake.ready),
+        fallback_panel_source=lambda: sorted(box.ready),
     )
 
     match = next(s for s in ledger.stages() if s.stage == "match")
@@ -1672,7 +1728,7 @@ def test_fetched_symbols_join_the_lazily_resolved_fallback_panel(tmp_path):
 def test_budget_refusal_is_ledgered_and_the_session_continues(tmp_path):
     # A refusal from the seam's cost preflight is data the driver ledgers and works around: the
     # session runs its normal course on the lake it already has.
-    box = MandateToolbox(ensure_result={"results": {"QQQ": dict(_REFUSED)}})
+    box = FakeToolbox(ready=(), ensure_result={"results": {"QQQ": dict(_REFUSED)}})
     ledger, summary = _drive_preflight(tmp_path, "pf6", box, mandate_symbols=["QQQ"])
 
     pre = _preflight_line(ledger)
@@ -1700,7 +1756,7 @@ def test_budget_refusal_is_ledgered_and_the_session_continues(tmp_path):
 def test_fetch_failure_is_ledgered_and_never_crashes_the_session(tmp_path, over, reason):
     # A raising fetch and the tool's own error result degrade the same honest way: the reason is
     # ledgered on the preflight line and the session continues with today's behavior.
-    box = MandateToolbox(**over)
+    box = FakeToolbox(ready=(), **over)
     ledger, summary = _drive_preflight(
         tmp_path, f"pf7-{len(over)}{reason[:3]}", box, mandate_symbols=["QQQ"]
     )
@@ -1715,7 +1771,7 @@ def test_no_mandate_symbols_makes_no_ensure_data_call_and_an_unchanged_session(t
     # Byte-identical guard: the data surface EXISTS but nothing declares a symbol ⇒ zero ensure_data
     # calls, no preflight stage line, the same stage flow as a session before the preflight existed.
     episodes = Episodes([formulate_ok()], [decide_ok("reject")])
-    box = MandateToolbox(ready=["AAA"])
+    box = FakeToolbox(ready=["AAA"])
     ledger = SessionLedger(tmp_path, "pf8")
     summary = _drive(episodes, box, max_episodes=2, ledger=ledger, history_days=30)
 
@@ -1733,7 +1789,7 @@ def test_no_mandate_symbols_makes_no_ensure_data_call_and_an_unchanged_session(t
 def test_all_declared_symbols_already_lake_ready_makes_no_ensure_data_call(tmp_path):
     # The other byte-identical case: every declared name is already lake-ready (matched
     # case-insensitively, as the mandate's own upper-casing implies) ⇒ nothing to fetch, no line.
-    box = MandateToolbox(ready=["QQQ", "IWM"])
+    box = FakeToolbox(ready=["QQQ", "IWM"])
     ledger, summary = _drive_preflight(tmp_path, "pf9", box, mandate_symbols=["qqq", "IWM"])
 
     assert box.ensure_calls == []
@@ -1741,12 +1797,11 @@ def test_all_declared_symbols_already_lake_ready_makes_no_ensure_data_call(tmp_p
     assert summary.rejections == 1
 
 
-@pytest.mark.parametrize("box_factory", [FakeToolbox, lambda: _no_readiness_toolbox()])
-def test_a_lake_without_a_readiness_surface_degrades_to_a_no_op_preflight(tmp_path, box_factory):
-    # A toolbox with no lake at all, or a lake seam without a readiness surface, cannot tell what is
-    # unready — so the preflight spends nothing, ledgers nothing, and the session is unchanged.
+def test_a_lake_that_holds_every_declared_name_is_a_no_op_preflight(tmp_path):
+    # A toolbox whose readiness fact is True for every name has nothing to fetch — so the preflight
+    # spends nothing, ledgers nothing, and the session is unchanged.
     episodes = Episodes([formulate_ok()], [decide_ok("reject")])
-    box = box_factory()
+    box = FakeToolbox()
     ledger = SessionLedger(tmp_path, f"pf10-{type(box).__name__}")
     summary = _drive(
         episodes,
@@ -1760,12 +1815,6 @@ def test_a_lake_without_a_readiness_surface_degrades_to_a_no_op_preflight(tmp_pa
     assert not [s for s in ledger.stages() if s.stage == "preflight"]
     assert [s.stage for s in ledger.stages()][0] == "formulate"
     assert summary.rejections == 1
-
-
-def _no_readiness_toolbox():
-    box = FakeToolbox()
-    box.lake = object()  # a lake seam with no readiness/coverage surface at all
-    return box
 
 
 def test_preflight_fetches_through_the_real_toolbox_gated_path(tmp_path):
@@ -1945,8 +1994,8 @@ def test_discover_missing_or_empty_fields_raise_as_schema_misfires(payload):
 
 
 # ── the discovery cycle, driven with fake episodes + a fake toolbox (zero LLM) ─────────────────
-class DiscoverToolbox(MandateToolbox):
-    """MandateToolbox whose screen matches only names that were FETCHED this session.
+class DiscoverToolbox(FakeToolbox):
+    """A fake whose screen matches only names that were FETCHED this session.
 
     The seeded lake expresses nothing the thesis asks for (so MATCH finds no lake match, exactly the
     condition DISCOVER exists for) and the post-fetch re-screen ranks the newcomers into its own
@@ -1954,11 +2003,11 @@ class DiscoverToolbox(MandateToolbox):
 
     def __init__(self, **kw):
         super().__init__(**kw)
-        self._seeded = set(self.lake.ready)
+        self._seeded = set(self.ready or ())
 
     def tool_screen_symbols(self, trend="any", volatility="any", liquidity="any", symbols=None):
         self.screens.append({"trend": trend, "volatility": volatility, "liquidity": liquidity})
-        fetched = sorted(self.lake.ready - self._seeded)
+        fetched = sorted((self.ready or set()) - self._seeded)
         return {"suggested_fit": fetched[:2], "reserved_holdout": fetched[2:3]}
 
 
@@ -2190,7 +2239,7 @@ def test_a_failed_discover_fetch_falls_through_without_a_second_episode(tmp_path
 def test_a_fetch_whose_re_screen_still_matches_nothing_falls_back_with_its_own_reason(tmp_path):
     # The honest end of a discovery that worked mechanically but not structurally: the names landed,
     # the re-screen ran once, and still nothing expresses the profile.
-    box = MandateToolbox(ready=["AAA"])  # its screen matches nothing, before or after a fetch
+    box = FakeToolbox(ready=["AAA"])  # its screen matches nothing, before or after a fetch
     episodes, ledger, summary = _drive_discover(
         tmp_path, "dc10", box, discover_script=[discover_ok(("QQQ",))]
     )
@@ -2255,7 +2304,7 @@ def test_a_screen_error_never_spends_a_discover_episode(tmp_path):
 def test_a_matching_screen_never_spends_a_discover_episode(tmp_path):
     # The byte-identical guard: a session whose screen matches behaves exactly as before — no
     # discover episode, no fetch, no discover line.
-    box = MandateToolbox(
+    box = FakeToolbox(
         ready=["AAA"], screen_result={"suggested_fit": ["A", "B"], "reserved_holdout": ["C"]}
     )
     episodes, ledger, summary = _drive_discover(

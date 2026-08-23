@@ -6,7 +6,7 @@
       "conversation",
       "episodic"
     ],
-    "digest": "706bd0c8ad5270a0",
+    "digest": "267eaf03f11e7ae8",
     "heading": "2026-08-22 \u2014 sites: author, briefings, conversation, episodic",
     "path": "docs/prompt-changelog.md"
   },
@@ -46,10 +46,10 @@
       "note": null
     },
     "episodic": {
-      "digest": "b22702fa91a2d0c3",
+      "digest": "01284f19563ebc7d",
       "files": {
         "src/noctis/research/digests.py": "67476f972a6bbedf",
-        "src/noctis/research/driver.py": "ba72f3bcc041ca06"
+        "src/noctis/research/driver.py": "046c491363bbcf60"
       },
       "note": null
     },

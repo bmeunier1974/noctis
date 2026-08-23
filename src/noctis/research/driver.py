@@ -21,9 +21,8 @@ involvement.
   set, symbol-holdout reservation, and (via the #110 source) fallback panel already see them. The
   spend rides the data seam's own cost preflight against ``data.budget_usd``: a refusal, a
   per-symbol vendor error, or a fetch that raises is ledgered under the stage's own
-  :data:`PREFLIGHT` label and the session continues on the lake it already has. Nothing declared,
-  everything already lake-ready, or a lake with no readiness surface ⇒ a strict no-op: no call, no
-  tool line, no stage line.
+  :data:`PREFLIGHT` label and the session continues on the lake it already has. Nothing declared
+  or everything already lake-ready ⇒ a strict no-op: no call, no tool line, no stage line.
 * **FORMULATE** — one episode proposes a falsifiable thesis (a :class:`FormulateOutput`). Its
   thesis is recorded to the session ledger (so the next formulate's briefing tail already knows
   what this session tried) before any authoring.
@@ -211,7 +210,7 @@ if TYPE_CHECKING:
     from noctis.research.episode import EpisodeRunner
     from noctis.research.ledger import SessionLedger
     from noctis.research.mandate import Mandate
-    from noctis.research.tools import ResearchToolbox
+    from noctis.research.surface import Toolbox
 
 logger = logging.getLogger("noctis.research.driver")
 
@@ -906,6 +905,11 @@ class SanityCheck:
 
 _CHECK_OK = SanityCheck(True)
 
+# The exhausted-class *fact*, not the registry that answers it: ``tag -> the record proving it was
+# declared a dead end, or None`` — the toolbox's own ``class_exhausted``. The check takes the
+# callable, so the driver holds one seam and never reaches through it for a collaborator.
+ClassExhausted = Callable[[str], dict | None]
+
 
 def _check_cost_arithmetic(fo: FormulateOutput, digest_text: str) -> SanityCheck:
     """The cost arithmetic must cite at least one number that actually appears in the MARKET
@@ -921,13 +925,11 @@ def _check_cost_arithmetic(fo: FormulateOutput, digest_text: str) -> SanityCheck
     )
 
 
-def _check_class_tag(fo: FormulateOutput, exhausted: Any) -> SanityCheck:
+def _check_class_tag(fo: FormulateOutput, class_exhausted: ClassExhausted) -> SanityCheck:
     """The proposed ``class_tag`` must not already be a declared dead end (mirrors the write-gate
     exhausted-class guard). FORMULATE carries no ``new_lever`` escape, so an exhausted tag simply
     fails here — the honest move is a genuinely different class, not a loosened guard."""
-    if exhausted is None:
-        return _CHECK_OK
-    dead = exhausted.is_exhausted(fo.class_tag)
+    dead = class_exhausted(fo.class_tag)
     if dead is None:
         return _CHECK_OK
     reason = dead.get("reason", "") if isinstance(dead, dict) else ""
@@ -939,10 +941,12 @@ def _check_class_tag(fo: FormulateOutput, exhausted: Any) -> SanityCheck:
     )
 
 
-def _formulate_checks(fo: FormulateOutput, digest_text: str, exhausted: Any) -> SanityCheck:
+def _formulate_checks(
+    fo: FormulateOutput, digest_text: str, class_exhausted: ClassExhausted
+) -> SanityCheck:
     """Run the FORMULATE sanity checks in order (cost arithmetic, then exhausted class) and return
     the first that fires, or the passing result when both are clean."""
-    for check in (_check_cost_arithmetic(fo, digest_text), _check_class_tag(fo, exhausted)):
+    for check in (_check_cost_arithmetic(fo, digest_text), _check_class_tag(fo, class_exhausted)):
         if not check.ok:
             return check
     return _CHECK_OK
@@ -963,7 +967,7 @@ T = TypeVar("T")
 def make_episodes(
     *,
     runner: EpisodeRunner,
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     ledger: SessionLedger,
     mandate: Mandate | None,
     context_window: int,
@@ -1119,7 +1123,7 @@ def _no_stage(stage: str) -> None:
     return None
 
 
-def _tool_emitter(on_event: Callable[[Event | str], None] | None, toolbox: Any) -> ToolEmitter:
+def _tool_emitter(on_event: Callable[[Event | str], None] | None, toolbox: Toolbox) -> ToolEmitter:
     """Build the driver's tool-line emitter, or the no-op when no sink is wired. Each line uses the
     toolbox's own ``result_brief`` (the gate-facing slice) so the numbers a promotion/rejection
     turns on print exactly as they do in the conversation loop's feed."""
@@ -1168,21 +1172,14 @@ def _fetch_window(session_at: datetime, history_days: int) -> dict[str, Any]:
     }
 
 
-def _unready_symbols(toolbox: Any, symbols: Sequence[str]) -> list[str]:
+def _unready_symbols(toolbox: Toolbox, symbols: Sequence[str]) -> list[str]:
     """The declared symbols this lake cannot research yet — normalized, deduped, declared order.
 
-    Readiness is asked of the lake's own ``check_symbol_ready``, the same surface the screener and
-    the fallback panel use. A lake seam without it (a test fake, a bare in-memory lake) cannot say
-    what is missing, so the honest answer is to fetch nothing: an empty list, a no-op preflight.
+    Readiness is the toolbox's own ``symbol_ready`` fact — the same lake surface the screener and
+    the fallback panel rank on — so the preflight asks one question and never invents an answer.
     """
-    declared = list(dict.fromkeys(s.strip().upper() for s in symbols if s and s.strip()))
-    if not declared:
-        return []
-    ready = getattr(getattr(toolbox, "lake", None), "check_symbol_ready", None)
-    if not callable(ready):
-        logger.debug("lake exposes no readiness check — skipping the mandate-symbol preflight")
-        return []
-    return [s for s in declared if not ready(s)]
+    declared = dict.fromkeys(s.strip().upper() for s in symbols if s and s.strip())
+    return [s for s in declared if not toolbox.symbol_ready(s)]
 
 
 def _fetch_outcome(payload: Any) -> dict[str, Any]:
@@ -1199,7 +1196,7 @@ def _fetch_outcome(payload: Any) -> dict[str, Any]:
 
 
 def _ensure_data(
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     symbols: Sequence[str],
     window: Mapping[str, Any],
     *,
@@ -1238,7 +1235,7 @@ def _ensure_data(
 
 
 def _preflight_stage(
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     ledger: SessionLedger,
     *,
     mandate_symbols: Sequence[str],
@@ -1343,7 +1340,7 @@ class MatchResult:
 
 
 def _screen_for(
-    toolbox: ResearchToolbox, profile: Mapping[str, str], *, emit_tool: ToolEmitter = _no_emit
+    toolbox: Toolbox, profile: Mapping[str, str], *, emit_tool: ToolEmitter = _no_emit
 ) -> tuple[list[str], list[str], str | None]:
     """Run the gated structural screen for one band profile and return
     ``(suggested_fit, reserved_holdout, error)``.
@@ -1369,7 +1366,7 @@ def _screen_for(
 
 
 def _match_stage(
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     fo: FormulateOutput,
     *,
     fallback_panel_source: FallbackPanelSource,
@@ -1446,7 +1443,7 @@ def _episode_corrective(result: EpisodeResult[Any]) -> str:
 
 
 def _discover_stage(
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     discover: DiscoverEpisode,
     fo: FormulateOutput,
     match: MatchResult,
@@ -1496,7 +1493,6 @@ def _discover_stage(
     # ONE window for the whole stage: the briefing tells the model exactly what a fetch would cover,
     # and the fetch below covers exactly that.
     window = _fetch_window(session_at, history_days)
-    ready = getattr(getattr(toolbox, "lake", None), "check_symbol_ready", None)
     detail: dict[str, Any] = {"proposed": [], "kept": [], "fetched": []}
 
     def ledgered(result: MatchResult) -> tuple[MatchResult, dict[str, Any]]:
@@ -1518,7 +1514,7 @@ def _discover_stage(
 
         proposed = list(result.value.symbols)
         detail["proposed"] = detail["proposed"] + proposed
-        kept = valid_tickers(proposed, lake_ready=ready if callable(ready) else None)
+        kept = valid_tickers(proposed, lake_ready=toolbox.symbol_ready)
         if not kept:
             # Schema-valid nonsense — the same first-line discipline as the FORMULATE checks (#71).
             record_episode(
@@ -1550,7 +1546,7 @@ def _discover_stage(
 
 
 def _fetch_and_rescreen(
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     kept: Sequence[str],
     profile: dict[str, str],
     detail: dict[str, Any],
@@ -1725,7 +1721,7 @@ def _cheap_subset(fit: Sequence[str]) -> list[str]:
 
 
 def _optimize_stage(
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     name: str,
     fit_symbols: Sequence[str],
     *,
@@ -1785,7 +1781,7 @@ def _optimize_stage(
     #    baseline still sweeps (the floor needs trials) but is sized down (the interpret slot).
     weak = baseline_metric is None or baseline_metric <= 0.0
     detail["weak_baseline"] = weak
-    base_trials = sweep_trials or int(getattr(toolbox, "default_sweep_trials", 0) or 0) or None
+    base_trials = sweep_trials or toolbox.limits.sweep_trials or None
     cheap_trials = max(1, base_trials // 2) if (weak and base_trials) else base_trials
     sweep = run_sweep(
         name=name,
@@ -1837,7 +1833,7 @@ def _optimize_stage(
 
 def run_episodic_research(
     *,
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     ledger: SessionLedger,
     formulate: FormulateEpisode,
     decide: DecideEpisode,
@@ -1900,7 +1896,6 @@ def run_episodic_research(
     """
     stop_event = stop_event or _NeverStop()
     digest_source = market_digest or (lambda: digests.market_digest(toolbox))
-    exhausted = getattr(toolbox, "exhausted", None)
     # The local coder model names the AUTHOR episode line for a non-escalated refined-brief exit
     # (#85); an escalated write names its own paid fallback model. Read off the session models map.
     coder_model = str((models or {}).get("coder") or "")
@@ -2003,7 +1998,7 @@ def run_episodic_research(
         # ── FORMULATE (+ driver-side sanity checks, #71) ──────────────────────
         emit_stage(FORMULATE)
         ledger.record_stage(FORMULATE)
-        fo = _formulate_stage(formulate, digest_source(), exhausted, _record_episode)
+        fo = _formulate_stage(formulate, digest_source(), toolbox.class_exhausted, _record_episode)
         if fo is None:
             # No usable thesis (a failed episode, or a sanity check the one re-ask never fixed);
             # end the session rather than busy-loop the budget.
@@ -2124,13 +2119,16 @@ def run_episodic_research(
             emit_tool=emit_tool,
         )
 
+    # ONE frozen snapshot of what this session spent and concluded (#259): the toolbox's live
+    # counters keep moving, and a summary has to describe a single moment, not six.
+    counters = toolbox.session_counters()
     summary.iterations = formulated
-    summary.promotions = int(getattr(toolbox, "promotions", 0))
-    summary.rejections = int(getattr(toolbox, "rejections", 0))
-    summary.candidates = list(getattr(toolbox, "strategies_touched", []))
-    summary.author_calls = int(getattr(toolbox, "author_calls", 0))
-    summary.escalations = int(getattr(toolbox, "escalations", 0))
-    summary.undecided = sorted(getattr(toolbox, "undecided", set()))
+    summary.promotions = counters.promotions
+    summary.rejections = counters.rejections
+    summary.candidates = list(counters.strategies_touched)
+    summary.author_calls = counters.author_calls
+    summary.escalations = counters.escalations
+    summary.undecided = sorted(counters.undecided)
     summary.ledger_path = str(ledger.path)
     ledger.record_session_end(
         formulated=formulated,
@@ -2176,7 +2174,7 @@ def run_episodic_research(
 def _formulate_stage(
     formulate: FormulateEpisode,
     digest_text: str,
-    exhausted: Any,
+    class_exhausted: ClassExhausted,
     record_episode: Callable[..., None],
 ) -> FormulateOutput | None:
     """Run FORMULATE with the driver-side sanity checks (#71): propose a thesis, run the
@@ -2193,7 +2191,7 @@ def _formulate_stage(
             record_episode(FORMULATE, result)
             return None
         fo = result.value
-        check = _formulate_checks(fo, digest_text, exhausted)
+        check = _formulate_checks(fo, digest_text, class_exhausted)
         if check.ok:
             record_episode(FORMULATE, result)
             return fo
@@ -2210,7 +2208,7 @@ def _formulate_stage(
 
 
 def _decide_stage(
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     ledger: SessionLedger,
     decide: DecideEpisode,
     name: str,
@@ -2277,7 +2275,7 @@ def _decide_stage(
 
 
 def _final_decide_ask(
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     ledger: SessionLedger,
     decide: DecideEpisode,
     name: str,
@@ -2319,7 +2317,7 @@ def _final_decide_ask(
 
 
 def _submit_verdict(
-    toolbox: ResearchToolbox,
+    toolbox: Toolbox,
     name: str,
     symbols: Sequence[str],
     reserved_holdout: Sequence[str],

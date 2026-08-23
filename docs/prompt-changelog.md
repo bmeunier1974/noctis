@@ -55,9 +55,14 @@ identity, on the same principle as the previous entry's author golden. The hashe
 composition *code* moved: `research/briefings.py` (`briefings`), `research/prompt.py`
 (`conversation`), and the shared fact-renderer `research/digests.py`, which is listed under
 `author` and `episodic` as well — exactly the over-partition this ratchet is designed for.
-`episodic`'s own asset `research/driver.py` is re-typed against the same seam in the story that
-follows (#259), with no wording change either: this one entry declares the whole epic's move, so
-that regeneration is already declared here.
+`episodic`'s own asset `research/driver.py` carries the same move (#259): the episodic driver holds
+a `noctis.research.surface.Toolbox` instead of an `Any`, and its ten `getattr(toolbox, …, default)`
+probes are gone — readiness is `toolbox.symbol_ready`, the FORMULATE class check takes
+`toolbox.class_exhausted` as a callable, sweep sizing reads `toolbox.limits`, and session end takes
+one `toolbox.session_counters()` snapshot instead of six live reads. No wording change there
+either: the per-stage system texts, emit contracts and every ledgered/emitted line are
+byte-identical, pinned by the goldens and by the driver's own ledger assertions. This one entry
+declares the whole epic's move.
 
 ## 2026-08-02 — sites: author
 
