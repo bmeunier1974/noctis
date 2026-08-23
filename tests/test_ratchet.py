@@ -25,8 +25,9 @@ from pathlib import Path
 
 import pytest
 
-from noctis.observability import engine_ratchet
+from noctis.observability import engine_ratchet, prompt_ratchet
 from noctis.observability.engine_id import COMPONENT_PATHS
+from noctis.observability.prompt_id import SITE_ASSETS
 from noctis.observability.ratchet import (
     RatchetSpec,
     build_record,
@@ -68,6 +69,23 @@ def _build_engine_tree(root: Path) -> Path:
     return _build_asset_tree(engine_ratchet.SPEC, root)
 
 
+# Every site, so the tree starts declared and the record is written against this head — which is
+# what makes a later edit with no new entry an *undeclared* move.
+PROMPT_BASELINE_CHANGELOG = (
+    "# Prompt changelog\n\nHow to read this file.\n\n"
+    "## 2026-01-01 — sites: author, briefings, conversation, distill, episodic, ideation\n"
+    "\nBaseline.\n"
+)
+
+
+def _build_prompt_tree(root: Path) -> Path:
+    _build_asset_tree(prompt_ratchet.SPEC, root)
+    changelog = root.joinpath(*prompt_ratchet.CHANGELOG_PATH.split("/"))
+    changelog.parent.mkdir(parents=True, exist_ok=True)
+    changelog.write_text(PROMPT_BASELINE_CHANGELOG)
+    return root
+
+
 def _write_unwatched_files(root: Path) -> None:
     """Docs, a test and the README — outside every allowlist, so they move no digest."""
     (root / "docs").mkdir(parents=True, exist_ok=True)
@@ -85,7 +103,16 @@ ENGINE = Policy(
     null_entry_status="warn",
 )
 
-POLICIES = [pytest.param(ENGINE, id="engine")]
+PROMPT = Policy(
+    spec=prompt_ratchet.SPEC,
+    build_tree=_build_prompt_tree,
+    # The changelog keeps its baseline entry, so editing this site declares nothing new.
+    refused_move=SITE_ASSETS["ideation"][0],
+    null_entry="ideation",
+    null_entry_status="fail",
+)
+
+POLICIES = [pytest.param(ENGINE, id="engine"), pytest.param(PROMPT, id="prompt")]
 
 
 @pytest.fixture(params=POLICIES)
