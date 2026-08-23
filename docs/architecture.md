@@ -423,6 +423,18 @@ what was collected, and `reporting/schema.py` is a pure validator. This section 
 exist and how they are produced; the field-by-field contract — every key, when it is `null`, the
 versioning promise, the caps, and a worked example — is [run-record.md](run-record.md).
 
+The package's own shape is five modules over one narrow read, plus the store that holds them:
+layered `record ← {address, index, lock, evidence} ← store` and pinned there by
+`tests/test_run_tree_boundary.py`: `record` (the tree's names, `read_record`, the one atomic
+`write`), `address` (the four address forms → one run dir), `index` (the derived `runs/index.json`),
+`lock` (the liveness protocol), `evidence` (the six collectors, `read_engine_identity`, and **every**
+heavy import in the package — the research journals, the champion registry, the broker's ledgers,
+the lake and pandas, all deferred) and `store` (the lifecycle verbs, `read_artifacts` and
+`RunStore` — the one module that imports the rest). So a verb that only names a run reads records
+and nothing else, and a verb that writes one takes the six collector reads exactly once:
+`run_tree.read_artifacts` parses the prior record, `run_tree.derive_evidence` derives what the run's
+own durable artifacts say.
+
 **One entry opens a run segment: `bootstrap.open_segment`.** A segment is one process's stretch of
 work on a run, and its lifecycle is written once, in the composition root: take the lock, mint or
 resume the id, freeze the inputs, record every engine-change note, build the `--debug` recorder and

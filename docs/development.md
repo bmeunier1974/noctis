@@ -332,6 +332,44 @@ production reads its verdict. Its twin is `tests/test_prompt_goldens.py`, which 
 briefings and the system prompt byte-for-byte: the boundary says who may read a fact, the goldens
 say that re-pointing a reader changed nothing the model is told.
 
+## The run tree's layering and its import guard
+
+The fifth guard protects a *direction inside one package*. `src/noctis/reporting/run_tree/` is the
+only code that touches `workspace/runs/<run_id>/`, and it is five modules whose dependencies point
+one way: **`record ← {address, index, lock, evidence} ← store`**.
+
+Why it is a rule and not a preference: the whole value of splitting one 2300-line module into a
+package is that the narrow modules stay narrow. Resolving `@label` needs `read_record` and nothing else;
+deciding whether a lock may be taken needs not even that. One import added by accident — an index
+reaching for the store, an address reaching for the lock — puts the collectors, the engine
+fingerprint and the whole lifecycle back behind a ten-line function, and nothing visibly breaks
+while it happens.
+
+The second clause points outwards: the six collectors need the research journals, the champion
+registry, the broker's ledgers, the data types, the settings model and pandas — and **only**
+`evidence.py` may name one of them, at any nesting level, deferred or not. That is what makes "a
+record write stays cheap" a shape rather than a comment: the subprocess probe in
+`tests/test_run_tree_store.py` measures what importing the package actually costs, and this says
+where a heavy import may ever be *written*.
+
+Enforcement is a stdlib-only `ast` walk over every import statement of each module — module level
+and function level, absolute and relative, including a reach around through the package's own
+`__init__` — and it lives in the test rather than in the package, because nothing in production
+reads its verdict:
+
+```bash
+uv run pytest tests/test_run_tree_boundary.py -q   # the run-tree layering guard
+```
+
+```text
+index.py imports ['store'] from noctis.reporting.run_tree
+```
+
+The layering is also what lets a test of a narrow module stay narrow: `tests/_run_tree_helpers.py`
+writes the files those modules read (`write_run` for a `run.json`, `hold_lock` for a `run.lock`), so
+a test of the four address forms never opens a store. What each module owns is in the glossary entry
+**Run tree** (`CONTEXT.md`); the record it all exists to write is [run-record.md](run-record.md).
+
 ## Dev scripts
 
 `scripts/` holds dev tools that are deliberately *not* CLI subcommands. One is the ratchet

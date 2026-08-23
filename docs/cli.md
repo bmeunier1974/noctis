@@ -102,9 +102,9 @@ the same lock, the same frozen config and the same run-scoped state — see
 
 #### The four address forms, and how they are told apart
 
-An address is resolved in one place (`reporting/run_tree.resolve_run_dir`, shared with
-`run-record`), in this **fixed order**, so one string always names one run whatever a workspace
-happens to contain:
+An address is resolved in one place (`run_tree.resolve_run_dir`, in
+`src/noctis/reporting/run_tree/address.py`, shared with `run-record`), in this **fixed order**, so
+one string always names one run whatever a workspace happens to contain:
 
 | # | form | matches when | resolves to |
 |---|---|---|---|

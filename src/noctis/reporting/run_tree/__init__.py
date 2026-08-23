@@ -13,9 +13,15 @@ listing roll-up) and :mod:`~noctis.reporting.run_tree.evidence` (the six reads a
 numbers from, and **every** heavy import in the package). The readers hold nothing but ``record``,
 so resolving ``@label`` or deriving an index entry takes no lock and runs no collector. The rest —
 the lifecycle verbs and :class:`~noctis.reporting.run_tree.store.RunStore` — is
-:mod:`~noctis.reporting.run_tree.store`, the one module that holds the others. Every public name
-keeps its spelling, so a caller says ``from noctis.reporting.run_tree import open_run,
-resolve_run_dir`` and never has to know which module answers.
+:mod:`~noctis.reporting.run_tree.store`, the one module that holds the others.
+
+A record is read in **two halves**, and each verb says which of them it needs:
+:func:`~noctis.reporting.run_tree.store.read_artifacts` parses the prior record (every verb does
+that) and :func:`~noctis.reporting.run_tree.evidence.derive_evidence` takes the six reads **once**,
+at write time only — which is why opening a run no longer costs two passes over the journals, the
+ledgers and the lake. Every public name keeps its spelling, so a caller says ``from
+noctis.reporting.run_tree import open_run, resolve_run_dir`` and never has to know which module
+answers.
 """
 
 from __future__ import annotations

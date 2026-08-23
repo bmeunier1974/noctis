@@ -25,7 +25,7 @@ Where the shape is decided, in the code, in one place each:
 | `src/noctis/reporting/run_record.py` | `build(artifacts) -> dict` — the **pure** builder; every derived number is computed here |
 | `src/noctis/reporting/assumptions.py` | The `assumptions` block (pure) |
 | `src/noctis/reporting/metrics.py` | The `performance` block's arithmetic (pure) |
-| `src/noctis/reporting/run_tree/` | The only package that touches the run tree: locking, reading, one atomic write |
+| `src/noctis/reporting/run_tree/` | The only package that touches the run tree — five modules over one narrow read plus the store that holds them, layered `record ← {address, index, lock, evidence} ← store`: `record` (the tree's names, `read_record`, one atomic `write`), `address` (the four address forms), `index` (the derived listing roll-up), `lock` (the liveness protocol), `evidence` (the six collectors, and every heavy import in the package), `store` (the lifecycle verbs, `read_artifacts` and `RunStore`) |
 | `src/noctis/config/rehydrate.py` | Freezing and rehydration — which settings a resume restores |
 | `src/noctis/observability/engine_id.py` | Engine identity, the component map, the comparable key |
 
@@ -573,9 +573,10 @@ record. Identity is minted, never derived from the configuration — two byte-id
 two runs. `--resume <address>` appends a segment to an existing run instead, and the same record
 keeps accumulating: the **run**, not the process, is the unit progress is tracked on.
 
-Four address forms resolve in one place (`run_tree.resolve_run_dir`, shared by `run`, `research`,
-`run-record` and `run-prune`) in a fixed order — a path, `@label`, the reserved word `latest`, a run
-id — and **a bare address is always the id**. Details:
+Four address forms resolve in one place (`run_tree.resolve_run_dir`, in `run_tree/address.py` —
+which reads records and nothing else, so naming a run takes no lock and runs no collector; shared by
+`run`, `research`, `run-record` and `run-prune`) in a fixed order — a path, `@label`, the reserved
+word `latest`, a run id — and **a bare address is always the id**. Details:
 [cli.md → the four address forms](cli.md#the-four-address-forms-and-how-they-are-told-apart).
 
 ### The four statuses
