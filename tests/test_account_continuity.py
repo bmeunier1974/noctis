@@ -117,6 +117,45 @@ def test_store_summary_reads_without_side_effects(tmp_path):
     assert summary.opened == "2026-07-06"
 
 
+def test_store_summarize_is_the_summary_of_one_load(tmp_path):
+    """``summary()`` IS ``summarize(load())``: the view is pure over an already-loaded broker
+    plus the store's own provenance, so a caller that needs both the broker and the summary
+    parses the file once (story #266)."""
+    store = AccountStore(tmp_path / "paper_account.json")
+    broker = store.load()
+    broker.set_price("AAPL", 100.0)
+    broker.submit_order(Order("AAPL", Side.BUY, 10))
+    broker.set_price("AAPL", 120.0)
+    store.save(broker, date(2026, 7, 6))
+    store.save(broker, date(2026, 7, 7))
+
+    reread = AccountStore(store.path)
+    summarized = reread.summarize(reread.load())
+
+    assert summarized == AccountStore(store.path).summary()  # same numbers, same provenance
+    assert summarized.equity == pytest.approx(broker.equity())
+    assert summarized.cumulative_pnl == pytest.approx(broker.equity() - 100_000.0)
+    assert summarized.open_positions == 1
+    assert summarized.opened == "2026-07-06" and summarized.last_session == "2026-07-07"
+
+
+def test_store_summarize_reads_the_broker_it_is_given(tmp_path):
+    """The summary describes the broker handed in — not a re-read of the file — so the close
+    can summarize the account it already loaded."""
+    store = AccountStore(tmp_path / "paper_account.json")
+    store.save(store.load(), date(2026, 7, 6))
+    other = AccountStore(store.path).load()
+    other.set_price("AAPL", 100.0)
+    other.submit_order(Order("AAPL", Side.BUY, 10))
+    other.set_price("AAPL", 150.0)
+
+    summarized = store.summarize(other)
+
+    assert summarized.equity == pytest.approx(other.equity())
+    assert summarized.open_positions == 1
+    assert summarized.opened == "2026-07-06"  # provenance still the store's
+
+
 # --- runtime wiring ------------------------------------------------------------------------
 
 

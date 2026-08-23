@@ -64,16 +64,24 @@ def gather_account_forward(state_dir: str | Path, entries) -> AccountForward:
     """One read of ``paper_account.json`` + ``forward_ledger.json`` → account summary and
     per-champion forward records (realized from the ledger + current unrealized on the
     account's open positions; realized-only when the account is unreadable). Evidence-only
-    degradation, never an exception."""
+    degradation, never an exception.
+
+    The account file is parsed **once**: a single ``load()`` feeds both the summary
+    (:meth:`AccountStore.summarize`, pure over that broker) and the forward ledger's
+    unrealized marks. A missing file is account inception — no summary, no broker to mark
+    against — so it is never loaded at all.
+    """
     account = None
     broker = None
     corrupt = False
     store = AccountStore(Path(state_dir) / "paper_account.json")
-    try:
-        account = store.summary()
-        broker = store.load() if account is not None else None
-    except RuntimeError:
-        corrupt = True
+    if store.path.is_file():
+        try:
+            broker = store.load()
+            account = store.summarize(broker)
+        except RuntimeError:
+            broker = None
+            corrupt = True
     forward = ForwardLedger(Path(state_dir) / "forward_ledger.json")
     forward.load()
     return AccountForward(account, corrupt, forward, forward_records(forward, entries, broker))
@@ -116,8 +124,14 @@ def assemble_report(
     memory: Memory,
     state_dir: str | Path,
     session: SessionActivity | None = None,
+    account_forward: AccountForward | None = None,
 ) -> ReportData:
     """Gather persisted state — plus ``session``, when a day-cycle ran — into a ReportData.
+
+    ``account_forward`` is the account view the report states: given one (CLOSE reads the
+    account once and hands that same view to the equity mark and to here), it is used as-is;
+    ``None`` means read it here — the ``noctis report`` path. Either way the report for one
+    account file is the same, so the CLI prints the numbers the close wrote.
 
     Evidence-only degradation: an unreadable paper account omits the cumulative curve (the
     TRADING phase already refused and reported the corruption); a corrupt forward ledger
@@ -135,7 +149,11 @@ def assemble_report(
     promotions = [h for h in registry.history[-50:] if h.get("promoted")]
     demotions = registry.demotions()[-10:]
     # The continuous account's cumulative curve + per-champion forward track record.
-    af = gather_account_forward(state_dir, entries)
+    af = (
+        account_forward
+        if account_forward is not None
+        else gather_account_forward(state_dir, entries)
+    )
     if af.account_corrupt:
         logger.warning("paper account unreadable; report omits cumulative P&L")
     account = af.account

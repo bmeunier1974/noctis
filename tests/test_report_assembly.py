@@ -14,10 +14,16 @@ import pytest
 
 from noctis.backtest.scorecard import Metrics, Scorecard, SplitScore, SymbolScore
 from noctis.broker.paper import PaperBroker
-from noctis.broker.persistence import AccountStore
+from noctis.broker.persistence import AccountStore, AccountSummary
+from noctis.broker.seam import Order, Side
 from noctis.champions import ChampionRegistry, PromotionRules
-from noctis.engine.forward_ledger import ForwardLedger
-from noctis.engine.report_assembly import SessionActivity, assemble_report
+from noctis.engine.forward_ledger import ForwardLedger, champion_key
+from noctis.engine.report_assembly import (
+    AccountForward,
+    SessionActivity,
+    assemble_report,
+    gather_account_forward,
+)
 from noctis.memory.base import InMemoryMemory
 from noctis.reporting.report import Trade, render_report
 
@@ -36,19 +42,25 @@ def _metrics(sharpe: float) -> Metrics:
     )
 
 
-def _scorecard(family: str, test: float, train: float, **params) -> Scorecard:
+def _scorecard(
+    family: str, test: float, train: float, *, symbol: str = "FIT", **params
+) -> Scorecard:
     return Scorecard(
         family=family,
         params=params,
         metric_name="sharpe",
         stage="validated",
-        symbols={"FIT": SymbolScore(splits=[SplitScore(0, _metrics(train), _metrics(test))])},
+        symbols={symbol: SymbolScore(splits=[SplitScore(0, _metrics(train), _metrics(test))])},
     )
 
 
-def _registry_with_champion(state_dir, family: str, **params) -> ChampionRegistry:
+def _registry_with_champion(
+    state_dir, family: str, *, symbol: str = "FIT", **params
+) -> ChampionRegistry:
+    """A board with one champion. ``symbol`` is the name it was tuned on — and therefore the
+    one an open position in the account is attributed to when forward records are built."""
     reg = ChampionRegistry(state_dir / "champions.json", capacity=3)
-    assert reg.consider(_scorecard(family, 1.5, 1.7, **params), RULES).promote
+    assert reg.consider(_scorecard(family, 1.5, 1.7, symbol=symbol, **params), RULES).promote
     return reg
 
 
@@ -272,6 +284,107 @@ def test_corrupt_account_omits_curve_and_keeps_forward_realized(tmp_path):
     assert data.cumulative_pnl is None and data.account_opened is None
     assert data.forward[0]["realized_pnl"] == pytest.approx(-3.0)
     assert data.forward[0]["unrealized_pnl"] == 0.0
+
+
+def _account_and_ledger(state, entries=()) -> None:
+    """A persisted account holding 10 AAPL marked at +30/share, plus a forward ledger entry —
+    keyed to the champion the open position is attributed to when one is passed, so the record
+    carries both halves (ledger realized + account unrealized)."""
+    broker = PaperBroker()
+    broker.set_price("AAPL", 100.0)
+    broker.submit_order(Order("AAPL", Side.BUY, 10))
+    broker.set_price("AAPL", 130.0)
+    AccountStore(state / "paper_account.json").save(broker, date(2026, 1, 2))
+    key = champion_key(entries[0]) if entries else "sma_crossover|abc"
+    ledger = ForwardLedger(state / "forward_ledger.json")
+    ledger.record(key, "sma_crossover", date(2026, 1, 5), {"AAPL": 12.5})
+    ledger.save()
+
+
+def test_gather_account_forward_parses_the_account_once(tmp_path, monkeypatch):
+    """One `load()` feeds both the account summary and the forward ledger's unrealized marks —
+    one parse of `paper_account.json` where there were two (story #266)."""
+    state = tmp_path / "state"
+    reg = _registry_with_champion(state, "sma_crossover", symbol="AAPL", fast=5, slow=20)
+    _account_and_ledger(state, reg.list())
+    loads: list[str] = []
+    real_load = AccountStore.load
+
+    def counting_load(self, *args, **kwargs):
+        loads.append(str(self.path))
+        return real_load(self, *args, **kwargs)
+
+    monkeypatch.setattr(AccountStore, "load", counting_load)
+
+    af = gather_account_forward(state, reg.list())
+
+    assert len(loads) == 1  # one parse, where the summary and the broker were two
+    assert not af.account_corrupt
+    assert af.account is not None
+    assert af.account.opened == "2026-01-02"
+    assert af.account.open_positions == 1
+    # That one load fed the forward ledger too: the open position is marked against it.
+    assert af.records[0].unrealized_pnl == pytest.approx(300.0, abs=1.0)
+    assert af.records[0].realized_pnl == pytest.approx(12.5)
+
+
+def test_assemble_report_reads_the_same_account_forward_it_can_be_given(tmp_path):
+    """`account_forward=None` means "read it yourself" (the `noctis report` path); given one,
+    it is used as-is — and for one account file both produce the same report."""
+    state = tmp_path / "state"
+    reg = _registry_with_champion(state, "sma_crossover", symbol="AAPL", fast=5, slow=20)
+    _account_and_ledger(state, reg.list())
+    kwargs = dict(
+        as_of="2026-01-06",
+        mode="paper",
+        registry=reg,
+        memory=InMemoryMemory(),
+        state_dir=state,
+    )
+
+    read_it_itself = assemble_report(**kwargs)
+    handed_one = assemble_report(
+        **kwargs, account_forward=gather_account_forward(state, reg.list())
+    )
+
+    assert handed_one == read_it_itself
+    # The account really was read: 10 AAPL bought at 100 and marked at 130, minus fees.
+    assert handed_one.cumulative_pnl == pytest.approx(300.0, abs=1.0)
+    assert handed_one.account_opened == "2026-01-02"
+    assert handed_one.forward[0]["unrealized_pnl"] == pytest.approx(300.0, abs=1.0)
+
+
+def test_assemble_report_uses_the_account_forward_it_is_given(tmp_path):
+    """A given AccountForward is the account the report states — never re-read behind it, so
+    CLOSE's one read is the one the written report carries."""
+    state = tmp_path / "state"
+    _account_and_ledger(state)
+    given = AccountForward(
+        account=AccountSummary(
+            equity=123_456.0,
+            starting_cash=100_000.0,
+            cumulative_pnl=23_456.0,
+            open_positions=2,
+            opened="2025-12-01",
+            last_session="2026-01-05",
+        ),
+        account_corrupt=False,
+        forward=ForwardLedger(state / "forward_ledger.json"),
+        records=[],
+    )
+
+    data = assemble_report(
+        as_of="2026-01-06",
+        mode="paper",
+        registry=ChampionRegistry(state / "champions.json", capacity=3),
+        memory=InMemoryMemory(),
+        state_dir=state,
+        account_forward=given,
+    )
+
+    assert data.cumulative_pnl == pytest.approx(23_456.0)
+    assert data.account_opened == "2025-12-01"
+    assert data.forward == ()  # the given view's records, not the file's
 
 
 def test_minted_spec_champions_are_flagged(tmp_path):
