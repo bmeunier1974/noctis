@@ -621,7 +621,7 @@ def _runtime(tmp_path: Path, *, body: str = "", **kwargs):
     from noctis.config import load_settings
     from noctis.data import MarketDataLake
     from noctis.data.types import to_ns
-    from noctis.engine import SimulatedSleeper, build_runtime
+    from noctis.engine import CloseResult, SimulatedSleeper, build_runtime
     from noctis.memory import MemoryStore
 
     from ._data_helpers import MockVendor
@@ -667,13 +667,13 @@ def _runtime(tmp_path: Path, *, body: str = "", **kwargs):
     def _trading(t, sleeper):
         sleeper.advance(30 * 60)
 
-    def _close(t):
+    def _close(t, cycle, *, tracked=None):
         captured["sleeper"].advance(60)
-        runtime.result.cycles_completed += 1
+        return CloseResult()
 
     runtime._run_research = _research
     runtime._run_trading = _trading
-    runtime._run_close = _close
+    runtime.close.run = _close  # the CLOSE seam; the loop keeps its own cycle bookkeeping
     return runtime, captured
 
 

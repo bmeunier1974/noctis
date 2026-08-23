@@ -13,7 +13,7 @@ from noctis.champions import ChampionRegistry, build_registry
 from noctis.config import load_settings
 from noctis.data import MarketDataLake
 from noctis.data.types import to_ns
-from noctis.engine import Phase, SimulatedSleeper, build_runtime
+from noctis.engine import CloseResult, Phase, SimulatedSleeper, build_runtime
 from noctis.memory import MemoryStore
 
 from ._data_helpers import MockVendor
@@ -277,13 +277,13 @@ def _stub_phases(runtime, captured, *, session_minutes=20):
     def _trading(t, sleeper):
         calls["trading"] += 1
 
-    def _close(t):
+    def _close(t, cycle, *, tracked=None):
         calls["close"] += 1
-        runtime.result.cycles_completed += 1
+        return CloseResult()
 
     runtime._run_research = _research
     runtime._run_trading = _trading
-    runtime._run_close = _close
+    runtime.close.run = _close  # the CLOSE seam; the loop keeps its own cycle bookkeeping
     return calls
 
 

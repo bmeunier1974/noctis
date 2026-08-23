@@ -297,9 +297,14 @@ report.
 
 ## At the close
 
-Noctis writes a report (`<run>/reports/<date>.md` + `.json`), syncs its data catalog
-(tail-only), reconciles live-built bars against the authoritative catalog (see
-[data.md](data.md)), reorganizes its own memory, and loops back to research.
+The CLOSE entry sits behind its own seam, `ClosePhase` (`src/noctis/engine/close.py`), and it
+**finishes the day's evidence before it renders it**: sync the data catalog (tail-only), check
+its integrity, reconcile live-built bars against the authoritative catalog (see
+[data.md](data.md) — the reconcile has to follow the sync, since it compares against T+1 vendor
+bars), read the paper account once, mark the day's equity, and only *then* write the report
+(`<run>/reports/<date>.md` + `.json`) — so what the close discovers, like a flagged feed drift,
+reaches both files. Then it reorganizes its own memory and loops back to research. Every step is
+isolated: a failure is recorded, never fatal, and memory upkeep always runs.
 
 ## Where state lives
 

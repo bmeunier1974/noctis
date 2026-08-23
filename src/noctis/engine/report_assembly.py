@@ -22,6 +22,8 @@ from noctis.reporting.report import ReportData, Trade
 from noctis.strategies.spec import spec_family_names
 
 if TYPE_CHECKING:
+    import pandas as pd
+
     from noctis.champions.registry import ChampionRegistry
     from noctis.memory.base import Memory
 
@@ -114,6 +116,10 @@ class SessionActivity:
     research_ledgers: list[str] = field(default_factory=list)
     minted_specs: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
+    # Bars the live feed actually built this session, retained for the close's reconciliation
+    # against the (T+1 synced) catalog. Empty on the replay path — and on ``noctis report``,
+    # which has no session at all — so there is simply nothing external to compare.
+    live_bars: dict[str, pd.DataFrame] = field(default_factory=dict)
 
 
 def assemble_report(

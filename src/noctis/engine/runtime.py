@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -20,12 +19,11 @@ import pandas as pd
 from noctis.backtest import Candidate, PipelineConfig, evaluate
 from noctis.backtest.pool import evaluation_time_limit
 from noctis.champions.promotion import PromotionRules
-from noctis.data.types import empty_bars
 from noctis.engine.clock import MarketClock
-from noctis.engine.close import ReconciliationReport, reconcile_bars, run_close
+from noctis.engine.close import ClosePhase
 from noctis.engine.machine import Phase, TradingMachine
 from noctis.engine.pacing import BoundedWaiter, RealSleeper, StallGuard, StopFlag
-from noctis.engine.report_assembly import SessionActivity, assemble_report
+from noctis.engine.report_assembly import SessionActivity
 from noctis.engine.research import run_research
 from noctis.engine.trading_phase import TradingPhase
 from noctis.live.risk import RiskLimits
@@ -207,6 +205,20 @@ class Runtime:
             on_event=on_event,
             stop_event=self._stop_event,
         )
+        # The CLOSE entry behind its own seam: the day's evidence (sync, integrity, reconcile,
+        # account, mark) is finished before the report is rendered, so what the close discovers
+        # reaches the files it writes. Assembled once, driven at each CLOSE with that cycle.
+        from noctis.research.distill import maybe_distill
+
+        self.close = ClosePhase(
+            settings=settings,
+            reports_dir=self.reports_dir,
+            memory=memory,
+            registry=registry,
+            market_lake=market_lake,
+            schema=schema,
+            distill_fn=lambda: maybe_distill(self.settings, self.memory),
+        )
 
         # Load catalog bars for the universe (research + replay share them). Re-run at each
         # TRADING entry so the CLOSE-phase T+1 sync becomes visible on multi-day runs.
@@ -283,10 +295,9 @@ class Runtime:
         )
 
     def _reset_cycle(self) -> None:
-        # Everything the day-cycle contributes to the close report, in one accumulator.
+        # Everything the day-cycle contributes to the close report, in one accumulator — the
+        # live-built bars the close reconciles included.
         self._cycle = SessionActivity()
-        # Bars the live feed actually built this session, retained for close reconciliation.
-        self._live_bars: dict[str, pd.DataFrame] = {}
 
     # --- phases ---
     def _evaluate(self, candidate: Candidate):
@@ -397,103 +408,9 @@ class Runtime:
             self.result.final_equity = outcome.end_equity
         self._cycle.trades.extend(outcome.trades)
         self._cycle.events.extend(outcome.events)
-        self._live_bars = outcome.live_bars
-
-    def _reconcile(self, threshold: float = 0.005):
-        """Compare the session's live-built bars against the (T+1 synced) catalog.
-
-        When a live feed ran, each symbol's retained live bars are reconciled against the
-        authoritative catalog and the per-symbol results are aggregated (drift over the
-        threshold on any symbol flags). Without a live feed there is nothing external to
-        compare, so this is a no-op that never flags.
-        """
-        if not self._live_bars:
-            return ReconciliationReport(0, 0.0, 0.0, threshold, flagged=False)
-        vendor_bars = self.market_lake.get_bars(
-            self.settings.data.dataset, self.schema, list(self._live_bars), 0, 2**63 - 1
-        )
-        n = 0
-        max_drift = 0.0
-        weighted_mean = 0.0
-        flagged = False
-        for sym, live in self._live_bars.items():
-            rep = reconcile_bars(live, vendor_bars.get(sym, empty_bars()), threshold=threshold)
-            n += rep.n_compared
-            max_drift = max(max_drift, rep.max_drift)
-            weighted_mean += rep.mean_drift * rep.n_compared
-            flagged = flagged or rep.flagged
-        mean_drift = weighted_mean / n if n else 0.0
-        return ReconciliationReport(n, max_drift, mean_drift, threshold, flagged=flagged)
-
-    def _mark_equity(self, as_of: str) -> None:
-        """Append this CLOSE's daily equity mark to the run's own account ledger (story #142).
-
-        The mark is the **account's** mark-to-market — read back off ``paper_account.json``, the
-        cumulative paper account — not the session's own end equity, so the curve is the account's
-        and a resumed run continues the same line. The session's fills, orders and closing
-        positions ride with it, which is what makes the run record's trade log derivable from one
-        durable artifact instead of from a report that a later ``noctis report`` could overwrite.
-
-        No account file means no mark: a night that never traded has no equity to state, and an
-        invented flat 100 000 would be a claim about trading that never happened (epic D10).
-
-        Never fatal, like every other reporting step at CLOSE: a ledger that cannot be written
-        costs the record a day, never the run.
-        """
-        from noctis.broker.persistence import EQUITY_CURVE_NAME, AccountStore, EquityLedger
-
-        try:
-            state_dir = Path(self.settings.state_dir)
-            summary = AccountStore(state_dir / "paper_account.json").summary()
-            if summary is None:
-                return
-            EquityLedger(state_dir / EQUITY_CURVE_NAME).mark(
-                date=as_of,
-                equity=summary.equity,
-                start_equity=self._cycle.start_equity,
-                end_equity=self._cycle.end_equity,
-                realized_pnl=self._cycle.end_equity - self._cycle.start_equity,
-                orders_submitted=len(self._cycle.trades),
-                positions_end=dict(self._cycle.positions),
-                trades=[trade.as_dict() for trade in self._cycle.trades],
-            )
-        except Exception:  # noqa: BLE001 — the record is evidence, never a gate
-            logger.exception("close: equity mark failed for %s; continuing", as_of)
-
-    def _run_close(self, t: datetime) -> None:
-        as_of = t.astimezone(UTC).date().isoformat()
-        # Before the report and before the cycle accumulator is reset: the mark belongs to the
-        # session that just closed, and the run record re-derives the whole curve from the ledger
-        # at its next write.
-        self._mark_equity(as_of)
-        data = assemble_report(
-            as_of=as_of,
-            mode=self.mode,
-            registry=self.registry,
-            memory=self.memory,
-            state_dir=self.settings.state_dir,
-            session=self._cycle,
-        )
-        from noctis.research.distill import maybe_distill
-
-        result = run_close(
-            report_data=data,
-            reports_dir=self.reports_dir,
-            memory=self.memory,
-            market_lake=self.market_lake,
-            registry=self.registry,
-            reconcile_fn=self._reconcile,
-            tracked=self.tracked,
-            # CLOSE owns memory upkeep (reorganize below), so the periodic distillation
-            # rides the same isolated-step machinery instead of racing a live session.
-            distill_fn=lambda: maybe_distill(self.settings, self.memory),
-        )
-        if result.report_path:
-            self.result.reports.append(result.report_path)
-        self.result.cycles_completed += 1
-        self._reset_cycle()
-        if self._on_cycle_close is not None:
-            self._on_cycle_close(self.result)
+        # The bars the live feed built ride the cycle to the close, which reconciles them
+        # against the catalog the T+1 sync just refreshed.
+        self._cycle.live_bars = outcome.live_bars
 
     # --- main loop ---
     def run(self, start: datetime | None = None, max_cycles: int | None = None) -> RuntimeResult:
@@ -565,7 +482,13 @@ class Runtime:
                     self._cycle.events.append("Trading phase skipped — market closed")
             elif phase is Phase.CLOSE:
                 close_start = sleeper.now()
-                self._run_close(close_start)
+                closed = self.close.run(close_start, self._cycle, tracked=self.tracked)
+                if closed.report_path:
+                    self.result.reports.append(closed.report_path)
+                self.result.cycles_completed += 1
+                self._reset_cycle()
+                if self._on_cycle_close is not None:
+                    self._on_cycle_close(self.result)
                 self._count_phase_time(phase, close_start, sleeper.now())
                 if max_cycles is not None and self.result.cycles_completed >= max_cycles:
                     self.machine.stop()

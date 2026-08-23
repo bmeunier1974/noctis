@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from noctis.engine.clock import MarketClock
-from noctis.engine.close import CloseResult, ReconciliationReport, reconcile_bars, run_close
+from noctis.engine.close import ClosePhase, CloseResult, ReconciliationReport, reconcile_bars
 from noctis.engine.forward_ledger import (
     ForwardLedger,
     ForwardRecord,
@@ -31,10 +31,10 @@ from noctis.engine.trading_phase import (
 
 __all__ = [
     "MarketClock",
+    "ClosePhase",
     "CloseResult",
     "ReconciliationReport",
     "reconcile_bars",
-    "run_close",
     "Phase",
     "TradingMachine",
     "initial_phase_for",
