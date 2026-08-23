@@ -39,7 +39,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from noctis.eval.decide_site import DECIDE_SCORER
+from noctis.eval.decide_site import DECIDE_SCORER, DIFFICULTY_AXES
 from noctis.eval.harness import HarnessSpec
 from noctis.eval.knobs import SiteKnobs
 from noctis.eval.site import AgentSite
@@ -236,6 +236,10 @@ DECIDE_SITE: AgentSite[DecideSiteInput, DecideOutput] = AgentSite(
     render=render_decide,
     knobs=DecideKnobs,
     scorers=(DECIDE_SCORER,),
+    # The three axes a mined DECIDE corpus labels its cases on, which every reading of this site
+    # splits its agreement figure by. Declared here because a site's facts live in its declaration,
+    # and carried to the scoring pass by the runner (#306).
+    difficulty_axes=DIFFICULTY_AXES,
 )
 
 # Every contract the decide site's version covers, primary first — the driver's own objects, so a

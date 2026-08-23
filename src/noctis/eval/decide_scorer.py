@@ -42,8 +42,10 @@ unlabelled approval refuses rather than quietly shrinking the population (``miss
 
 **Pure.** Values in, values out: no file, no clock, no configuration, no seeded draw, and no import
 of the engine at all — the verdict vocabulary is asserted against the driver's emit contract in the
-suite instead, so drift is caught without coupling. Any figure published from here is reproducible
-from a fixture with a pencil.
+suite instead, so drift is caught without coupling. The one module it reaches for is
+:mod:`noctis.eval.reading`, the eval layer's own stdlib-only reading vocabulary, which owns the
+pair's rows (:data:`~noctis.eval.reading.APPROVAL_PAIR`) and computes no figure. Any figure
+published from here is reproducible from a fixture with a pencil.
 """
 
 from __future__ import annotations
@@ -52,6 +54,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from enum import Enum
 from types import MappingProxyType
+
+from noctis.eval.reading import APPROVAL_PAIR, table
 
 __all__ = [
     "APPROVE",
@@ -162,18 +166,16 @@ class ApprovalPair:
 
     def render(self) -> str:
         """The pair, as the two lines a report prints — never one of them."""
-        return _table(self._rows())
+        return APPROVAL_PAIR.render(self)
 
     def _rows(self) -> list[tuple[str, object]]:
-        """The pair's rows, agreement first and the approval rate immediately beneath it."""
-        return [
-            ("Approval-side agreement", self.agreement),
-            ("Approval rate", self.approval_rate),
-            ("Approvals", self.approvals),
-            ("  gates promoted", self.promoted),
-            ("  gates labeled", self.labeled_approvals),
-            ("  unlabeled (n/a)", self.unlabeled_approvals),
-        ]
+        """The pair's rows, agreement first and the approval rate immediately beneath it.
+
+        The rows themselves are :data:`~noctis.eval.reading.APPROVAL_PAIR`'s, not restated here:
+        one declaration serves this rendering, :func:`~noctis.eval.decide_site.pair_block`'s keys
+        and the bench report's, so they cannot drift apart.
+        """
+        return APPROVAL_PAIR.rows(self)
 
 
 @dataclass(frozen=True)
@@ -210,7 +212,7 @@ class DecideMetrics:
             [
                 f"DECIDE approval side — {self.decided} decided candidates",
                 "",
-                _table(rows),
+                table(rows, label_w=APPROVAL_PAIR.label_w),
             ]
         )
 
@@ -281,23 +283,14 @@ def _share(part: int, whole: int) -> float | None:
     return part / whole if whole else None
 
 
-def _fmt(value: object) -> str:
-    """A cell: the literal ``n/a`` for ``None``, four decimals for a rate, the value otherwise."""
-    if value is None:
-        return "n/a"
-    if isinstance(value, float):
-        return f"{value:.4f}"
-    return str(value)
-
-
-def _table(rows: Sequence[tuple[str, object]]) -> str:
-    """Label/value rows in two columns — the one place a ``None`` becomes the word ``n/a``."""
-    label_w, value_w = 28, 12
-    return "\n".join(f"{label:<{label_w}}{_fmt(value):>{value_w}}" for label, value in rows)
-
-
 # Read once at import so the pairing rule is a property of the type rather than a comment: the
 # co-primary value must carry both halves, or this module refuses to load at all.
 _PAIR_FIELDS = {field.name for field in fields(ApprovalPair)}
 if not {"agreement", "approval_rate"} <= _PAIR_FIELDS:  # pragma: no cover — a structural assertion
     raise RuntimeError("the co-primary pair carries agreement and the approval rate, or neither")
+
+# And the manifest that renders it may only name figures the pair really carries: a row reading an
+# attribute that moved would fail one rendering at a time, months later, in whichever report ran
+# first. It fails here instead, at import, for everybody at once.
+if not APPROVAL_PAIR.attributes() <= _PAIR_FIELDS:  # pragma: no cover — a structural assertion
+    raise RuntimeError("the approval manifest names a figure the co-primary pair does not carry")

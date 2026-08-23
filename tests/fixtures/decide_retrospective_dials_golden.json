@@ -1,0 +1,327 @@
+{
+  "retrospective": true,
+  "answers": "recorded",
+  "attempt_calls": 0,
+  "decide": {
+    "approval": {
+      "agreement": 0.6,
+      "approval_rate": 0.75,
+      "decided": 8,
+      "approvals": 6,
+      "labeled_approvals": 5,
+      "unlabeled_approvals": 1,
+      "promoted": 3
+    },
+    "revise_rate": 0.5,
+    "revise_flip_rate": 0.75,
+    "revises": 4,
+    "revise_flips": 3,
+    "rejections": 2,
+    "cases": [
+      {
+        "case_id": "carry_roll-20260720T144233Z-a3f9c1",
+        "run_id": "20260720T144233Z-a3f9c1",
+        "verdict": "approve",
+        "label": "promoted",
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "n/a",
+          "binding_gate": "none",
+          "evidence_depth": "at-floor"
+        }
+      },
+      {
+        "case_id": "gap_fade_open-20260720T144233Z-a3f9c1",
+        "run_id": "20260720T144233Z-a3f9c1",
+        "verdict": "approve",
+        "label": "refused",
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "comfortable",
+          "binding_gate": "forward_holdout",
+          "evidence_depth": "above-floor"
+        }
+      },
+      {
+        "case_id": "mean_revert_close-20260721T090000Z-b7d2e4",
+        "run_id": "20260721T090000Z-b7d2e4",
+        "verdict": "reject",
+        "label": null,
+        "revises": 2,
+        "revise_flip": true,
+        "difficulty": {
+          "margin": "near",
+          "binding_gate": "activity_floor",
+          "evidence_depth": "at-floor"
+        }
+      },
+      {
+        "case_id": "momo_pullback-20260720T144233Z-a3f9c1",
+        "run_id": "20260720T144233Z-a3f9c1",
+        "verdict": "reject",
+        "label": null,
+        "revises": 1,
+        "revise_flip": true,
+        "difficulty": {
+          "margin": "near",
+          "binding_gate": "symbol_holdout",
+          "evidence_depth": "above-floor"
+        }
+      },
+      {
+        "case_id": "orb_fade-20260721T090000Z-b7d2e4",
+        "run_id": "20260721T090000Z-b7d2e4",
+        "verdict": "approve",
+        "label": "refused",
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "comfortable",
+          "binding_gate": "consistency",
+          "evidence_depth": "below-floor"
+        }
+      },
+      {
+        "case_id": "range_compression-20260721T090000Z-b7d2e4",
+        "run_id": "20260721T090000Z-b7d2e4",
+        "verdict": "approve",
+        "label": null,
+        "revises": 0,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "comfortable",
+          "binding_gate": "n/a",
+          "evidence_depth": "below-floor"
+        }
+      },
+      {
+        "case_id": "squeeze_fade-20260721T090000Z-b7d2e4",
+        "run_id": "20260721T090000Z-b7d2e4",
+        "verdict": "approve",
+        "label": "promoted",
+        "revises": 1,
+        "revise_flip": false,
+        "difficulty": {
+          "margin": "comfortable",
+          "binding_gate": "forward_holdout",
+          "evidence_depth": "above-floor"
+        }
+      },
+      {
+        "case_id": "vol_breakout_squeeze-20260720T144233Z-a3f9c1",
+        "run_id": "20260720T144233Z-a3f9c1",
+        "verdict": "approve",
+        "label": "promoted",
+        "revises": 1,
+        "revise_flip": true,
+        "difficulty": {
+          "margin": "near",
+          "binding_gate": "none",
+          "evidence_depth": "at-floor"
+        }
+      }
+    ],
+    "strata": {
+      "margin": {
+        "comfortable": {
+          "approval": {
+            "agreement": 0.3333333333333333,
+            "approval_rate": 1.0,
+            "decided": 4,
+            "approvals": 4,
+            "labeled_approvals": 3,
+            "unlabeled_approvals": 1,
+            "promoted": 1
+          },
+          "revise_rate": 0.25,
+          "revise_flip_rate": 0.0,
+          "revises": 1,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "n/a": {
+          "approval": {
+            "agreement": 1.0,
+            "approval_rate": 1.0,
+            "decided": 1,
+            "approvals": 1,
+            "labeled_approvals": 1,
+            "unlabeled_approvals": 0,
+            "promoted": 1
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "near": {
+          "approval": {
+            "agreement": 1.0,
+            "approval_rate": 0.3333333333333333,
+            "decided": 3,
+            "approvals": 1,
+            "labeled_approvals": 1,
+            "unlabeled_approvals": 0,
+            "promoted": 1
+          },
+          "revise_rate": 1.0,
+          "revise_flip_rate": 1.0,
+          "revises": 3,
+          "revise_flips": 3,
+          "rejections": 2
+        }
+      },
+      "binding_gate": {
+        "activity_floor": {
+          "approval": {
+            "agreement": null,
+            "approval_rate": 0.0,
+            "decided": 1,
+            "approvals": 0,
+            "labeled_approvals": 0,
+            "unlabeled_approvals": 0,
+            "promoted": 0
+          },
+          "revise_rate": 1.0,
+          "revise_flip_rate": 1.0,
+          "revises": 1,
+          "revise_flips": 1,
+          "rejections": 1
+        },
+        "consistency": {
+          "approval": {
+            "agreement": 0.0,
+            "approval_rate": 1.0,
+            "decided": 1,
+            "approvals": 1,
+            "labeled_approvals": 1,
+            "unlabeled_approvals": 0,
+            "promoted": 0
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "forward_holdout": {
+          "approval": {
+            "agreement": 0.5,
+            "approval_rate": 1.0,
+            "decided": 2,
+            "approvals": 2,
+            "labeled_approvals": 2,
+            "unlabeled_approvals": 0,
+            "promoted": 1
+          },
+          "revise_rate": 0.5,
+          "revise_flip_rate": 0.0,
+          "revises": 1,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "n/a": {
+          "approval": {
+            "agreement": null,
+            "approval_rate": 1.0,
+            "decided": 1,
+            "approvals": 1,
+            "labeled_approvals": 0,
+            "unlabeled_approvals": 1,
+            "promoted": 0
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 0
+        },
+        "none": {
+          "approval": {
+            "agreement": 1.0,
+            "approval_rate": 1.0,
+            "decided": 2,
+            "approvals": 2,
+            "labeled_approvals": 2,
+            "unlabeled_approvals": 0,
+            "promoted": 2
+          },
+          "revise_rate": 0.5,
+          "revise_flip_rate": 1.0,
+          "revises": 1,
+          "revise_flips": 1,
+          "rejections": 0
+        },
+        "symbol_holdout": {
+          "approval": {
+            "agreement": null,
+            "approval_rate": 0.0,
+            "decided": 1,
+            "approvals": 0,
+            "labeled_approvals": 0,
+            "unlabeled_approvals": 0,
+            "promoted": 0
+          },
+          "revise_rate": 1.0,
+          "revise_flip_rate": 1.0,
+          "revises": 1,
+          "revise_flips": 1,
+          "rejections": 1
+        }
+      },
+      "evidence_depth": {
+        "above-floor": {
+          "approval": {
+            "agreement": 0.5,
+            "approval_rate": 0.6666666666666666,
+            "decided": 3,
+            "approvals": 2,
+            "labeled_approvals": 2,
+            "unlabeled_approvals": 0,
+            "promoted": 1
+          },
+          "revise_rate": 0.6666666666666666,
+          "revise_flip_rate": 0.5,
+          "revises": 2,
+          "revise_flips": 1,
+          "rejections": 1
+        },
+        "at-floor": {
+          "approval": {
+            "agreement": 1.0,
+            "approval_rate": 0.6666666666666666,
+            "decided": 3,
+            "approvals": 2,
+            "labeled_approvals": 2,
+            "unlabeled_approvals": 0,
+            "promoted": 2
+          },
+          "revise_rate": 0.6666666666666666,
+          "revise_flip_rate": 1.0,
+          "revises": 2,
+          "revise_flips": 2,
+          "rejections": 1
+        },
+        "below-floor": {
+          "approval": {
+            "agreement": 0.0,
+            "approval_rate": 1.0,
+            "decided": 2,
+            "approvals": 2,
+            "labeled_approvals": 1,
+            "unlabeled_approvals": 1,
+            "promoted": 0
+          },
+          "revise_rate": 0.0,
+          "revise_flip_rate": null,
+          "revises": 0,
+          "revise_flips": 0,
+          "rejections": 0
+        }
+      }
+    }
+  }
+}

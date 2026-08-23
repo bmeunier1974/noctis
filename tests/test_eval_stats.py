@@ -16,9 +16,11 @@ that posture at the boundary: never a silent intersection of two case sets, neve
 **The verdict is tri-state, and the module is pure.** Following the parity module's flip assessment
 (``src/noctis/research/parity.py``): an ``n/a`` input makes the affected half inconclusive rather
 than deciding it, ratios are denominator-guarded to ``None``, and ``None`` renders as the literal
-``n/a`` in exactly one place — asserted structurally, beside the import allowlist (stdlib only, no
-engine, no I/O, no clock) and the seeded-randomness inspection that every use of ``random`` goes
-through an explicitly seeded generator.
+``n/a`` — spelled not here but once, in :mod:`noctis.eval.reading`, the eval layer's shared reading
+vocabulary this module formats its cells through (#303). That is asserted structurally, beside the
+import allowlist (stdlib plus that one pure module — no engine, no I/O, no clock) and the
+seeded-randomness inspection that every use of ``random`` goes through an explicitly seeded
+generator.
 """
 
 from __future__ import annotations
@@ -501,18 +503,31 @@ def _imports(source: Path) -> set[str]:
 
 def test_the_stats_module_reaches_no_io_no_clock_and_no_engine() -> None:
     """The load-bearing decision of this slice: the statistics are a pure function of their
-    inputs. Nothing here reads a file, a clock, the settings — or the engine."""
+    inputs. Nothing here reads a file, a clock, the settings — or the engine.
+
+    The one ``noctis`` module it reaches for is :mod:`noctis.eval.reading`, the eval layer's own
+    stdlib-only rendering vocabulary, which computes no figure and is held to that purity by
+    ``tests/test_eval_reading.py``."""
     assert _imports(STATS_SOURCE) <= {
         "__future__",
         "collections",
         "dataclasses",
         "itertools",
         "math",
+        "noctis",
         "random",
         "typing",
     }
+    tree = ast.parse(STATS_SOURCE.read_text())
+    reached = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("noctis")
+    }
+    assert reached == {"noctis.eval.reading"}
+
     text = STATS_SOURCE.read_text()
-    for forbidden in ("open(", "Path(", "os.", "json.", "datetime", "time.time", "import noctis"):
+    for forbidden in ("open(", "Path(", "os.", "json.", "datetime", "time.time"):
         assert forbidden not in text, forbidden
 
 
@@ -539,12 +554,15 @@ def test_the_entry_points_that_use_randomness_require_a_seed() -> None:
         assert seed.kind is inspect.Parameter.KEYWORD_ONLY, entry_point.__name__
 
 
-def test_none_renders_as_the_literal_n_a_in_exactly_one_place() -> None:
+def test_none_is_not_spelled_here_at_all_because_the_reading_vocabulary_owns_the_word() -> None:
+    """The stronger form of "in exactly one place": the one place is no longer this module.
+
+    Every cell goes through :func:`noctis.eval.reading.fmt`, so this module cannot disagree with the
+    coder's reading or the bench report about what a missing figure looks like — and the rendering
+    of one is pinned as behaviour above."""
     tree = ast.parse(STATS_SOURCE.read_text())
     literals = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and node.value == "n/a"  # noqa: E501
+        node for node in ast.walk(tree) if isinstance(node, ast.Constant) and node.value == "n/a"
     ]
 
-    assert len(literals) == 1
+    assert literals == []

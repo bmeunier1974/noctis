@@ -52,6 +52,10 @@ a job pass rate that is one thing on ``bars_only`` briefs and another on ``exits
 findings, not one. So the reading carries a :data:`STRATA_KEY` block — axis → level → the same
 co-primary pair over just those jobs, computed by the same arithmetic as the whole batch
 (:func:`strata_block`), exactly as :func:`noctis.eval.decide_site.strata_block` stratifies DECIDE's.
+*Which* axes is the site declaration's answer, not this module's: the seven ride on
+:data:`~noctis.eval.coder_distill_sites.CODER_SITE`'s ``difficulty_axes`` and the runner hands them
+to :meth:`CoderReadingScorer.read`, while the grouping itself is
+:func:`~noctis.eval.reading.strata`'s — the one loop both sites stratify through (#306).
 A stratum publishes the **pass breakdown** and not a second copy of the spend and taxonomy blocks:
 those repeated across twenty levels are a wall nobody reads, while the pair is what an axis was
 invented to split. A level no case in the batch carries is absent rather than present at zero.
@@ -81,6 +85,7 @@ from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
 
 from noctis.eval.case import Case
+from noctis.eval.coder_case import CODER_AXES
 from noctis.eval.metrics import (
     AttemptDistribution,
     AttemptOutcome,
@@ -95,6 +100,18 @@ from noctis.eval.metrics import (
     mean_attempts_to_pass,
     retry_yield,
 )
+from noctis.eval.reading import (
+    ANSWERS_FRESH,
+    ANSWERS_KEY,
+    ATTEMPT_CALLS_KEY,
+    NOT_APPLICABLE,
+    PASS_RATES,
+    STRATA_KEY,
+    Pair,
+    SiteReading,
+    strata,
+)
+from noctis.eval.reading import table as render_table
 from noctis.eval.site import AnsweredCase
 from noctis.research.pricing import USAGE_FIELDS, PriceTable, default_table
 
@@ -109,6 +126,7 @@ __all__ = [
     "FEEDBACK_LABEL",
     "NOT_APPLICABLE",
     "PASS_LABEL_KEY",
+    "RATES_KEY",
     "RETRY_INFORMED_BLOCKS",
     "STRATA_KEY",
     "UNATTEMPTED_KEY",
@@ -118,6 +136,7 @@ __all__ = [
     "EscalationReading",
     "PassRates",
     "coder_block",
+    "coder_reading",
     "job_records",
     "score_coder_jobs",
     "strata_block",
@@ -126,10 +145,10 @@ __all__ = [
 #: The key the whole coder reading rides under, inside the dials subtree a record quotes verbatim.
 CODER_DIALS_KEY = "coder"
 
-#: What ``dials.answers`` says on a bench that really asked a model. The word is DECIDE's
-#: (:data:`noctis.eval.decide_site.ANSWERS_FRESH`), spelled here rather than imported so this
-#: module stays free of another site's vocabulary; the suite pins the two equal.
-ANSWERS_FRESH = "fresh"
+# ``ANSWERS_FRESH`` — what ``dials.answers`` says on a bench that really asked a model — is not
+# this site's word and not DECIDE's either: it is the eval layer's, spelled once in
+# :mod:`noctis.eval.reading` and re-exported here. It used to be spelled in both sites with a suite
+# test pinning the copies equal, which is a pin that can only report drift after it happens (#305).
 
 #: What retry-informed passing is called, in full, wherever it renders. Never plain ``pass@k``:
 #: the retries were shown the gate's rejection, which is a materially easier question.
@@ -146,15 +165,16 @@ RETRY_INFORMED_BLOCKS: tuple[str, ...] = ("rates", "effort", "escalation", "cost
 UNREADABLE_KEY = "unreadable"
 UNATTEMPTED_KEY = "unattempted_jobs"
 
-#: The key the per-axis breakdown rides under. The word is DECIDE's (its reading publishes
-#: ``strata`` in the same place), so one generic reader renders both sites' breakdowns.
-STRATA_KEY = "strata"
+#: The key the co-primary pair rides under inside the coder's block — the word DECIDE spells
+#: ``approval``. It travels with the manifest and the value on one
+#: :class:`~noctis.eval.reading.Pair`, so a block builder no longer spells it by hand.
+RATES_KEY = "rates"
 
-#: What a stratum is keyed by when a job's case carries no level on an axis. Every validated coder
-#: case is labelled on all seven, so this is a defensive spelling rather than an expected row; the
-#: word is DECIDE's (:data:`noctis.eval.decide_case.NOT_APPLICABLE`), spelled here rather than
-#: imported so this module stays free of another site's vocabulary; the suite pins the two equal.
-NOT_APPLICABLE = "n/a"
+# ``STRATA_KEY`` is the key the per-axis breakdown rides under, on this site and DECIDE's alike, so
+# one generic reader renders both; ``NOT_APPLICABLE`` is what the shared grouping loop keys a
+# stratum by when a job's case carries no level on an axis (every validated coder case is labelled
+# on all seven, so it is a defensive spelling rather than an expected row). Both are the eval
+# layer's words, imported from :mod:`noctis.eval.reading` and re-exported here (#305).
 
 
 # ── the co-primary pair ───────────────────────────────────────────────────────────────────
@@ -186,19 +206,16 @@ class PassRates:
 
     def render(self) -> str:
         """The pair, as the two lines a report prints — never one of them."""
-        return _table(self._rows())
+        return PASS_RATES.render(self)
 
     def _rows(self) -> list[tuple[str, object]]:
-        """The pair's rows, the opening ask first and the retry-informed rate beneath it."""
-        return [
-            ("First-attempt pass rate", self.first_attempt_pass_rate),
-            (f"Job pass rate ({self.label})", self.job_pass_rate),
-            ("Jobs", self.jobs),
-            ("  cases", self.cases),
-            ("  first ask landed", self.first_attempt_passes),
-            ("  landed in the end", self.passed_jobs),
-            ("  never asked (n/a)", self.unattempted_jobs),
-        ]
+        """The pair's rows, the opening ask first and the retry-informed rate beneath it.
+
+        The rows themselves are :data:`~noctis.eval.reading.PASS_RATES`', not restated here: one
+        declaration serves this rendering and :func:`_rates_block`'s keys, and it is what carries
+        :data:`FEEDBACK_LABEL` into the job rate's own label rather than into a caption.
+        """
+        return PASS_RATES.rows(self)
 
 
 @dataclass(frozen=True)
@@ -252,7 +269,7 @@ class CoderMetrics:
                 f"Coder site — {self.rates.jobs} job(s) over {self.rates.cases} case(s); "
                 f"job passing is {FEEDBACK_LABEL}",
                 "",
-                _table(rows),
+                render_table(rows, label_w=PASS_RATES.label_w),
             ]
         )
 
@@ -406,6 +423,54 @@ def _share(part: int, whole: int) -> float | None:
 # ── the reading a record quotes ───────────────────────────────────────────────────────────
 
 
+def coder_reading(
+    metrics: CoderMetrics,
+    *,
+    attempt_calls: int = 0,
+    warnings: Sequence[Mapping[str, Any]] = (),
+    unreadable: int = 0,
+    strata: Mapping[str, Any] | None = None,
+) -> SiteReading:
+    """One scored batch as the site reading a record quotes — the sections, and where each rides.
+
+    The pair whole, the cost beside it, no blended figure. ``warnings`` are the detector rows,
+    carried verbatim and read by nothing above them; ``unreadable`` counts the jobs whose retained
+    output was not a job record at all; ``strata`` is the per-axis breakdown of the pair
+    (:func:`strata_block`), empty for a caller that computed none — a batch nobody labelled has no
+    axes, which is an absence and not a zero.
+
+    What each section *is* belongs to :class:`~noctis.eval.reading.SiteReading`, which publishes
+    them (#308); what this function decides is which section each of the coder's figures is filed
+    under. Two of those choices are the coder's published order rather than anyone's taste: the
+    batch opens with the population its rates are over, above the pair, and its per-axis breakdown
+    sits between the blocks that explain the two rates and the warning rows beneath them — so the
+    extras name the strata's slot there, and it is filled from the field.
+    """
+    axes = dict(strata or {})
+    return SiteReading(
+        dials_key=CODER_DIALS_KEY,
+        headline={ANSWERS_KEY: ANSWERS_FRESH, ATTEMPT_CALLS_KEY: attempt_calls},
+        pair=Pair(key=RATES_KEY, manifest=PASS_RATES, value=metrics.rates),
+        counts={
+            PASS_LABEL_KEY: FEEDBACK_LABEL,
+            "cases": metrics.rates.cases,
+            "jobs": metrics.rates.jobs,
+            UNATTEMPTED_KEY: metrics.rates.unattempted_jobs,
+            UNREADABLE_KEY: unreadable,
+        },
+        strata=axes,
+        extras={
+            "effort": _effort_block(metrics),
+            "escalation": _escalation_block(metrics.escalation),
+            "cost": _cost_block(metrics),
+            "failures": _failures_block(metrics.failures),
+            STRATA_KEY: axes,
+            "warnings": [dict(row) for row in warnings],
+            "warned_jobs": len({(row["case_id"], row["rep"]) for row in warnings}),
+        },
+    )
+
+
 def coder_block(
     metrics: CoderMetrics,
     *,
@@ -413,31 +478,21 @@ def coder_block(
     unreadable: int = 0,
     strata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One scored batch as record data — the pair whole, the cost beside it, no blended figure.
+    """One scored batch as record data — the block half of :func:`coder_reading`.
 
-    ``warnings`` are the detector rows, carried verbatim and read by nothing above them;
-    ``unreadable`` counts the jobs whose retained output was not a job record at all; ``strata`` is
-    the per-axis breakdown of the pair (:func:`strata_block`), empty for a caller that computed
-    none — a batch nobody labelled has no axes, which is an absence and not a zero.
+    The headline facts above the block (how the bench came by its answers, how many model calls
+    sit behind them) are the *scoring pass*'s to state, so a caller that wants the batch's figures
+    alone reads them here.
     """
-    return {
-        PASS_LABEL_KEY: FEEDBACK_LABEL,
-        "cases": metrics.rates.cases,
-        "jobs": metrics.rates.jobs,
-        UNATTEMPTED_KEY: metrics.rates.unattempted_jobs,
-        UNREADABLE_KEY: unreadable,
-        "rates": _rates_block(metrics.rates),
-        "effort": _effort_block(metrics),
-        "escalation": _escalation_block(metrics.escalation),
-        "cost": _cost_block(metrics),
-        "failures": _failures_block(metrics.failures),
-        STRATA_KEY: dict(strata or {}),
-        "warnings": [dict(row) for row in warnings],
-        "warned_jobs": len({(row["case_id"], row["rep"]) for row in warnings}),
-    }
+    return coder_reading(metrics, warnings=warnings, unreadable=unreadable, strata=strata).block()
 
 
-def strata_block(cases: Sequence[Case], records: Sequence[JobRecord]) -> dict[str, Any]:
+def strata_block(
+    cases: Sequence[Case],
+    records: Sequence[JobRecord],
+    *,
+    axes: Sequence[str] = CODER_AXES,
+) -> dict[str, Any]:
     """Each difficulty axis's levels, each carrying the co-primary pair over just those jobs.
 
     Stratified pass rates are the reason the axes exist: a job pass rate that is one thing on
@@ -446,29 +501,29 @@ def strata_block(cases: Sequence[Case], records: Sequence[JobRecord]) -> dict[st
     and the headline pair can never be computed two different ways — DECIDE's
     :func:`~noctis.eval.decide_site.strata_block` is stratified the same way for the same reason.
 
+    The grouping itself is :func:`~noctis.eval.reading.strata`'s, the one loop both sites stratify
+    through: an absent level is :data:`~noctis.eval.reading.NOT_APPLICABLE`, levels come back
+    sorted, and a level no case in the batch carries is absent rather than present at zero —
+    nothing was measured there, and an empty row would read as a measurement. What this function
+    keeps is the coder's own two contributions: how a job finds its level, and what a level scores
+    (:func:`_stratum_block`).
+
     What a stratum publishes is deliberately the **pass breakdown** and not a second copy of the
     whole reading: the spend, effort and taxonomy blocks repeated across twenty levels would be a
     wall of numbers nobody reads, while the pair is exactly what an axis was invented to split. Both
     halves ride together (:func:`_rates_block`), so the pairing rule holds at every depth.
 
-    A level no case in the batch carries is absent rather than present at zero — nothing was
-    measured there, and an empty row would read as a measurement.
+    ``axes`` are the site's declared :attr:`~noctis.eval.site.AgentSite.difficulty_axes`, which a
+    bench's runner hands the scoring pass; a caller that names none reads the coder's whole
+    vocabulary, because that is what a coder corpus labels its briefs on.
     """
-    # Deferred: the axis vocabulary pulls the author engine in for one enum, and every other caller
-    # of this module needs neither.
-    from noctis.eval.coder_case import Axis
-
     levels = {case.case_id: dict(case.difficulty) for case in cases}
-    stratified: dict[str, Any] = {}
-    for axis in Axis:
-        grouped: dict[str, list[JobRecord]] = {}
-        for record in records:
-            level = levels.get(record.case_id, {}).get(axis.value, NOT_APPLICABLE)
-            grouped.setdefault(level, []).append(record)
-        stratified[axis.value] = {
-            level: _stratum_block(grouped[level]) for level in sorted(grouped)
-        }
-    return stratified
+    return strata(
+        axes,
+        records,
+        level_of=lambda record, axis: levels.get(record.case_id, {}).get(axis),
+        block_of=_stratum_block,
+    )
 
 
 def _stratum_block(records: Sequence[JobRecord]) -> dict[str, Any]:
@@ -483,14 +538,13 @@ def _stratum_block(records: Sequence[JobRecord]) -> dict[str, Any]:
 
 
 def _rates_block(rates: PassRates) -> dict[str, Any]:
-    """The co-primary value, whole: neither rate is published without the other beside it."""
-    return {
-        PASS_LABEL_KEY: rates.label,
-        "first_attempt_pass_rate": rates.first_attempt_pass_rate,
-        "job_pass_rate": rates.job_pass_rate,
-        "first_attempt_passes": rates.first_attempt_passes,
-        "passed_jobs": rates.passed_jobs,
-    }
+    """The co-primary value, whole: neither rate is published without the other beside it.
+
+    The keys and their order are :data:`~noctis.eval.reading.PASS_RATES`', not restated here — the
+    same declaration the pair renders itself from, so a published document and a printed report can
+    never name the figures two different things.
+    """
+    return PASS_RATES.block(rates)
 
 
 def _effort_block(metrics: CoderMetrics) -> dict[str, Any]:
@@ -627,49 +681,42 @@ class CoderReadingScorer:
     hands it every answered case and folds the block it returns into the record's dials.
     """
 
-    def read(self, answered: Sequence[AnsweredCase]) -> Mapping[str, Any] | None:
+    def read(
+        self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = CODER_AXES
+    ) -> SiteReading | None:
         """The whole coder reading over one live bench's answers — see the module docstring.
+
+        ``axes`` is what the site's declaration says its cases are labelled on, handed over by the
+        runner (:class:`~noctis.eval.site.Scorer`) rather than looked up here: this scorer is the
+        singleton that declaration carries, so it cannot import it back.
 
         ``None`` for a bench that answered nothing: a reading over no answers is not a measured
         zero, it is an absence, and publishing empty figures beside real dials would read as one.
+
+        **The population is jobs, and the reps are not folded — on purpose.** DECIDE folds a case's
+        reps into one contribution by strict majority (:func:`~noctis.eval.reading.fold_by_case`),
+        because a case has one right verdict and several answers to it. A coder brief has no such
+        thing: every rep is a real authoring *job* that really asked, really spent and really landed
+        or did not, and the pass rates are rates over those jobs. There is no verdict vocabulary
+        over an authored file to take a majority of, so a fold here would blur the spread the two
+        rates exist to report rather than settle anything (#305).
         """
         if not answered:
             return None
         read = job_records(answered)
         records = [record for record, _ in read]
-        return {
-            "answers": ANSWERS_FRESH,
-            "attempt_calls": sum(len(one.replies) for one in answered),
-            CODER_DIALS_KEY: coder_block(
-                score_coder_jobs(records),
-                warnings=_warning_rows(read),
-                unreadable=len(answered) - len(read),
-                strata=strata_block([one.case for one in answered], records),
-            ),
-        }
+        return coder_reading(
+            score_coder_jobs(records),
+            attempt_calls=sum(len(one.replies) for one in answered),
+            warnings=_warning_rows(read),
+            unreadable=len(answered) - len(read),
+            strata=strata_block([one.case for one in answered], records, axes=axes),
+        )
 
 
 #: The scorer the coder declaration carries in its ``scorers`` slot. One instance: it is stateless,
 #: and a per-bench copy would invite per-bench configuration of a thing that has none.
 CODER_SCORER = CoderReadingScorer()
-
-
-# ── rendering: one place where an absence becomes the word ``n/a`` ────────────────────────
-
-
-def _fmt(value: object) -> str:
-    """A cell: the literal ``n/a`` for ``None``, four decimals for a rate, the value otherwise."""
-    if value is None:
-        return "n/a"
-    if isinstance(value, float):
-        return f"{value:.4f}"
-    return str(value)
-
-
-def _table(rows: Sequence[tuple[str, object]]) -> str:
-    """Label/value rows in two columns — the one place a ``None`` becomes the word ``n/a``."""
-    label_w, value_w = 36, 12
-    return "\n".join(f"{label:<{label_w}}{_fmt(value):>{value_w}}" for label, value in rows)
 
 
 # Read once at import so the pairing rule is a property of the type rather than a comment: the
@@ -682,3 +729,9 @@ if not set(PassRates.rate_fields()) <= _RATE_FIELDS:  # pragma: no cover — a s
 # reading refuses to publish, so its absence is asserted on the type rather than reviewed for.
 if _RATE_FIELDS & {"score", "blended_score", "combined_score"}:  # pragma: no cover — structural
     raise RuntimeError("the coder reading publishes two co-primary rates and no blended score")
+
+# And the manifest that renders the pair may only name figures the pair really carries: a row
+# reading an attribute that moved would fail one rendering at a time, months later, in whichever
+# report ran first. It fails here instead, at import, for everybody at once.
+if not PASS_RATES.attributes() <= _RATE_FIELDS:  # pragma: no cover — a structural assertion
+    raise RuntimeError("the pass-rate manifest names a figure the co-primary pair does not carry")

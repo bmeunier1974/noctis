@@ -1,0 +1,317 @@
+Bench 20260801T101112Z-a1b2c3 — golden-net
+  workspace/bench/20260801T101112Z-a1b2c3/bench.json
+
+Site                               coder
+Site version                           1
+Corpus split                      tuning
+Complete                             yes
+Started (UTC)               2026-08-01T10:11:12Z
+Finished (UTC)              2026-08-01T10:29:44Z
+Comparable key
+  engine_version=3|engine_fingerprint=0ab702d65ec8a507|site_id=coder|site_version=1|prompt_asset_hash=7c1f0d9a4b2e6f83|corpus_version=coder/2026-07|corpus_hash=9f2c1d3e4b5a6c7d|harness_hash=1122334455667788|pricing_table_version=2026-07.1
+
+Cases (n)                              3
+Runs (reps)                            6
+Reps per case                          2
+Attempts                               7
+Corpus cases                           4
+  not scored                           1
+
+Harness dials
+answers                            fresh
+attempt_calls                          7
+
+dials.coder
+pass_label                  pass@k with feedback
+cases                                  3
+jobs                                   5
+unattempted_jobs                       1
+unreadable                             1
+rates
+  First-attempt pass rate                   0.2500
+  Job pass rate (pass@k with feedback)      0.7500
+    first ask landed                             1
+    landed in the end                            3
+effort
+  pass_label                  pass@k with feedback
+  mean_attempts_to_pass             2.2500
+  attempt_distribution
+    passed_on
+      1                                 0.2500
+      2                                 0.2500
+      3                                 0.2500
+    never                             0.2500
+  retry_yield
+    2                                 0.2500
+    3                                 0.2500
+escalation
+  pass_label                  pass@k with feedback
+  escalated_jobs                         2
+  rescued_jobs                           1
+  escalation_rescue_rate            0.5000
+  usd_per_rescued_file_estimate     39.0000
+  pricing_table_version          2026-07.1
+cost
+  pass_label                  pass@k with feedback
+  tokens_total                     8000000
+  tokens_per_pass             2666666.6667
+  usd_total_estimate               48.0000
+  usd_per_pass_estimate            16.0000
+  pricing_table_version          2026-07.1
+  seconds_total                    32.5000
+  p50_seconds_to_pass               9.0000
+  p95_seconds_to_pass              12.1500
+failures
+  attempts                               5
+  classes
+    warmup_too_large
+      count                                  0
+      share                             0.0000
+      knob                        fixed-oracle block wording, spec-path only
+    api_misuse
+      count                                  0
+      share                             0.0000
+      knob                        contract sheet coverage, hint enrichment
+    name_mismatch
+      count                                  1
+      share                             0.2000
+      knob                        prompt contract rules
+    signals_parity
+      count                                  0
+      share                             0.0000
+      knob                        model capability
+    structural_invariant
+      count                                  0
+      share                             0.0000
+      knob                        model capability — the serious one
+    scenario_violation
+      count                                  2
+      share                             0.4000
+      knob                        feasibility rules, thinking dial, oracle mode
+    truncated
+      count                                  1
+      share                             0.2000
+      knob                        coder max-tokens, thinking allowance, thinking dial
+    no_code_block
+      count                                  0
+      share                             0.0000
+      knob                        prompt output rules, model instruction-following
+    import_error
+      count                                  1
+      share                             0.2000
+      knob                        model capability / contract sheet
+    unclassified
+      count                                  0
+      share                             0.0000
+      knob                        grow the taxonomy
+strata
+  composition_mode
+    reference
+      cases                                  1
+      jobs                                   1
+      unattempted_jobs                       1
+      rates
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
+    revision
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
+    scratch
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
+  oracle_mode
+    authored
+      cases                                  2
+      jobs                                   3
+      unattempted_jobs                       1
+      rates
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
+    fixed_spec
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
+  warmup_arithmetic
+    composed
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
+    higher_timeframe
+      cases                                  1
+      jobs                                   1
+      unattempted_jobs                       1
+      rates
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
+    single
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
+  state_complexity
+    latched
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
+    rolling
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
+    stateless
+      cases                                  1
+      jobs                                   1
+      unattempted_jobs                       1
+      rates
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
+  no_trade_tape
+    falsified
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
+    scale_free
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
+    trivial
+      cases                                  1
+      jobs                                   1
+      unattempted_jobs                       1
+      rates
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
+  param_space_breadth
+    broad
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
+    moderate
+      cases                                  1
+      jobs                                   1
+      unattempted_jobs                       1
+      rates
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
+    narrow
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
+  api_surface
+    exits
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
+    indicators
+      cases                                  1
+      jobs                                   2
+      unattempted_jobs                       0
+      rates
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
+    n/a
+      cases                                  1
+      jobs                                   1
+      unattempted_jobs                       1
+      rates
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
+warnings                     [3 entries]
+warned_jobs                            2
+
+Metrics
+first_attempt_pass_rate           0.3333
+job_pass_rate                     0.5000
+mean_attempts_to_pass             1.2500
+attempt_distribution
+  passed_on
+    1                                 0.3333
+    2                                 0.1667
+  never                             0.5000
+retry_yield
+  2                                 0.1667
+cost
+  tokens_total                         n/a
+  tokens_per_pass                      n/a
+  usd_total_estimate                   n/a
+  usd_per_pass_estimate                n/a
+  pricing_table_version          2026-07.1
+latency
+  p50_s                            12.5000
+  p95_s                            19.2500

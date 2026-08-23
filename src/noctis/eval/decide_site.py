@@ -52,7 +52,9 @@ publishes — the co-primary pair, the deferral figures, one row per case and th
 because the two paths share the shaping functions below (:func:`scored_block`, :func:`case_row`,
 :func:`strata_block`) rather than agreeing by convention. What differs is stated at the top of the
 block and nowhere else: ``answers`` is :data:`ANSWERS_FRESH` here and :data:`ANSWERS_RECORDED`
-there.
+there. The axes those strata split by are declared data — :data:`DIFFICULTY_AXES`, published by
+:data:`~noctis.eval.episodic_sites.DECIDE_SITE` and handed to the pass by the runner — and the
+grouping loop belongs to no site at all (:func:`~noctis.eval.reading.strata`, #306).
 
 Three honesty rules govern that fold:
 
@@ -78,7 +80,6 @@ import.
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -93,6 +94,20 @@ from noctis.eval.decide_scorer import (
     score_decide_batch,
 )
 from noctis.eval.metrics import AttemptOutcome
+from noctis.eval.reading import (
+    ANSWERS_FRESH,
+    ANSWERS_KEY,
+    ANSWERS_RECORDED,
+    APPROVAL_PAIR,
+    ATTEMPT_CALLS_KEY,
+    NOT_APPLICABLE,
+    RETROSPECTIVE_KEY,
+    Pair,
+    SiteReading,
+    fold_by_case,
+    strata,
+    strict_majority,
+)
 from noctis.eval.site import AnsweredCase
 from noctis.research.driver import DECIDE_CONTRACT, DECIDE_FINAL_CONTRACT, DecideOutput
 from noctis.research.episode import EmitContract, _extract_json_object
@@ -107,8 +122,13 @@ if TYPE_CHECKING:  # the cycle-closing imports, for annotations only — see the
 __all__ = [
     "ANSWERS_FRESH",
     "ANSWERS_RECORDED",
+    "APPROVAL_KEY",
+    "BINDING_GATE_AXIS",
     "DECIDE_DIALS_KEY",
     "DECIDE_SCORER",
+    "DIFFICULTY_AXES",
+    "EVIDENCE_DEPTH_AXIS",
+    "MARGIN_AXIS",
     "NEUTRAL_SESSION",
     "NO_MAJORITY",
     "NO_VERDICT",
@@ -122,6 +142,7 @@ __all__ = [
     "contract_for",
     "decide_input",
     "decide_site_input",
+    "deferral_block",
     "pair_block",
     "parse_reply",
     "scored_block",
@@ -131,14 +152,31 @@ __all__ = [
 #: The key the whole DECIDE reading rides under, inside the dials subtree a record quotes verbatim.
 DECIDE_DIALS_KEY = "decide"
 
-#: What ``dials.answers`` says on a bench that really asked a model, and on one that re-read
-#: history. One vocabulary, so the two records are diffable rather than merely similar.
-ANSWERS_FRESH = "fresh"
-ANSWERS_RECORDED = "recorded"
+# ``ANSWERS_FRESH`` / ``ANSWERS_RECORDED`` — what ``dials.answers`` says on a bench that really
+# asked a model, and on one that re-read history — are the eval layer's words rather than this
+# site's: spelled once in :mod:`noctis.eval.reading`, and re-exported here because this module's
+# docstring names them and its readers have always imported them from it (#305).
+
+#: The three difficulty axes a mined DECIDE corpus labels its cases on, in the order every reading
+#: publishes them. They live here, one module below the case builder that labels a case
+#: (:mod:`noctis.eval.decide_case`) and the declaration that publishes them
+#: (:data:`~noctis.eval.episodic_sites.DECIDE_SITE`'s ``difficulty_axes``), because both of those
+#: import this module and neither may be imported back: the declaration carries this module's
+#: scorer, and the case reads its site id off the declaration. One spelling, imported by all three,
+#: is what retired the call-time axis imports this module used to close that cycle with (#306).
+MARGIN_AXIS = "margin"
+BINDING_GATE_AXIS = "binding_gate"
+EVIDENCE_DEPTH_AXIS = "evidence_depth"
+DIFFICULTY_AXES: tuple[str, ...] = (MARGIN_AXIS, BINDING_GATE_AXIS, EVIDENCE_DEPTH_AXIS)
 
 #: The two exclusion counts a live reading carries beside the pair — the n/a side, named.
 UNREADABLE_KEY = "unreadable"
 UNSETTLED_KEY = "unsettled"
+
+#: The key the co-primary pair rides under inside DECIDE's block — the word the coder spells
+#: ``rates``. It travels with the manifest and the value on one
+#: :class:`~noctis.eval.reading.Pair`, so a block builder no longer spells it by hand.
+APPROVAL_KEY = "approval"
 
 #: Why a case carries no verdict. Spelled once, so the row and its test read the same words.
 NO_VERDICT = "no reply this case gave carried a verdict the emit contract admits"
@@ -478,9 +516,22 @@ class ScoredReply:
 
 
 def scored_block(metrics: DecideMetrics) -> dict[str, Any]:
-    """One scored batch as record data — the pair first, never a bare agreement beside it."""
+    """One scored batch as record data — the pair first, never a bare agreement beside it.
+
+    This is the block a *stratum* publishes, and the whole reading's own two sections read
+    together: :func:`pair_block` and :func:`deferral_block`, in that order.
+    """
+    return {APPROVAL_KEY: pair_block(metrics.approval), **deferral_block(metrics)}
+
+
+def deferral_block(metrics: DecideMetrics) -> dict[str, Any]:
+    """The figures beside the pair: how often the model asked for another lap, and what came of it.
+
+    Everything a DECIDE reading publishes that is not the co-primary pair — so the live scoring
+    pass and the retrospective miner file exactly these under a reading's site-only section rather
+    than each restating the five keys (#308).
+    """
     return {
-        "approval": pair_block(metrics.approval),
         "revise_rate": metrics.revise_rate,
         "revise_flip_rate": metrics.revise_flip_rate,
         "revises": metrics.revises,
@@ -490,16 +541,13 @@ def scored_block(metrics: DecideMetrics) -> dict[str, Any]:
 
 
 def pair_block(approval: ApprovalPair) -> dict[str, Any]:
-    """The co-primary value, whole: agreement is never published without the rate it cost."""
-    return {
-        "agreement": approval.agreement,
-        "approval_rate": approval.approval_rate,
-        "decided": approval.decided,
-        "approvals": approval.approvals,
-        "labeled_approvals": approval.labeled_approvals,
-        "unlabeled_approvals": approval.unlabeled_approvals,
-        "promoted": approval.promoted,
-    }
+    """The co-primary value, whole: agreement is never published without the rate it cost.
+
+    The keys and their order are :data:`~noctis.eval.reading.APPROVAL_PAIR`'s, not restated here —
+    the same declaration the pair renders itself from, so a published document and a printed report
+    can never name the figure two different things.
+    """
+    return APPROVAL_PAIR.block(approval)
 
 
 def case_row(
@@ -516,8 +564,6 @@ def case_row(
     ``error`` is an absent *key* when there is none, the way #207's outcome block spells an absent
     label: "this one was readable" is better read off a missing key than off a null to interpret.
     """
-    from noctis.eval.decide_case import DIFFICULTY_AXES, NOT_APPLICABLE
-
     row: dict[str, Any] = {
         "case_id": case.case_id,
         "run_id": case.provenance.mined_from,
@@ -532,25 +578,33 @@ def case_row(
     return row
 
 
-def strata_block(cases: Sequence[Case], outcomes: Sequence[DecideOutcome]) -> dict[str, Any]:
+def strata_block(
+    cases: Sequence[Case],
+    outcomes: Sequence[DecideOutcome],
+    *,
+    axes: Sequence[str] = DIFFICULTY_AXES,
+) -> dict[str, Any]:
     """Each difficulty axis's levels, each scored by the same batch scorer as the whole.
 
     Stratified numbers are the reason the axes exist: an agreement figure that is one thing on
     near-margin cases and another on comfortable ones is two findings, not one.
-    """
-    from noctis.eval.decide_case import DIFFICULTY_AXES, NOT_APPLICABLE
 
+    The grouping is :func:`~noctis.eval.reading.strata`'s, the one loop the coder's reading
+    stratifies through as well; what stays here is DECIDE's own two contributions — how an outcome
+    finds its level, and that a level is scored by the very batch scorer the headline is scored by,
+    so a stratum and the figure it splits can never be computed two different ways.
+
+    ``axes`` are the site's declared :attr:`~noctis.eval.site.AgentSite.difficulty_axes`, which a
+    bench's runner hands the scoring pass; a caller that names none — the retrospective miner reads
+    history this way — stratifies by the whole vocabulary a mined corpus labels its cases on.
+    """
     levels = {case.case_id: dict(case.difficulty) for case in cases}
-    stratified: dict[str, Any] = {}
-    for axis in DIFFICULTY_AXES:
-        grouped: dict[str, list[DecideOutcome]] = {}
-        for outcome in outcomes:
-            level = levels.get(outcome.case_id, {}).get(axis, NOT_APPLICABLE)
-            grouped.setdefault(level, []).append(outcome)
-        stratified[axis] = {
-            level: scored_block(score_decide_batch(grouped[level])) for level in sorted(grouped)
-        }
-    return stratified
+    return strata(
+        axes,
+        outcomes,
+        level_of=lambda outcome, axis: levels.get(outcome.case_id, {}).get(axis),
+        block_of=lambda grouped: scored_block(score_decide_batch(grouped)),
+    )
 
 
 @dataclass(frozen=True)
@@ -595,8 +649,14 @@ class DecideAgreementScorer:
     case and folds the block it returns into the record's dials.
     """
 
-    def read(self, answered: Sequence[AnsweredCase]) -> Mapping[str, Any] | None:
+    def read(
+        self, answered: Sequence[AnsweredCase], *, axes: tuple[str, ...] = DIFFICULTY_AXES
+    ) -> SiteReading | None:
         """The whole DECIDE reading over one live bench's answers — see the module docstring.
+
+        ``axes`` is what the site's declaration says its cases are labelled on, handed over by the
+        runner (:class:`~noctis.eval.site.Scorer`) rather than looked up here: this scorer is the
+        singleton that declaration carries, so it cannot import it back.
 
         ``None`` for a bench that answered nothing: a reading over no answers is not a measured
         zero, it is an absence, and publishing empty figures beside real dials would read as one.
@@ -605,27 +665,38 @@ class DecideAgreementScorer:
             return None
         readings = self._readings(answered)
         outcomes = tuple(one.outcome for one in readings if one.outcome is not None)
-        return {
+        metrics = score_decide_batch(outcomes)
+        return SiteReading(
+            dials_key=DECIDE_DIALS_KEY,
             # The three facts that distinguish this record from a retrospective one, stated up
             # front and in that record's own vocabulary.
-            "retrospective": False,
-            "answers": ANSWERS_FRESH,
-            "attempt_calls": sum(len(one.replies) for one in answered),
-            DECIDE_DIALS_KEY: {
-                **scored_block(score_decide_batch(outcomes)),
+            headline={
+                RETROSPECTIVE_KEY: False,
+                ANSWERS_KEY: ANSWERS_FRESH,
+                ATTEMPT_CALLS_KEY: sum(len(one.replies) for one in answered),
+            },
+            pair=Pair(key=APPROVAL_KEY, manifest=APPROVAL_PAIR, value=metrics.approval),
+            # DECIDE opens its block with the pair and states the two exclusion counts *among* the
+            # deferral figures, so both ride in the site's own section — its published order, not
+            # a filing convenience (:class:`~noctis.eval.reading.SiteReading`).
+            extras={
+                **deferral_block(metrics),
                 UNREADABLE_KEY: sum(1 for one in readings if one.unreadable),
                 UNSETTLED_KEY: sum(1 for one in readings if one.unsettled),
-                "cases": [one.row() for one in readings],
-                "strata": strata_block([one.case for one in readings], outcomes),
             },
-        }
+            rows=[one.row() for one in readings],
+            strata=strata_block([one.case for one in readings], outcomes, axes=axes),
+        )
 
     def _readings(self, answered: Sequence[AnsweredCase]) -> tuple[_CaseReading, ...]:
-        """Every case this bench asked, folded once, in case-id order."""
-        grouped: dict[str, list[AnsweredCase]] = {}
-        for one in answered:
-            grouped.setdefault(one.case.case_id, []).append(one)
-        return tuple(self._fold(grouped[case_id]) for case_id in sorted(grouped))
+        """Every case this bench asked, folded once, in case-id order.
+
+        The grouping is :func:`~noctis.eval.reading.fold_by_case`'s — arithmetic every site's
+        reading is entitled to — and what a folded group *means* is :meth:`_fold`'s, below.
+        """
+        return tuple(
+            self._fold(group) for group in fold_by_case(answered, key=lambda one: one.case.case_id)
+        )
 
     def _fold(self, jobs: Sequence[AnsweredCase]) -> _CaseReading:
         """One case's answers as the single outcome it contributes — a strict majority, or none.
@@ -634,6 +705,10 @@ class DecideAgreementScorer:
         answer the job ended on) and the verdicts that parsed are counted. A verdict held by more
         than half of them is this case's; anything else is unreadable or unsettled, and the case
         contributes nothing to a denominator it did not answer.
+
+        The counting is :func:`~noctis.eval.reading.strict_majority`'s, because more-than-half is
+        arithmetic; :data:`NO_VERDICT` and :data:`NO_MAJORITY` stay here, because what an unsettled
+        case is *called* is this site's word and no other site's business.
         """
         case = jobs[0].case
         readable = [
@@ -643,12 +718,10 @@ class DecideAgreementScorer:
         ]
         if not readable:
             return _CaseReading(case=case, error=NO_VERDICT)
-        verdict, held = Counter(one.verdict for one in readable).most_common(1)[0]
-        if held * 2 <= len(readable):
+        settled = strict_majority(readable, key=lambda one: one.verdict)
+        if settled is None:
             return _CaseReading(case=case, error=NO_MAJORITY)
-        return _CaseReading(
-            case=case, outcome=next(one for one in readable if one.verdict == verdict)
-        )
+        return _CaseReading(case=case, outcome=settled)
 
     def score(self, case: Case, reply: str | None) -> ScoredReply:
         """One reply, parsed and scored — never raising, because a bad reply is a result."""

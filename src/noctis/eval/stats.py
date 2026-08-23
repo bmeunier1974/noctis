@@ -61,7 +61,9 @@ by zero, and ``None`` becomes the literal ``n/a`` in exactly one place: the form
 :func:`render_comparison`.
 
 **Pure.** Values in, values out: no I/O, no clock, no configuration, no import of the engine. The
-module is stdlib-only on purpose — the suite asserts it structurally.
+one module it reaches for beyond the standard library is :mod:`noctis.eval.reading`, the eval
+layer's own stdlib-only reading vocabulary, so a rendered comparison spells a missing figure the
+same way every other reading in this layer does — the suite asserts both structurally.
 """
 
 from __future__ import annotations
@@ -71,6 +73,8 @@ import math
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+
+from noctis.eval.reading import table
 
 __all__ = [
     "Assessment",
@@ -441,16 +445,7 @@ def assess(
     )
 
 
-# ── rendering: the only place a ``None`` becomes a word ───────────────────────────────────
-def _fmt(value: object) -> str:
-    """A cell: the literal ``n/a`` for ``None``, four decimals for a float, the value otherwise."""
-    if value is None:
-        return "n/a"
-    if isinstance(value, float):
-        return f"{value:.4f}"
-    return str(value)
-
-
+# ── rendering: the cells are the eval layer's own, the divider is this module's ───────────
 def render_comparison(comparison: Comparison, assessment: Assessment) -> str:
     """A one-page reading of a comparison: its scope on the header, its numbers, its verdict."""
     label_w, value_w = 28, 22
@@ -478,7 +473,7 @@ def render_comparison(comparison: Comparison, assessment: Assessment) -> str:
         "",
         f"{'-' * label_w}{'-' * value_w}",
     ]
-    lines += [f"{name:<{label_w}}{_fmt(value):>{value_w}}" for name, value in rows]
+    lines.append(table(rows, label_w=label_w, value_w=value_w))
     lines += ["", assessment.summary]
     return "\n".join(lines)
 

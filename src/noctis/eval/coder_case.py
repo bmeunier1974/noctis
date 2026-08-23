@@ -87,6 +87,7 @@ from noctis.strategies.scenario_spec import SpecSuite
 __all__ = [
     "AXIS_LEVELS",
     "BRIEF_KEYS",
+    "CODER_AXES",
     "BUCKET_TAG_PREFIX",
     "CODER_REFUSED_KEYS",
     "PAYLOAD_KEYS",
@@ -162,6 +163,11 @@ AXIS_LEVELS: Mapping[Axis, tuple[str, ...]] = MappingProxyType(
         Axis.API_SURFACE: ("bars_only", "indicators", "exits"),
     }
 )
+
+#: The seven axes flat, in declaration order — the same vocabulary as :class:`Axis`, as the plain
+#: strings a record's keys and a declaration's ``difficulty_axes`` are made of. Spelled once here,
+#: where the enum lives, so the site declaration and the site's own reading share one object (#306).
+CODER_AXES: tuple[str, ...] = tuple(axis.value for axis in Axis)
 
 #: The expected-output shapes a coder case is refused for, at the top level **and** inside the
 #: payload: the eval core's generic set plus the spellings this site invites. ``reference`` is a

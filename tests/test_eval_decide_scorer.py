@@ -462,6 +462,9 @@ def test_the_decide_scorer_reaches_no_io_no_clock_and_no_seeded_draw():
         "enum",
         "types",
         "typing",
+        # The eval layer's own reading vocabulary (#303) — itself stdlib-only, and held to that by
+        # ``tests/test_eval_reading.py``, so depending on it costs this module none of its purity.
+        "noctis",
     }
     text = SCORER_SOURCE.read_text()
     for forbidden in ("datetime.now", "utcnow", "time(", "open(", "Path(", "random", "os."):
@@ -470,7 +473,10 @@ def test_the_decide_scorer_reaches_no_io_no_clock_and_no_seeded_draw():
 
 def test_the_decide_scorer_restates_no_statistics_and_imports_no_engine_module():
     """The comparison surface is :func:`noctis.eval.stats.compare` itself, handed this module's
-    per-case outcomes — so there is no second implementation of a paired test to drift."""
+    per-case outcomes — so there is no second implementation of a paired test to drift.
+
+    The one module it does reach for is :mod:`noctis.eval.reading`, the eval layer's own pure
+    rendering vocabulary — no engine module, and nothing that computes a figure."""
     tree = ast.parse(SCORER_SOURCE.read_text())
     reached = {
         node.module
@@ -478,4 +484,4 @@ def test_the_decide_scorer_restates_no_statistics_and_imports_no_engine_module()
         if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("noctis")
     }
 
-    assert reached == set()
+    assert reached == {"noctis.eval.reading"}

@@ -168,7 +168,7 @@ def _block(*records: JobRecord) -> Mapping[str, Any]:
     """The coder reading over a scripted batch, as a record carries it."""
     reading = CODER_SCORER.read(_answered(*records))
     assert reading is not None
-    return reading[CODER_DIALS_KEY]
+    return reading.as_dials()[CODER_DIALS_KEY]
 
 
 def _keys(node: Any, seen: set[str] | None = None) -> set[str]:
@@ -357,7 +357,7 @@ def _strata(*answered: AnsweredCase) -> Mapping[str, Any]:
     """The per-axis breakdown of a reading over cases labelled case by case."""
     reading = CODER_SCORER.read(tuple(answered))
     assert reading is not None
-    return reading[CODER_DIALS_KEY][STRATA_KEY]
+    return reading.as_dials()[CODER_DIALS_KEY][STRATA_KEY]
 
 
 def test_the_reading_stratifies_its_pass_rates_by_every_difficulty_axis_the_site_declares():
@@ -401,7 +401,7 @@ def test_every_axis_stratifies_the_same_jobs_so_each_axis_totals_the_headline():
     reading = CODER_SCORER.read(answered)
     assert reading is not None
 
-    block = reading[CODER_DIALS_KEY]
+    block = reading.as_dials()[CODER_DIALS_KEY]
     for axis, levels in block[STRATA_KEY].items():
         assert sum(level["jobs"] for level in levels.values()) == block["jobs"], axis
 
@@ -535,32 +535,48 @@ def test_a_reply_that_is_not_a_job_record_is_counted_as_unreadable_and_rated_now
 
     reading = CODER_SCORER.read(answered)
     assert reading is not None
-    assert reading[CODER_DIALS_KEY]["unreadable"] == 1
-    assert reading[CODER_DIALS_KEY]["rates"]["job_pass_rate"] == 1.0
+    assert reading.as_dials()[CODER_DIALS_KEY]["unreadable"] == 1
+    assert reading.as_dials()[CODER_DIALS_KEY]["rates"]["job_pass_rate"] == 1.0
 
 
 def test_the_reading_marks_itself_as_freshly_answered_and_counts_the_calls_behind_it():
     reading = CODER_SCORER.read(_answered(_job("a", [True]), _job("b", [True])))
 
     assert reading is not None
-    assert (reading["answers"], reading["attempt_calls"]) == ("fresh", 2)
+    dials = reading.as_dials()
+    assert (dials["answers"], dials["attempt_calls"]) == ("fresh", 2)
 
 
 def test_the_coder_declaration_carries_the_reading_scorer_in_its_scorers_slot():
     assert CODER_SITE.scorers == (CODER_SCORER,)
 
 
-def test_a_fresh_answer_is_spelled_the_same_word_the_decide_reading_spells_it():
-    """The vocabulary is shared so two records diff; each module states it without importing."""
+def test_a_fresh_answer_is_the_one_object_the_decide_reading_publishes_too():
+    """The vocabulary is shared so two records diff — and now it is shared by import (#305).
+
+    This used to pin two independently spelled copies equal, which is a test that can only report
+    a drift after a record carrying it has been published. The word lives in the reading module;
+    both sites name the same object, and an identity assertion says so.
+    """
     from noctis.eval.decide_site import ANSWERS_FRESH as DECIDE_FRESH
+    from noctis.eval.reading import ANSWERS_FRESH as SHARED_FRESH
 
-    assert ANSWERS_FRESH == DECIDE_FRESH
+    assert ANSWERS_FRESH is SHARED_FRESH
+    assert DECIDE_FRESH is SHARED_FRESH
 
 
-def test_an_unlabelled_stratum_is_spelled_the_same_word_the_decide_reading_spells_it():
+def test_an_unlabelled_stratum_is_the_one_object_the_decide_reading_publishes_too():
     from noctis.eval.decide_case import NOT_APPLICABLE as DECIDE_NOT_APPLICABLE
+    from noctis.eval.reading import NOT_APPLICABLE as SHARED_NOT_APPLICABLE
 
-    assert NOT_APPLICABLE == DECIDE_NOT_APPLICABLE
+    assert NOT_APPLICABLE is SHARED_NOT_APPLICABLE
+    assert DECIDE_NOT_APPLICABLE is SHARED_NOT_APPLICABLE
+
+
+def test_the_per_axis_breakdown_rides_under_the_one_key_the_reading_module_spells():
+    from noctis.eval.reading import STRATA_KEY as SHARED_STRATA_KEY
+
+    assert STRATA_KEY is SHARED_STRATA_KEY
 
 
 def test_the_block_builder_and_the_scoring_pass_publish_the_same_shape():

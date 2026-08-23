@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from noctis.eval.coder_case import CODER_AXES
 from noctis.eval.coder_scorer import CODER_SCORER
 from noctis.eval.harness import HarnessSpec
 from noctis.eval.knobs import SiteKnobs
@@ -217,6 +218,10 @@ CODER_SITE: AgentSite[AuthoringJob, str] = AgentSite(
     # The site's own reading over the retained job records: two co-primary pass rates, the effort
     # and spend behind them, the failure taxonomy and the detectors' advisory rows (#226).
     scorers=(CODER_SCORER,),
+    # The seven axes a coder corpus labels a brief on (:class:`~noctis.eval.coder_case.Axis`), which
+    # every reading of this site splits its pass rates by. Declared here because a site's facts live
+    # in its declaration, and carried to the scoring pass by the runner (#306).
+    difficulty_axes=CODER_AXES,
 )
 
 DISTILL_SITE: AgentSite[FindingsHistory, tuple[str, ...]] = AgentSite(

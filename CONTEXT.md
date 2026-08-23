@@ -222,3 +222,30 @@ failure prints, so it can never also be how one gets recorded. **One null rule**
 surface *appearing* is the news), two nulls did not, a non-string reads as null — shared with the
 resume policy `engine_change`, so "may this change land" and "may this run continue" can never
 answer one edit differently.
+
+## Site reading
+
+One site's **own** numbers over a finished bench — the half the eval core cannot compute because it
+means nothing anywhere else: DECIDE's approval-side agreement against the labels the promotion
+gates recorded, the coder's co-primary pass pair. `Scorer.read(answered, axes=…) -> SiteReading |
+None` is the whole seam (`noctis.eval.site`, decided 2026-08-23): every answered case in, one
+reading out — or `None` from a site with nothing to add — and the runner folds it into the record's
+`harness.dials` without interpreting it, which is what keeps the bench verbs free of any site's
+vocabulary. The `axes` a pass stratifies by are **handed over** from the site's own
+`difficulty_axes` declaration, never looked up: a scorer is a stateless singleton that declaration
+carries, so it cannot import it.
+
+A reading is a **typed value, not a hand-assembled literal**: `SiteReading` (`noctis.eval.reading`)
+declares the sections every published reading shares — the headline facts above the block, the
+co-primary `Pair` inside it, the population, the per-case rows, the per-axis strata and the site's
+own extras — and `as_dials()` serializes it **once**, so the live coder pass, the live DECIDE pass
+and the retrospective miner agree structurally rather than through three literals somebody keeps in
+step. Which section a figure is filed under stays the site's, because two sites publish their
+blocks in genuinely different orders.
+
+`reading.py` is the vocabulary beneath it, and it is **pure and stdlib-only** — every site's
+reading depends on it, so it may drag nothing behind it: `fmt` / `table` (the one spelling of an
+absence, `n/a` and never a plausible zero), the shared words (`answers: fresh` / `recorded`, the
+headline keys, `strata`), `fold_by_case` / `strict_majority`, the one generic `strata` loop, and
+the two `PairManifest`s. A pair is **whole or refused** — the flagship figure (agreement, the
+retry-informed pass rate) is never published or printed without the figures that qualify it.
