@@ -230,6 +230,17 @@ def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
     typer.secho(f"WARNING: {message}", fg=typer.colors.YELLOW, err=True)
 
 
+# The one spelling of the address argument's help, shared by every verb that takes one, because
+# five verbs describing the same four forms in four wordings is how a form quietly grows a fifth
+# meaning. The forms themselves are one resolver's (``run_tree.resolve_run_dir``), and the last
+# sentence is the promise the bare form keeps: nothing an operator types today changes meaning.
+_ADDRESS_HELP = (
+    "Run address: an id as `noctis runs` lists it, a path to a run.json, @LABEL, or "
+    "`latest`. The same four forms `run --resume` takes, resolved by the same rules. "
+    "Omitted, this reads the reserved `legacy` run, as every unaddressed verb does."
+)
+
+
 def _reading_or_exit(
     config: str | None,
     address: str | None = None,
@@ -1335,12 +1346,7 @@ def mandate(
 
 @app.command()
 def report(
-    run_id: str = typer.Argument(
-        None,
-        help="Run address: an id as `noctis runs` lists it, a path to a run.json, @LABEL, or "
-        "`latest`. The same four forms `run --resume` takes, resolved by the same rules. "
-        "Omitted, this reads the reserved `legacy` run, as every unaddressed verb does.",
-    ),
+    run_id: str = typer.Argument(None, help=_ADDRESS_HELP),
     as_of: str = typer.Option(None, "--as-of", help="Report date (YYYY-MM-DD); default latest."),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
     sweep_stale: bool = typer.Option(
@@ -1425,6 +1431,7 @@ def report(
 @app.command()
 def backtest(
     strategy: str = typer.Argument(..., help="Strategy family to backtest."),
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     symbol: str = typer.Option(None, "--symbol", "-s", help="Symbol (default: first in universe)."),
     schema: str = typer.Option("ohlcv-1m", "--schema", help="Bar schema/resolution."),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
@@ -1433,12 +1440,18 @@ def backtest(
 
     Runs with the file's current ``Params`` defaults — after a champion promotion those are
     the tuned values, so this replays exactly what the research loop shipped.
+
+    And it replays on the *run's* footing, not the file's: the metric, the annualization and cost
+    knobs, and the universe the default symbol comes from are all read off the reading, so a
+    session steered onto another metric by a mandate is replayed under that metric rather than
+    under whatever ``config.yaml`` resolves today. ``noctis backtest <name> <address>`` goes one
+    further and replays under the addressed run's **frozen** settings — the scorecard it prints is
+    then the scorecard that promoted the champion, months and config edits later.
     """
     from noctis.backtest import Candidate, PipelineConfig, evaluate
     from noctis.bootstrap import build_families, build_lake
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, address).settings
     # One hydration (seeds → spec-families → library files): the library files are the
     # canonical versions of their families (tuned defaults live in the file), so a human
     # replays exactly what the agent shipped — and a minted spec champion replays too.
@@ -1498,6 +1511,7 @@ def backtest(
 
 @app.command()
 def champions(
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
     reset: bool = typer.Option(
         False,
@@ -1506,11 +1520,10 @@ def champions(
         "current gates and metric.",
     ),
 ) -> None:
-    """Show the current champion registry."""
+    """Show the current champion registry — of the reserved run, or of one you name."""
     from noctis.champions import build_registry
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, address).settings
     registry = build_registry(settings)
     if reset:
         dropped = registry.reset("operator reset via `noctis champions --reset`")
@@ -1520,6 +1533,11 @@ def champions(
     if not entries:
         typer.echo("No champions yet. The research loop promotes them over time.")
         return
+    # The metric this board was *elected* under — off the reading, so it is the post-overlay
+    # metric a mandate steered the run with (or, addressed, the metric that run froze), never the
+    # raw file's. A champion scored under a different one is genuinely stale: cross-metric numbers
+    # are not comparable, and promotion treats such an incumbent as displaceable. Labelling it off
+    # settings the run never saw is how a whole sortino board came to read `sortino(stale)`.
     current_metric = settings.promotion.metric
     typer.echo(
         f"{'family':<20} {'test_metric':>12} {'gap':>10}  {'metric':<14} {'crowned_at':<26} params"
@@ -1536,6 +1554,7 @@ def champions(
 
 @app.command()
 def account(
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
     reset: bool = typer.Option(
         False,
@@ -1547,14 +1566,15 @@ def account(
     """Show the continuous paper account — the cumulative forward track record.
 
     One paper account carries equity and open positions across TRADING sessions (the state
-    dir's paper_account.json). Champion turnover never resets it; only --reset does.
+    dir's paper_account.json). Champion turnover never resets it; only --reset does. The account
+    belongs to a **run**, as its state does: an address reads that run's track record, and the
+    bare form the reserved ``legacy`` run's.
     """
     from pathlib import Path
 
     from noctis.broker.persistence import AccountStore
 
-    settings = load_settings(config_path=config)
-    _guard_legacy_or_exit(settings)
+    settings = _reading_or_exit(config, address).settings
     store = AccountStore(Path(settings.state_dir) / "paper_account.json")
     if reset:
         archive = store.reset()
@@ -1846,12 +1866,18 @@ def research(
 
 @app.command()
 def strategies(
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
 ) -> None:
-    """List the strategy library: status, style, symbols, tuned date, thesis."""
+    """List the strategy library: status, style, symbols, tuned date, thesis.
+
+    Three tiers, lowest precedence first: the committed seeds, then the addressed run's own
+    working tier and its locally-promoted champions — so an address lists what *that* run
+    authored, and the bare form the reserved ``legacy`` run's.
+    """
     from noctis.strategies.library import LibraryPaths, list_strategies
 
-    settings = load_settings(config_path=config)
+    settings = _reading_or_exit(config, address).settings
     infos = list_strategies(LibraryPaths.from_settings(settings))
     if not infos:
         typer.echo(f"No strategies in {settings.strategies_dir!r} yet.")

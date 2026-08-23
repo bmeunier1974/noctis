@@ -1321,17 +1321,76 @@ def test_status_beside_a_legacy_layout_still_warns_rather_than_exits(tmp_path, m
 # key the read-only verbs read *pre*-overlay, off a raw ``load_settings`` that stopped before the
 # mandate — so a run steered onto ``sortino`` was reported on in ``sharpe``'s terms. One row per
 # reader that has moved onto the reading band (``bootstrap.open_reading``, through
-# ``_reading_or_exit``); a reader that stops at ``load_settings`` again fails its own row.
+# ``_reading_or_exit``); a reader that stops at ``load_settings`` again fails its own row. Each
+# row brings whatever that verb needs in order to *say* a metric at all.
+
+
+def _needs_nothing(tmp_path) -> None:
+    """This reader shows what it resolved with no state to read."""
+
+
+def _crown_a_sortino_champion(tmp_path) -> None:
+    """The board a run under this mandate produces: crowned under the metric it bound.
+
+    Seeded directly rather than researched — the promotion itself is not what is under test here,
+    the label the board is then read back under is.
+    """
+    from noctis.backtest.scorecard import Scorecard
+    from noctis.champions.registry import ChampionEntry, ChampionRegistry
+
+    registry = ChampionRegistry(tmp_path / "state" / "champions.json", 3)
+    registry.champions.append(
+        ChampionEntry(
+            family="steered_winner",
+            params={"fast": 3},
+            scorecard=Scorecard(family="steered_winner", params={"fast": 3}, metric_name="sortino"),
+            crowned_at="2026-01-01",
+            rationale="seed",
+        )
+    )
+    registry.save()
+
+
+def _fill_the_lake(tmp_path) -> None:
+    """One symbol of catalog data, so ``backtest`` reaches a scorecard rather than the no-data
+    path — the scorecard is where the metric it scored on is printed."""
+    from noctis.data import MarketDataLake
+    from noctis.data.types import to_ns
+
+    from ._data_helpers import MockVendor
+
+    lake = MarketDataLake(tmp_path / "lake", MockVendor(), budget_usd=10_000.0, calendar="XNYS")
+    lake.ensure_coverage(
+        "EQUS.MINI", "ohlcv-1m", ["AAPL"], to_ns("2026-01-01"), to_ns("2026-12-31")
+    )
 
 
 @pytest.mark.parametrize(
-    ("argv", "present", "absent"),
+    ("setup", "argv", "present", "absent"),
     [
-        pytest.param(["report"], (), (), id="report"),
+        pytest.param(_needs_nothing, ["report"], (), (), id="report"),
+        # The bug this epic is named for: every entry on the board reads ``sortino(stale)``
+        # when the label is taken off the pre-overlay metric.
+        pytest.param(
+            _crown_a_sortino_champion,
+            ["champions"],
+            ("steered_winner", "sortino"),
+            ("sortino(stale)", "sharpe"),
+            id="champions",
+        ),
+        # The scorecard a replay prints must be the one that promoted the champion.
+        pytest.param(
+            _fill_the_lake,
+            ["backtest", "sma_crossover"],
+            ("metric:           sortino",),
+            ("sharpe",),
+            id="backtest",
+        ),
     ],
 )
-def test_readers_see_the_post_overlay_metric(tmp_path, argv, present, absent):
+def test_readers_see_the_post_overlay_metric(tmp_path, setup, argv, present, absent):
     cfg = _mandate_config(tmp_path, "homelab", _WIDE_OVERLAY)
+    setup(tmp_path)
 
     result = runner.invoke(app, [*argv, "--config", cfg])
 
