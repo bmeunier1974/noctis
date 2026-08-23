@@ -81,6 +81,8 @@ python scripts/prompt_fingerprint.py [--write]   # the prompt-asset ratchet, its
                            # change the newest docs/prompt-changelog.md entry does not declare
 pytest tests/test_eval_boundary.py       # the eval import-isolation guard: the eval layer imports
                            # the engine, the engine never imports src/noctis/eval (docs/development.md)
+pytest tests/test_run_tree_boundary.py   # the run-tree layering guard: record ← {address, index,
+                           # lock, evidence} ← store, and only evidence.py may name a heavy package
 
 python -m noctis setup [--check]   # guided first-run wizard: files, extras, keys, LLM verify
 python -m noctis init              # scaffold local config/.env/mandate + workspace (idempotent)
@@ -178,10 +180,16 @@ family's re-tune, only by a different strategy.
 **The run is an entity, and it writes one file.** Every `noctis run` mints a run id
 (`observability/debug/runid.py` — identity is minted, never derived from the config) and opens
 `workspace/runs/<run_id>/`: `run.json` (the record) + `run.lock` (liveness). The I/O boundary is the
-design: `reporting/run_store.py` is the **only** module that touches that tree — it collects, locks,
-appends the process's segment and writes atomically behind a fail-safe latch — while
-`reporting/run_record.py` (`build(artifacts) -> dict`) and `reporting/schema.py` (`validate`) are
-**pure**, which is what makes the golden-record snapshot cheap. Wired in the composition root:
+design: the `reporting/run_tree/` package is the **only** code that touches that tree — five modules
+over one narrow read (`record ← {address, index, lock, evidence} ← store`, a layering
+`tests/test_run_tree_boundary.py` pins), which between them lock, resolve an address, collect the
+evidence, append the process's segment and write atomically behind a fail-safe latch. Every heavy
+read lives in `evidence` alone, so a record write drags in no research package, no ledger and no
+pandas, and a record is read in two halves — `run_tree.read_artifacts` parses the prior record (what
+every verb needs), `run_tree.derive_evidence` takes the six collector reads once, at write time.
+Beside the package, `reporting/run_record.py` (`build(artifacts) -> dict`) and
+`reporting/schema.py` (`validate`) are **pure**, which is what makes the golden-record snapshot
+cheap. Wired in the composition root:
 `bootstrap.open_segment` is a **run segment's one entry** — it opens the run through
 `bootstrap.open_run_store`, records the engine-change notes, builds the `--debug` recorder and the
 event sink, hands the work a `Segment`, and closes with a stop reason and its counters, releasing
@@ -191,7 +199,7 @@ they drive. The record is rewritten at each CLOSE via the runtime's `on_cycle_cl
 honesty rules: a killed segment is marked `interrupted` on the **next** open, never guessed at write
 time, and a live lock is a hard refusal (two engines on one run is corruption) while everything else
 latches off with one warning rather than raising into the engine. **Retention is opt-in and
-completed-only**: `run_store.prune_run_state` (`noctis run-prune <address> [--dry-run]`) is the one
+completed-only**: `run_tree.prune_run_state` (`noctis run-prune <address> [--dry-run]`) is the one
 code path in Noctis that deletes a run's files — the heavy `state/`, `strategies/` and `reports/`
 directories, never `run.json`/`index.json` (they *are* the progress history), and never for a run
 that could still be resumed, since prunable and resumable are the same constant's two sides. The
@@ -202,9 +210,10 @@ record against it.
 
 **A run outlives its process, so it carries its own config.** `noctis run --resume <address>` appends
 a segment to an existing run and keeps accumulating into the same record — the run, not the process,
-is the unit progress is tracked on. One resolver (`run_store.resolve_run_dir`, shared with
-`run-record`) understands four address forms in a fixed order — a `run.json` path, `@label`,
-the reserved word `latest`, a run id — and a bare address is *always* the id; `--label` is a
+is the unit progress is tracked on. One resolver (`run_tree.resolve_run_dir`, whose module
+`run_tree.address` reads records and nothing else, so an address costs no lock and no collector;
+shared with `run-record`) understands four address forms in a fixed order — a `run.json` path,
+`@label`, the reserved word `latest`, a run id — and a bare address is *always* the id; `--label` is a
 nickname the record stores, so an ambiguous `@label` refuses naming both ids rather than pick one. Every cumulative number in the record is **derived, never
 incremented** (recomputed at write time from the durable artifacts + the append-only `segments[]`),
 which is why three short segments total exactly what one long one does and a crash mid-write cannot

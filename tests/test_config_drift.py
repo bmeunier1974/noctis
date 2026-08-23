@@ -27,7 +27,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from noctis.cli import app
-from noctis.reporting.run_store import RUN_LOCK_NAME, RUN_RECORD_NAME
+from noctis.reporting.run_tree import RUN_LOCK_NAME, RUN_RECORD_NAME
 from noctis.reporting.schema import validate
 
 runner = CliRunner()

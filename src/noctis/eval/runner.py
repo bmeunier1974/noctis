@@ -1014,9 +1014,10 @@ def _read(path: Path) -> str | None:
 def _write_json(target: Path, document: Mapping[str, Any]) -> None:
     """One atomic JSON write — the run store's discipline: a temp file, then ``os.replace``.
 
-    Deliberately re-stated here rather than imported: :mod:`noctis.reporting.run_store` is the one
-    module allowed to touch the runs tree, and a bench runner reaching into it would blur exactly
-    the boundary this module exists to keep.
+    Deliberately re-stated here rather than imported: the :mod:`noctis.reporting.run_tree` package
+    is the only code allowed to touch the runs tree, and a bench runner reaching into it — even for
+    the ten lines of :mod:`noctis.reporting.run_tree.record` — would blur exactly the boundary this
+    module exists to keep.
     """
     tmp = target.with_name(f"{target.name}.tmp-{os.getpid()}")
     try:

@@ -334,7 +334,7 @@ class FakeClock:
 
 
 def _open(runs_dir: Path, clock: FakeClock, **kwargs):
-    from noctis.reporting.run_store import open_run
+    from noctis.reporting.run_tree import open_run
 
     kwargs.setdefault("argv", ["run", "-v"])
     kwargs.setdefault("election_metric", "sharpe")
@@ -342,7 +342,7 @@ def _open(runs_dir: Path, clock: FakeClock, **kwargs):
 
 
 def _record(run_dir: Path) -> dict:
-    from noctis.reporting.run_store import RUN_RECORD_NAME
+    from noctis.reporting.run_tree import RUN_RECORD_NAME
 
     return json.loads((run_dir / RUN_RECORD_NAME).read_text())
 
@@ -417,7 +417,7 @@ def test_a_run_that_breaches_its_cap_while_running_is_completed_at_its_segment_c
 
 
 def test_a_capped_out_run_refuses_the_next_resume_and_says_why(tmp_path):
-    from noctis.reporting.run_store import RunCompletedError
+    from noctis.reporting.run_tree import RunCompletedError
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -438,7 +438,7 @@ def test_a_capped_out_run_refuses_the_next_resume_and_says_why(tmp_path):
 
 
 def test_the_index_lists_the_cap_beside_the_runtime_it_bounds(tmp_path):
-    from noctis.reporting.run_store import index_entry
+    from noctis.reporting.run_tree import index_entry
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -457,7 +457,7 @@ def test_the_index_lists_the_cap_beside_the_runtime_it_bounds(tmp_path):
 
 
 def test_finishing_a_run_seals_it_without_opening_a_segment(tmp_path):
-    from noctis.reporting.run_store import finish_run
+    from noctis.reporting.run_tree import finish_run
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -480,7 +480,7 @@ def test_finishing_a_run_seals_it_without_opening_a_segment(tmp_path):
 
 
 def test_finishing_an_already_completed_run_is_a_documented_no_op(tmp_path):
-    from noctis.reporting.run_store import finish_run
+    from noctis.reporting.run_tree import finish_run
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -500,7 +500,7 @@ def test_finishing_an_already_completed_run_is_a_documented_no_op(tmp_path):
 
 def test_finishing_a_live_locked_run_is_refused(tmp_path):
     """A run another engine is working is not one to seal from underneath it."""
-    from noctis.reporting.run_store import RunLockedError, finish_run
+    from noctis.reporting.run_tree import RunLockedError, finish_run
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -514,7 +514,7 @@ def test_finishing_a_live_locked_run_is_refused(tmp_path):
 
 
 def test_finishing_an_unknown_run_is_a_clean_lookup_failure(tmp_path):
-    from noctis.reporting.run_store import RunNotFoundError, finish_run
+    from noctis.reporting.run_tree import RunNotFoundError, finish_run
 
     with pytest.raises(RunNotFoundError):
         finish_run(
@@ -526,7 +526,7 @@ def test_finishing_an_unknown_run_is_a_clean_lookup_failure(tmp_path):
 
 
 def test_a_finished_run_refuses_the_next_resume(tmp_path):
-    from noctis.reporting.run_store import RunCompletedError, finish_run
+    from noctis.reporting.run_tree import RunCompletedError, finish_run
 
     runs = tmp_path / "runs"
     clock = FakeClock()
@@ -768,7 +768,7 @@ def test_a_segment_that_spends_the_cap_closes_completed_and_refuses_the_next_res
     for ``run_limit``, the segment closes with that reason and its phase timings, and the record —
     deriving the breach from its own segments — is terminal."""
     from noctis.bootstrap import segment_counters, segment_phase_seconds
-    from noctis.reporting.run_store import RunCompletedError
+    from noctis.reporting.run_tree import RunCompletedError
 
     runs = tmp_path / "runs"
     clock = FakeClock()

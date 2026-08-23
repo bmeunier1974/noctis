@@ -7,7 +7,7 @@ results. This file pins that section end to end:
 
 * the **pure builder** (``run_record.build``) renders what it is handed, caps the list honestly,
   and never drops a champion to make room;
-* the **store** (``run_store.read_strategies``) reads the run's own champion board, experiment
+* the **store** (``run_tree.read_strategies``) reads the run's own champion board, experiment
   journals and strategy tiers, embeds a champion's source in full, and references every other
   candidate by a run-relative path plus a content hash;
 * ``--embed-all-sources`` — frozen at run creation, like every other knob that says what a run
@@ -35,7 +35,7 @@ from noctis.reporting.run_record import (
     StrategyArtifact,
     build,
 )
-from noctis.reporting.run_store import RUN_RECORD_NAME, open_run, read_strategies
+from noctis.reporting.run_tree import RUN_RECORD_NAME, open_run, read_strategies
 
 START = datetime(2026, 7, 27, 14, 22, 33, 418000, tzinfo=UTC)
 HOUR = 3600.0
@@ -427,7 +427,7 @@ def test_the_tiers_the_store_reads_are_the_tiers_the_library_writes(tmp_path):
     spellings together."""
     from types import SimpleNamespace
 
-    from noctis.reporting.run_store import (
+    from noctis.reporting.run_tree.evidence import (
         CHAMPIONS_TIER,
         STRATEGIES_SUBDIR,
         STRATEGY_TIER_SUBDIRS,

@@ -37,7 +37,7 @@ from noctis.reporting.run_record import (
     SegmentArtifact,
     build,
 )
-from noctis.reporting.run_store import RUN_RECORD_NAME, open_run, read_benchmark, read_sessions
+from noctis.reporting.run_tree import RUN_RECORD_NAME, open_run, read_benchmark, read_sessions
 
 from ._session_helpers import _bars_local, _FakeLake, _make_runtime, _run_phase, _uptrend
 

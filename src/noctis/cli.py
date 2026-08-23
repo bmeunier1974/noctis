@@ -79,7 +79,7 @@ def _startup_refusals() -> tuple[tuple[type[Exception], str | None], ...]:
     from noctis.bootstrap import UsageError
     from noctis.config.rehydrate import RehydrationError
     from noctis.observability.engine_change import EngineChangeError
-    from noctis.reporting.run_store import (
+    from noctis.reporting.run_tree import (
         RunCompletedError,
         RunLockedError,
         RunNotFoundError,
@@ -246,7 +246,7 @@ def _segment_or_exit(
     live, rather than in a module that must never import Typer.
     """
     from noctis.bootstrap import open_segment
-    from noctis.reporting.run_store import RunLockedError
+    from noctis.reporting.run_tree import RunLockedError
 
     with _refusals_or_exit(only=(RunLockedError,)):
         with open_segment(
@@ -359,7 +359,7 @@ def _show_config_drift(config: str | None, resume: str | None) -> None:
     """
     from noctis.bootstrap import UsageError
     from noctis.config.rehydrate import config_drift
-    from noctis.reporting.run_store import read_run_record
+    from noctis.reporting.run_tree import read_run_record
 
     if resume is None:
         _exit_red(
@@ -394,7 +394,7 @@ def _finish_run(config: str | None, resume: str | None) -> None:
     from pathlib import Path
 
     from noctis.bootstrap import UsageError
-    from noctis.reporting.run_store import finish_run
+    from noctis.reporting.run_tree import finish_run
 
     if resume is None:
         _exit_red(
@@ -993,7 +993,7 @@ def runs(
     """
     from pathlib import Path
 
-    from noctis.reporting.run_store import rebuild_index, visible_runs, write_index
+    from noctis.reporting.run_tree import rebuild_index, visible_runs, write_index
 
     settings = load_settings(config_path=config)
     runs_dir = Path(settings.runs_dir)
@@ -1112,7 +1112,7 @@ def run_record(
     from pathlib import Path
 
     from noctis.reporting import schema
-    from noctis.reporting.run_store import RunNotFoundError, read_record, resolve_run_dir
+    from noctis.reporting.run_tree import RunNotFoundError, read_record, resolve_run_dir
 
     settings = load_settings(config_path=config)
     try:
@@ -1175,7 +1175,7 @@ def run_prune(
     from datetime import UTC, datetime
     from pathlib import Path
 
-    from noctis.reporting.run_store import prune_run_state
+    from noctis.reporting.run_tree import prune_run_state
 
     settings = load_settings(config_path=config)
     with _refusals_or_exit(verb="prune"):
@@ -1386,7 +1386,7 @@ def _bind_reported_run_or_exit(settings, address: str | None) -> None:
     one assembled from nothing — an empty champion board attributed to a run that had one.
     """
     from noctis.bootstrap import bind_addressed_run
-    from noctis.reporting.run_store import RunNotFoundError, read_record
+    from noctis.reporting.run_tree import RunNotFoundError, read_record
 
     if address is None:
         _guard_legacy_or_exit(settings)

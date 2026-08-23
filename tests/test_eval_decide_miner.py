@@ -15,7 +15,7 @@ held to the shape a run really leaves behind rather than to a hand-drawn imitati
 The two invariants worth naming: the miner **never writes into the runs tree** (asserted by a
 byte-and-mtime snapshot taken around it), and the whole path **spends nothing** (asserted by running
 it in a fresh interpreter and inspecting what got imported, the technique
-``tests/test_run_store.py`` uses on the run store).
+``tests/test_run_tree_store.py`` uses on the run tree).
 """
 
 from __future__ import annotations

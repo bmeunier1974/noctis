@@ -226,7 +226,7 @@ def test_a_captured_block_is_exactly_what_the_record_schema_requires():
     fully-degraded one both satisfy ``schema.validate`` on a segment, key for key."""
     from noctis.reporting import schema
     from noctis.reporting.run_record import RunArtifacts, SegmentArtifact, build
-    from noctis.reporting.run_store import read_engine_identity
+    from noctis.reporting.run_tree.evidence import read_engine_identity
 
     for probes in (_probes(), _bare_probes()):
         record = build(

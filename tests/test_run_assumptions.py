@@ -303,7 +303,7 @@ def test_the_assumptions_state_the_benchmarks_rebalancing_convention():
 def test_the_stated_rebalancing_convention_is_the_one_the_benchmark_implements():
     """Weights are set at the first session mark and drift thereafter — so a basket whose two
     names diverge lands on the mean of their *ratios*, never on a re-weighted path."""
-    from noctis.reporting.run_store import _equal_weight_levels
+    from noctis.reporting.run_tree.evidence import _equal_weight_levels
 
     closes = {
         "AAA": {"2026-07-01": 100.0, "2026-07-02": 200.0, "2026-07-03": 400.0},
@@ -504,7 +504,7 @@ def test_resuming_an_older_record_upgrades_it_in_place_and_records_the_upgrade(
     leaves a version-2 record on disk carrying an event that says where it came from."""
     from datetime import UTC, datetime, timedelta
 
-    from noctis.reporting.run_store import RUN_RECORD_NAME, open_run
+    from noctis.reporting.run_tree import RUN_RECORD_NAME, open_run
 
     class Clock:
         def __init__(self) -> None:
@@ -535,7 +535,7 @@ def test_resuming_an_older_record_upgrades_it_in_place_and_records_the_upgrade(
 def test_a_resume_that_changes_no_version_records_no_upgrade(tmp_path):
     from datetime import UTC, datetime, timedelta
 
-    from noctis.reporting.run_store import RUN_RECORD_NAME, open_run
+    from noctis.reporting.run_tree import RUN_RECORD_NAME, open_run
 
     class Clock:
         def __init__(self) -> None:

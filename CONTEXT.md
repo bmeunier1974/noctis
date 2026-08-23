@@ -133,6 +133,32 @@ A body that never reports closes at the `"startup"` sentinel — **measured noth
 The band never imports Typer, so a live lock leaves as `RunLockedError` and the CLI maps it to red
 text and an exit code, once.
 
+## Run tree
+
+One run's directory and everything in it: `workspace/runs/<run_id>/` — `run.json` (the record),
+`run.lock` (liveness), and everything that run produced (`state/`, `strategies/{__tmp,champions}/`,
+`memory/`, `reports/`, `qa/`), with the derived `runs/index.json` rolled up beside it. A run owns
+its state, so two trees in one workspace are two experiments.
+
+`src/noctis/reporting/run_tree/` is the **only** code that touches it (decided 2026-08-23): five
+modules over one narrow read, and the `store` that holds them — layered
+`record ← {address, index, lock, evidence} ← store`, pinned there by
+`tests/test_run_tree_boundary.py`. `record` is the bottom — the tree's names, the one `read_record`,
+the one atomic `write`; `address` turns one operator-typed string into one run dir (four forms,
+fixed order); `index` derives the listing roll-up, never authoritative; `lock` is the whole liveness
+protocol, and the one failure here that is fatal rather than latched; `evidence` is the six
+collectors plus `read_engine_identity` and **every** heavy import in the package (`research`,
+`champions`, `broker`, `data`, `config.settings`, `pandas` — all deferred), so a record write stays
+cheap; and `store` — the lifecycle verbs `open_run` / `finish_run` / `prune_run_state`,
+`read_artifacts` and `RunStore` — is the one module that imports the rest. The readers hold nothing
+but `record`, which is why resolving `@label` takes no lock and runs no collector.
+
+A record is read in **two halves**, and each verb says which it needs: `read_artifacts` parses the
+prior record (every verb does), `derive_evidence` takes the six reads **once**, at write time only.
+Beside the package, `reporting/run_record.py` (`build(artifacts) -> dict`) and
+`reporting/schema.py` (`validate`) stay pure — that boundary is what the package exists to hold.
+The record's own field-by-field contract is [`docs/run-record.md`](docs/run-record.md).
+
 ## Research toolbox
 
 The one object a research session holds for its whole life — and the **surface** every reader of it

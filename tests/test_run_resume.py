@@ -23,7 +23,7 @@ from typer.testing import CliRunner
 
 from noctis.cli import app
 from noctis.config.rehydrate import freeze_inputs
-from noctis.reporting.run_store import (
+from noctis.reporting.run_tree import (
     RUN_LOCK_NAME,
     RUN_RECORD_NAME,
     RunCompletedError,

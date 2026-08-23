@@ -31,7 +31,7 @@ from noctis.engine.research import ResearchSummary
 from noctis.engine.runtime import RuntimeResult
 from noctis.observability import Console, EventTee
 from noctis.reporting.run_record import RESEARCH_PHASE
-from noctis.reporting.run_store import RUN_LOCK_NAME, RunLockedError
+from noctis.reporting.run_tree import RUN_LOCK_NAME, RunLockedError
 
 START = datetime(2026, 8, 22, 13, 30, 0, tzinfo=UTC)
 
