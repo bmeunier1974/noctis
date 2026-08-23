@@ -12,8 +12,10 @@ addresses under test are the ones an operator would actually type — and each r
 with a mark only that run carries, so "which run did this read?" is answered by the output alone.
 
 The reader table is the point: one row per verb on the band, so a verb that stops at
-``load_settings`` again fails its own row. ``status`` (#296) and the pruned-run-readable trio
-``run-record`` / ``run --finish`` / ``run-prune`` (#297) join it as they move.
+``load_settings`` again fails its own row. ``status`` joined it in #296 — the one reader that
+narrates the resolved mode, so the one that arms the safety gate and warns where the others
+refuse. The pruned-run-readable trio ``run-record`` / ``run --finish`` / ``run-prune`` (#297)
+joins as it moves.
 """
 
 from __future__ import annotations
@@ -155,15 +157,25 @@ def _seed_champion(run_dir: Path, mark: int) -> str:
     return family
 
 
+def _run_cash(mark: int) -> float:
+    """The starting cash one run — and only that run — opened its paper account at."""
+    return 100_000.0 + mark
+
+
 def _seed_account(run_dir: Path, mark: int) -> str:
     """Open this run's own paper account at a starting cash only this run has."""
     from noctis.broker.paper import PaperBroker
     from noctis.broker.persistence import AccountStore
 
-    cash = 100_000.0 + mark
     store = AccountStore(run_dir / "state" / "paper_account.json")
-    store.save(PaperBroker(starting_cash=cash), date(2026, 7, 6))
-    return f"starting cash:    {cash:,.2f}"
+    store.save(PaperBroker(starting_cash=_run_cash(mark)), date(2026, 7, 6))
+    return f"starting cash:    {_run_cash(mark):,.2f}"
+
+
+def _seed_account_equity(run_dir: Path, mark: int) -> str:
+    """The same per-run account, read back the way ``status`` narrates it: one equity line."""
+    _seed_account(run_dir, mark)
+    return f"equity {_run_cash(mark):,.2f}"
 
 
 def _seed_draft(run_dir: Path, mark: int) -> str:
@@ -190,6 +202,10 @@ class Reader:
     # What a reading that *worked* exits with — not always 0: ``backtest`` below is asked for a
     # family nobody has, precisely so that it prints the addressed run's library index and stops.
     code: int = 0
+    # What the *bare* form exits with beside an un-migrated pre-workspace layout. The guard
+    # refuses (2) for every reader but ``status``, whose standing exception is to warn and carry
+    # on (0) — it is the diagnostic an operator runs *because* the layout is wrong.
+    guard_code: int = 2
 
 
 READERS = (
@@ -215,6 +231,15 @@ READERS = (
         seed=_seed_draft,
         argv=lambda address: ["backtest", "no_such_family", *([address] if address else [])],
         code=1,
+    ),
+    # ``status`` reports the addressed run's own tree — its account, its board — under that
+    # run's frozen inputs, and is the only reader whose bare form warns rather than refuses
+    # beside an un-migrated layout.
+    Reader(
+        id="status",
+        seed=_seed_account_equity,
+        argv=lambda address: ["status", *([address] if address else [])],
+        guard_code=0,
     ),
 )
 
@@ -273,9 +298,10 @@ def test_an_address_is_authoritative_beside_an_un_migrated_legacy_layout(
     bare = runner.invoke(app, [*reader.argv(None), "--config", cfg])
     addressed = runner.invoke(app, [*reader.argv(run_dir.name), "--config", cfg])
 
-    assert bare.exit_code == 2  # unaddressed: the refusal that names `noctis migrate`
-    assert "noctis migrate" in bare.output
+    assert bare.exit_code == reader.guard_code, bare.output  # refused, or warned for `status`
+    assert "noctis migrate" in bare.output  # unaddressed: the guard asks its question
     assert addressed.exit_code == reader.code, addressed.output
+    assert "noctis migrate" not in addressed.output  # addressed: the address answered it
     assert mine in addressed.output
 
 
@@ -431,3 +457,40 @@ def test_champions_labels_an_addressed_runs_board_with_that_runs_own_metric(tmp_
     assert result.exit_code == 0, result.output
     assert "sortino_winner" in result.output
     assert "sortino(stale)" not in result.output
+
+
+# ── the one reader that narrates the mode (story #296) ─────────────────────────────────────
+
+
+def test_status_reports_an_addressed_runs_frozen_universe(tmp_path):
+    """``status`` addressed reports the run, not the file: its universe is the one frozen at
+    creation, so the summary describes the experiment that ran rather than the config edited
+    since."""
+    cfg = Path(_config(tmp_path))
+    run_dir = _mint_run(tmp_path, str(cfg))
+    cfg.write_text(cfg.read_text().replace("universe: [AAPL]", "universe: [MSFT]"))
+
+    addressed = runner.invoke(app, ["status", run_dir.name, "--config", str(cfg)])
+    bare = runner.invoke(app, ["status", "--config", str(cfg)])
+
+    assert addressed.exit_code == 0, addressed.output
+    assert "universe:          AAPL" in addressed.output  # the run's own, frozen
+    assert bare.exit_code == 0, bare.output
+    assert "universe:          MSFT" in bare.output  # today's file, for the reserved run
+
+
+def test_status_still_refuses_under_a_misconfigured_safety_gate(tmp_path, monkeypatch):
+    """``status`` is the one reader that resolves the safety gate (D1), because it is the one that
+    prints the resolved mode — and that gate is never degraded to a report line the way an
+    unusable mandate is, addressed or bare: a mode line status had to guess at would be worse than
+    no mode line at all."""
+    monkeypatch.delenv("ALLOW_LIVE", raising=False)
+    cfg = Path(_config(tmp_path))
+    run_dir = _mint_run(tmp_path, str(cfg))
+    cfg.write_text(cfg.read_text().replace("mode: paper", "mode: live"))
+
+    for argv in (["status"], ["status", run_dir.name]):
+        result = runner.invoke(app, [*argv, "--config", str(cfg)])
+        assert result.exit_code == 1, result.output
+        assert "SAFETY GATE" in result.output
+        assert "mode (resolved)" not in result.output

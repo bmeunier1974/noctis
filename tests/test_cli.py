@@ -1386,6 +1386,16 @@ def _fill_the_lake(tmp_path) -> None:
             ("sharpe",),
             id="backtest",
         ),
+        # ``status`` narrates the steering itself: the mandate it resolved, every knob that
+        # mandate moved, and the post-overlay model — none of which a raw ``load_settings``
+        # would have, so a status that stopped there prints "none (unconstrained)" instead.
+        pytest.param(
+            _needs_nothing,
+            ["status"],
+            ("mandate:           profile:homelab", "promotion.metric=sortino"),
+            ("sharpe", "mandate:           none"),
+            id="status",
+        ),
     ],
 )
 def test_readers_see_the_post_overlay_metric(tmp_path, setup, argv, present, absent):

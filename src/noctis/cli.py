@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Literal, NoReturn
 
 import typer
 
-from noctis.config import SafetyGateError, load_settings, resolve_execution_mode
+from noctis.config import SafetyGateError, load_settings
 
 if TYPE_CHECKING:  # the composition root imports at call time (fast `--help`), types don't
     from noctis.bootstrap import OverrideChange, Reading, Segment, SessionInputs
@@ -132,14 +132,6 @@ def _refusals_or_exit(
         raise
 
 
-def _resolve_mode_or_exit(config: str | None):
-    """Load settings and resolve the execution mode, exiting non-zero on a gate error."""
-    settings = load_settings(config_path=config)
-    with _refusals_or_exit():
-        mode = resolve_execution_mode(settings)
-    return settings, mode
-
-
 def _resolve_session_or_exit(config: str | None, **kwargs):
     """Resolve the session inputs (the composition root's precedence chain), mapping each
     typed startup error to red text + a non-zero exit. Errors are loud at startup by design:
@@ -152,31 +144,6 @@ def _resolve_session_or_exit(config: str | None, **kwargs):
 
     with _refusals_or_exit():
         return resolve_session(config, **kwargs)
-
-
-def _resolve_status_session(config: str | None) -> tuple[SessionInputs, str | None]:
-    """Resolve the whole session for ``status``, degrading an unusable mandate to a report.
-
-    ``status`` is the command an operator runs *because* something is wrong, so a mandate the
-    overlay refuses must not take the rest of the diagnosis down with it: the refusal is
-    returned as text for the mandate line, the remaining values fall back to the pre-overlay
-    settings, and the command still exits 0 — the same warn-don't-exit contract this one
-    already keeps beside an un-migrated legacy layout. ``run``/``research`` still refuse
-    outright, which is where a fatal configuration error belongs.
-
-    The safety gate is deliberately **not** degraded (a mode that will not resolve is not a
-    configuration ``status`` can narrate), and it resolves before the mandate, so the fallback
-    reload below is only ever reached with the gate already open.
-    """
-    from noctis.bootstrap import SessionInputs, resolve_session
-    from noctis.research import MandateError
-
-    try:
-        with _refusals_or_exit(only=(SafetyGateError,)):
-            return resolve_session(config, require_gate=True), None
-    except MandateError as exc:
-        settings, mode = _resolve_mode_or_exit(config)
-        return SessionInputs(settings=settings, mode=mode, mandate=None, overrides=[]), str(exc)
 
 
 def _guard_legacy_or_exit(settings, *, warn_only: bool = False) -> None:
@@ -250,6 +217,7 @@ def _reading_or_exit(
     warn_only: bool = False,
     mandate_overlay: bool = True,
     readable_pruned: bool = False,
+    degrade: tuple[type[Exception], ...] = (),
 ) -> Reading:
     """The one prelude of every read-only verb: resolve the reading, or refuse out loud (#292).
 
@@ -269,12 +237,19 @@ def _reading_or_exit(
       un-migrated data beside ``config.yaml`` would make read as silently empty. ``warn_only``
       is ``status``'s standing exception (the diagnostic warns where every other verb refuses).
 
+    ``degrade`` names the refusals this verb answers *itself* instead of exiting on — one caller,
+    ``status``, which reports an unusable mandate as a line and re-reads with the overlay off
+    (D6). It is an exclusion, never a list of what to catch, and it is taken from the table
+    itself: everything the table names still maps to red text here, so a refusal nobody has
+    thought about yet cannot reach a terminal unspoken through the one verb that handles one.
+
     It builds nothing and prints nothing else; the command body assembles its collaborators from
     ``reading.settings`` and does its work.
     """
     from noctis.bootstrap import open_reading
 
-    with _refusals_or_exit(verb=verb):
+    only = tuple(kind for kind, _ in _startup_refusals() if kind not in degrade) if degrade else ()
+    with _refusals_or_exit(verb=verb, only=only):
         reading = open_reading(
             config,
             address,
@@ -959,25 +934,49 @@ def run(
 
 @app.command()
 def status(
+    address: str | None = typer.Argument(None, help=_ADDRESS_HELP),
     config: str = typer.Option(None, "--config", "-c", help="Path to config YAML."),
 ) -> None:
     """Show the resolved execution mode, market state, and a configuration summary.
 
-    Reports the configuration the session actually assembled: ``status`` runs the composition
-    root's whole precedence chain (gate → mandate → overlay), not the mode alone, so every line
-    below shows the **post-overlay** value a run would use rather than what ``config.yaml`` said
-    before the mandate touched it. The mandate, its applied overrides, and the resolved research
-    model are stated alongside, so the steering and its effect are readable together.
+    Reports the configuration the session actually assembled: ``status`` opens the composition
+    root's reading (gate → mandate → overlay), not the mode alone, so every line below shows the
+    **post-overlay** value a run would use rather than what ``config.yaml`` said before the
+    mandate touched it. The mandate, its applied overrides, and the resolved research model are
+    stated alongside, so the steering and its effect are readable together.
+
+    Given an address, it reports **that run** instead: the board, account and forward record from
+    the run's own tree, under the inputs the run froze at creation — so a summary of last week's
+    experiment still describes the experiment, whatever ``config.yaml`` has become since. Bare, it
+    reports the reserved ``legacy`` run, as it always has.
+
+    It is the one reader that narrates the resolved mode, so it is the one that arms the safety
+    gate: a ``mode: live`` that ``ALLOW_LIVE`` does not open refuses here too, because a mode line
+    ``status`` had to guess at would be worse than no mode line at all.
     """
     from noctis.champions import build_registry
     from noctis.engine import MarketClock, initial_phase_for, resolve_trading_driver
     from noctis.engine.report_assembly import gather_account_forward
-    from noctis.research import resolved_research_model
+    from noctis.research import MandateError, resolved_research_model
 
-    inputs, mandate_error = _resolve_status_session(config)
-    settings, mode = inputs.settings, inputs.mode
-    # status stays usable beside a legacy layout — it's the diagnostic you'd run first.
-    _guard_legacy_or_exit(settings, warn_only=True)
+    # The one prelude, run twice at most. ``status`` is the command an operator runs *because*
+    # something is wrong, so a mandate the overlay refuses must not take the rest of the
+    # diagnosis down with it: the refusal becomes the mandate line, the reading is retaken with
+    # the overlay off, and the command still exits 0 — the same warn-don't-exit contract it keeps
+    # beside an un-migrated legacy layout, and the reason ``run``/``research`` refuse where this
+    # reports. The safety gate is deliberately *not* degraded, and the band resolves it before the
+    # mandate, so the second reading is only ever reached with the gate already open.
+    mandate_error: str | None = None
+    try:
+        reading = _reading_or_exit(
+            config, address, require_gate=True, warn_only=True, degrade=(MandateError,)
+        )
+    except MandateError as exc:
+        mandate_error = str(exc)
+        reading = _reading_or_exit(
+            config, address, require_gate=True, warn_only=True, mandate_overlay=False
+        )
+    settings, mode = reading.settings, reading.mode
     clock = MarketClock(settings.session.calendar, settings.session.timezone)
     is_open = clock.is_open()
     next_transition = clock.next_close() if is_open else clock.next_open()
@@ -1025,7 +1024,7 @@ def status(
         f"trading driver:    {resolve_trading_driver(settings)} "
         f"(execution={settings.trading.execution})"
     )
-    _echo_status_mandate(inputs.mandate, inputs.overrides, mandate_error)
+    _echo_status_mandate(reading.inputs.mandate, reading.inputs.overrides, mandate_error)
 
 
 @app.command("runs")
