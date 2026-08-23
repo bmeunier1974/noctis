@@ -208,6 +208,24 @@ _ADDRESS_HELP = (
 )
 
 
+# Three command bodies in this module still call ``load_settings`` raw, and they are the **only**
+# three: ``runs``, ``init`` and ``migrate`` (epic #292). Each is an exception for a reason a fourth
+# verb almost certainly does not share, so read this before adding one by analogy:
+#
+# * ``runs`` lists **every** run, so no run is addressed — a reading resolves one tree, and this
+#   verb's whole job is the roll-up over all of them. All it needs is ``runs_dir``.
+# * ``init`` and ``migrate`` run **before there is a tree to read**: one scaffolds the local input
+#   files and the workspace, the other moves a legacy layout into it and adopts what it finds into
+#   the reserved run. A reading of a run that does not exist yet is not a thing to want, and the
+#   legacy-layout guard a reading runs is precisely the condition ``migrate`` exists to clear.
+#
+# Everything else that reads — ``status``, ``report``, ``champions``, ``account``, ``backtest``,
+# ``strategies``, ``run-record``, ``run-prune``, ``--finish`` and the three ``data`` verbs — goes
+# through :func:`_reading_or_exit` below, because a body that stops at ``load_settings`` sees the
+# **pre-overlay** settings: the bug that labelled a whole champion board ``(stale)`` under a mandate
+# binding ``promotion.metric``. ``run``, ``research``, ``engine``, ``mandate`` and
+# ``--show-config-drift`` open a *session* instead (:func:`_resolve_session_or_exit`) — a preflight
+# of what a run would get, which is a different question from what a run got.
 def _reading_or_exit(
     config: str | None,
     address: str | None = None,

@@ -361,13 +361,17 @@ plus `jq` one-liners over `events.jsonl` — see
 python -m noctis runs [--all]              # the run board: id, label, status, segments, headline numbers
 python -m noctis run-record <address> [--validate]   # print one run's whole record, or schema-check it
 python -m noctis run-prune <address> [--dry-run]   # reclaim a completed run's heavy directories
-python -m noctis status                    # resolved mode, market state, next transition, champions
+python -m noctis status [address]          # resolved mode, market state, next transition, champions
 python -m noctis mandate <name>            # preflight a mandate: provenance + the effective settings diff
 python -m noctis engine                    # engine identity: version, component fingerprint, comparable key
-python -m noctis report [<address>] [--as-of DATE]   # generate / print one run's close-of-day report
-python -m noctis account [--reset]         # the continuous paper account; --reset archives + starts fresh
-python -m noctis champions [--reset]       # the champion board; --reset re-fills slots under current gates
+python -m noctis report [address] [--as-of DATE]   # generate / print one run's close-of-day report
+python -m noctis account [address] [--reset]   # the continuous paper account; --reset archives + starts fresh
+python -m noctis champions [address] [--reset]   # the champion board; --reset re-fills slots under current gates
 ```
+
+Every one of those readers resolves through the composition root's one reading entry
+(`bootstrap.open_reading`), so they agree on what they are looking at: `[address]` is the same four
+forms `--resume` takes, and omitting it reads the reserved `legacy` run.
 
 ### Reading the run you just ran
 
@@ -392,10 +396,12 @@ that run's close-of-day report, which is a file under the run's own tree, at
 
 `latest` is one of the four
 [address forms](#the-four-address-forms-and-how-they-are-told-apart), so the same three commands
-take an id, a `run.json` path or `@label` when the run wanted is not the newest. Dropping the
-address is not the same question: a bare `report` reads the reserved `legacy` run, not the run
-that just finished — see [the close-of-day report](#the-close-of-day-report--report-address) for
-what an address does and does not change.
+take an id, a `run.json` path or `@label` when the run wanted is not the newest. **To read the run
+that just finished, pass the address**: bare, every reader reads the reserved `legacy` run — the
+one an invocation that never opened a run should read — and that is true of `champions`, `account`,
+`backtest`, `strategies` and `status` exactly as it is of `report`. See
+[the close-of-day report](#the-close-of-day-report--report-address) for what an address does and
+does not change; the rule there is now every reader's.
 
 ### The run board — `runs` and `run-record`
 
@@ -525,19 +531,35 @@ answers the address, or when more than one does.
 invocation that never opened a run should read. `--as-of` and `--sweep-stale` compose with an
 address exactly as they always have, on the addressed run's own reports.
 
-An addressed run's tree is **authoritative**, and that is the whole rule:
+An addressed run's tree is **authoritative**, and that is the whole rule — **one** rule, because
+every reader resolves the same way, through the composition root's one reading entry
+(`bootstrap.open_reading`). What follows holds verbatim for `champions @nightly-momo`,
+`account latest`, `backtest sma_cross <id>`, `strategies @x` and `status latest` as it does for
+`report`:
 
 - Its `reports/` are what is printed, its `state/` is what a missing one is assembled from, and
   its `reports/` is where that one is written — no report is ever assembled from, or written
-  into, another run's tree.
+  into, another run's tree. The same goes for the board `champions` lists, the account `account`
+  reads and the tiers `strategies` walks: each is that run's own.
+- Its **frozen config** is what the reader is told, rehydrated exactly as `--resume` rehydrates it
+  ([configuration.md](configuration.md#config-freezing--what-a-resumed-run-reads)) — so
+  `backtest sma_cross @nightly-momo` scores on the metric and universe that run was steered by,
+  months after `config.yaml` moved on, and `champions @nightly-momo` labels the board with the
+  metric it was crowned under. Bare, a reader gets the current files with the mandate overlay
+  applied: what a run minted right now would be told.
 - The un-migrated-layout guard ([the workspace](configuration.md#the-workspace)) does not run:
   that guard answers *"which tree does an unaddressed command read?"*, and an address answers it.
   A bare `report` beside a pre-workspace layout still refuses and names `noctis migrate`.
+- Nothing is **locked or written**: a reading takes no lock and leaves the tree byte-identical, so
+  it is safe beside a live `noctis run` on that same run — and a `completed` run stays fully
+  readable, because terminal is about working a run, not about reading one.
 - A run whose state [`run-prune`](#reclaiming-disk--run-prune-address) removed is **refused**
-  rather than reported on. Its `reports/` and `state/` were deleted on purpose and the record
-  says so (`run.state_pruned`), so the only report left to give would be one assembled from
+  rather than read. Its `reports/`, `state/` and `strategies/` were deleted on purpose and the
+  record says so (`run.state_pruned`), so the only report left to give would be one assembled from
   nothing — an empty champion board attributed to a run that had one. Everything that run
-  accumulated is still in `noctis run-record <address>`, which is the refusal's own advice.
+  accumulated is still in `noctis run-record <address>`, which is the refusal's own advice. The
+  three verbs whose subject *is* the record — `run-record`, `run --resume <address> --finish` and
+  `run-prune` itself — still reach a pruned run, for exactly that reason.
 
 ### What `status` reports about steering
 
@@ -545,6 +567,13 @@ An addressed run's tree is **authoritative**, and that is the whole rule:
 value it prints is the **post-overlay** one a run would actually use, not what `config.yaml` said
 before the mandate touched it. It closes with the provenance: which mandate steered this
 configuration and every `k=v` override that applied.
+
+`status [address]` reports **that run** instead — its champion board, account and forward record,
+read under the inputs the run froze at creation — so a summary of last week's experiment still
+describes the experiment, whatever `config.yaml` has become since. Bare, it reports the reserved
+`legacy` run, as it always has. It is also the one reader that *narrates* the resolved mode, and
+therefore the one that arms the safety gate — every other reader resolves none, because a reading
+places no order.
 
 ```
 research_budget:   17 min
@@ -673,8 +702,11 @@ the tuple two runs must match on before their champion and scorecard numbers may
 or plotted together. The two arbiter digests carry that guarantee rather than the declared version,
 because a digest cannot be forgotten in review; the election metric rides along for the reason
 promotion already treats a differently scored champion as *stale* (numbers in different units were
-never comparable), and it is the **post-overlay** metric, so a mandate that binds `promotion.metric`
-is reflected here.
+never comparable), and it is the metric the run was actually steered by — the **post-overlay** one
+while the run is being minted, so a mandate that binds `promotion.metric` is reflected here, and the
+run's own **frozen** one when `--finish` or `run-prune` re-stamps the key on a run that is already
+over. A run's key is therefore the same at the end as it was at the start, whatever `config.yaml`
+says on the day it is sealed.
 
 Digests cover committed files only — the shipped `mandate/` scaffold, the seed strategies,
 `MEMORY.seed.md` and the engine modules that decide what passes, what a number means, how
@@ -694,8 +726,8 @@ python -m noctis research -v               # one observable agent research sessi
 python -m noctis research --resume latest  # …append it to an existing run, under that run's config
 python -m noctis research --metric total_return   # override the promotion metric for this session
 python -m noctis research --debug          # record this session's QA report under the run's qa/
-python -m noctis strategies                # the strategy library: status / style / thesis / tuned
-python -m noctis backtest <name>           # replay a library strategy on its shipped Params defaults
+python -m noctis strategies [address]      # the strategy library: status / style / thesis / tuned
+python -m noctis backtest <name> [address]   # replay a library strategy on its shipped Params defaults
 ```
 
 `research` loads config + memory and resolves the safety gate exactly as `run` does, and accepts
