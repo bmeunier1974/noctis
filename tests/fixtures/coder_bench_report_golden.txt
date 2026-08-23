@@ -28,11 +28,10 @@ jobs                                   5
 unattempted_jobs                       1
 unreadable                             1
 rates
-  pass_label                  pass@k with feedback
-  first_attempt_pass_rate           0.2500
-  job_pass_rate                     0.7500
-  first_attempt_passes                   1
-  passed_jobs                            3
+  First-attempt pass rate                   0.2500
+  Job pass rate (pass@k with feedback)      0.7500
+    first ask landed                             1
+    landed in the end                            3
 effort
   pass_label                  pass@k with feedback
   mean_attempts_to_pass             2.2500
@@ -112,207 +111,187 @@ strata
       jobs                                   1
       unattempted_jobs                       1
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate              n/a
-        job_pass_rate                        n/a
-        first_attempt_passes                   0
-        passed_jobs                            0
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
     revision
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.0000
-        job_pass_rate                     0.5000
-        first_attempt_passes                   0
-        passed_jobs                            1
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
     scratch
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.5000
-        job_pass_rate                     1.0000
-        first_attempt_passes                   1
-        passed_jobs                            2
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
   oracle_mode
     authored
       cases                                  2
       jobs                                   3
       unattempted_jobs                       1
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.5000
-        job_pass_rate                     1.0000
-        first_attempt_passes                   1
-        passed_jobs                            2
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
     fixed_spec
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.0000
-        job_pass_rate                     0.5000
-        first_attempt_passes                   0
-        passed_jobs                            1
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
   warmup_arithmetic
     composed
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.0000
-        job_pass_rate                     0.5000
-        first_attempt_passes                   0
-        passed_jobs                            1
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
     higher_timeframe
       cases                                  1
       jobs                                   1
       unattempted_jobs                       1
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate              n/a
-        job_pass_rate                        n/a
-        first_attempt_passes                   0
-        passed_jobs                            0
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
     single
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.5000
-        job_pass_rate                     1.0000
-        first_attempt_passes                   1
-        passed_jobs                            2
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
   state_complexity
     latched
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.0000
-        job_pass_rate                     0.5000
-        first_attempt_passes                   0
-        passed_jobs                            1
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
     rolling
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.5000
-        job_pass_rate                     1.0000
-        first_attempt_passes                   1
-        passed_jobs                            2
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
     stateless
       cases                                  1
       jobs                                   1
       unattempted_jobs                       1
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate              n/a
-        job_pass_rate                        n/a
-        first_attempt_passes                   0
-        passed_jobs                            0
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
   no_trade_tape
     falsified
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.5000
-        job_pass_rate                     1.0000
-        first_attempt_passes                   1
-        passed_jobs                            2
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
     scale_free
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.0000
-        job_pass_rate                     0.5000
-        first_attempt_passes                   0
-        passed_jobs                            1
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
     trivial
       cases                                  1
       jobs                                   1
       unattempted_jobs                       1
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate              n/a
-        job_pass_rate                        n/a
-        first_attempt_passes                   0
-        passed_jobs                            0
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
   param_space_breadth
     broad
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.0000
-        job_pass_rate                     0.5000
-        first_attempt_passes                   0
-        passed_jobs                            1
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
     moderate
       cases                                  1
       jobs                                   1
       unattempted_jobs                       1
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate              n/a
-        job_pass_rate                        n/a
-        first_attempt_passes                   0
-        passed_jobs                            0
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
     narrow
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.5000
-        job_pass_rate                     1.0000
-        first_attempt_passes                   1
-        passed_jobs                            2
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
   api_surface
     exits
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.0000
-        job_pass_rate                     0.5000
-        first_attempt_passes                   0
-        passed_jobs                            1
+        First-attempt pass rate                   0.0000
+        Job pass rate (pass@k with feedback)      0.5000
+          first ask landed                             0
+          landed in the end                            1
     indicators
       cases                                  1
       jobs                                   2
       unattempted_jobs                       0
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate           0.5000
-        job_pass_rate                     1.0000
-        first_attempt_passes                   1
-        passed_jobs                            2
+        First-attempt pass rate                   0.5000
+        Job pass rate (pass@k with feedback)      1.0000
+          first ask landed                             1
+          landed in the end                            2
     n/a
       cases                                  1
       jobs                                   1
       unattempted_jobs                       1
       rates
-        pass_label                  pass@k with feedback
-        first_attempt_pass_rate              n/a
-        job_pass_rate                        n/a
-        first_attempt_passes                   0
-        passed_jobs                            0
+        First-attempt pass rate                      n/a
+        Job pass rate (pass@k with feedback)         n/a
+          first ask landed                             0
+          landed in the end                            0
 warnings                     [3 entries]
 warned_jobs                            2
 

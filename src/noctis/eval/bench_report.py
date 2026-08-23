@@ -10,13 +10,16 @@ the record carries it**, which is what keeps one verb honest across every site t
 
 Three rules do all the work:
 
-* **The co-primary pair is rendered by the pairing rule, or not at all.** A dials block carrying the
-  whole :class:`~noctis.eval.decide_scorer.ApprovalPair` is handed to that type and printed by
-  :meth:`~noctis.eval.decide_scorer.ApprovalPair.render`, which cannot print agreement without the
-  approval rate beside it (#206). A block carrying an ``agreement`` figure *without* the rest of the
-  pair is **refused** — the figure is named and not printed — because a bare agreement is exactly
-  the half-truth the pairing rule exists to prevent, and re-implementing the rendering here to be
-  helpful would be re-implementing the loophole.
+* **A co-primary pair renders whole, or it is refused by name.** The eval layer declares its pairs
+  in one place — :data:`~noctis.eval.reading.PAIR_MANIFESTS` — and this module walks them, knowing
+  no site's types at all. A block that publishes every key a manifest declares is printed through
+  that manifest's own labels, so the report and the type that owns the arithmetic tell one story. A
+  block that carries a manifest's **flagship** — DECIDE's ``agreement``, the coder's
+  ``job_pass_rate`` — without the rest of its pair is **refused**: the figure is named and not
+  printed, because a bare agreement (approve one candidate, score 1.0) and a bare retry-informed
+  pass rate are exactly the half-truths the pairing rule of #206 exists to prevent, and
+  re-implementing the rendering here to be helpful would be re-implementing the loophole. A third
+  pair is one declaration in the reading module, not an edit in this one (#304).
 * **An absence renders as the literal ``n/a``, never as a zero.** A measured zero is a finding and
   prints as ``0.0000``; a ``null`` is a missing input and prints as ``n/a``. The distinction is the
   record's, and this module's only job is not to lose it.
@@ -25,6 +28,12 @@ Three rules do all the work:
   breakdown is the recursion, and an axis nobody has invented yet renders the day a record carries
   it.
 
+The pairing rule governs the reading a record **quotes** — the ``harness.dials`` subtree a site
+publishes — and not the record's own ``metrics`` block, whose ``job_pass_rate`` is the eval core's
+figure over attempt outcomes on every site and shares nothing but a spelling with the coder's pair.
+That block carries both of the core's rates and none of a site's counts, so a pairing rule applied
+there would refuse a block for missing figures nobody ever claimed it published.
+
 Nothing here reads a file, a clock or a configuration — the verb (``bench report``) resolves and
 validates the document, and this module renders whatever it is handed.
 """
@@ -32,20 +41,14 @@ validates the document, and this module renders whatever it is handed.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import fields
 from typing import Any
 
-from noctis.eval.decide_scorer import ApprovalPair
+from noctis.eval import reading
 
 __all__ = ["NOT_AVAILABLE", "render_bench_report"]
 
 #: How every unknown figure renders, at every depth. One token, spelled once.
 NOT_AVAILABLE = "n/a"
-
-# The two-column table's widths — the pairing rule's own (``decide_scorer._table``), so a block
-# printed by :meth:`ApprovalPair.render` lines up with the rows this module prints beside it.
-_LABEL_WIDTH = 28
-_VALUE_WIDTH = 12
 
 # One nesting level, in spaces. A whole block is shifted by it, values included, so a stratum's
 # figures stay column-aligned with the pair's own rendering inside the same block.
@@ -54,20 +57,6 @@ _INDENT = "  "
 # A defensive ceiling on recursion: a record is data from disk, and a reader that could be made to
 # recurse forever by a hand-edited document is a reader with a crash in it.
 _MAX_DEPTH = 8
-
-# The fields a block must carry before it may be rendered as the co-primary pair. Read off the type
-# rather than restated, so a pair that grows a field cannot be half-rendered from here.
-_PAIR_FIELDS: tuple[str, ...] = tuple(field.name for field in fields(ApprovalPair))
-
-# The one figure that may never be printed on its own. Named here because the refusal has to know
-# what it is refusing; the *rendering* of it lives entirely in :class:`ApprovalPair`.
-_UNPAIRED = "agreement"
-
-_PAIR_REFUSAL = (
-    f"REFUSED — this block carries {_UNPAIRED!r} without the approval rate and counts that "
-    "qualify it. Agreement alone is trivially gamed (approve one candidate, score 1.0), so the "
-    "co-primary pair renders whole or not at all."
-)
 
 
 def render_bench_report(record: Mapping[str, Any], *, source: object = None) -> str:
@@ -83,7 +72,9 @@ def render_bench_report(record: Mapping[str, Any], *, source: object = None) -> 
         # The record's own reading first — it is the headline, and it is the part that differs
         # site by site — then the metrics block every bench record carries in the same shape.
         *_dials(record),
-        _titled("Metrics", _section(record, "metrics")),
+        # ``pairs=False``: the core's own metrics are not a site's reading (see the module
+        # docstring), so the pairing rule does not read them as one.
+        _titled("Metrics", _section(record, "metrics"), pairs=False),
     ]
     return "\n\n".join(section for section in sections if section)
 
@@ -161,31 +152,36 @@ def _dials(record: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _titled(title: str, node: Mapping[str, Any] | None) -> str:
-    """One titled block, or nothing at all when the record carries no such section."""
+def _titled(title: str, node: Mapping[str, Any] | None, *, pairs: bool = True) -> str:
+    """One titled block, or nothing at all when the record carries no such section.
+
+    ``pairs`` is whether the co-primary pairing rule governs this subtree: true for the reading a
+    record quotes under ``harness.dials``, false for the core's own ``metrics``.
+    """
     if not isinstance(node, Mapping):
         return ""
-    body = _block(node, depth=0)
+    body = _block(node, depth=0, pairs=pairs)
     return "\n".join([title, *body]) if body else f"{title}\n{_INDENT}(empty)"
 
 
-def _block(node: Mapping[str, Any], *, depth: int) -> list[str]:
+def _block(node: Mapping[str, Any], *, depth: int, pairs: bool) -> list[str]:
     """One mapping, rendered: the pair first if it is one, then its rows and its sub-blocks.
 
     The recursion *is* the per-axis breakdown — a mapping under a key becomes an indented block
     headed by that key, however deep the record nests it — so nothing here enumerates axes, levels
-    or figure names.
+    or figure names. A stratum's level is a pair block like any other, which is why the pairing rule
+    reaches every depth the record nests one at.
     """
     if depth > _MAX_DEPTH:
         return [f"{_INDENT * depth}(nested deeper than this report renders)"]
-    lines, rendered = _pair_lines(node, depth=depth)
+    lines, rendered = _pair_lines(node, depth=depth) if pairs else ([], set())
     for key, value in node.items():
         if key in rendered:
             continue
         name = str(key)
         if isinstance(value, Mapping):
             lines.append(f"{_INDENT * depth}{name}")
-            nested = _block(value, depth=depth + 1)
+            nested = _block(value, depth=depth + 1, pairs=pairs)
             lines += nested if nested else [f"{_INDENT * (depth + 1)}(empty)"]
         elif _is_list(value):
             lines.append(_line(name, f"[{len(value)} entries]", depth=depth))
@@ -197,35 +193,53 @@ def _block(node: Mapping[str, Any], *, depth: int) -> list[str]:
 def _pair_lines(node: Mapping[str, Any], *, depth: int) -> tuple[list[str], set[str]]:
     """The co-primary pair of this block — whole, refused, or absent — and the keys it consumed.
 
-    Whole: the pairing rule's own renderer prints it, agreement and approval rate together. Refused:
-    the block carries an agreement without the rest of the pair, so the figure is named and *not*
-    printed. Absent: nothing here is a pair, and every key falls through to the generic rows.
+    Whole: the block publishes every key some manifest declares, so that manifest's labels print it,
+    the flagship and the figures that qualify it together. Refused: the block carries a manifest's
+    flagship without the rest of that pair, so the figure is named and *not* printed. Absent:
+    nothing here is a pair, and every key falls through to the generic rows.
+
+    The walk is over :data:`~noctis.eval.reading.PAIR_MANIFESTS` and stops at the first manifest the
+    block answers to — no site is named here, and a record from a site that publishes neither pair
+    reaches the generic rows exactly as it always did.
     """
-    if not set(_PAIR_FIELDS) <= set(node):
-        if _UNPAIRED in node:
-            return [f"{_INDENT * depth}{_PAIR_REFUSAL}"], {_UNPAIRED}
-        return [], set()
-    pair = ApprovalPair(**{name: node[name] for name in _PAIR_FIELDS})
-    return _shift(pair.render(), depth=depth), set(_PAIR_FIELDS)
+    for manifest in reading.PAIR_MANIFESTS:
+        keys = set(manifest.keys)
+        if keys <= set(node):
+            return _shift(_pair(manifest, node), depth=depth), keys
+        if manifest.flagship in node:
+            return [f"{_INDENT * depth}{manifest.refusal}"], {manifest.flagship}
+    return [], set()
+
+
+def _pair(manifest: reading.PairManifest, node: Mapping[str, Any]) -> str:
+    """One whole pair, through its manifest's labels: the rows this block carries, in report order.
+
+    A block publishes what its own level owns. DECIDE's ``approval`` block carries every figure of
+    its pair; the coder's ``rates`` block leaves the job and case counts to the reading around it.
+    So the rows are the manifest's report order filtered to the keys the block really carries — a
+    figure the block never published is not a missing measurement, and printing ``n/a`` for a count
+    that is stated one level up would misdescribe both.
+    """
+    values = {figure.field: node[figure.key] for figure in manifest.figures if figure.key in node}
+    rows = [
+        (figure.label.format_map(values), values[figure.field])
+        for figure in manifest.figures
+        if figure.label is not None and figure.key in node
+    ]
+    return reading.table(rows, label_w=manifest.label_w)
 
 
 # ── formatting: one place where an absence becomes the word ``n/a`` ──────────────────────────
 
 
 def _line(label: str, value: object, *, depth: int = 0) -> str:
-    """One label/value row, indented whole so a nested block stays column-aligned."""
-    return f"{_INDENT * depth}{label:<{_LABEL_WIDTH}}{_fmt(value):>{_VALUE_WIDTH}}"
+    """One label/value row, indented whole so a nested block stays column-aligned.
 
-
-def _fmt(value: object) -> str:
-    """A cell: ``n/a`` for a null, four decimals for a rate, yes/no for a flag, the value else."""
-    if value is None:
-        return NOT_AVAILABLE
-    if isinstance(value, bool):
-        return "yes" if value else "no"
-    if isinstance(value, float):
-        return f"{value:.4f}"
-    return str(value)
+    The two columns are :func:`~noctis.eval.reading.table`'s at its own default widths: every
+    reading in the eval layer formats a cell one way, and the indent is this module's only addition
+    to it.
+    """
+    return f"{_INDENT * depth}{reading.table([(label, value)])}"
 
 
 def _text(value: object) -> str:
@@ -234,7 +248,7 @@ def _text(value: object) -> str:
 
 
 def _shift(rendered: str, *, depth: int) -> list[str]:
-    """Another module's rendered block, indented into this one — never re-rendered here."""
+    """A block laid out at its own label width, indented into this one — never re-laid-out here."""
     return [f"{_INDENT * depth}{line}" for line in rendered.splitlines()]
 
 

@@ -6,12 +6,17 @@ clock in sight. The **verb** is the thin body around it: it resolves ``bench/<be
 under the workspace, validates it, prints the render, and refuses (naming the bench root) when it
 cannot.
 
-The load-bearing property being asserted throughout is that **the verb knows nothing about DECIDE**.
-It renders the reading the record carries: a record whose dials publish a co-primary approval pair
-gets that pair (never one half of it — the pairing rule of #206 is the only rendering of agreement
-there is), and a record from another site with entirely different axes renders through exactly the
-same code path. The one integration test drives #208's zero-spend retrospective writer and reports
-the record it produced, so the mined path is held to the same reader as any other.
+The load-bearing property being asserted throughout is that **the verb knows nothing about any
+site**. It renders the reading the record carries: a dials block that publishes a whole co-primary
+pair gets that pair through the pair's own labels (never one half of it — since #304 the
+whole-or-refused rule of #206 is read off
+:data:`~noctis.eval.reading.PAIR_MANIFESTS` and governs the coder's pass rates exactly as it
+governs DECIDE's agreement), and a record from another site with entirely different axes renders
+through exactly the same code path. The record's own ``metrics`` block is *not* a site reading —
+its ``job_pass_rate`` is the eval core's figure over attempt outcomes, and it renders as the core's
+own rows however a site spells its keys. The one integration test drives #208's zero-spend
+retrospective writer and reports the record it produced, so the mined path is held to the same
+reader as any other.
 """
 
 from __future__ import annotations
@@ -102,6 +107,13 @@ DECIDE_DIALS: dict[str, Any] = {
         },
     },
 }
+
+
+#: The two rows the coder's pass pair prints, spelled as an operator reads them off the report —
+#: the qualification rides *inside* the job rate's label, so the words cannot be separated from the
+#: number (:data:`~noctis.eval.reading.PASS_RATES`).
+FIRST_ATTEMPT_ROW = "First-attempt pass rate"
+JOB_PASS_ROW = "Job pass rate (pass@k with feedback)"
 
 
 def _rates(first: float | None, job: float | None) -> dict[str, Any]:
@@ -350,8 +362,61 @@ def test_the_report_renders_a_coder_records_per_axis_pass_breakdown(tmp_path):
 
     strata = _block(rendered, "strata")
     assert "api_surface" in strata and "oracle_mode" in strata
-    assert _row(_block(strata, "bars_only"), "job_pass_rate") == "1.0000"
-    assert _row(_block(strata, "exits"), "job_pass_rate") == "0.5000"
+    assert _row(_block(strata, "bars_only"), JOB_PASS_ROW) == "1.0000"
+    assert _row(_block(strata, "exits"), JOB_PASS_ROW) == "0.5000"
+
+
+def test_a_whole_coder_pass_pair_renders_through_the_pairs_own_labelled_rows(tmp_path):
+    """(#304) The report and the type tell one story: the manifest's labels, not the JSON keys."""
+    rendered = render_bench_report(_record(dials=CODER_DIALS))
+
+    rates = _block(rendered, "rates")
+    assert _row(rates, FIRST_ATTEMPT_ROW) == "0.3333"
+    assert _row(rates, JOB_PASS_ROW) == "0.6667"
+    assert _row(rates, "first ask landed") == "1"
+    assert _row(rates, "landed in the end") == "2"
+    assert "job_pass_rate" not in rates
+    assert "pass_label" not in rates
+
+
+def test_a_nested_stratum_renders_its_pass_pair_through_the_same_labels_as_the_headline(tmp_path):
+    """The pairing rule is the block's, not the depth's: an axis level is a pair block too."""
+    strata = _block(render_bench_report(_record(dials=CODER_DIALS)), "strata")
+
+    exits = _block(strata, "exits")
+    assert _row(exits, FIRST_ATTEMPT_ROW) == "0.0000"
+    assert _row(exits, JOB_PASS_ROW) == "0.5000"
+    assert "first_attempt_pass_rate" not in exits
+
+
+def test_a_job_pass_rate_carried_without_its_first_attempt_rate_is_refused_rather_than_rendered():
+    """(#304) The coder's half-truth is refused where a human reads it, as DECIDE's already is.
+
+    A retry-informed rate alone is the same shape of lie a bare agreement is — a composition that
+    fails first and recovers twice is not the product one that lands it immediately is.
+    """
+    half = {"coder": {"rates": {"job_pass_rate": 0.5, "passed_jobs": 2}}}
+
+    rendered = render_bench_report(_record(dials=half))
+
+    assert "0.5000" not in rendered
+    assert "REFUSED" in rendered
+    assert "job_pass_rate" in rendered
+    assert "first-attempt rate" in rendered
+
+
+def test_the_records_own_metrics_are_not_a_sites_pair_and_render_as_the_cores_own_rows(tmp_path):
+    """The pairing rule governs the reading a record *quotes*, not the core's own arithmetic.
+
+    ``metrics.job_pass_rate`` is the eval core's figure over attempt outcomes on every site, and it
+    shares nothing but a spelling with the coder's pair. A reader that refused it would be refusing
+    a block that carries both rates already — a refusal that would read as a lie.
+    """
+    rendered = render_bench_report(_record(dials=CODER_DIALS))
+
+    assert "REFUSED" not in rendered
+    assert _row(rendered, "job_pass_rate") == "1.0000"
+    assert _row(rendered, "first_attempt_pass_rate") == "1.0000"
 
 
 def test_the_report_renders_the_failure_taxonomy_share_table_with_the_knob_each_share_points_at(
@@ -379,6 +444,32 @@ def test_a_record_carrying_no_dials_at_all_still_renders_its_generic_metrics_blo
 
     assert _row(rendered, "job_pass_rate") == "1.0000"
     assert _row(rendered, "first_attempt_pass_rate") == "1.0000"
+
+
+def test_a_fresh_interpreter_that_imports_the_report_module_loads_no_site_module_at_all():
+    """(#304) The docstring's "site-generic" claim, made structural rather than prose.
+
+    The reader knows the record's own shape and the eval layer's shared reading vocabulary. It
+    knows no site's types: not ``ApprovalPair``, not ``PassRates``, not a taxonomy — which is why
+    the whole-or-refused rule below can be one rule over every pair a record carries instead of
+    one site's rule hard-wired into a generic renderer.
+    """
+    probe = (
+        "import json, sys\n"
+        "import noctis.eval.bench_report\n"
+        "print(json.dumps(sorted(n for n in sys.modules if n.split('.')[0] == 'noctis')))\n"
+    )
+
+    finished = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+
+    assert json.loads(finished.stdout) == [
+        "noctis",
+        "noctis.eval",
+        "noctis.eval.bench_report",
+        "noctis.eval.reading",
+    ]
 
 
 def test_the_report_names_the_bench_the_site_and_the_key_its_numbers_are_comparable_under(tmp_path):
