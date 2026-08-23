@@ -9,20 +9,23 @@ prompt that session was answered from — **byte for byte**, over the same recor
 renders a briefing of its own; a second builder would drift from production in silence, and the
 first prompt change afterwards would be scored against a fork nobody ships.
 
-**Parity is achieved by reconstruction, not by copying.** The production builder asks a session for
-one candidate's evidence and folds in a session ledger; the case holds the *lines* those objects
-would have answered with. So the adapter answers that ask through the production evidence builder
-(:func:`noctis.research.journal.evidence_block`) over a journal whose reads come off the frozen
-evidence, and hands the builder a :class:`~noctis.research.ledger.SessionLedger` whose ``records()``
-come off the frozen tail — every typed read on a ledger funnels through that one method, which is
-what makes the substitution total. Nothing re-derives the block here.
+**Parity is achieved by answering the ask, not by copying it.** The production builder asks a
+session for *facts* (:class:`~noctis.research.surface.ResearchFacts`) and folds in a session
+ledger. The case froze one of those facts — the candidate's evidence block, as
+:func:`noctis.research.journal.evidence_block` wrote it at mining time — so the adapter hands that
+block straight back, and hands the builder a :class:`~noctis.research.ledger.SessionLedger` whose
+``records()`` come off the frozen tail (every typed read on a ledger funnels through that one
+method, which is what makes the substitution total). Nothing re-derives the block here: rebuilding
+it from its own rows would be a second builder over a decision already made, and a second builder
+drifts.
 
 **What a case does not freeze, the bench states — as nothing, by default.** The DECIDE briefing
 also carries the market cost arithmetic, the champion board, the memory tail and the library index:
-session context, not case evidence, and #207 froze none of it. :data:`NEUTRAL_SESSION` renders those
-blocks empty, identically for every case, so a comparison between two model configurations is still
-a comparison over one prompt. A bench that wants the real thing injects its own context object
-(anything that answers those session facts) instead — the adapter forwards to it untouched.
+session context, not case evidence, and #207 froze none of it. :data:`NEUTRAL_SESSION` answers those
+facts empty, identically for every case, so a comparison between two model configurations is still
+a comparison over one prompt. A bench that wants the real thing injects its own ``ResearchFacts``
+instead — the adapter forwards every fact but the evidence to it untouched. Both stand-ins are
+*facts* and nothing wider: a re-run reads a session, it never drives one.
 
 **The reply is read through production's own vocabulary.** :func:`contract_for` returns the driver's
 :data:`~noctis.research.driver.DECIDE_CONTRACT` — or the revise-less final ask
@@ -78,7 +81,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from noctis.eval.case import Case
 from noctis.eval.decide_scorer import (
@@ -91,19 +94,11 @@ from noctis.eval.decide_scorer import (
 )
 from noctis.eval.metrics import AttemptOutcome
 from noctis.eval.site import AnsweredCase
-from noctis.research import digests
 from noctis.research.driver import DECIDE_CONTRACT, DECIDE_FINAL_CONTRACT, DecideOutput
 from noctis.research.episode import EmitContract, _extract_json_object
-from noctis.research.journal import (
-    ExperimentJournal,
-    JournalStats,
-    Thesis,
-    Trial,
-    evidence_block,
-)
 from noctis.research.ledger import SessionLedger
 from noctis.research.mandate import Mandate
-from noctis.research.surface import ChampionBoard
+from noctis.research.surface import ChampionBoard, ResearchFacts, ResearchLimits
 
 if TYPE_CHECKING:  # the cycle-closing imports, for annotations only — see the module docstring
     from noctis.eval.decide_case import RecordedOutcome
@@ -115,7 +110,6 @@ __all__ = [
     "DECIDE_DIALS_KEY",
     "DECIDE_SCORER",
     "NEUTRAL_SESSION",
-    "NO_LIBRARY",
     "NO_MAJORITY",
     "NO_VERDICT",
     "UNREADABLE_KEY",
@@ -150,18 +144,10 @@ UNSETTLED_KEY = "unsettled"
 NO_VERDICT = "no reply this case gave carried a verdict the emit contract admits"
 NO_MAJORITY = "the case's answers settled on no single verdict, and none is invented for it"
 
-#: The strategy library a re-run reads when the bench states no session context: a path no checkout
-#: has, so the index comes back empty. An *empty stated* library, never somebody else's real one.
-NO_LIBRARY = "/nonexistent/noctis-eval/no-strategy-library"
-
 # Where the frozen ledger claims to live. It never opens the path — ``records()`` is overridden —
 # but a ledger carries one, and a plainly impossible path is the honest thing to carry.
 _NO_SESSION_DIR = "/nonexistent/noctis-eval/frozen-decide-case"
 _FROZEN_SESSION = "frozen-decide-case"
-
-# The four keys a frozen top-trial row carries beside its metrics; everything else in the row IS a
-# metric, because the production builder spreads the metrics dict flat beside exactly these.
-_TRIAL_KEYS = ("params", "symbols", "source", "max_bars")
 
 
 class UnreadableReply(ValueError):
@@ -175,25 +161,14 @@ class UnreadableReply(ValueError):
 
 # ── the session context a frozen case does not carry ─────────────────────────────────────────
 
+#: The ceilings a bench that states no session context reports: none, on every dial. No block a
+#: briefing renders reads them — the DECIDE prompt quotes the exhaustion floor, and a case freezes
+#: its own — so a number here would be one session's budget restated for every case in a corpus.
+_NO_LIMITS = ResearchLimits(min_trials=0, max_backtests=0, sweep_trials=0, max_author_calls=0)
 
-class _NoChampions:
-    """A champion board with nothing crowned on it."""
-
-    def list(self) -> list[Any]:
-        return []
-
-
-class _NoMemory:
-    """A memory tail with nothing distilled, found or ruled out."""
-
-    def findings(self) -> list[Any]:
-        return []
-
-    def distilled(self) -> list[Any]:
-        return []
-
-    def rejected_ideas(self) -> list[Any]:
-        return []
+# The inventory cap the facts surface declares as its default (noctis.research.surface). Restated
+# only so an empty answer keeps the surface's signature; nothing here has a list to cap.
+_INVENTORY_LIMIT = 60
 
 
 @dataclass(frozen=True)
@@ -203,96 +178,61 @@ class NeutralSession:
     The DECIDE briefing carries four blocks a case does not freeze — the market cost arithmetic,
     the champion board, the advisory memory tail and the library index. A re-run has to render
     *something* there, and the honest something is nothing: an empty market digest, an empty board,
-    an empty memory and a library nobody has. Identical across every case in a corpus, so the
+    an empty memory tail and an empty library. Identical across every case in a corpus, so the
     difference between two benched configurations is never the context they happened to be handed.
 
-    Each block is *answered*, not exposed: the briefing asks a session for the fact
-    (:class:`~noctis.research.surface.ResearchFacts`), and the empty collaborators below are how
-    this one comes by its answers — through the production renderers, so "empty" here renders
-    exactly as an empty session would in a real run.
+    It is a :class:`~noctis.research.surface.ResearchFacts` and nothing wider — every fact
+    *answered*, none faked. There is no empty registry, no empty memory store and no library path
+    behind these answers: a stand-in collaborator would be a second implementation of a renderer
+    that already exists, and every one of them renders exactly this nothing over empty inputs. The
+    facts a DECIDE briefing never reads are answered too (that is what the surface promises), which
+    is why the same object can state the context of a FORMULATE or DISCOVER re-run.
     """
 
-    registry: Any = _NoChampions()
-    memory: Any = _NoMemory()
-    strategies_dir: Any = NO_LIBRARY
+    # A constant on the class rather than a field: a neutral session has no state to construct,
+    # and every instance of it states the same nothing.
+    limits = _NO_LIMITS
 
     def market_context(self) -> dict[str, Any]:
         """No market digest at all — not a plausible one somebody would read as measured."""
         return {}
 
+    def journal_evidence(self, name: str) -> dict[str, Any]:
+        """No journaled evidence for anybody: a context states the blocks a case does *not*
+        freeze, and a candidate's evidence is never one of them (the case answers that fact
+        itself). Empty, so a context can never quietly become the source of a verdict's case."""
+        return {}
+
     def champion_board(self) -> ChampionBoard:
         """An empty board, no crowned family, and no slot count to claim."""
-        return ChampionBoard(
-            rows=tuple(digests.champion_digest(self.registry)),
-            crowned_families=tuple(digests.crowned_families(self.registry)),
-            capacity=0,
-        )
+        return ChampionBoard(rows=(), crowned_families=(), capacity=0)
 
     def library_index(self) -> list[dict]:
         """The index of a library nobody has — empty, never somebody else's real one."""
-        return digests.library_index(self.strategies_dir)
+        return []
+
+    def template_text(self) -> str:
+        """No strategy template: the same answer a checkout without the seed tier gives."""
+        return "(none)"
 
     def memory_tail(self, *, prefix_trim: bool = False) -> tuple[list, list]:
         """No findings and no dead ends, at either trim setting."""
-        return digests.memory_block(self.memory, prefix_trim=prefix_trim)
+        return [], []
+
+    def lake_inventory(self, *, limit: int = _INVENTORY_LIMIT) -> list[str]:
+        """No tickers stated as already researchable — a bench states no lake."""
+        return []
+
+    def data_budget(self) -> float | None:
+        """No data spend to state: the honest ``None`` a lake with no cost preflight answers."""
+        return None
 
 
 #: The context :func:`decide_input` renders the un-frozen blocks from unless a bench states one.
 NEUTRAL_SESSION = NeutralSession()
 
 
-# ── the frozen reads: a journal and a ledger answered from the case ──────────────────────────
-
-
-class _FrozenJournal:
-    """The journal reads :func:`noctis.research.journal.evidence_block` makes, answered from
-    one frozen case.
-
-    A case is one candidate, so the strategy name every read takes is the one this journal was
-    frozen for. The trial list is returned in the order the case holds it — that order *is* the
-    production builder's ranking, recorded when the case was mined, so re-deriving it here would be
-    a second implementation of a decision already made.
-    """
-
-    def __init__(self, evidence: Mapping[str, Any]) -> None:
-        self._evidence = evidence
-
-    def stats(self, name: str) -> JournalStats:
-        return JournalStats(
-            n_trials=int(self._evidence.get("n_trials") or 0),
-            n_distinct_params=int(self._evidence.get("n_distinct_params") or 0),
-            sweep_completed=bool(self._evidence.get("sweep_completed")),
-        )
-
-    def trials_by_test(self, name: str) -> list[Trial]:
-        return [_trial(row) for row in self._evidence.get("top_trials") or []]
-
-    def thesis(self, name: str) -> Thesis | None:
-        text = self._evidence.get("thesis")
-        return None if text is None else Thesis.from_record({"thesis": text})
-
-    def class_tag(self, name: str) -> str | None:
-        tag = self._evidence.get("class_tag")
-        return None if tag is None else str(tag)
-
-    def verdicts(self, name: str) -> list[dict[str, Any]]:
-        return [dict(record) for record in self._evidence.get("verdicts") or []]
-
-    def touched_symbols(self, name: str) -> set[str]:
-        return {str(symbol) for symbol in self._evidence.get("tuned_off_limits_for_holdout") or []}
-
-
-def _trial(row: Mapping[str, Any]) -> Trial:
-    """One frozen top-trial row back as the journal's own typed view of a ``trial`` line."""
-    return Trial.from_record(
-        {
-            "source": row.get("source", ""),
-            "symbols": row.get("symbols") or [],
-            "params": row.get("params") or {},
-            "metrics": {key: value for key, value in row.items() if key not in _TRIAL_KEYS},
-            "max_bars": row.get("max_bars"),
-        }
-    )
+# ── the frozen reads: the evidence and the ledger answered from the case ─────────────────────
 
 
 class _FrozenLedger(SessionLedger):
@@ -345,29 +285,58 @@ class _CaseToolbox:
     """What the DECIDE briefing builder asks a session for: the case's own gate-facing evidence,
     and the session context for every block the case does not carry.
 
-    The evidence is built here from the frozen journal through the *production* builder
-    (:func:`noctis.research.journal.evidence_block`) with the case's own exhaustion floor, so a
-    re-run states the floor its session stated. Every other fact goes to the context untouched:
-    the delegation is deliberately open-ended, so a builder that grows a read fails loudly against
-    a context that cannot answer it rather than being quietly re-forked here.
+    One fact is the case's. :meth:`journal_evidence` answers the block the case *froze* — which is
+    what :func:`noctis.research.journal.evidence_block` wrote when the case was mined — handed back
+    as mined rather than rebuilt from its own rows. Re-deriving it would be a second builder over a
+    decision already made, and the second one drifts: it would silently drop a field a later miner
+    freezes and re-apply a ranking and a cap that were applied once, at mining time.
+
+    Every other fact is the bench's, forwarded to its stated context untouched. The forwarding is
+    named method by method rather than caught by a ``__getattr__``, because a facts surface with a
+    catch-all is not a surface: a builder that grew a read would be answered by whatever the
+    context happened to have, and this class is a :class:`~noctis.research.surface.ResearchFacts`
+    exactly to the extent that its answers are enumerated here.
     """
 
-    def __init__(self, journal: _FrozenJournal, min_trials: int, context: Any) -> None:
+    def __init__(self, evidence: Mapping[str, Any], context: ResearchFacts) -> None:
+        self._evidence = dict(evidence)
         self._context = context
-        self.journal = journal
-        self.min_trials = min_trials
-
-    def journal_evidence(self, name: str) -> dict[str, Any]:
-        # The frozen journal answers every read the builder makes, off the case's own lines — but
-        # it is a stand-in, not an ExperimentJournal, and the substitution is the point (a real one
-        # would need the session's state dir back). Stated as a cast so it stays a declared
-        # substitution: a read the stand-in has not overridden still fails loudly.
-        return evidence_block(
-            cast(ExperimentJournal, self.journal), name, min_trials=self.min_trials
+        # The bench's ceilings under the exhaustion floor this candidate was really judged against:
+        # a re-run spends the bench's budget, but it is answering history's ask, and min_trials is
+        # the one limit a rendered briefing quotes. Resolved once — a case cannot change.
+        self.limits = replace(
+            context.limits, min_trials=int(self._evidence.get("min_trials_gate") or 0)
         )
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._context, name)
+    def journal_evidence(self, name: str) -> dict[str, Any]:
+        """The evidence block this case froze, verbatim.
+
+        ``name`` is not looked up: a case is one candidate, so the name the builder asks with is
+        the one the case was frozen for (:func:`decide_input` takes the strategy off this very
+        block). A copy per call, so a rendering can never edit the ask.
+        """
+        return dict(self._evidence)
+
+    def market_context(self) -> dict[str, Any]:
+        return self._context.market_context()
+
+    def champion_board(self) -> ChampionBoard:
+        return self._context.champion_board()
+
+    def library_index(self) -> list[dict]:
+        return self._context.library_index()
+
+    def template_text(self) -> str:
+        return self._context.template_text()
+
+    def memory_tail(self, *, prefix_trim: bool = False) -> tuple[list, list]:
+        return self._context.memory_tail(prefix_trim=prefix_trim)
+
+    def lake_inventory(self, *, limit: int = _INVENTORY_LIMIT) -> list[str]:
+        return self._context.lake_inventory(limit=limit)
+
+    def data_budget(self) -> float | None:
+        return self._context.data_budget()
 
 
 # ── the ask: one frozen case as the declared site's input ────────────────────────────────────
@@ -377,7 +346,7 @@ def decide_input(
     case: Case,
     *,
     context_window: int,
-    context: Any = NEUTRAL_SESSION,
+    context: ResearchFacts = NEUTRAL_SESSION,
     mandate: Mandate | None = None,
 ) -> DecideSiteInput:
     """One frozen case as the record the declared DECIDE renderer takes.
@@ -395,9 +364,7 @@ def decide_input(
     evidence: dict[str, Any] = _thawed(view.get(EVIDENCE_KEY) or {})
     tail: list[dict[str, Any]] = _thawed(view.get(LEDGER_TAIL_KEY) or [])
     return DecideSiteInput(
-        toolbox=_CaseToolbox(
-            _FrozenJournal(evidence), int(evidence.get("min_trials_gate") or 0), context
-        ),
+        toolbox=_CaseToolbox(evidence, context),
         ledger=_FrozenLedger(tail),
         strategy=str(evidence.get("strategy") or ""),
         context_window=context_window,
@@ -408,7 +375,7 @@ def decide_input(
 def decide_site_input(
     *,
     context_window: int,
-    context: Any = NEUTRAL_SESSION,
+    context: ResearchFacts = NEUTRAL_SESSION,
     mandate: Mandate | None = None,
 ) -> Callable[[Case], DecideSiteInput]:
     """The adapter a bench hands :class:`~noctis.eval.runner.BenchRunner` as its ``site_input``.

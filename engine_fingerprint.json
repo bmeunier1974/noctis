@@ -42,9 +42,9 @@
       "note": null
     },
     "prompts": {
-      "digest": "82c77ec0f5ae3f1c",
+      "digest": "3d7931b43ae1abfb",
       "files": {
-        "src/noctis/research/briefings.py": "886bdcfd72cb03d9",
+        "src/noctis/research/briefings.py": "65d039b72047a292",
         "src/noctis/research/contract_sheet.py": "a94270514c15a554",
         "src/noctis/research/digests.py": "67476f972a6bbedf",
         "src/noctis/research/ideation.py": "765299073e318ffb",

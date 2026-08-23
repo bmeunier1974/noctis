@@ -36,7 +36,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from noctis.research import digests, journal
+from noctis.research import digests
 from noctis.research.agent import _estimate_tokens
 from noctis.research.ledger import SessionLedger
 from noctis.research.mandate import Mandate
@@ -45,11 +45,6 @@ from noctis.research.surface import ResearchFacts
 # The fixed advisory-trim priority order: memory tail first, then the library stubs, then the
 # per-symbol digest breadth. Everything NOT keyed here is core (gate-facing) and never trimmed.
 _TRIM_ORDER = ("memory", "library", "breadth")
-
-# How many top-ranked trials the decide evidence surfaces: the one cap, in the module that owns
-# the evidence block. Re-exported here only until the eval layer's frozen-case builder reads it
-# from the journal directly (#261) — nothing in this module has its own copy to drift.
-_TOP_TRIALS = journal.TOP_TRIALS
 
 _FORMULATE_HEADER = (
     "Propose ONE falsifiable strategy thesis for this session. Before any code, state the cost "

@@ -68,10 +68,6 @@ from noctis.backtest.scorecard import Scorecard
 from noctis.champions.promotion import Decision, GateResult, PromotionRules, decide
 from noctis.eval.case import Case, parse_case
 from noctis.eval.episodic_sites import DECIDE_SITE
-
-# Imported, never re-declared: a second copy of the briefing's trial cap would drift from it in
-# silence, and the case would then freeze a slice the production prompt does not show.
-from noctis.research.briefings import _TOP_TRIALS
 from noctis.research.driver import (
     _APPROVE,
     _EXHAUSTED,
@@ -82,7 +78,11 @@ from noctis.research.driver import (
     _REVISE_CHECK,
     DECIDE,
 )
-from noctis.research.journal import JournalStats, Thesis, Trial
+
+# ``TOP_TRIALS`` is imported from the module that owns the evidence block, never re-declared: a
+# second copy of the rendered trial cap would drift from it in silence, and the case would then
+# freeze a slice the production prompt does not show.
+from noctis.research.journal import TOP_TRIALS, JournalStats, Thesis, Trial
 from noctis.research.ledger import ThesisLine, Verdict
 
 __all__ = [
@@ -558,7 +558,7 @@ def _evidence(
     slice as of the ask (see :func:`_before_index`), so the history the two agree on is the one the
     session was really answering from.
     """
-    trials = _trials_by_test(records)[:_TOP_TRIALS]
+    trials = _trials_by_test(records)[:TOP_TRIALS]
     thesis = _thesis(records)
     return {
         "strategy": strategy,

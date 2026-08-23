@@ -64,6 +64,11 @@ either: the per-stage system texts, emit contracts and every ledgered/emitted li
 byte-identical, pinned by the goldens and by the driver's own ledger assertions. This one entry
 declares the whole epic's move.
 
+Amended for #261, the epic's last story and the same kind of move: the eval layer's frozen DECIDE
+case now reads the rendered trial cap straight from `research/journal.py`, the module that owns the
+evidence block, so the `_TOP_TRIALS` alias `research/briefings.py` was keeping for it is deleted.
+That is the only line of any asset this amendment moves, and it is a name nothing renders.
+
 ## 2026-08-02 — sites: author
 
 Ablation seam widening, **no wording change**: the authoring engine's five prompt pieces (contract
