@@ -4,8 +4,8 @@ build-time fit assertion that replaces mid-session eviction.
 The episodic research driver (epic #62) invokes the model only at narrow judgment points and
 rebuilds each episode's prompt *fresh from disk* — there is no accumulated transcript to evict.
 So the discipline that keeps a session inside its context window moves to *build time*: every
-builder here renders the same facts the conversation loop shows (out of the shared digest
-builders in :mod:`noctis.research.digests`) plus the session-ledger tail, then asserts the
+builder here renders the same facts the conversation loop shows (off the session's own
+:class:`~noctis.research.surface.ResearchFacts`) plus the session-ledger tail, then asserts the
 rendered prompt fits the configured window. Nothing carries between calls: a builder is a pure
 function of what is on disk when it runs.
 
@@ -18,10 +18,15 @@ does not fit after every advisory block is trimmed fails loudly with
 :class:`BriefingTooLargeError` rather than truncating silently: silent truncation of a
 gate-facing number is structurally impossible here.
 
-Builders take explicit collaborators (the toolbox, the session ledger, an optional mandate) and
-the window size as parameters — no Settings reads. Token size is estimated with the loop's own
-provider-neutral ~4-chars/token heuristic (:func:`noctis.research.agent._estimate_tokens`), so
-there is one token accounting across the codebase, not two.
+Builders take explicit inputs — the session's facts, the session ledger, an optional mandate —
+and the window size, with no Settings reads. That first input is a
+:class:`~noctis.research.surface.ResearchFacts`: every block below is rendered from a fact the
+session *answers* (the champion board, the library index, the memory tail, the lake inventory,
+the data budget, one candidate's journaled evidence), never from a collaborator reached through
+a toolbox, so a builder cannot read a half-fact or invent one a probe missed. Token size is
+estimated with the loop's own provider-neutral ~4-chars/token heuristic
+(:func:`noctis.research.agent._estimate_tokens`), so there is one token accounting across the
+codebase, not two.
 """
 
 from __future__ import annotations
@@ -31,17 +36,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from noctis.research import digests
+from noctis.research import digests, journal
 from noctis.research.agent import _estimate_tokens
 from noctis.research.ledger import SessionLedger
 from noctis.research.mandate import Mandate
+from noctis.research.surface import ResearchFacts
 
 # The fixed advisory-trim priority order: memory tail first, then the library stubs, then the
 # per-symbol digest breadth. Everything NOT keyed here is core (gate-facing) and never trimmed.
 _TRIM_ORDER = ("memory", "library", "breadth")
 
-# How many top-ranked trials the decide evidence surfaces (mirrors get_experiment_log's cap).
-_TOP_TRIALS = 10
+# How many top-ranked trials the decide evidence surfaces: the one cap, in the module that owns
+# the evidence block. Re-exported here only until the eval layer's frozen-case builder reads it
+# from the journal directly (#261) — nothing in this module has its own copy to drift.
+_TOP_TRIALS = journal.TOP_TRIALS
 
 _FORMULATE_HEADER = (
     "Propose ONE falsifiable strategy thesis for this session. Before any code, state the cost "
@@ -145,7 +153,7 @@ def _ledger_tail(ledger: SessionLedger) -> list[dict[str, Any]]:
     return tail
 
 
-def _market_parts(toolbox: Any) -> tuple[str, str, str]:
+def _market_parts(toolbox: ResearchFacts) -> tuple[str, str, str]:
     """Split the shared market digest into (cost-facts core, exhausted-classes core, breadth).
 
     The facts come from the one shared builder (:func:`digests.market_digest`) — parsed back so
@@ -156,38 +164,6 @@ def _market_parts(toolbox: Any) -> tuple[str, str, str]:
     breadth = digest.pop("symbols", {})
     exhausted = digest.pop("exhausted_classes", [])
     return _json(digest), _json(exhausted), _json(breadth)
-
-
-def _decide_evidence(toolbox: Any, strategy: str) -> dict[str, Any]:
-    """The candidate's gate-facing evidence: exhaustion stats, the ranked top trials with their
-    train/test/gap/holdout metrics, journaled verdicts, and the holdout-taint symbol set — the
-    same digest ``get_experiment_log`` surfaces, so the decide episode reasons on identical
-    numbers. Never trimmed."""
-    journal = toolbox.journal
-    stats = journal.stats(strategy)
-    trials = journal.trials_by_test(strategy)[:_TOP_TRIALS]
-    thesis = journal.thesis(strategy)
-    return {
-        "strategy": strategy,
-        "thesis": thesis.text if thesis is not None else None,
-        "class_tag": journal.class_tag(strategy),
-        "n_trials": stats.n_trials,
-        "n_distinct_params": stats.n_distinct_params,
-        "sweep_completed": stats.sweep_completed,
-        "min_trials_gate": toolbox.min_trials,
-        "top_trials": [
-            {
-                "params": trial.params,
-                "symbols": trial.symbols,
-                "source": trial.source,
-                **({"max_bars": trial.max_bars} if trial.max_bars else {}),
-                **trial.metrics,
-            }
-            for trial in trials
-        ],
-        "verdicts": journal.verdicts(strategy),
-        "tuned_off_limits_for_holdout": sorted(journal.touched_symbols(strategy)),
-    }
 
 
 def _render(sections: list[_Section], dropped: set[str]) -> str:
@@ -218,7 +194,7 @@ def _fit_or_raise(sections: list[_Section], *, window: int, kind: str) -> str:
 
 
 def formulate_briefing(
-    toolbox: Any,
+    toolbox: ResearchFacts,
     ledger: SessionLedger,
     *,
     mandate: Mandate | None = None,
@@ -233,7 +209,7 @@ def formulate_briefing(
     entries stubbed), and the per-symbol digest breadth. See the module docstring for the trim
     contract."""
     market_core, exhausted, breadth = _market_parts(toolbox)
-    findings, dead_ends = digests.memory_block(toolbox.memory)
+    findings, dead_ends = toolbox.memory_tail()
     sections = [
         _Section("header", "FORMULATE TASK", _FORMULATE_HEADER),
         _Section("mandate", "OPERATOR MANDATE", _mandate_body(mandate)),
@@ -255,7 +231,7 @@ def formulate_briefing(
 
 
 def decide_briefing(
-    toolbox: Any,
+    toolbox: ResearchFacts,
     ledger: SessionLedger,
     strategy: str,
     *,
@@ -271,14 +247,14 @@ def decide_briefing(
     tail. Advisory, trimmable blocks are
     the distilled memory tail, the library index, and the per-symbol digest breadth."""
     market_core, exhausted, breadth = _market_parts(toolbox)
-    findings, dead_ends = digests.memory_block(toolbox.memory)
+    findings, dead_ends = toolbox.memory_tail()
     sections = [
         _Section("header", "DECIDE TASK", _decide_header(strategy)),
         _Section("mandate", "OPERATOR MANDATE", _mandate_body(mandate)),
         _Section(
             "evidence",
             f"EVIDENCE FOR {strategy} (gate-facing)",
-            _json(_decide_evidence(toolbox, strategy)),
+            _json(toolbox.journal_evidence(strategy)),
         ),
         _Section("market", "MARKET ECONOMICS (cost arithmetic)", market_core),
         _Section("breadth", "MARKET BREADTH (per-symbol character)", breadth),
@@ -298,7 +274,7 @@ def decide_briefing(
 
 
 def discover_briefing(
-    toolbox: Any,
+    toolbox: ResearchFacts,
     ledger: SessionLedger,
     *,
     thesis: str,
@@ -320,7 +296,7 @@ def discover_briefing(
     order, so the ask itself survives any window a small backend brings. The strategy library index
     is deliberately absent: this episode reasons about symbols, not strategies."""
     _market_core, _exhausted, breadth = _market_parts(toolbox)
-    findings, dead_ends = digests.memory_block(toolbox.memory)
+    findings, dead_ends = toolbox.memory_tail()
     sections = [
         _Section("header", "DISCOVER TASK", _DISCOVER_HEADER),
         _Section("mandate", "OPERATOR MANDATE", _mandate_body(mandate)),
@@ -335,7 +311,7 @@ def discover_briefing(
         _Section(
             "inventory",
             "LAKE INVENTORY (already researchable — do NOT propose these)",
-            _json(digests.lake_inventory(toolbox)),
+            _json(toolbox.lake_inventory()),
         ),
         _Section(
             "budget",
@@ -351,11 +327,11 @@ def discover_briefing(
     return _fit_or_raise(sections, window=context_window, kind="discover")
 
 
-def _spend_context(toolbox: Any, window: Mapping[str, Any] | None) -> dict[str, Any]:
+def _spend_context(toolbox: ResearchFacts, window: Mapping[str, Any] | None) -> dict[str, Any]:
     """The data-spend context a DISCOVER proposal is made inside: the history window a fetch would
-    cover and — when the lake seam exposes its cost preflight — the configured budget the fetch is
-    judged against. A seam without one (a test fake, a lake built without a vendor) simply omits the
-    number; it is never invented."""
+    cover and the configured budget the fetch is judged against. A session whose lake has no cost
+    preflight (a test fake, a lake built without a vendor) has no budget to state and answers
+    ``None``, so the block simply omits the number; it is never invented."""
     out: dict[str, Any] = {
         "note": (
             "Each proposed ticker's history is fetched through the same cost-gated path every "
@@ -365,23 +341,26 @@ def _spend_context(toolbox: Any, window: Mapping[str, Any] | None) -> dict[str, 
     }
     if window:
         out["fetch_window"] = dict(window)
-    budget = getattr(getattr(toolbox, "lake", None), "preflight", None)
-    usd = getattr(budget, "budget_usd", None)
-    if isinstance(usd, (int, float)) and not isinstance(usd, bool):
-        out["budget_usd"] = float(usd)
+    budget = toolbox.data_budget()
+    if budget is not None:
+        out["budget_usd"] = budget
     return out
 
 
-def _champions(toolbox: Any) -> dict[str, Any]:
+def _champions(toolbox: ResearchFacts) -> dict[str, Any]:
     """The board a candidate must beat, plus the rule that decides whether it may try at all:
     the crowned families (whose re-tunes the ``family_slot`` gate rejects) and the honest path
-    out — a new name through the full funnel. Gate-facing, so it is never trimmed."""
+    out — a new name through the full funnel. Gate-facing, so it is never trimmed.
+
+    Rows and crowned families come off the board as one value, so the block can never pair one
+    session's rows with another's crowned names."""
+    board = toolbox.champion_board()
     return {
         "rule": digests.ONE_SLOT_PER_FAMILY,
-        "crowned_families": digests.crowned_families(toolbox.registry),
-        "board": digests.champion_digest(toolbox.registry),
+        "crowned_families": list(board.crowned_families),
+        "board": list(board.rows),
     }
 
 
-def _library(toolbox: Any) -> list[dict[str, Any]]:
-    return digests.library_index(toolbox.strategies_dir)
+def _library(toolbox: ResearchFacts) -> list[dict]:
+    return toolbox.library_index()

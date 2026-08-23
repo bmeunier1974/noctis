@@ -6,12 +6,12 @@ own builder, with state seeded through the collaborators (journal, registry, mem
 library) exactly as a session seeds it — never through a stubbed surface. That is the point of
 the story: the seam is only worth declaring if the object that answers it is the production one.
 
-Two kinds of assertion carry the refactor that follows:
+Two kinds of assertion carry the refactor that followed:
 
-* **parity** — each derived fact is compared against the renderer the consumers still call today
-  (``digests.champion_digest`` / ``crowned_families`` / ``library_index`` / ``memory_block`` /
-  ``lake_inventory``, ``briefings._decide_evidence``, ``briefings._spend_context``). When story
-  #258 re-points the consumers at the surface, these are what say nothing moved.
+* **parity** — each derived fact is compared against the pure renderer behind it
+  (``digests.champion_digest`` / ``crowned_families`` / ``library_index`` / ``memory_block``,
+  ``journal.evidence_block``), which is what says story #258's re-pointing of the consumers
+  moved nothing. The renderers stayed where they were: what moved is who reads them.
 * **leafness** — the surface module imports nothing from the engine, so the eval layer may import
   it without crossing the one-way boundary ``tests/test_eval_boundary.py`` guards.
 """
@@ -26,7 +26,6 @@ from types import SimpleNamespace
 import pytest
 
 from noctis.research import digests, surface
-from noctis.research.briefings import _TOP_TRIALS, _decide_evidence, _spend_context
 from noctis.research.journal import TOP_TRIALS, evidence_block
 from noctis.research.surface import (
     ChampionBoard,
@@ -103,13 +102,12 @@ def test_limits_are_the_four_configured_ceilings(tmp_path):
 
 
 # ── journal evidence: one builder ───────────────────────────────────────────────────────────
-def test_journal_evidence_is_the_decide_briefing_evidence_key_for_key(tmp_path):
+def test_journal_evidence_carries_exactly_the_keys_the_decide_briefing_renders(tmp_path):
     box, _ledger, _mandate = _populate(tmp_path)
 
     evidence = box.journal_evidence("probe")
 
     assert set(evidence) == _EVIDENCE_KEYS
-    assert evidence == _decide_evidence(box, "probe")
 
 
 def test_journal_evidence_reports_the_seeded_journal(tmp_path):
@@ -147,14 +145,6 @@ def test_evidence_caps_the_ranked_trials_at_the_top_trials_constant(tmp_path):
         )
 
     assert len(box.journal_evidence("probe")["top_trials"]) == TOP_TRIALS
-
-
-def test_the_briefing_and_the_journal_state_the_same_top_trials_cap():
-    """The DECIDE briefing still carries its own copy of the cap (its module is a prompt-ratchet
-    asset this story does not touch — story #258 deletes the copy and imports this one). Until it
-    does, the two are pinned equal here, so the duplicate cannot quietly drift into showing the
-    verdict episode a different depth of leaderboard than ``get_experiment_log`` shows."""
-    assert _TOP_TRIALS == TOP_TRIALS
 
 
 def test_get_experiment_log_rows_are_the_evidence_top_trials_prefix(tmp_path):
@@ -229,11 +219,12 @@ def test_memory_tail_matches_the_memory_block_renderer_and_prefix_trim_caps_it(t
 
 
 # ── lake inventory ──────────────────────────────────────────────────────────────────────────
-def test_lake_inventory_is_sorted_and_matches_the_shared_builder(tmp_path):
+# The builder lives here now, not in the digests module: an inventory is a fact about a session's
+# own lake, and the DISCOVER briefing asks the session for it (#258).
+def test_lake_inventory_is_the_sorted_readiness_filtered_universe(tmp_path):
     box = _make_toolbox(tmp_path)
 
     assert box.lake_inventory() == ["AAA", "BBB", "CCC", "DDD"]
-    assert box.lake_inventory() == digests.lake_inventory(box)
 
 
 def test_lake_inventory_drops_a_symbol_the_lake_is_not_ready_for(tmp_path):
@@ -261,11 +252,12 @@ def test_lake_inventory_is_empty_when_the_coverage_listing_raises(tmp_path):
 
 
 # ── data budget ─────────────────────────────────────────────────────────────────────────────
+# The one tolerant read in the codebase: the cost preflight is an attribute of the concrete lake,
+# not of the MarketData seam every lake answers. A renderer never probes for it — it asks here.
 def test_data_budget_is_none_without_a_cost_preflight(tmp_path):
     box = _make_toolbox(tmp_path)
 
     assert box.data_budget() is None
-    assert "budget_usd" not in _spend_context(box, None)
 
 
 def test_data_budget_is_the_preflight_budget_as_a_float(tmp_path):
@@ -274,7 +266,6 @@ def test_data_budget_is_the_preflight_budget_as_a_float(tmp_path):
 
     assert box.data_budget() == 12.0
     assert isinstance(box.data_budget(), float)
-    assert box.data_budget() == _spend_context(box, None)["budget_usd"]
 
 
 # ── delegating facts ────────────────────────────────────────────────────────────────────────

@@ -1,37 +1,40 @@
 {
   "changelog": {
     "declares": [
-      "author"
+      "author",
+      "briefings",
+      "conversation",
+      "episodic"
     ],
-    "digest": "eb5ac09954525733",
-    "heading": "2026-08-02 \u2014 sites: author",
+    "digest": "706bd0c8ad5270a0",
+    "heading": "2026-08-22 \u2014 sites: author, briefings, conversation, episodic",
     "path": "docs/prompt-changelog.md"
   },
   "kind": "noctis.prompt_fingerprint",
   "regenerate_with": "uv run python scripts/prompt_fingerprint.py --write",
   "sites": {
     "author": {
-      "digest": "7ed3cd98668b939d",
+      "digest": "8a41a08beef56b50",
       "files": {
         "src/noctis/research/author.py": "d94307d5789ece36",
         "src/noctis/research/contract_sheet.py": "a94270514c15a554",
-        "src/noctis/research/digests.py": "c731ffae918e9574"
+        "src/noctis/research/digests.py": "67476f972a6bbedf"
       },
       "note": null
     },
     "briefings": {
-      "digest": "a19fd389d34985b2",
+      "digest": "60aab447a9d0628d",
       "files": {
-        "src/noctis/research/briefings.py": "5765117e4194f2ce",
-        "src/noctis/research/digests.py": "c731ffae918e9574"
+        "src/noctis/research/briefings.py": "886bdcfd72cb03d9",
+        "src/noctis/research/digests.py": "67476f972a6bbedf"
       },
       "note": null
     },
     "conversation": {
-      "digest": "39305345c1269682",
+      "digest": "f7d566ead62ab431",
       "files": {
-        "src/noctis/research/digests.py": "c731ffae918e9574",
-        "src/noctis/research/prompt.py": "fc3b7c95147c1f28"
+        "src/noctis/research/digests.py": "67476f972a6bbedf",
+        "src/noctis/research/prompt.py": "90b7d2610e03ad0b"
       },
       "note": null
     },
@@ -43,9 +46,9 @@
       "note": null
     },
     "episodic": {
-      "digest": "8029a4492ed38d0d",
+      "digest": "b22702fa91a2d0c3",
       "files": {
-        "src/noctis/research/digests.py": "c731ffae918e9574",
+        "src/noctis/research/digests.py": "67476f972a6bbedf",
         "src/noctis/research/driver.py": "ba72f3bcc041ca06"
       },
       "note": null

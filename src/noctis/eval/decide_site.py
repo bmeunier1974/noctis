@@ -9,19 +9,20 @@ prompt that session was answered from — **byte for byte**, over the same recor
 renders a briefing of its own; a second builder would drift from production in silence, and the
 first prompt change afterwards would be scored against a fork nobody ships.
 
-**Parity is achieved by reconstruction, not by copying.** The production builder reads a journal
-object and a session ledger; the case holds the *lines* those objects would have answered with. So
-the adapter hands the builder a journal whose reads come off the frozen evidence and a
-:class:`~noctis.research.ledger.SessionLedger` whose ``records()`` come off the frozen tail — every
-typed read on a ledger funnels through that one method, which is what makes the substitution total.
-The builder then computes the evidence block itself, exactly as it does in a session.
+**Parity is achieved by reconstruction, not by copying.** The production builder asks a session for
+one candidate's evidence and folds in a session ledger; the case holds the *lines* those objects
+would have answered with. So the adapter answers that ask through the production evidence builder
+(:func:`noctis.research.journal.evidence_block`) over a journal whose reads come off the frozen
+evidence, and hands the builder a :class:`~noctis.research.ledger.SessionLedger` whose ``records()``
+come off the frozen tail — every typed read on a ledger funnels through that one method, which is
+what makes the substitution total. Nothing re-derives the block here.
 
 **What a case does not freeze, the bench states — as nothing, by default.** The DECIDE briefing
 also carries the market cost arithmetic, the champion board, the memory tail and the library index:
 session context, not case evidence, and #207 froze none of it. :data:`NEUTRAL_SESSION` renders those
 blocks empty, identically for every case, so a comparison between two model configurations is still
-a comparison over one prompt. A bench that wants the real thing injects its own context object (any
-research-toolbox-shaped stand-in) instead — the adapter forwards to it untouched.
+a comparison over one prompt. A bench that wants the real thing injects its own context object
+(anything that answers those session facts) instead — the adapter forwards to it untouched.
 
 **The reply is read through production's own vocabulary.** :func:`contract_for` returns the driver's
 :data:`~noctis.research.driver.DECIDE_CONTRACT` — or the revise-less final ask
@@ -77,7 +78,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from noctis.eval.case import Case
 from noctis.eval.decide_scorer import (
@@ -90,11 +91,19 @@ from noctis.eval.decide_scorer import (
 )
 from noctis.eval.metrics import AttemptOutcome
 from noctis.eval.site import AnsweredCase
+from noctis.research import digests
 from noctis.research.driver import DECIDE_CONTRACT, DECIDE_FINAL_CONTRACT, DecideOutput
 from noctis.research.episode import EmitContract, _extract_json_object
-from noctis.research.journal import JournalStats, Thesis, Trial
+from noctis.research.journal import (
+    ExperimentJournal,
+    JournalStats,
+    Thesis,
+    Trial,
+    evidence_block,
+)
 from noctis.research.ledger import SessionLedger
 from noctis.research.mandate import Mandate
+from noctis.research.surface import ChampionBoard
 
 if TYPE_CHECKING:  # the cycle-closing imports, for annotations only — see the module docstring
     from noctis.eval.decide_case import RecordedOutcome
@@ -196,6 +205,11 @@ class NeutralSession:
     *something* there, and the honest something is nothing: an empty market digest, an empty board,
     an empty memory and a library nobody has. Identical across every case in a corpus, so the
     difference between two benched configurations is never the context they happened to be handed.
+
+    Each block is *answered*, not exposed: the briefing asks a session for the fact
+    (:class:`~noctis.research.surface.ResearchFacts`), and the empty collaborators below are how
+    this one comes by its answers — through the production renderers, so "empty" here renders
+    exactly as an empty session would in a real run.
     """
 
     registry: Any = _NoChampions()
@@ -206,6 +220,22 @@ class NeutralSession:
         """No market digest at all — not a plausible one somebody would read as measured."""
         return {}
 
+    def champion_board(self) -> ChampionBoard:
+        """An empty board, no crowned family, and no slot count to claim."""
+        return ChampionBoard(
+            rows=tuple(digests.champion_digest(self.registry)),
+            crowned_families=tuple(digests.crowned_families(self.registry)),
+            capacity=0,
+        )
+
+    def library_index(self) -> list[dict]:
+        """The index of a library nobody has — empty, never somebody else's real one."""
+        return digests.library_index(self.strategies_dir)
+
+    def memory_tail(self, *, prefix_trim: bool = False) -> tuple[list, list]:
+        """No findings and no dead ends, at either trim setting."""
+        return digests.memory_block(self.memory, prefix_trim=prefix_trim)
+
 
 #: The context :func:`decide_input` renders the un-frozen blocks from unless a bench states one.
 NEUTRAL_SESSION = NeutralSession()
@@ -215,7 +245,7 @@ NEUTRAL_SESSION = NeutralSession()
 
 
 class _FrozenJournal:
-    """The journal reads :func:`noctis.research.briefings._decide_evidence` makes, answered from
+    """The journal reads :func:`noctis.research.journal.evidence_block` makes, answered from
     one frozen case.
 
     A case is one candidate, so the strategy name every read takes is the one this journal was
@@ -312,18 +342,29 @@ def _tail_records(tail: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
 
 class _CaseToolbox:
-    """What the DECIDE briefing builder reads off a toolbox: the case's own journal and exhaustion
-    floor, and the session context for every block the case does not carry.
+    """What the DECIDE briefing builder asks a session for: the case's own gate-facing evidence,
+    and the session context for every block the case does not carry.
 
-    The delegation is deliberately open-ended. The two case-borne attributes are set here; anything
-    else the builder reaches for goes to the context untouched, so a builder that grows a read
-    fails loudly against a context that cannot answer it rather than being quietly re-forked here.
+    The evidence is built here from the frozen journal through the *production* builder
+    (:func:`noctis.research.journal.evidence_block`) with the case's own exhaustion floor, so a
+    re-run states the floor its session stated. Every other fact goes to the context untouched:
+    the delegation is deliberately open-ended, so a builder that grows a read fails loudly against
+    a context that cannot answer it rather than being quietly re-forked here.
     """
 
     def __init__(self, journal: _FrozenJournal, min_trials: int, context: Any) -> None:
         self._context = context
         self.journal = journal
         self.min_trials = min_trials
+
+    def journal_evidence(self, name: str) -> dict[str, Any]:
+        # The frozen journal answers every read the builder makes, off the case's own lines — but
+        # it is a stand-in, not an ExperimentJournal, and the substitution is the point (a real one
+        # would need the session's state dir back). Stated as a cast so it stays a declared
+        # substitution: a read the stand-in has not overridden still fails loudly.
+        return evidence_block(
+            cast(ExperimentJournal, self.journal), name, min_trials=self.min_trials
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._context, name)

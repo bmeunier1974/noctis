@@ -23,6 +23,14 @@ from noctis.research import build_system_prompt, digests
 from noctis.research.prompt import _MARKET_REALITY_BLOCK
 from noctis.strategies import library
 from noctis.strategies.library import set_header, write_strategy
+from tests.test_briefings import (
+    _FACTS_CROWNED,
+    _FACTS_DEAD_END,
+    _FACTS_FINDING,
+    _FACTS_LIBRARY,
+    _FACTS_MARKET,
+    _FactsOnly,
+)
 from tests.test_champions import make_scorecard
 from tests.test_research_tools import LENIENT, PROBE, _make_toolbox
 
@@ -178,3 +186,22 @@ def test_one_slot_steering_speaks_the_family_slot_gate_dialect():
     ):
         assert phrase in rationale, f"the gate no longer says {phrase!r}"
         assert phrase in digests.ONE_SLOT_PER_FAMILY, f"the steering drifted on {phrase!r}"
+
+
+# ── the seam: the system prompt reads the facts, never the collaborators behind them (#258) ─
+# The same stand-in the briefing tests use — a bare ResearchFacts with no journal, registry,
+# memory, lake, library path or scalar ceiling on it. Every number and block the prefix carries
+# has to come off that surface, or the prompt is reaching past it.
+def test_the_system_prompt_renders_every_block_from_the_facts_alone():
+    facts = _FactsOnly()
+
+    prompt = build_system_prompt(facts, budget_minutes=60.0, max_iterations=40)
+
+    assert "at least 4 distinct parameter sets" in prompt  # limits.min_trials
+    assert "Session budgets: 9 backtests/sweep-trials" in prompt  # limits.max_backtests
+    assert facts.template_text() in prompt  # the strategy-file contract's template
+    assert _FACTS_MARKET in prompt  # the MARKET REALITY digest
+    assert f'Champion board (3 slots): [{{"family": "{_FACTS_CROWNED}"' in prompt
+    assert f'Crowned families (cannot re-promote): ["{_FACTS_CROWNED}"]' in prompt
+    assert f'"name": "{_FACTS_LIBRARY}"' in prompt  # the library index
+    assert _FACTS_FINDING in prompt and _FACTS_DEAD_END in prompt  # the advisory memory tail

@@ -56,10 +56,12 @@ from noctis.eval.metrics import AttemptOutcome
 from noctis.eval.record import EngineStamp
 from noctis.eval.runner import Attempt, AttemptRequest, BenchRunner, bench_root, replay
 from noctis.eval.stats import MISMATCHED_CASES, Refusal, compare
+from noctis.research import digests
 from noctis.research.briefings import decide_briefing
 from noctis.research.driver import DECIDE_CONTRACT, DECIDE_FINAL_CONTRACT
-from noctis.research.journal import ExperimentJournal
+from noctis.research.journal import ExperimentJournal, evidence_block
 from noctis.research.ledger import SessionLedger
+from noctis.research.surface import ChampionBoard
 
 from ._promotion_cases import card, rules
 
@@ -208,7 +210,8 @@ class _Memory:
 
 
 class _Toolbox:
-    """Everything the production DECIDE briefing builder reads off a research toolbox."""
+    """Every fact the production DECIDE briefing builder asks a session for, answered from a real
+    journal and the empty collaborators above — through the production renderers, never a copy."""
 
     def __init__(
         self,
@@ -228,6 +231,22 @@ class _Toolbox:
 
     def market_context(self) -> dict[str, Any]:
         return dict(self._market)
+
+    def journal_evidence(self, name: str) -> dict[str, Any]:
+        return evidence_block(self.journal, name, min_trials=self.min_trials)
+
+    def champion_board(self) -> ChampionBoard:
+        return ChampionBoard(
+            rows=tuple(digests.champion_digest(self.registry)),
+            crowned_families=tuple(digests.crowned_families(self.registry)),
+            capacity=0,
+        )
+
+    def library_index(self) -> list[dict]:
+        return digests.library_index(self.strategies_dir)
+
+    def memory_tail(self, *, prefix_trim: bool = False) -> tuple[list, list]:
+        return digests.memory_block(self.memory, prefix_trim=prefix_trim)
 
 
 MARKET = {

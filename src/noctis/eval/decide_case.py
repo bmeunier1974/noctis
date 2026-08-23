@@ -550,7 +550,7 @@ def _evidence(
     min_trials: int,
     stats: JournalStats,
 ) -> dict[str, Any]:
-    """Exactly the block :func:`noctis.research.briefings._decide_evidence` builds, from records.
+    """Exactly the block :func:`noctis.research.journal.evidence_block` builds, from records.
 
     The production builder reads a journal object; this reads the lines that journal holds, through
     the journal's own typed views, so the two produce the same mapping for the same history — the
