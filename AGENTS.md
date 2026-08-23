@@ -110,7 +110,12 @@ RESEARCH ↔ TRADING → CLOSE → RESEARCH (+ STOPPED) — with a global time l
 any state. `src/noctis/engine/runtime.py` wires the real phase work behind injectable hooks and paces
 ticks in wall-clock time; it researches while closed, waits out the weekend via the `BoundedWaiter`
 pacing seam (`src/noctis/engine/pacing.py`), and routes SIGINT/SIGTERM + the time limit through one
-clean between-phases shutdown.
+clean between-phases shutdown. It holds **one object per phase and nothing else phase-shaped** —
+`ResearchPhase` (`engine/research_phase.py`), `TradingPhase` (`engine/trading_phase.py`, which also
+holds `TradingDay`, the settle order) and `ClosePhase` (`engine/close.py`, whose fixed order
+finishes sync/integrity/reconcile *before* it renders the report, so what the close discovers
+reaches both report files) — each with one `run(...)` and one return value, so what is left in the
+runtime is the loop itself.
 
 **Everything heavy is a seam.** `nautilus_trader`, `vectorbt`, `databento`, `optuna`,
 `exchange-calendars`, `anthropic` are **optional extras** (`pyproject.toml`). Each hides behind a

@@ -77,12 +77,31 @@ strings by hand.
 
 ## Trading day (the settle order)
 
-One session end-to-end (`TradingDay`, decided 2026-07-11): trade the feed → attribute
-forward P&L (derived evidence — never blocks) → persist the account **first** → advance the
-session high-water mark **second**, identically for live and replay days. A crash between
+One session end-to-end (`TradingDay`, `noctis.engine.trading_phase` — the one TRADING module,
+beside the `TradingPhase` entry that builds it; decided 2026-07-11): trade the feed →
+attribute forward P&L (derived evidence — never blocks) → persist the account **first** → advance
+the session high-water mark **second**, identically for live and replay days. A crash between
 the last two re-trades the session (safe) rather than silently skipping it. Before the
 unification the live path never advanced the mark, so a live-traded day followed by a
-replay day was re-traded on the carried account.
+replay day was re-traded on the carried account. The settle ends by **folding** the session
+straight into the entry's one `TradingOutcome` (equity and positions from the last session,
+trades and events across all of them) and handing back the stamped `TradingSummary` that is the
+session's own evidence — a replay catch-up folds several sessions into that one outcome, and no
+per-session wrapper shape sits in between (decided 2026-08-23).
+
+## Close phase
+
+The one CLOSE entry (`ClosePhase`, `noctis.engine.close`, decided 2026-08-23), run in a fixed
+order: tail-only catalog sync → integrity check + repair → reconcile the session's live bars
+against the synced catalog → **one** read of the paper account + forward ledger → the day's
+equity mark → assemble one frozen report → write both files (`.md`, then `.json` from that one
+value) → periodic distillation → reorganize memory. The order is the contract for two reasons:
+the reconcile compares against T+1 vendor bars, so it can only follow the sync, and **the day's
+events are complete before the report is rendered**, so what the close itself discovers — a
+flagged feed drift — reaches both files instead of being appended to a report already on disk.
+One `gather_account_forward` parses `paper_account.json` once, so the equity mark and the report
+state the same account because they are the same read. Every step is isolated: a failure is
+recorded on the `CloseResult`, never fatal, and memory upkeep always runs last.
 
 ## Position driver
 
