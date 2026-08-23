@@ -19,6 +19,15 @@ line is skipped (a corrupt record can't confirm anything) and an unknown record 
 older reader never learned is ignored by the typed views rather than being fatal, so an
 existing journal keeps loading as new kinds land. Appends are line-atomic per strategy, and
 the toolbox keeps journaling parent-side so there is exactly one writer per session.
+
+Rendering the record for a reader lives here too — :func:`trial_row` and :func:`evidence_block`,
+pure functions over a journal. The DECIDE briefing's evidence and the ``get_experiment_log``
+tool result are the same numbers read two ways, and they were built by two independent
+comprehensions over ``trials_by_test``; one row renderer means a field added to a trial row
+cannot reach the verdict episode but not the tool that shows the model the same trials (or the
+reverse). The builders take an explicit journal and return plain JSON-serializable data — they
+touch no toolbox, no settings and no gate, so the exhaustion gate that actually *arbitrates*
+(:meth:`~noctis.research.tools.ResearchToolbox._exhaustion_block`) keeps its own read.
 """
 
 from __future__ import annotations
@@ -35,6 +44,12 @@ if TYPE_CHECKING:
     from noctis.backtest import Scorecard
 
 EXPERIMENTS_DIRNAME = "experiments"
+
+# How many ranked trials a rendered evidence block surfaces. The cap is on the *rendering*, never
+# on the record: the journal keeps every trial, and the exhaustion gate counts distinct param sets
+# over all of them. It lives beside the renderer that applies it so the DECIDE briefing and
+# ``get_experiment_log`` cannot show the model two different depths of the same leaderboard.
+TOP_TRIALS = 10
 
 
 def _now_iso() -> str:
@@ -334,3 +349,55 @@ class ExperimentJournal:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+# ── rendering the record for a reader ────────────────────────────────────────
+def trial_row(trial: Trial) -> dict[str, Any]:
+    """One journaled trial as a rendered row: its params, the symbols it tuned on, whether it
+    came from a backtest or a sweep, the truncation cap when it ran at exploration fidelity, and
+    its metrics flattened in beside them.
+
+    ``max_bars`` is omitted rather than written as ``null`` when the trial ran on the full window
+    — a truthy cap is the marker of exploration fidelity, so an absent key says "judgment
+    fidelity" without a reader having to know the sentinel. The metrics spread last and keep the
+    journal's own names (``stage`` / ``metric_name`` / ``train`` / ``test`` / ``gap`` /
+    ``holdout``), because the model is asked to reason about them by exactly those names.
+    """
+    return {
+        "params": trial.params,
+        "symbols": trial.symbols,
+        "source": trial.source,
+        **({"max_bars": trial.max_bars} if trial.max_bars else {}),
+        **trial.metrics,
+    }
+
+
+def evidence_block(
+    journal: ExperimentJournal, name: str, *, min_trials: int, top: int = TOP_TRIALS
+) -> dict[str, Any]:
+    """One candidate's gate-facing evidence, built purely from what is journaled for it.
+
+    The whole case for a verdict, in the order it is argued: what the strategy is (thesis, class
+    tag), how thoroughly its space was explored against the ``min_trials`` floor the exhaustion
+    gate enforces, the ``top`` ranked trials with their train/test/gap/holdout numbers, every
+    verdict already spent on it, and the symbols tuning has touched — which are exactly the names
+    a symbol holdout may not be drawn from (AGENTS.md rule 4).
+
+    ``min_trials`` is passed in rather than read off a config here: this is a renderer, and the
+    floor it *shows* must be the same number the caller's gate will *apply*. It is stated, never
+    enforced — nothing in this module refuses anything.
+    """
+    stats = journal.stats(name)
+    thesis = journal.thesis(name)
+    return {
+        "strategy": name,
+        "thesis": thesis.text if thesis is not None else None,
+        "class_tag": journal.class_tag(name),
+        "n_trials": stats.n_trials,
+        "n_distinct_params": stats.n_distinct_params,
+        "sweep_completed": stats.sweep_completed,
+        "min_trials_gate": min_trials,
+        "top_trials": [trial_row(trial) for trial in journal.trials_by_test(name)[:top]],
+        "verdicts": journal.verdicts(name),
+        "tuned_off_limits_for_holdout": sorted(journal.touched_symbols(name)),
+    }

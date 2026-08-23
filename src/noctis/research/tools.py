@@ -42,12 +42,13 @@ from noctis.data.aggregate import (
 from noctis.data.types import ns_to_date, ns_to_timestamp, to_ns, to_ns_end_inclusive
 from noctis.observability.capture import CAPTURE_DIRNAME, CaptureStore
 from noctis.observability.events import Event, render_plain
-from noctis.research import websearch
+from noctis.research import digests, websearch
 from noctis.research.author import AuthoringError, StrategyAuthor, StrategyBrief
 from noctis.research.cost import resolve_budgets
 from noctis.research.exhaustion_registry import ExhaustedClassRegistry
 from noctis.research.failed_store import FailedAttemptStore
-from noctis.research.journal import ExperimentJournal
+from noctis.research.journal import ExperimentJournal, evidence_block, trial_row
+from noctis.research.surface import ChampionBoard, ResearchLimits, SessionCounters
 from noctis.research.sweep import SweepRunner
 from noctis.research.symbols import BANDS, SymbolScreener, screen, validate_profile
 from noctis.strategies import library
@@ -63,6 +64,11 @@ logger = logging.getLogger("noctis.research.tools")
 
 _PREVIEW_ROW_CAP = 60
 _LOG_LIMIT_CAP = 50
+# How many tracked tickers :meth:`ResearchToolbox.lake_inventory` names before it stops
+# (alphabetical). Bounded by construction so a deep lake cannot quietly inflate a small-context
+# briefing; the inventory is advisory in either case — the pre-fetch validator, not this list,
+# decides what may actually be fetched.
+_INVENTORY_CAP = 60
 # Floor for run_sweep's max_bars fidelity cap — below this the walk-forward split
 # geometry (train + test + holdout) has no room and every trial degenerates.
 _MAX_BARS_FLOOR = 200
@@ -389,6 +395,15 @@ class ResearchToolbox:
         # once spent, brief authoring is refused (source-based writes stay open). Inert without
         # a coder_model — no completion ever happens, so the count stays 0.
         self.max_author_calls = budgets.max_author_calls
+        # The same four ceilings as one frozen value — what a reader of the surface asks for
+        # (noctis.research.surface.ResearchLimits). The scalars above stay: they are what this
+        # toolbox's OWN gates read, and a gate reads one number, not a record.
+        self.limits = ResearchLimits(
+            min_trials=self.min_trials,
+            max_backtests=self.max_backtests,
+            sweep_trials=self.default_sweep_trials,
+            max_author_calls=self.max_author_calls,
+        )
         self.sweep_workers = settings.research.agent.sweep_workers
         self.worker_bar_budget = settings.research.agent.worker_bar_budget
         # run_sweep's execution engine — sampler, fork pool, stall guard — behind its own
@@ -647,6 +662,122 @@ class ResearchToolbox:
             # class_tag/new_lever guard); reuse a listed class_tag verbatim if you extend one.
             "exhausted_classes": self.exhausted.summary(),
         }
+
+    # ── the derived facts (the noctis.research.surface seam) ─────────────────
+    # Everything below answers a question a briefing, the system prompt, a driver or an eval
+    # site used to answer for itself by reaching through this object into whichever collaborator
+    # happened to hold it. The collaborators stay public attributes — "private" here means "not
+    # on the surface", not an underscore rename — but the ANSWERS live here, once, so a renderer
+    # never probes with a getattr default and never invents a fact it could not read.
+
+    def journal_evidence(self, name: str) -> dict:
+        """One candidate's gate-facing evidence out of the experiment journal.
+
+        A thin wrapper over the one builder (:func:`noctis.research.journal.evidence_block`) with
+        this session's exhaustion floor supplied, so the DECIDE briefing and
+        ``get_experiment_log`` show the same trials, ranked the same way, against the same stated
+        floor. The floor is *stated* here; the gate that applies it is
+        :meth:`_exhaustion_block`, which keeps its own read of the journal.
+        """
+        return evidence_block(self.journal, name, min_trials=self.min_trials)
+
+    def champion_board(self) -> ChampionBoard:
+        """The board a candidate must beat, its crowned families, and the number of slots.
+
+        One value, because the three are one fact: a rendered board beside a capacity read
+        separately is how a surface comes to claim four rows in three slots. The rows and the
+        crowned names are rendered by the shared digest builders, unchanged.
+        """
+        return ChampionBoard(
+            rows=tuple(digests.champion_digest(self.registry)),
+            crowned_families=tuple(digests.crowned_families(self.registry)),
+            capacity=self.registry.capacity,
+        )
+
+    def library_index(self) -> list[dict]:
+        """The strategy library index across this session's three tiers, every ``rejected`` entry
+        collapsed to a ``{name, status}`` stub (the corpse's lesson already reaches the model
+        through memory and the exhausted-class digest)."""
+        return digests.library_index(self.strategies_dir)
+
+    def template_text(self) -> str:
+        """The shipped ``TEMPLATE.py`` the strategy-file contract embeds, or ``"(none)"``.
+
+        The seeds tier is committed, read-only input, and an install that ships no template is a
+        real configuration — so the absence is an answer with a name in it, never an exception a
+        prompt builder has to catch.
+        """
+        template_path = (
+            library.LibraryPaths.coerce(self.strategies_dir).seeds / library.TEMPLATE_NAME
+        )
+        return template_path.read_text(encoding="utf-8") if template_path.is_file() else "(none)"
+
+    def memory_tail(self, *, prefix_trim: bool = False) -> tuple[list, list]:
+        """The advisory memory tail — ``(findings, dead_ends)``. ``prefix_trim`` (the ``economy``
+        cost lever) caps it to the last 5 lesson classes instead of 20: cost, not capability."""
+        return digests.memory_block(self.memory, prefix_trim=prefix_trim)
+
+    def lake_inventory(self, *, limit: int = _INVENTORY_CAP) -> list[str]:
+        """The tickers this lake can already research — the names a discovery step must NOT
+        re-propose.
+
+        The candidates are the configured universe plus every coverage-tracked symbol, filtered
+        by :meth:`symbol_ready` — the identical predicate the pre-fetch ticker validator drops
+        names with, so what the model is told the lake holds and what the validator refuses to
+        fetch cannot drift. Sorted and capped at ``limit``, so the block is deterministic and
+        bounded. A lake that cannot list its coverage yields an empty inventory rather than
+        killing the briefing: the honest degradation is "I cannot tell you what I hold", never a
+        fabricated list.
+        """
+        try:
+            listed = self.tool_list_symbols()
+        except Exception as exc:  # noqa: BLE001 — a lake hiccup must not kill a briefing
+            logger.warning("lake inventory unavailable (%s); showing none", exc)
+            return []
+        tracked = [row["symbol"] for row in listed["tracked"]]
+        names = {
+            str(s).strip().upper() for s in [*listed["universe"], *tracked] if s and str(s).strip()
+        }
+        return sorted(n for n in names if self.symbol_ready(n))[:limit]
+
+    def data_budget(self) -> float | None:
+        """The configured data-spend budget in USD, or ``None`` when this lake has no preflight.
+
+        The cost preflight is an attribute of the concrete lake, not of the ``MarketData`` seam
+        every lake answers, so this is the one place in the codebase that reaches for it
+        tolerantly. A seam without one (a test fake, a lake built without a vendor) has no budget
+        to state and says so; the number is never invented.
+        """
+        usd = getattr(getattr(self.lake, "preflight", None), "budget_usd", None)
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool):
+            return float(usd)
+        return None
+
+    def symbol_ready(self, symbol: str) -> bool:
+        """Whether the lake's coverage for ``symbol`` is complete enough to research on — the
+        seam's own predicate, so a reader never re-implements readiness."""
+        return bool(self.lake.check_symbol_ready(symbol))
+
+    def class_exhausted(self, tag: str) -> dict | None:
+        """The record proving ``tag``'s class was already declared a dead end, or ``None``."""
+        return self.exhausted.is_exhausted(tag)
+
+    def session_counters(self) -> SessionCounters:
+        """A fresh frozen snapshot of what this session has spent and concluded.
+
+        The live counters stay mutable attributes the tools below bump; this copies them. A
+        summary or a ledger row that held them by reference would keep re-reading a session that
+        had moved on — it would describe the run at write time, not at measure time.
+        """
+        return SessionCounters(
+            backtests_run=self.backtests_run,
+            promotions=self.promotions,
+            rejections=self.rejections,
+            author_calls=self.author_calls,
+            escalations=self.escalations,
+            strategies_touched=tuple(self.strategies_touched),
+            undecided=frozenset(self.undecided),
+        )
 
     def _spend_backtests(self, n: int = 1) -> str | None:
         if self.backtests_run + n > self.max_backtests:
@@ -1275,16 +1406,10 @@ class ResearchToolbox:
             "n_distinct_params": stats.n_distinct_params,
             "sweep_completed": stats.sweep_completed,
             "min_trials_gate": self.min_trials,
-            "top_trials": [
-                {
-                    "params": t.params,
-                    "symbols": t.symbols,
-                    "source": t.source,
-                    **({"max_bars": t.max_bars} if t.max_bars else {}),
-                    **t.metrics,
-                }
-                for t in trials[:limit]
-            ],
+            # The same per-trial renderer the evidence block uses (noctis.research.journal), so
+            # the leaderboard the model reads here and the one a verdict episode reasons on
+            # cannot describe a trial differently.
+            "top_trials": [trial_row(t) for t in trials[:limit]],
             "verdicts": self.journal.verdicts(name),
         }
         if symbols:
