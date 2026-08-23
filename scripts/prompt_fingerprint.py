@@ -10,12 +10,11 @@ names that site — and ``--write`` **refuses** to record it (writes nothing, ex
 regenerating rewrites every site at once and so cannot also be how an undeclared prompt change gets
 committed. A prompt change must arrive with its explanation.
 
-A thin I/O wrapper, exactly like ``scripts/engine_fingerprint.py``: the rule, the comparison and
-the report live in :mod:`noctis.observability.prompt_ratchet` (inside mypy's scope and covered by
-``tests/test_prompt_ratchet.py``); this file only puts them on a command line.
+A shim, a guard and one import: the rule lives in :mod:`noctis.observability.prompt_ratchet` and
+the mechanics it is judged by in :mod:`noctis.observability.ratchet` (both inside mypy's scope and
+covered by ``tests/test_prompt_ratchet.py``); this file only puts them on a command line, from
+outside the package, before the package is importable.
 """
-
-from __future__ import annotations
 
 import sys
 from pathlib import Path

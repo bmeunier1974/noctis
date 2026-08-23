@@ -18,6 +18,7 @@ entry that was already the head when the record was written declares nothing new
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from noctis.observability.prompt_ratchet import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RATCHET_SOURCE = REPO_ROOT / "src" / "noctis" / "observability" / "prompt_ratchet.py"
+SCRIPT = REPO_ROOT / "scripts" / "prompt_fingerprint.py"
 
 AUTHOR_FILE = "src/noctis/research/author.py"
 AUTHOR_SIBLING = "src/noctis/research/contract_sheet.py"
@@ -444,3 +446,41 @@ def test_the_declared_change_rule_is_documented_where_a_contributor_reads_it():
 def test_every_site_is_named_on_the_changelog_page(site):
     """A hash has to read back to a human explanation, which starts with knowing the sites."""
     assert site in (REPO_ROOT / CHANGELOG_PATH).read_text()
+
+
+def test_the_script_is_a_shim_a_guard_and_one_main_import():
+    """``scripts/prompt_fingerprint.py`` runs *before* the package is importable, which is the
+    only reason it exists: it holds the ``sys.path`` shim, the ``ImportError`` guard and the one
+    import of ``main`` — no policy, no argument parsing, nothing a module could hold instead."""
+    module = ast.parse(SCRIPT.read_text())
+    docstring, *statements = module.body
+
+    assert isinstance(docstring, ast.Expr) and isinstance(docstring.value, ast.Constant)
+    assert [type(node).__name__ for node in statements] == [
+        "Import",  # sys, for the shim
+        "ImportFrom",  # pathlib.Path, for the shim
+        "Assign",  # _SRC
+        "If",  # the sys.path shim
+        "Try",  # the ImportError guard
+        "If",  # the __main__ dispatch
+    ]
+
+    guard = statements[4]
+    assert isinstance(guard, ast.Try)
+    assert [ast.unparse(node) for node in guard.body] == [
+        "from noctis.observability.prompt_ratchet import main"
+    ]
+
+    dispatch = statements[5]
+    assert isinstance(dispatch, ast.If)
+    assert ast.unparse(dispatch.test) == "__name__ == '__main__'"
+
+
+def test_the_script_docstring_names_what_write_refuses():
+    """A guard nobody has been told about reads as a broken tool, and the script is where an
+    operator lands first — so its docstring keeps the refusal sentence."""
+    docstring = ast.get_docstring(ast.parse(SCRIPT.read_text())) or ""
+
+    assert "refuses" in docstring
+    assert "--write" in docstring
+    assert "undeclared prompt change" in docstring and CHANGELOG_PATH in docstring
