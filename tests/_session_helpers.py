@@ -81,7 +81,9 @@ class _FakeRegistry:
         return []
 
 
-def _make_runtime(tmp_path, lake, universe=("AAPL",), *, on_event=None):
+def _make_runtime(tmp_path, lake, universe=("AAPL",), **sink):
+    """A tmp-path runtime over ``lake``. Pass ``on_event=`` to wire a console; **omit** it for a
+    bare run, which holds the engine's own quiet :data:`~noctis.observability.NULL_SINK`."""
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
         "mode: paper\n"
@@ -96,7 +98,7 @@ def _make_runtime(tmp_path, lake, universe=("AAPL",), *, on_event=None):
         memory=MemoryStore(tmp_path / "MEMORY.md"),
         registry=_FakeRegistry(),
         reports_dir=str(tmp_path / "reports"),
-        on_event=on_event,
+        **sink,
     )
 
 

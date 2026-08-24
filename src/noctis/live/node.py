@@ -31,7 +31,7 @@ from noctis.champions.assignment import assign_indices
 from noctis.data.aggregate import StreamingAggregator
 from noctis.live.feed import BarFeed, ReplayBarFeed
 from noctis.live.risk import RiskLimits, RiskManager
-from noctis.observability import Event
+from noctis.observability import NULL_SINK, Event, EventSink
 from noctis.strategies.base import Bar, TargetContext
 from noctis.strategies.candidate import Candidate
 from noctis.strategies.families import FamilyRegistry
@@ -97,7 +97,9 @@ class SessionConfig:
     slippage_bps: float = 1.0
     min_order_notional: float = 0.0
     rebalance_band_pct: float = 0.0
-    on_event: Callable[[Event], None] | None = None
+    #: Where this session's inline feed goes — always a real sink; an unwired session holds
+    #: the quiet :data:`~noctis.observability.NULL_SINK`, so every driver emits unguarded.
+    on_event: EventSink = NULL_SINK
     heartbeat_polls: int = 0
     # Who opened each currently-open position (symbol → champion key), from the forward
     # ledger's holder map. Display-only: it names the champion whose displacement orphaned a
@@ -203,11 +205,11 @@ class _TradingSession:
         self.symbols = symbols
         self.record_bars = record_bars
         # Inline per-decision feed (verbose-observability P4): a console sink for `trade`/`refuse`
-        # events, or ``None`` (a bare run) — every emit is guarded on it, so a quiet session
-        # constructs no events on the per-bar hot path. Report accounting is untouched: this only
-        # *tees* what already happens (a fill, a refusal), never the report's `orders_refused`
-        # total. `refuse` collapses to one event per distinct reason (reusing the quiet-replay
-        # spirit — a per-bar flood after the daily-loss latch stays one line, not per-bar).
+        # events, or the quiet null adapter (a bare run) — either way it is called, never checked
+        # for. Report accounting is untouched: this only *tees* what already happens (a fill, a
+        # refusal), never the report's `orders_refused` total. `refuse` still collapses to one
+        # event per distinct reason (reusing the quiet-replay spirit — a per-bar flood after the
+        # daily-loss latch stays one line, not per-bar).
         self._on_event = config.on_event
         self._refused_reasons: set[str] = set()
         families = config.families if config.families is not None else FamilyRegistry()
@@ -312,20 +314,19 @@ class _TradingSession:
                 + (f" (opened by {opener})" if opener else "")
             )
             self.summary.events.append(msg)
-            if self._on_event is not None:
-                self._on_event(
-                    Event(
-                        "orphan",
-                        msg,
-                        meta={
-                            "symbol": sym,
-                            "quantity": held_qty,
-                            "price": fill.price,
-                            "opened_by": opener or "",
-                        },
-                        level=1,
-                    )
+            self._on_event(
+                Event(
+                    "orphan",
+                    msg,
+                    meta={
+                        "symbol": sym,
+                        "quantity": held_qty,
+                        "price": fill.price,
+                        "opened_by": opener or "",
+                    },
+                    level=1,
                 )
+            )
 
         # 1) mark opens for symbols trading this bar (and retain the live-built bar).
         for sym in present:
@@ -376,8 +377,8 @@ class _TradingSession:
                 # strings are symbol-agnostic — "daily loss limit breached…", "no exposure
                 # room"), so a halted session that refuses every bar still shows one `refuse`
                 # line, mirroring the collapsed WARNING above. The membership test gates event
-                # construction, so a quiet or already-seen refusal costs nothing.
-                if self._on_event is not None and reason not in self._refused_reasons:
+                # construction, so an already-seen refusal costs nothing.
+                if reason not in self._refused_reasons:
                     self._refused_reasons.add(reason)
                     self._on_event(
                         Event(
@@ -394,23 +395,20 @@ class _TradingSession:
                 # Inline feed: one `trade` event per ACTUAL fill (flat→long, exit, flip, or a
                 # material re-true), mirroring the fills the TRADING phase already folds into
                 # the report. A dead-band skip never produces one (the sizer answered "not this
-                # bar", so nothing was submitted) — construction is gated on the sink so a quiet
-                # run pays nothing.
-                if self._on_event is not None:
-                    self._on_event(
-                        Event(
-                            "trade",
-                            f"{fill.symbol} {fill.side.value} {fill.quantity:.4f} @ "
-                            f"{fill.price:.2f}",
-                            meta={
-                                "symbol": fill.symbol,
-                                "side": fill.side.value,
-                                "qty": fill.quantity,
-                                "price": fill.price,
-                            },
-                            level=2,
-                        )
+                # bar", so nothing was submitted).
+                self._on_event(
+                    Event(
+                        "trade",
+                        f"{fill.symbol} {fill.side.value} {fill.quantity:.4f} @ {fill.price:.2f}",
+                        meta={
+                            "symbol": fill.symbol,
+                            "side": fill.side.value,
+                            "qty": fill.quantity,
+                            "price": fill.price,
+                        },
+                        level=2,
                     )
+                )
 
         # 3) champions decide for this bar. Each minute bar feeds the symbol's timeframe
         # proxy; the strategy only decides when an aggregated bar completes — between
@@ -446,22 +444,21 @@ class _TradingSession:
             fill = decided.exit_fill
             if fill is not None:
                 self.summary.orders_submitted += 1
-                if self._on_event is not None:
-                    self._on_event(
-                        Event(
-                            "trade",
-                            f"{fill.symbol} {fill.side.value} {fill.quantity:.4f} @ "
-                            f"{fill.price:.2f} ({fill.reason} exit)",
-                            meta={
-                                "symbol": fill.symbol,
-                                "side": fill.side.value,
-                                "qty": fill.quantity,
-                                "price": fill.price,
-                                "reason": fill.reason,
-                            },
-                            level=2,
-                        )
+                self._on_event(
+                    Event(
+                        "trade",
+                        f"{fill.symbol} {fill.side.value} {fill.quantity:.4f} @ "
+                        f"{fill.price:.2f} ({fill.reason} exit)",
+                        meta={
+                            "symbol": fill.symbol,
+                            "side": fill.side.value,
+                            "qty": fill.quantity,
+                            "price": fill.price,
+                            "reason": fill.reason,
+                        },
+                        level=2,
                     )
+                )
 
         # 4) mark closes.
         for sym in present:
@@ -554,8 +551,8 @@ def run_trading_day(
     :class:`~noctis.observability.events.Event`s): the same feed transitions as ``feed``
     events, per-decision ``trade``/``refuse`` from the session, and — on a clock-bounded day,
     every ``heartbeat_polls`` polls (``0`` disables) — a ``heartbeat`` carrying the poll
-    count, open-position count, and mark-to-market equity. ``None`` on a bare run, so nothing
-    is constructed.
+    count, open-position count, and mark-to-market equity. A bare run holds the quiet
+    :data:`~noctis.observability.NULL_SINK`, so the day narrates into silence.
 
     ``record_bars`` retains every processed bar for close-phase reconciliation — set it when
     the feed is external (live), not when the feed *is* the catalog.
@@ -574,8 +571,7 @@ def run_trading_day(
         # A feed-health transition goes to BOTH the report (a plain string on the summary,
         # byte-identical to before) and the console (a level-1 `feed` event, colorized inline).
         session.summary.events.append(msg)
-        if on_event is not None:
-            on_event(Event("feed", msg, level=1))
+        on_event(Event("feed", msg, level=1))
 
     # How the day ends and how polls are paced, resolved once. A clock-bounded day (live)
     # waits for the open, sleeps between polls, and closes with the session; a data-bounded
@@ -623,12 +619,10 @@ def run_trading_day(
         # Heartbeat: the "is it alive?" pulse a long unattended session needs — a wall-clock
         # liveness signal, so only a clock-bounded (paced) day emits it; an instant
         # data-bounded replay has no liveness to prove. Level-2 (the -vv feed), every
-        # ``heartbeat_polls`` polls; gated so a bare run and a disabled cadence (0)
-        # construct nothing.
+        # ``heartbeat_polls`` polls; a disabled cadence (0) constructs nothing.
         if (
             sleeper is not None
             and config.heartbeat_polls > 0
-            and on_event is not None
             and (session.summary.polls % config.heartbeat_polls == 0)
         ):
             open_positions = len(broker.positions())  # positions() already drops flats
@@ -674,7 +668,7 @@ def run_trading(
     scores: list[float] | None = None,
     min_order_notional: float = 0.0,
     rebalance_band_pct: float = 0.0,
-    on_event: Callable[[Event], None] | None = None,
+    on_event: EventSink = NULL_SINK,
 ) -> TradingSummary:
     """Evaluate champions over a whole static timeline: the batch convenience wrapper.
 

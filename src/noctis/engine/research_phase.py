@@ -30,6 +30,7 @@ from noctis.backtest.pool import evaluation_time_limit
 from noctis.backtest.scorecard import Scorecard
 from noctis.champions.promotion import PromotionRules
 from noctis.engine.research import ResearchSummary, run_research
+from noctis.observability import NULL_SINK, EventSink
 from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.proposer import CandidateProposer
 
@@ -78,7 +79,7 @@ class ResearchPhase:
         mandate=None,
         ideator=None,
         research_max_iters: int | None = None,
-        on_event=None,
+        on_event: EventSink = NULL_SINK,
         stop_event=None,
     ):
         self.settings = settings
@@ -93,6 +94,8 @@ class ResearchPhase:
         # LLM ideation seam (clientless/no-op when no key or [llm] extra). None → seed-only.
         self.ideator = ideator
         self.research_max_iters = research_max_iters
+        # Where this phase's research feed goes — always a real sink, handed straight to the
+        # session the composition root assembles. A bare run holds the quiet :data:`NULL_SINK`.
         self.on_event = on_event
         self.stop_event = stop_event
 
@@ -135,8 +138,8 @@ class ResearchPhase:
         from noctis.bootstrap import build_research_session
 
         # The composition root assembles the same session bundle `noctis research` runs.
-        # on_event tees the research feed into the run's console (None ⇒ the loop's own logger
-        # sink): `run -v` shows the tool feed, `-vv`/`--show-reasoning` opens think/say — the
+        # on_event tees the research feed into the run's console (a bare run's null sink drops
+        # it): `run -v` shows the tool feed, `-vv`/`--show-reasoning` opens think/say — the
         # same streams `noctis research` surfaces, now visible from the day/night loop.
         session = build_research_session(
             settings=self.settings,

@@ -9,7 +9,9 @@ collapse. These tests pin that:
 * the refusal feed collapses to one event per distinct reason, ``orders_refused`` unchanged;
 * the heartbeat fires every ``heartbeat_polls`` polls and only at level 2;
 * feed transitions reach BOTH the report (strings, byte-identical) and the console (``feed``);
-* a bare run (``on_event=None``) constructs nothing and leaves the report untouched.
+* a bare run surfaces nothing and leaves the report untouched — the sink it holds when no
+  console is wired is the quiet :data:`~noctis.observability.NULL_SINK`, so every driver emits
+  unguarded and the null adapter swallows it.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from noctis.config import load_settings
 from noctis.engine import SimulatedSleeper, build_runtime
 from noctis.live import RiskLimits, SessionConfig, run_trading, run_trading_day
 from noctis.memory import MemoryStore
-from noctis.observability import Console, Event
+from noctis.observability import NULL_SINK, Console, Event, EventSink
 from noctis.strategies.base import Bar
 
 from ._data_helpers import make_ohlcv
@@ -192,15 +194,15 @@ def test_trade_and_refuse_are_level_two():
 # --- 4) heartbeat: every N polls, level-2 only -------------------------------------------
 
 
-def _run_live(*, on_event=None, heartbeat_polls=0, n_polls=12, poll_s=1.0):
+def _run_live(*, heartbeat_polls=0, n_polls=12, poll_s=1.0, **sink):
     start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
     sleeper = SimulatedSleeper(start)
     feed = _ScriptedFeed(["AAPL"], _groups(make_ohlcv([100.0 + i * 0.5 for i in range(8)])))
     return run_trading_day(
         SessionConfig(
             candidates=[_Candidate(_AlwaysLong())],
-            on_event=on_event,
             heartbeat_polls=heartbeat_polls,
+            **sink,
         ),
         feed,
         session_start=start,
@@ -253,13 +255,13 @@ class _DegradingFeed(_ScriptedFeed):
         return group
 
 
-def _run_degrading(*, on_event=None):
+def _run_degrading(**sink):
     start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
     sleeper = SimulatedSleeper(start)
     df = make_ohlcv([100.0 + i * 0.5 for i in range(6)])
     feed = _DegradingFeed(["AAPL"], _groups(df), schedule=[True] * 3 + [False] * 3)
     return run_trading_day(
-        SessionConfig(candidates=[_Candidate(_AlwaysLong())], on_event=on_event),
+        SessionConfig(candidates=[_Candidate(_AlwaysLong())], **sink),
         feed,
         session_start=start,
         session_end=start + timedelta(seconds=len(df) + 2),
@@ -284,7 +286,7 @@ def test_feed_transitions_reach_both_report_and_console():
 
 def test_report_is_byte_identical_without_a_console():
     with_console = _run_degrading(on_event=[].append)
-    bare = _run_degrading(on_event=None)
+    bare = _run_degrading()  # no console wired at all
     # The console never changes what the summary hands the report.
     assert bare.summary.events == with_console.summary.events
 
@@ -292,7 +294,7 @@ def test_report_is_byte_identical_without_a_console():
 # --- 6) Runtime replay narration: a per-session banner; the report stays report-only ------
 
 
-def _replay_runtime(tmp_path, *, on_event=None):
+def _replay_runtime(tmp_path, **sink):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
         "mode: paper\n"
@@ -308,7 +310,7 @@ def _replay_runtime(tmp_path, *, on_event=None):
         memory=MemoryStore(tmp_path / "MEMORY.md"),
         registry=_FakeRegistry(),
         reports_dir=str(tmp_path / "reports"),
-        on_event=on_event,
+        **sink,
     )
 
 
@@ -331,3 +333,31 @@ def test_replay_keeps_per_decision_events_out_of_the_report(tmp_path):
     outcome = _run_phase(runtime)
     assert _kinds(events, "trade")  # the feed actually had decisions to show
     assert not any(isinstance(e, Event) for e in outcome.events)  # report is report-only
+
+
+# --- 7) no console is an adapter, not an absence -----------------------------------------
+
+
+def test_a_bare_session_carries_a_real_sink():
+    """An unwired :class:`SessionConfig` holds the quiet :data:`NULL_SINK` — a real
+    :class:`EventSink`, which is what lets every driver call it without asking if it is there."""
+    config = SessionConfig(candidates=[])
+    assert config.on_event is NULL_SINK
+    assert isinstance(config.on_event, EventSink)
+
+
+def test_a_bare_live_day_runs_the_whole_feed_through_the_null_sink(capsys):
+    """A paced day with the heartbeat on and nobody watching: the trade and heartbeat emits land
+    in the null adapter, so the day still trades, nothing surfaces, and nothing raises."""
+    result = _run_live(heartbeat_polls=1)  # a pulse every poll, into the null sink
+    assert result.summary.polls > 0  # the day genuinely ran
+    assert capsys.readouterr().out == ""  # ...and said nothing
+
+
+def test_a_bare_replay_narrates_into_the_null_sink(tmp_path, capsys):
+    """The TRADING phase's per-session replay banner is emitted unguarded too: a bare runtime
+    trades its catch-up session and the banner disappears into the null adapter."""
+    runtime = _replay_runtime(tmp_path)  # no console wired
+    outcome = _run_phase(runtime)
+    assert outcome.sessions  # the replay really traded a session
+    assert capsys.readouterr().out == ""

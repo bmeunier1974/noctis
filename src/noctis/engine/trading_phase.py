@@ -47,7 +47,7 @@ from noctis.engine.forward_ledger import ForwardLedger, champion_key
 from noctis.engine.sessions import SessionLedger, sessions_present, slice_session, unseen_sessions
 from noctis.live.feed import BarFeed, ReplayBarFeed
 from noctis.live.node import SessionConfig, run_trading_day
-from noctis.observability import Event
+from noctis.observability import NULL_SINK, Event, EventSink
 from noctis.reporting.report import Trade
 
 if TYPE_CHECKING:
@@ -174,7 +174,7 @@ class TradingDay:
         slippage_bps: float = 1.0,
         min_order_notional: float = 0.0,
         rebalance_band_pct: float = 0.0,
-        on_event=None,
+        on_event: EventSink = NULL_SINK,
         heartbeat_polls: int = 0,
     ):
         self.broker = broker
@@ -410,7 +410,7 @@ class TradingPhase:
         families: FamilyRegistry,
         limits: RiskLimits,
         feed_factory=None,
-        on_event=None,
+        on_event: EventSink = NULL_SINK,
         stop_event=None,
     ):
         self.settings = settings
@@ -462,8 +462,8 @@ class TradingPhase:
             slippage_bps=self.slippage_bps,
             min_order_notional=self.settings.trading.min_order_notional,
             rebalance_band_pct=self.settings.trading.rebalance_band_pct,
-            # The inline console feed (feed/trade/refuse/heartbeat; None on a bare run so
-            # nothing is constructed). Report lines come back on each session's summary.
+            # The inline console feed (feed/trade/refuse/heartbeat; the quiet null sink on a
+            # bare run). Report lines come back on each session's summary.
             on_event=self._on_event,
             heartbeat_polls=self.settings.observability.heartbeat_polls,
         )
@@ -526,16 +526,16 @@ class TradingPhase:
             logger.info("TRADING replay: session=%s symbols=%d bars=%d", day, nsym, nbars)
             # A per-session `phase` banner (P4): a catch-up replays several sessions in one
             # TRADING phase, so each announces itself inline instead of the loop emitting one
-            # INFO for the batch. Guarded — a bare run stays silent.
-            if self._on_event is not None:
-                self._on_event(
-                    Event(
-                        "phase",
-                        f"TRADING replay · {day} · {nsym} symbol(s) · {nbars} bars",
-                        meta={"session": str(day), "symbols": nsym, "bars": nbars},
-                        level=1,
-                    )
+            # INFO for the batch. Emitted into the sink whatever it is — a bare run's null
+            # adapter stays silent.
+            self._on_event(
+                Event(
+                    "phase",
+                    f"TRADING replay · {day} · {nsym} symbol(s) · {nbars} bars",
+                    meta={"session": str(day), "symbols": nsym, "bars": nbars},
+                    level=1,
                 )
+            )
             # The carried broker is the one continuous account; a fresh _TradingSession/
             # RiskManager per session date keeps the "daily" loss limit daily even during
             # catch-up, anchored to that day's carried starting equity.

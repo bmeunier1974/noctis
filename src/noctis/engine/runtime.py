@@ -26,7 +26,7 @@ from noctis.engine.report_assembly import SessionActivity
 from noctis.engine.research_phase import ResearchPanel, ResearchPhase
 from noctis.engine.trading_phase import TradingPhase
 from noctis.live.risk import RiskLimits
-from noctis.observability import Event
+from noctis.observability import NULL_SINK, Event, EventSink
 from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.proposer import CandidateProposer
 
@@ -142,15 +142,16 @@ class Runtime:
         sleeper_factory=None,
         ideator=None,
         mandate=None,
-        on_event=None,
+        on_event: EventSink = NULL_SINK,
         on_cycle_close=None,
         prior_runtime_s: float = 0.0,
     ):
         self.settings = settings
         self.clock = clock
-        # Observability sink (a Console, or any ``Event | str`` callable). Default ``None`` keeps a
-        # bare run byte-identical: the research feed falls back to its own logger, and the phase
-        # hooks below emit nothing. The CLI builds this from ``run``'s ``-v``/``--show-reasoning``.
+        # Observability sink (a Console, the ``--debug`` recorder, any :class:`EventSink`). It is
+        # always a real sink: a bare run holds the quiet :data:`NULL_SINK`, which keeps the run
+        # byte-identical while letting every hook below emit unguarded. The CLI builds this from
+        # ``run``'s ``-v``/``--show-reasoning``.
         self._on_event = on_event
         # The run-record checkpoint seam: called once at the end of every CLOSE with the current
         # :class:`RuntimeResult`, so the run's durable record is current after each day-cycle
@@ -175,8 +176,9 @@ class Runtime:
             settings.risk.max_daily_loss_pct,
         )
         # Wire the machine's phase seam so each RESEARCH→TRADING→CLOSE transition announces itself
-        # inline (guarded on ``_on_event`` — a quiet run emits nothing). This frames the interleaved
-        # research/trading feeds; entry is the only hook, so each transition is exactly one event.
+        # inline (into the sink, whatever it is — a quiet run's null adapter says nothing). This
+        # frames the interleaved research/trading feeds; entry is the only hook, so each transition
+        # is exactly one event.
         # Two ceilings, one stop. ``time_limit_hours`` bounds this process (how long tonight lasts);
         # ``run_limit_hours`` bounds the whole run across every stop/resume, measured against the
         # runtime its earlier segments already spent (``prior_runtime_s``, read off the run record
@@ -310,10 +312,9 @@ class Runtime:
         This is the ``run`` command's replacement for the raw ``phase=… | cycle=…`` INFO
         heartbeat as the ``-v`` framing: a clean banner that carries the phase and the cycle it
         opens, so the research (P3) and trading (P4) feeds that follow read as belonging to it.
-        A no-op when no console is wired (``on_event=None``), so a bare run stays silent.
+        The banner is emitted unconditionally; with no console wired the sink is the quiet
+        :data:`~noctis.observability.NULL_SINK`, so a bare run stays silent.
         """
-        if self._on_event is None:
-            return
         cycle = self.result.cycles_completed if hasattr(self, "result") else 0
         self._on_event(
             Event(
@@ -477,7 +478,7 @@ def build_runtime(
     feed_factory=None,
     sleeper_factory=None,
     mandate=None,
-    on_event=None,
+    on_event: EventSink = NULL_SINK,
     on_cycle_close=None,
     prior_runtime_s: float = 0.0,
 ) -> Runtime:
