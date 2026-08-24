@@ -7,11 +7,11 @@ reads the agent loop and the CLI make. :class:`~noctis.observability.events.Even
 surface as a type, and :class:`~noctis.observability.events.NullSink` is its safe-default adapter.
 
 These tests are the contract. The conformance test is **parametrized over adapters** — the
-renderer (``Console``), the quiet default (``NullSink``) and the splitter (``EventTee``, #335),
-with the debug recorder joining :data:`ADAPTERS` in a later story of the epic rather than bringing
-a second set of by-name tests with it. Everything asserted here is what a caller observes: what
-the sink accepts, what it returns, that ``activity`` brackets a block, and what the three flags
-read as.
+renderer (``Console``), the quiet default (``NullSink``), the splitter (``EventTee``, #335) and
+the ``--debug`` ``Recorder`` (#336), which declares the seam by subclassing ``NullSink`` and so
+joins :data:`ADAPTERS` as one entry rather than bringing a second set of by-name tests with it.
+Everything asserted here is what a caller observes: what the sink accepts, what it returns, that
+``activity`` brackets a block, and what the three flags read as.
 """
 
 from __future__ import annotations
@@ -19,12 +19,14 @@ from __future__ import annotations
 import ast
 import sys
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from noctis.observability import NULL_SINK, Console, Event, EventSink, EventTee, NullSink
 from noctis.observability import events as events_module
+from noctis.observability.debug import Recorder
 
 # The seam's whole surface, named once. Every adapter serves all seven; dropping any one of them
 # breaks conformance (that is the point of writing the contract down).
@@ -39,27 +41,47 @@ SINK_MEMBERS = (
 )
 
 
-def _console() -> Console:
+# Every builder takes the test's throwaway directory, because one adapter — the recorder — files
+# to disk; the three in-memory adapters ignore it.
+def _console(qa_dir: Path) -> Console:
     """A real :class:`Console` whose output lands in a list, off a TTY — the adapter as the CLI
     builds it, minus the terminal."""
     return Console(2, color=False, sink=[].append, tty=False)
 
 
-def _tee() -> EventTee:
+def _null_sink(qa_dir: Path) -> NullSink:
+    """The quiet default — stateless, so it needs nothing built for it."""
+    return NullSink()
+
+
+def _tee(qa_dir: Path) -> EventTee:
     """A tee fronting the quiet null sink — the shape a ``--debug`` run with no ``-v`` builds. It
     is a sink because it delegates every read to the real primary it holds (#335)."""
     return EventTee(NULL_SINK, [].append)
 
 
-# The adapters that declare the seam. Story #336 adds the debug ``Recorder``; each is one entry
-# here, not a new set of by-name tests.
-ADAPTERS = {"console": _console, "null-sink": NullSink, "event-tee": _tee}
+def _recorder(qa_dir: Path) -> Recorder:
+    """The ``--debug`` recorder filing into a throwaway QA tree on a frozen clock — the adapter as
+    ``build_recorder`` assembles it, minus the run. It serves the seam by subclassing
+    :class:`NullSink`: its own call records, and the six console-facing members it never
+    implemented are the null adapter's safe defaults (#336)."""
+    return Recorder(qa_dir, run_id="conformance", clock=lambda: datetime(2026, 7, 20, 14, 0))
+
+
+# The adapters that declare the seam — all four of them, each one entry here rather than a new set
+# of by-name tests.
+ADAPTERS = {
+    "console": _console,
+    "null-sink": _null_sink,
+    "event-tee": _tee,
+    "recorder": _recorder,
+}
 
 
 # ── the conformance test: every adapter serves all seven members ─────────────────────────────
 @pytest.mark.parametrize("build_adapter", list(ADAPTERS.values()), ids=list(ADAPTERS))
-def test_every_adapter_serves_the_whole_sink_surface(build_adapter):
-    sink = build_adapter()
+def test_every_adapter_serves_the_whole_sink_surface(build_adapter, tmp_path):
+    sink = build_adapter(tmp_path)
     assert isinstance(sink, EventSink)
     # 1-2. The call takes a typed Event and a legacy pre-formatted string alike.
     assert sink(Event("tool", "run_backtest(...) -> ok", level=1)) is None

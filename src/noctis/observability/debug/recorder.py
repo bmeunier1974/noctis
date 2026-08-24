@@ -23,6 +23,18 @@ it once for its arrival stamp, ``close()`` reads it once for ``stopped``. The ma
 recorder cannot know (argv, mode, config digest, versions) are injected too — the recorder owns
 only ``run_id`` and the ``started``/``stopped``/``duration_s`` stamps, and never computes a digest.
 
+**The recorder declares the seam it rides** (#336, epic #333): it subclasses
+:class:`~noctis.observability.events.NullSink`, so it *is* an
+:class:`~noctis.observability.events.EventSink` — its own ``__call__`` records, and the six
+console-facing members it has no use for (``delta``/``hint``/``activity`` and the
+``verbose``/``show_reasoning``/``saw_think`` reads) come in as the null adapter's safe defaults.
+Nothing reads those off a recorder today — the tee only ever *calls* a secondary — so this changes
+no behaviour; it is the cheapest honest way for the fourth adapter to conform, and it is what lets
+``tests/test_event_sink_contract.py`` hold the recorder to the same contract as the console, the
+null sink and the tee. The inherited ``__getattr__`` tail rides along with it: an attribute the
+recorder does not define resolves to a harmless no-op rather than raising, which is the null
+adapter's posture and matches the fail-safe latch below.
+
 **Segments are ELAPSED hours since start.** On each event ``h = int(elapsed // 3600)``; the first
 event of an hour lazily creates ``h{h:02d}/`` (an idle hour writes nothing, so ``h`` may jump
 0 → 3 and only ``h00``/``h03`` exist). A rollover finalizes the previous segment — its
@@ -46,7 +58,7 @@ from noctis.observability.debug.render import (
     render_errors_markdown,
     render_summary_markdown,
 )
-from noctis.observability.events import Event
+from noctis.observability.events import Event, NullSink
 
 __all__ = ["Recorder"]
 
@@ -83,8 +95,12 @@ def _as_event(ev: Event | str) -> Event:
     return Event("feed", str(ev), meta={})
 
 
-class Recorder:
+class Recorder(NullSink):
     """Files a debug run's hour-segmented report tree under ``<qa_dir>/<run-id>/``.
+
+    A :class:`~noctis.observability.events.NullSink` subclass, so the recorder is an
+    :class:`~noctis.observability.events.EventSink` by declaration (#336): the four members below
+    are its own, the other six are the null adapter's inherited safe defaults.
 
     Public surface (kept minimal for stories #44/#45 to build on):
 
