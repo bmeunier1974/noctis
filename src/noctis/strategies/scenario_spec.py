@@ -26,6 +26,16 @@ an entry leg always begins after warmup by construction: the "warmup exceeds the
 conflict the epic flags for the gate (#84) cannot arise at this layer — a ``warm`` so large it
 overruns the maximum tape length surfaces instead as a precise out-of-range compile error.
 
+Two dialects, one vocabulary
+----------------------------
+A spec reaches this module in two dialects and leaves as the same frozen objects.
+:func:`spec_from_payload` reads the *model's* FORMULATE emit — behavior by its wire value, shape
+params omitted rather than zeroed, and a precise refusal for every malformed shape, because that
+sentence becomes the corrective the model is re-prompted with. :func:`spec_from_json` reads the
+*machine-exact* carrier :func:`spec_to_json` writes for the write gate's subprocess. Both are pure,
+and both hand :func:`compile_spec` the same :class:`SpecSuite`, so what a spec *is* is decided here
+rather than at either boundary.
+
 Purity
 ------
 Compilation is a pure, deterministic function of ``(spec, warm)``: no LLM, no I/O, no clock, no
@@ -39,6 +49,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 from noctis.strategies.scenarios import (
     MAX_SCENARIO_BARS,
@@ -66,6 +77,11 @@ from noctis.strategies.scenarios import (
 # The leading setup stretch is ``warm + SETUP_PAD`` decision bars: enough flat bars past the
 # warmup itself that a well-behaved strategy has settled before the interesting legs begin.
 SETUP_PAD = 20
+
+# The representative warmup FORMULATE compiles a spec at *parse* time — purely a structural
+# validity check of the spec's shape (the write gate #84 re-compiles at the strategy's real
+# declared warmup). Zero, so a directional entry leg begins right after the setup pad.
+PARSE_WARM = 0
 
 
 class SpecError(Exception):
@@ -364,4 +380,93 @@ def spec_from_json(text: str) -> SpecSuite:
             )
             for s in payload["scenarios"]
         )
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model dialect — the tolerant parse of the FORMULATE emit (#83)
+# ─────────────────────────────────────────────────────────────────────────────
+# The other dialect (see the module docstring): what a model emitted, read one level at a time —
+# leg, then behavior, then scenario. Every refusal here is a sentence the model is re-prompted
+# with, so the wording is contract rather than diagnostics, and it is checked as such.
+def _leg_from_payload(payload: Any, scenario_name: str, index: int) -> LegSpec:
+    """Construct one frozen :class:`LegSpec` from the model's JSON leg; raise on a malformed shape
+    (a non-object leg, a missing kind, a non-integer length) so it re-prompts as a schema misfire.
+    ``pct``/``amplitude``/``period`` default to 0 and are ignored per kind by the compiler."""
+    if not isinstance(payload, dict):
+        raise SpecError(f"scenario {scenario_name!r} leg {index}: each leg must be an object")
+    kind = payload.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        raise SpecError(f"scenario {scenario_name!r} leg {index}: a leg 'kind' is required")
+    bars = payload.get("bars", 0)
+    if isinstance(bars, bool) or not isinstance(bars, int):
+        raise SpecError(
+            f"scenario {scenario_name!r} leg {index}: 'bars' must be an integer length (0 for gap)"
+        )
+    return LegSpec(
+        kind=kind,
+        bars=bars,
+        pct=float(payload.get("pct", 0.0) or 0.0),
+        amplitude=float(payload.get("amplitude", 0.0) or 0.0),
+        period=int(payload.get("period", 0) or 0),
+    )
+
+
+def _behavior_from_payload(value: Any, scenario_name: str) -> Behavior:
+    """Map the model's behavior string onto the :class:`Behavior` tag; raise with the allowed
+    vocabulary on an unknown/missing tag so it re-prompts as a schema misfire."""
+    if not isinstance(value, str) or not value.strip():
+        raise SpecError(f"scenario {scenario_name!r}: a 'behavior' tag is required")
+    try:
+        return Behavior(value)
+    except ValueError:
+        allowed = ", ".join(b.value for b in Behavior)
+        raise SpecError(
+            f"scenario {scenario_name!r}: unknown behavior {value!r}; use one of {allowed}"
+        ) from None
+
+
+def _scenario_from_payload(payload: Any, index: int) -> ScenarioSpec:
+    """Construct one frozen :class:`ScenarioSpec` from the model's JSON scenario; raise on any
+    malformed shape (missing name/legs, a non-integer leg reference) so it re-prompts as a
+    misfire."""
+    if not isinstance(payload, dict):
+        raise SpecError(f"scenario {index}: each scenario must be an object")
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise SpecError(f"scenario {index}: a non-empty 'name' is required")
+    raw_legs = payload.get("legs")
+    if not isinstance(raw_legs, list) or not raw_legs:
+        raise SpecError(f"scenario {name!r}: a non-empty 'legs' list is required")
+    legs = tuple(_leg_from_payload(leg, name, i) for i, leg in enumerate(raw_legs))
+    behavior = _behavior_from_payload(payload.get("behavior"), name)
+    leg_ref = payload.get("leg")
+    if leg_ref is not None and (isinstance(leg_ref, bool) or not isinstance(leg_ref, int)):
+        raise SpecError(f"scenario {name!r}: 'leg' must be an integer leg index or omitted")
+    return ScenarioSpec(name=name, legs=legs, behavior=behavior, leg=leg_ref)
+
+
+def spec_from_payload(raw: Any) -> SpecSuite:
+    """Parse the model's emitted ``scenario_spec`` object into a frozen :class:`SpecSuite`.
+
+    ``raw`` is the spec object itself (``{"scenarios": [...]}``), not the whole FORMULATE payload:
+    reading the field out of the emit is the driver's boundary, deciding what a spec *is* is this
+    module's. Pure — no LLM, no I/O — and tolerant only where the model's dialect legitimately
+    differs from the JSON carrier's (behavior by value, omitted shape params defaulting to 0, an
+    absent ``leg``). Every other malformed shape raises :class:`SpecError` with a precise sentence,
+    which the episode runner turns into the corrective the model reads on its re-prompt.
+
+    ``bool`` is refused where an integer belongs (``bars``, ``leg``) even though Python calls it an
+    int: a model emitting ``true`` for a count is misfiring, not authoring a one-bar leg.
+
+    The suite is *shape*-checked at compile time, not here — :func:`compile_spec` is the one arbiter
+    of the suite rules, so this function is the vocabulary check and nothing more.
+    """
+    if not isinstance(raw, dict):
+        raise SpecError("scenario_spec must be an object with a 'scenarios' list")
+    raw_scenarios = raw.get("scenarios")
+    if not isinstance(raw_scenarios, list) or not raw_scenarios:
+        raise SpecError("scenario_spec.scenarios must be a non-empty list of scenarios")
+    return SpecSuite(
+        scenarios=tuple(_scenario_from_payload(s, i) for i, s in enumerate(raw_scenarios))
     )

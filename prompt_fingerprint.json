@@ -1,13 +1,10 @@
 {
   "changelog": {
     "declares": [
-      "author",
-      "briefings",
-      "conversation",
       "episodic"
     ],
-    "digest": "d5839de98ca07c6b",
-    "heading": "2026-08-22 \u2014 sites: author, briefings, conversation, episodic",
+    "digest": "b241477bde0db047",
+    "heading": "2026-08-23 \u2014 sites: episodic",
     "path": "docs/prompt-changelog.md"
   },
   "kind": "noctis.prompt_fingerprint",
@@ -46,10 +43,10 @@
       "note": null
     },
     "episodic": {
-      "digest": "01284f19563ebc7d",
+      "digest": "ebc456f38a4c0fa1",
       "files": {
         "src/noctis/research/digests.py": "67476f972a6bbedf",
-        "src/noctis/research/driver.py": "046c491363bbcf60"
+        "src/noctis/research/driver.py": "b33c69d14f81f037"
       },
       "note": null
     },

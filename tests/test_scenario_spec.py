@@ -19,6 +19,7 @@ import pytest
 from noctis.strategies import indicators as ind
 from noctis.strategies.base import ParamSpec, TraderStrategy
 from noctis.strategies.scenario_spec import (
+    PARSE_WARM,
     SETUP_PAD,
     Behavior,
     LegSpec,
@@ -29,6 +30,7 @@ from noctis.strategies.scenario_spec import (
     compile_spec,
     describe_spec,
     spec_from_json,
+    spec_from_payload,
     spec_to_json,
 )
 from noctis.strategies.scenarios import (
@@ -455,6 +457,219 @@ def test_round_tripped_suite_compiles_identically():
     suite = _mixed_suite()
     restored = spec_from_json(spec_to_json(suite))
     assert compile_spec(restored, 20) == compile_spec(suite, 20)
+
+
+# ── the model dialect: spec_from_payload, the tolerant parse of the FORMULATE emit (#83) ─────
+# One scenario the model could emit, and its never-trade partner — the two dialect fixtures.
+_RALLY_PAYLOAD = {
+    "name": "rally",
+    "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}],
+    "behavior": "enter_long_during_leg",
+    "leg": 0,
+}
+_GRIND_PAYLOAD = {
+    "name": "grind",
+    "legs": [{"kind": "flat", "bars": 60}],
+    "behavior": "never_trade",
+}
+
+# Every refusal sentence, copied verbatim from the parse. These messages ride into the FORMULATE
+# corrective the model reads on a re-prompt, so the wording is contract, not diagnostics: pinning
+# it here is what makes "the parse moved without changing what the model is told" a checked claim.
+_REFUSALS = [
+    pytest.param(
+        {"scenarios": [{"name": "rally", "legs": ["nope"], "behavior": "never_trade"}]},
+        "scenario 'rally' leg 0: each leg must be an object",
+        id="leg-not-an-object",
+    ),
+    pytest.param(
+        {"scenarios": [{"name": "rally", "legs": [{"bars": 60}], "behavior": "never_trade"}]},
+        "scenario 'rally' leg 0: a leg 'kind' is required",
+        id="leg-kind-missing",
+    ),
+    pytest.param(
+        {
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [{"kind": "flat", "bars": "60"}],
+                    "behavior": "never_trade",
+                }
+            ]
+        },
+        "scenario 'rally' leg 0: 'bars' must be an integer length (0 for gap)",
+        id="bars-not-an-integer",
+    ),
+    pytest.param(
+        {"scenarios": [{"name": "rally", "legs": [{"kind": "flat", "bars": 60}]}]},
+        "scenario 'rally': a 'behavior' tag is required",
+        id="behavior-missing",
+    ),
+    pytest.param(
+        {
+            "scenarios": [
+                {"name": "rally", "legs": [{"kind": "flat", "bars": 60}], "behavior": "mystery"}
+            ]
+        },
+        "scenario 'rally': unknown behavior 'mystery'; use one of enter_long_during_leg, "
+        "enter_short_during_leg, hold_long_through_leg, hold_short_through_leg, "
+        "flat_by_end_of_leg, never_trade",
+        id="behavior-unknown",
+    ),
+    pytest.param(
+        {"scenarios": ["nope"]},
+        "scenario 0: each scenario must be an object",
+        id="scenario-not-an-object",
+    ),
+    pytest.param(
+        {"scenarios": [{"legs": [{"kind": "flat", "bars": 60}], "behavior": "never_trade"}]},
+        "scenario 0: a non-empty 'name' is required",
+        id="name-missing",
+    ),
+    pytest.param(
+        {"scenarios": [{"name": "rally", "behavior": "never_trade"}]},
+        "scenario 'rally': a non-empty 'legs' list is required",
+        id="legs-missing",
+    ),
+    pytest.param(
+        {"scenarios": [{"name": "rally", "legs": [], "behavior": "never_trade"}]},
+        "scenario 'rally': a non-empty 'legs' list is required",
+        id="legs-empty",
+    ),
+    pytest.param(
+        {
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [{"kind": "flat", "bars": 60}],
+                    "behavior": "never_trade",
+                    "leg": "0",
+                }
+            ]
+        },
+        "scenario 'rally': 'leg' must be an integer leg index or omitted",
+        id="leg-reference-not-an-integer",
+    ),
+    pytest.param(
+        ["scenarios"],
+        "scenario_spec must be an object with a 'scenarios' list",
+        id="spec-not-an-object",
+    ),
+    pytest.param(
+        {},
+        "scenario_spec.scenarios must be a non-empty list of scenarios",
+        id="scenarios-missing",
+    ),
+    pytest.param(
+        {"scenarios": []},
+        "scenario_spec.scenarios must be a non-empty list of scenarios",
+        id="scenarios-empty",
+    ),
+]
+
+
+def test_parse_warm_is_zero_so_a_parse_time_compile_checks_the_shape_only():
+    # FORMULATE compiles at parse time purely to prove the spec is structurally valid; the write
+    # gate re-compiles at the candidate's real declared warmup. Zero, so a directional entry leg
+    # begins right after the setup pad.
+    assert PARSE_WARM == 0
+
+
+def test_spec_from_payload_parses_the_model_dialect_into_the_frozen_suite():
+    suite = spec_from_payload({"scenarios": [_RALLY_PAYLOAD, _GRIND_PAYLOAD]})
+    assert suite == SpecSuite(
+        [
+            ScenarioSpec("rally", [LegSpec("trend", 60, pct=0.05)], Behavior.ENTER_LONG, leg=0),
+            ScenarioSpec("grind", [LegSpec("flat", 60)], Behavior.NEVER_TRADE),
+        ]
+    )
+
+
+def test_a_parsed_payload_compiles_at_the_parse_warmup():
+    # The two halves the FORMULATE boundary puts together: the tolerant parse, then the compile at
+    # PARSE_WARM that proves the emitted spec is structurally valid.
+    suite = spec_from_payload({"scenarios": [_RALLY_PAYLOAD, _GRIND_PAYLOAD]})
+    compiled = compile_spec(suite, PARSE_WARM)
+    assert [s.name for s in compiled] == ["rally", "grind"]
+
+
+def test_spec_from_payload_defaults_the_omitted_shape_params_to_zero():
+    # pct/amplitude/period are ignored per kind by the compiler, so a model that omits them is
+    # emitting a valid leg, not a malformed one.
+    suite = spec_from_payload({"scenarios": [_GRIND_PAYLOAD]})
+    leg = suite.scenarios[0].legs[0]
+    assert (leg.pct, leg.amplitude, leg.period) == (0.0, 0.0, 0)
+
+
+def test_spec_from_payload_reads_an_omitted_leg_reference_as_none():
+    suite = spec_from_payload({"scenarios": [_GRIND_PAYLOAD]})
+    assert suite.scenarios[0].leg is None
+
+
+@pytest.mark.parametrize("tag", list(Behavior))
+def test_spec_from_payload_reads_the_behavior_tag_by_value(tag):
+    # The model dialect speaks the tag's *value* ("enter_long_during_leg"), unlike the
+    # machine-exact JSON carrier, which speaks its name.
+    suite = spec_from_payload(
+        {
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [{"kind": "flat", "bars": 60}, {"kind": "flat", "bars": 60}],
+                    "behavior": tag.value,
+                    "leg": 0,
+                }
+            ]
+        }
+    )
+    assert suite.scenarios[0].behavior is tag
+
+
+def test_a_gap_leg_carries_zero_bars_and_parses():
+    suite = spec_from_payload(
+        {
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [
+                        {"kind": "gap", "bars": 0, "pct": 0.05},
+                        {"kind": "trend", "bars": 60},
+                    ],
+                    "behavior": "enter_long_during_leg",
+                    "leg": 1,
+                }
+            ]
+        }
+    )
+    assert suite.scenarios[0].legs[0] == LegSpec("gap", 0, pct=0.05)
+
+
+@pytest.mark.parametrize(("raw", "message"), _REFUSALS)
+def test_a_malformed_payload_is_refused_with_its_exact_sentence(raw, message):
+    with pytest.raises(SpecError) as exc:
+        spec_from_payload(raw)
+    assert str(exc.value) == message
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("bars", "scenario 'rally' leg 0: 'bars' must be an integer length (0 for gap)"),
+        ("leg", "scenario 'rally': 'leg' must be an integer leg index or omitted"),
+    ],
+)
+def test_true_is_not_an_integer_length_or_leg_reference(field, message):
+    # bool is an int in Python; a model emitting `true` where a count belongs is a schema misfire,
+    # not a leg of length 1.
+    leg = {"kind": "flat", "bars": 60}
+    scenario = {"name": "rally", "legs": [leg], "behavior": "never_trade"}
+    if field == "bars":
+        leg["bars"] = True
+    else:
+        scenario["leg"] = True
+    with pytest.raises(SpecError) as exc:
+        spec_from_payload({"scenarios": [scenario]})
+    assert str(exc.value) == message
 
 
 # ── depth: a compiled suite passes the real scenario-contract end to end ─────────────────────

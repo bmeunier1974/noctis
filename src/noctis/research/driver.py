@@ -196,13 +196,13 @@ from noctis.research.ledger import episode_usage
 from noctis.research.pricing import PriceTable, default_table
 from noctis.strategies import library
 from noctis.strategies.scenario_spec import (
+    PARSE_WARM,
     Behavior,
-    LegSpec,
-    ScenarioSpec,
     SpecError,
     SpecSuite,
     compile_spec,
     describe_spec,
+    spec_from_payload,
 )
 from noctis.strategies.scenarios import Scenario
 
@@ -483,88 +483,24 @@ def _opt(payload: dict[str, Any], key: str) -> str | None:
     return str(value) if value else None
 
 
-# The representative warmup FORMULATE compiles a spec at *parse* time — purely a structural
-# validity check of the spec's shape (the write gate #84 re-compiles at the strategy's real
-# declared warmup). Zero, so a directional entry leg begins right after the setup pad.
-PARSE_WARM = 0
-
 # The allowed leg kinds (the #82 segment builders) the FORMULATE schema advertises to the model.
 _LEG_KINDS = ("flat", "trend", "selloff", "recovery", "chop", "vol_spike", "gap")
 
 
-def _build_leg(payload: Any, scenario_name: str, index: int) -> LegSpec:
-    """Construct one frozen :class:`LegSpec` from the model's JSON leg; raise on a malformed shape
-    (a non-object leg, a missing kind, a non-integer length) so it re-prompts as a schema misfire.
-    ``pct``/``amplitude``/``period`` default to 0 and are ignored per kind by the compiler."""
-    if not isinstance(payload, dict):
-        raise ValueError(f"scenario {scenario_name!r} leg {index}: each leg must be an object")
-    kind = payload.get("kind")
-    if not isinstance(kind, str) or not kind.strip():
-        raise ValueError(f"scenario {scenario_name!r} leg {index}: a leg 'kind' is required")
-    bars = payload.get("bars", 0)
-    if isinstance(bars, bool) or not isinstance(bars, int):
-        raise ValueError(
-            f"scenario {scenario_name!r} leg {index}: 'bars' must be an integer length (0 for gap)"
-        )
-    return LegSpec(
-        kind=kind,
-        bars=bars,
-        pct=float(payload.get("pct", 0.0) or 0.0),
-        amplitude=float(payload.get("amplitude", 0.0) or 0.0),
-        period=int(payload.get("period", 0) or 0),
-    )
-
-
-def _build_behavior(value: Any, scenario_name: str) -> Behavior:
-    """Map the model's behavior string onto the #82 :class:`Behavior` tag; raise with the allowed
-    vocabulary on an unknown/missing tag so it re-prompts as a schema misfire."""
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"scenario {scenario_name!r}: a 'behavior' tag is required")
-    try:
-        return Behavior(value)
-    except ValueError:
-        allowed = ", ".join(b.value for b in Behavior)
-        raise ValueError(
-            f"scenario {scenario_name!r}: unknown behavior {value!r}; use one of {allowed}"
-        ) from None
-
-
-def _build_scenario(payload: Any, index: int) -> ScenarioSpec:
-    """Construct one frozen :class:`ScenarioSpec` from the model's JSON scenario; raise on any
-    malformed shape (missing name/legs, a non-integer leg reference) so it re-prompts as a
-    misfire."""
-    if not isinstance(payload, dict):
-        raise ValueError(f"scenario {index}: each scenario must be an object")
-    name = payload.get("name")
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError(f"scenario {index}: a non-empty 'name' is required")
-    raw_legs = payload.get("legs")
-    if not isinstance(raw_legs, list) or not raw_legs:
-        raise ValueError(f"scenario {name!r}: a non-empty 'legs' list is required")
-    legs = tuple(_build_leg(leg, name, i) for i, leg in enumerate(raw_legs))
-    behavior = _build_behavior(payload.get("behavior"), name)
-    leg_ref = payload.get("leg")
-    if leg_ref is not None and (isinstance(leg_ref, bool) or not isinstance(leg_ref, int)):
-        raise ValueError(f"scenario {name!r}: 'leg' must be an integer leg index or omitted")
-    return ScenarioSpec(name=name, legs=legs, behavior=behavior, leg=leg_ref)
-
-
 def _parse_scenario_spec(payload: dict[str, Any]) -> tuple[SpecSuite, tuple[Scenario, ...]]:
-    """Parse the structured ``scenario_spec`` into a :class:`SpecSuite` and compile it at
-    :data:`PARSE_WARM` as a structural validity check.
+    """Read the emitted ``scenario_spec`` field, parse it into a :class:`SpecSuite` and compile it
+    at :data:`~noctis.strategies.scenario_spec.PARSE_WARM` as a structural validity check.
 
-    Any malformed shape raises :class:`ValueError`; an uncompilable spec re-raises the compiler's
-    precise :class:`SpecError` message as a :class:`ValueError`. Both are caught by the episode
-    runner as a schema misfire (exactly like a missing field), and the message rides into the
-    corrective so the model can fix the spec on the re-prompt."""
+    This is the boundary and nothing more: which field the emit carries the spec in is FORMULATE's
+    business, what a spec *is* — its vocabulary, its refusal sentences, its bar arithmetic — belongs
+    to :mod:`noctis.strategies.scenario_spec`, which owns both halves (#319). The one translation
+    left here is the currency: a malformed shape and an uncompilable spec both surface as the
+    strategy layer's :class:`SpecError` and both leave as :class:`ValueError`, so the episode runner
+    reads either as a schema misfire (exactly like a missing field) and the precise message rides
+    into the corrective so the model can fix the spec on the re-prompt."""
     raw = _require(payload, "scenario_spec")
-    if not isinstance(raw, dict):
-        raise ValueError("scenario_spec must be an object with a 'scenarios' list")
-    raw_scenarios = raw.get("scenarios")
-    if not isinstance(raw_scenarios, list) or not raw_scenarios:
-        raise ValueError("scenario_spec.scenarios must be a non-empty list of scenarios")
-    suite = SpecSuite(scenarios=tuple(_build_scenario(s, i) for i, s in enumerate(raw_scenarios)))
     try:
+        suite = spec_from_payload(raw)
         compiled = compile_spec(suite, PARSE_WARM)
     except SpecError as exc:
         raise ValueError(str(exc)) from exc
