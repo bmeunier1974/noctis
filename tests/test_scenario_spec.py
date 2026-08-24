@@ -42,8 +42,10 @@ from noctis.strategies.scenarios import (
     HoldsShortThrough,
     LongWithin,
     Scenario,
+    ScenarioError,
     Segment,
     ShortWithin,
+    check_suite_shape,
 )
 
 WARMS = [0, 1, 5, 20, 50]
@@ -382,6 +384,38 @@ def test_invalid_shape_params_are_rejected_with_the_builder_message():
 def test_suite_shape_rules_are_enforced(scenarios, match):
     with pytest.raises(SpecError, match=match):
         compile_spec(SpecSuite(scenarios), 5)
+
+
+def test_the_suite_shape_refusal_has_one_spelling_across_both_dialects():
+    # compile_spec compiles, then runs the contract's own check_suite_shape and wraps its
+    # ScenarioError — so a spec-path refusal and a DSL-path refusal are the same sentence (#320).
+    missing_no_trade = [
+        _directional_spec("trend", Behavior.ENTER_LONG, name="a"),
+        _directional_spec("trend", Behavior.ENTER_SHORT, name="b"),
+    ]
+    missing_directional = [_never_trade_spec(name="a"), _never_trade_spec(name="b")]
+    for specs in (missing_no_trade, missing_directional):
+        compiled = tuple(compile_scenario(s, 5) for s in specs)
+        with pytest.raises(ScenarioError) as from_shape:
+            check_suite_shape(compiled)
+        with pytest.raises(SpecError) as from_spec:
+            compile_spec(SpecSuite(specs), 5)
+        assert str(from_spec.value) == str(from_shape.value)
+
+
+def test_an_uncompilable_tape_is_reported_before_the_suite_is_counted():
+    # Named ordering change (#320): compile_spec compiles before it counts, so a 9-tape suite
+    # with one uncompilable tape reports that tape's compile error, not `want 2-8`.
+    tiny = ScenarioSpec(name="tiny", legs=[_leg("trend", 5)], behavior=Behavior.ENTER_LONG, leg=0)
+    suite = SpecSuite(
+        [tiny]
+        + [_directional_spec("trend", Behavior.ENTER_LONG, name=f"s{i}") for i in range(7)]
+        + [_never_trade_spec()]
+    )
+    with pytest.raises(SpecError) as excinfo:
+        compile_spec(suite, 0)
+    assert "compiles to" in str(excinfo.value)
+    assert "2-8" not in str(excinfo.value)
 
 
 def test_negative_warm_is_rejected():

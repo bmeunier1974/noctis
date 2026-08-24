@@ -42,14 +42,13 @@ from enum import StrEnum
 
 from noctis.strategies.scenarios import (
     MAX_SCENARIO_BARS,
-    MAX_SCENARIOS,
     MIN_SCENARIO_BARS,
-    MIN_SCENARIOS,
     Expectation,
     Scenario,
     ScenarioError,
     Segment,
     always_flat,
+    check_suite_shape,
     chop,
     flat,
     flat_by,
@@ -105,11 +104,6 @@ class Behavior(StrEnum):
     HOLD_SHORT = "hold_short_through_leg"
     FLAT_BY_END = "flat_by_end_of_leg"
     NEVER_TRADE = "never_trade"
-
-
-_DIRECTIONAL = frozenset(
-    {Behavior.ENTER_LONG, Behavior.ENTER_SHORT, Behavior.HOLD_LONG, Behavior.HOLD_SHORT}
-)
 
 
 @dataclass(frozen=True)
@@ -227,6 +221,11 @@ def compile_scenario(spec: ScenarioSpec, warm: int) -> Scenario:
 
     Pure and deterministic: prepend a flat setup leg of ``warm + SETUP_PAD`` bars, build the
     authored legs, then derive the behavior tag's expectation window from the leg boundaries.
+
+    The tape-length refusal here is a **diagnosis**, not a second rule: it carries the setup/legs
+    arithmetic (and so the advice to adjust the leg lengths or the warmup) that the shared
+    arbiter, :func:`~noctis.strategies.scenarios.check_suite_shape`, cannot know. The arbiter of
+    the 60–2000 bar range, like every other suite-shape rule's, is that one check.
     """
     if isinstance(warm, bool) or not isinstance(warm, int) or warm < 0:
         raise SpecError(f"warm must be a non-negative int, got {warm!r}")
@@ -288,25 +287,24 @@ def describe_spec(suite: SpecSuite) -> str:
 def compile_spec(spec: SpecSuite, warm: int) -> tuple[Scenario, ...]:
     """Compile a :class:`SpecSuite` into contract-satisfying :class:`Scenario` objects.
 
-    Enforces the existing declaration shape rules at compile time — 2–8 scenarios, unique names,
-    at least one directional entry, at least one no-trade tape, 60–2000 bars each — so any valid
-    spec compiles to a suite that passes ``check_scenario_contract``'s declaration checks. Raises
-    :class:`SpecError` with a precise message on any violation.
+    Compiles every :class:`ScenarioSpec` through :func:`compile_scenario`, then runs the
+    contract's own :func:`~noctis.strategies.scenarios.check_suite_shape` on the compiled tuple —
+    the suite-shape rules (2–8 scenarios, unique names, at least one directional entry, at least
+    one no-trade tape, 60–2000 bars each) are written once, in the strategy layer's oracle module,
+    so a spec-path refusal and a hand-authored ``scenarios()`` refusal are the same sentence. The
+    :class:`~noctis.strategies.scenarios.ScenarioError` is wrapped into this module's one
+    exception, exactly as ``_segment`` wraps a builder's.
+
+    Compilation runs **before** the shape check, so an uncompilable tape in an over-long suite
+    reports its own compile error rather than the count. Of the five rules, the bar-range one has
+    an earlier **diagnosis** in :func:`compile_scenario` (which knows the setup/legs arithmetic);
+    its **arbiter** is ``check_suite_shape``, like every other rule's.
     """
-    specs = spec.scenarios
-    n = len(specs)
-    if not MIN_SCENARIOS <= n <= MAX_SCENARIOS:
-        raise SpecError(f"want {MIN_SCENARIOS}-{MAX_SCENARIOS} scenarios, got {n}")
-    names = [s.name for s in specs]
-    if len(set(names)) != len(names):
-        raise SpecError(f"scenario names must be unique, got {names}")
-    compiled = tuple(compile_scenario(s, warm) for s in specs)
-    if not any(s.behavior in _DIRECTIONAL for s in specs):
-        raise SpecError(
-            "at least one scenario must demand a directional entry (enter/hold long/short)"
-        )
-    if not any(s.behavior is Behavior.NEVER_TRADE for s in specs):
-        raise SpecError("at least one scenario must be a no-trade tape (never_trade)")
+    compiled = tuple(compile_scenario(s, warm) for s in spec.scenarios)
+    try:
+        check_suite_shape(compiled)
+    except ScenarioError as exc:
+        raise SpecError(str(exc)) from exc
     return compiled
 
 

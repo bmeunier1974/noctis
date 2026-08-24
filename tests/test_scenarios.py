@@ -19,6 +19,7 @@ from noctis.strategies.scenarios import (
     always_flat,
     check_invariants,
     check_scenario_contract,
+    check_suite_shape,
     chop,
     flat,
     flat_by,
@@ -128,6 +129,88 @@ def test_expectation_pass_fail_and_message_names_the_bar(exp, passing, failing, 
 def test_invalid_expectations_rejected(bad):
     with pytest.raises(ScenarioError):
         bad()
+
+
+# ── check_suite_shape: the five suite-shape rules, written once (#320) ─────────────────────
+def _tape(name: str) -> Scenario:
+    """A directional tape: 60 bars, a long entry window inside the trend leg."""
+    return Scenario(name, [flat(15), trend(45, 0.10)], [long_within(20, 50)])
+
+
+def _no_trade_tape(name: str = "grind") -> Scenario:
+    return Scenario(name, [flat(60)], [always_flat()])
+
+
+DIRECTIONAL_MESSAGE = (
+    "at least one scenario must demand a directional entry (enter/hold long/short — "
+    "long_within/holds_long_through/short_within/holds_short_through)"
+)
+NO_TRADE_MESSAGE = "at least one scenario must be a no-trade tape (never_trade / always_flat())"
+
+
+def test_check_suite_shape_accepts_a_well_formed_suite():
+    assert check_suite_shape([_tape("rally"), _no_trade_tape()]) is None
+
+
+@pytest.mark.parametrize(
+    ("declared", "message"),
+    [
+        (["not a scenario", 3], "scenarios() must return a list of Scenario objects"),
+        ([_tape("rally")], "want 2-8 scenarios, got 1"),
+        (
+            [_tape(f"s{i}") for i in range(8)] + [_no_trade_tape()],
+            "want 2-8 scenarios, got 9",
+        ),
+        (
+            [_tape("dup"), _no_trade_tape("dup")],
+            "scenario names must be unique, got ['dup', 'dup']",
+        ),
+        (
+            [Scenario("a", [list(range(60))], [long_within(0, 10)]), _no_trade_tape()],
+            "scenario 'a': segments must be built from the DSL "
+            "(flat/trend/selloff/recovery/chop/vol_spike/gap)",
+        ),
+        (
+            [Scenario("a", [flat(60)], []), _no_trade_tape()],
+            "scenario 'a': expect must be a non-empty list of expectations "
+            "(flat_until/long_within/holds_long_through/short_within/holds_short_through/"
+            "flat_by/always_flat)",
+        ),
+        (
+            [Scenario("a", [flat(59)], [long_within(0, 10)]), _no_trade_tape()],
+            "scenario 'a': 59 bars is outside [60, 2000]",
+        ),
+        (
+            [Scenario("a", [flat(60)], [long_within(50, 99)]), _no_trade_tape()],
+            "scenario 'a': expectation window exceeds the 60-bar tape",
+        ),
+        ([_no_trade_tape("a"), _no_trade_tape("b")], DIRECTIONAL_MESSAGE),
+        ([_tape("a"), _tape("b")], NO_TRADE_MESSAGE),
+    ],
+)
+def test_check_suite_shape_refuses_each_broken_rule_with_its_own_message(declared, message):
+    with pytest.raises(ScenarioError) as excinfo:
+        check_suite_shape(declared)
+    assert str(excinfo.value) == message
+
+
+def test_check_suite_shape_names_both_dialects_in_the_two_shared_messages():
+    # One check serves the DSL and the spec vocabulary, so each message names both (#320/D5).
+    for message, words in (
+        (DIRECTIONAL_MESSAGE, ("enter/hold long/short", "long_within")),
+        (NO_TRADE_MESSAGE, ("never_trade", "always_flat()")),
+    ):
+        assert all(word in message for word in words)
+
+
+def test_the_contract_raises_the_shape_refusal_verbatim_through_the_same_type():
+    # check_scenario_contract is its prelude, then this same check, then the replay loop.
+    declared = [_tape("a"), _tape("b")]
+    with pytest.raises(ScenarioError) as from_shape:
+        check_suite_shape(declared)
+    with pytest.raises(ScenarioError) as from_contract:
+        check_scenario_contract(_with_scenarios(*declared))
+    assert str(from_contract.value) == str(from_shape.value)
 
 
 # ── the contract checker, run against a real strategy ─────────────────────────────────────
