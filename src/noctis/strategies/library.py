@@ -13,8 +13,9 @@ subclass and carries its research record in a structured module-docstring header
 
 The header is convention plus the tiny module :mod:`noctis.strategies.header` — which owns the
 value (a frozen :class:`~noctis.strategies.header.StrategyHeader`, illegal by construction if its
-``status`` is), the parse and the stamp that writes fields back, all re-exported here so no
-caller's import moved. The loader mirrors
+``status`` is), the parse, the stamp that writes header fields back and the ``Params`` default
+write-back that is the other half of the same record, all re-exported here so no caller's import
+moved. The loader mirrors
 ``noctis/strategies/spec/strategy.py``'s ``load_and_register``; :func:`write_strategy` is the
 validation gate — a structural lint on the raw source (``noctis.strategies.structure``), then
 import in a **fresh interpreter** (via the swappable :data:`validator` seam), a smoke replay on
@@ -60,6 +61,7 @@ from noctis.strategies.header import (  # noqa: F401 — re-exported: no caller'
     StrategyHeader,
     parse_header,
     stamp_header,
+    write_params,
 )
 from noctis.strategies.scenario_spec import (
     SpecError,
@@ -187,43 +189,6 @@ def fixture_frame(n: int = 180, seed: int = 7) -> pd.DataFrame:
             "volume": [1000] * n,
         }
     )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Params write-back  (the header value, its parse and its stamp all live in
-# ``noctis.strategies.header``; only the ``Params`` defaults are rewritten here)
-# ─────────────────────────────────────────────────────────────────────────────
-def _render_param_defaults(source: str, name: str, params: dict) -> str:
-    """Return ``source`` with the ``Params`` dataclass defaults replaced by ``params``."""
-    lines = source.splitlines(keepends=True)
-    class_idx = None
-    class_indent = 0
-    for i, line in enumerate(lines):
-        match = re.match(r"^(\s*)class\s+Params\b", line)
-        if match:
-            class_idx, class_indent = i, len(match.group(1))
-            break
-    if class_idx is None:
-        raise StrategyValidationError(f"{name}: no `class Params` block found for write-back")
-
-    remaining = dict(params)
-    for i in range(class_idx + 1, len(lines)):
-        line = lines[i]
-        stripped = line.strip()
-        if stripped and (len(line) - len(line.lstrip())) <= class_indent:
-            break  # left the Params block
-        match = re.match(r"^(\s*)(\w+)(\s*:\s*[^=#\n]+=\s*)([^#\n]*?)([ \t]*)(#.*)?(\n?)$", line)
-        if match and match.group(2) in remaining:
-            value = remaining.pop(match.group(2))
-            comment = f"{match.group(5)}{match.group(6)}" if match.group(6) else ""
-            lines[i] = (
-                f"{match.group(1)}{match.group(2)}{match.group(3)}{value!r}{comment}{match.group(7)}"
-            )
-    if remaining:
-        raise StrategyValidationError(
-            f"{name}: params {sorted(remaining)} not found as Params fields for write-back"
-        )
-    return "".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -818,8 +783,10 @@ def plan_promotion(
     defaults (so ``noctis backtest <name>`` with no arguments replays exactly what
     shipped) and the header is re-stamped ``status: champion`` with the fit ``symbols``
     and ``tuned`` date — then runs the write gate ONCE on the result. Raises
-    :class:`StrategyValidationError` (typically: tuned params that violate the file's
-    declared known-outcome scenarios) while the caller can still refuse the verdict;
+    :class:`StrategyValidationError` — the gate's one currency, so a rendering refusal
+    (a param the file's ``Params`` never declared) arrives wrapped into it, and tuned
+    params that violate the file's declared known-outcome scenarios arrive as
+    themselves — while the caller can still refuse the verdict;
     only a plan that survives here reaches :meth:`PromotionPlan.commit`, which the
     caller invokes after the registry crowns.
     """
@@ -828,12 +795,17 @@ def plan_promotion(
     if origin is None:
         raise FileNotFoundError(f"no strategy named {name!r} in {strategies_dir}")
     source = origin.read_text(encoding="utf-8")
-    rendered = stamp_header(
-        _render_param_defaults(source, name, params),
-        status="champion",
-        symbols=symbols,
-        tuned=tuned,
-    )
+    try:
+        rendered = stamp_header(
+            write_params(source, name, params),
+            status="champion",
+            symbols=symbols,
+            tuned=tuned,
+        )
+    except HeaderError as exc:
+        # The pure module refuses in its own currency; the gate's callers only know this one
+        # (``research/tools.py`` catches it around the plan to refuse the verdict).
+        raise StrategyValidationError(str(exc)) from exc
     paths.tmp.mkdir(parents=True, exist_ok=True)
     probe = paths.tmp / f".promote-{name}.py"  # dot-prefixed: invisible to discovery
     probe.write_text(rendered, encoding="utf-8")

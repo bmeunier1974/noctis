@@ -586,6 +586,27 @@ def test_promotion_plan_that_breaks_scenarios_is_refused(tmp_path, families, fas
     assert not list(tmp_path.rglob(".promote*")), "promotion temp file left behind"
 
 
+def test_promotion_plan_with_a_param_the_file_does_not_declare_is_refused(
+    tmp_path, families, fast_gate
+):
+    """A failed ``Params`` write-back reaches the caller in the gate's own currency: the header
+    module refuses in :class:`HeaderError`, ``plan_promotion`` wraps it, and the toolbox's
+    ``except StrategyValidationError`` around the plan is what turns it into a refused verdict."""
+    write_strategy(tmp_path, "probe", GOOD_SOURCE, families)
+
+    with pytest.raises(StrategyValidationError) as excinfo:
+        plan_promotion(
+            tmp_path, "probe", {"lookback": 20, "windwo": 5}, symbols=["AAA"], tuned="2026-07-04"
+        )
+
+    assert str(excinfo.value) == (
+        "probe: params ['windwo'] not found as Params fields for write-back"
+    )
+    assert isinstance(excinfo.value.__cause__, HeaderError)
+    assert not (tmp_path / "champions" / "probe.py").exists()
+    assert not list(tmp_path.rglob(".promote*")), "promotion temp file left behind"
+
+
 def test_promotion_tolerates_legacy_scenario_less_file(tmp_path, families, fast_gate):
     legacy = GOOD_SOURCE.replace("def scenarios(", "def _scenarios(")
     (tmp_path / "probe.py").write_text(legacy, encoding="utf-8")  # pre-gate artifact

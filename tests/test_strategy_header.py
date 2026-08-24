@@ -1,13 +1,13 @@
 """The strategy file's research record as text: ``StrategyHeader``, its parse (#312) and the
-``stamp_header`` write side (#314).
+write side — ``stamp_header`` (#314) and the ``Params`` default write-back ``write_params`` (#315).
 
 String in, string (or value) out — no ``tmp_path``, no gate, no I/O in the module under test. It
 is pure by rule (``noctis.strategies.header`` imports the standard library and nothing else), and
 the last two tests here are what pins that rule, the way ``tests/test_eval_boundary.py`` pins the
 eval one. The characterization section reads the committed seeds and their goldens as *text
-inputs* to that same pure function: the goldens were rendered by the private
-``library._render_header_fields`` at pre-epic commit ``1ab6da8``, so a byte of drift there means
-the stamp was re-typeset, not moved.
+inputs* to those same pure functions: the goldens were rendered by the private
+``library._render_header_fields`` / ``library._render_param_defaults`` at pre-epic commit
+``1ab6da8``, so a byte of drift there means the write was re-typeset, not moved.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from noctis.strategies.header import (
     StrategyHeader,
     parse_header,
     stamp_header,
+    write_params,
 )
 
 HEADER_SOURCE = Path(__file__).resolve().parents[1] / "src" / "noctis" / "strategies" / "header.py"
@@ -399,6 +400,83 @@ def test_what_the_stamp_writes_is_what_the_parse_reads_back() -> None:
     )
 
 
+# ── 3b. The write side: the tuned ``Params`` defaults ─────────────────────────────────────
+
+PARAMS_SOURCE = (
+    '"""Toy probe.\n'
+    "\n"
+    "status: draft\n"
+    '"""\n'
+    "\n"
+    "\n"
+    "class Probe:\n"
+    "    class Params:\n"
+    "        lookback: int = 20\n"
+    "        edge: float = 1.0            # the entry threshold\n"
+    "\n"
+    "    params_cls = Params\n"
+)
+
+
+def test_the_write_back_replaces_a_default_with_the_repr_of_the_tuned_value() -> None:
+    after = write_params(PARAMS_SOURCE, "probe", {"lookback": 33, "edge": 1.01})
+
+    assert "        lookback: int = 33\n" in after
+    assert "        edge: float = 1.01" in after
+
+
+def test_a_field_the_params_dict_does_not_name_keeps_its_default() -> None:
+    after = write_params(PARAMS_SOURCE, "probe", {"lookback": 33})
+
+    assert "        edge: float = 1.0            # the entry threshold\n" in after
+
+
+def test_the_trailing_comment_on_a_default_survives_the_write_back() -> None:
+    after = write_params(PARAMS_SOURCE, "probe", {"edge": 1.01})
+
+    assert "        edge: float = 1.01            # the entry threshold\n" in after
+
+
+def test_the_edit_stops_where_the_params_block_ends() -> None:
+    """Indentation is the boundary: a same-named field in a later method or class is not ours."""
+    before = (
+        "class Probe:\n"
+        "    class Params:\n"
+        "        lookback: int = 20\n"
+        "\n"
+        "    def helper(self) -> None:\n"
+        "        lookback: int = 99\n"
+        "\n"
+        "\n"
+        "class Later:\n"
+        "    lookback: int = 77\n"
+    )
+
+    after = write_params(before, "probe", {"lookback": 33})
+
+    assert after == before.replace("lookback: int = 20", "lookback: int = 33")
+    assert "        lookback: int = 99\n" in after
+    assert "    lookback: int = 77\n" in after
+
+
+def test_a_param_that_is_not_a_params_field_is_refused_naming_it() -> None:
+    with pytest.raises(HeaderError) as excinfo:
+        write_params(PARAMS_SOURCE, "probe", {"lookback": 33, "nope": 1, "also_nope": 2})
+
+    assert str(excinfo.value) == (
+        "probe: params ['also_nope', 'nope'] not found as Params fields for write-back"
+    )
+    assert isinstance(excinfo.value, ValueError)
+
+
+def test_a_source_with_no_params_block_is_refused() -> None:
+    with pytest.raises(HeaderError) as excinfo:
+        write_params('"""Toy probe."""\nx = 1\n', "probe", {"lookback": 33})
+
+    assert str(excinfo.value) == "probe: no `class Params` block found for write-back"
+    assert isinstance(excinfo.value, ValueError)
+
+
 # ── 4. The move, pinned: the committed seeds stamp exactly as they always did ─────────────
 
 SEEDS = sorted((Path(__file__).resolve().parents[1] / "strategies").glob("*.py"))
@@ -420,10 +498,39 @@ def test_a_committed_seed_stamps_byte_for_byte_as_the_library_renderer_did(seed:
     assert stamped == golden.read_text(encoding="utf-8")
 
 
+# Every field of each seed's ``Params``, moved to a new value of the same type (ints ``+1``,
+# floats ``*2``) — so no golden can pass on an untouched line.
+SEED_PARAMS: dict[str, dict[str, object]] = {
+    "TEMPLATE": {"lookback": 21, "threshold": 2.0},
+    "donchian_breakout": {"channel": 21},
+    "rsi_meanrev": {"period": 15, "oversold": 60.0, "overbought": 140.0},
+    "sma_crossover": {"fast": 11, "slow": 31},
+}
+
+
+@pytest.mark.parametrize("seed", SEEDS, ids=lambda seed: seed.stem)
+def test_a_committed_seed_takes_tuned_defaults_as_the_library_renderer_wrote_them(
+    seed: Path,
+) -> None:
+    """Characterization: the goldens were rendered by ``library._render_param_defaults`` at
+    ``1ab6da8`` (pre-epic). #315 moved that code here; a byte of difference is a rewrite."""
+    written = write_params(seed.read_text(encoding="utf-8"), seed.stem, SEED_PARAMS[seed.stem])
+
+    golden = STAMP_GOLDENS / f"{seed.stem}.params.py.txt"
+    assert written == golden.read_text(encoding="utf-8")
+
+
 def test_the_characterization_covers_every_committed_seed() -> None:
     assert [seed.stem for seed in SEEDS] == sorted(
         path.name.removesuffix(".stamped.py.txt") for path in STAMP_GOLDENS.glob("*.stamped.py.txt")
     )
+
+
+def test_the_params_characterization_covers_every_committed_seed() -> None:
+    assert [seed.stem for seed in SEEDS] == sorted(
+        path.name.removesuffix(".params.py.txt") for path in STAMP_GOLDENS.glob("*.params.py.txt")
+    )
+    assert sorted(SEED_PARAMS) == [seed.stem for seed in SEEDS]
 
 
 # ── 5. The names the library still exports ───────────────────────────────────────────────

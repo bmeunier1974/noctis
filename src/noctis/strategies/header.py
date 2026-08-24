@@ -5,9 +5,10 @@ one-sentence thesis, then the header fields ``status`` / ``style`` / ``symbols``
 (``strategies/README.md``). This module owns that record — the value (:class:`StrategyHeader`,
 frozen, and refusing an illegal ``status`` in its constructor), its vocabulary
 (:data:`HEADER_FIELDS`, :data:`VALID_STATUSES`, :data:`FIELD_RE`), the one parser
-(:meth:`StrategyHeader.parse`, aliased :func:`parse_header`) and the one writer
-(:func:`stamp_header`, typed and keyword-only). The ``Params`` default write-back arrives here in
-a later story of the same epic (#311).
+(:meth:`StrategyHeader.parse`, aliased :func:`parse_header`) and the whole write side: the
+header stamp (:func:`stamp_header`, typed and keyword-only) and the tuned ``Params`` defaults
+(:func:`write_params`). Those defaults are the other half of the same record — ``tuned:`` names
+the date they were fitted — and the same kind of thing: a pure text edit of one strategy file.
 
 Parse is **tolerant of the file and strict on the value**: a file with no docstring, or one that
 does not even parse as Python, reads as the default ``draft`` header, but a status the file
@@ -15,6 +16,10 @@ does not even parse as Python, reads as the default ``draft`` header, but a stat
 **strict on the file and strict on the value**: it needs a docstring to write into, and it routes
 its ``status`` through that same constructor before it edits anything, so an illegal status never
 reaches a file and the library's write gate needs no second check.
+
+:class:`HeaderError` is the module's one exception — the library wraps it into the write gate's
+own ``StrategyValidationError`` at the two places a header error reaches that gate's callers, so
+this module never has to know the gate exists.
 
 The module edits *strings*: no path, no tier, no gate, no I/O. **It imports the standard library
 and nothing else, by rule** — every reader of a strategy file depends on it, so it may drag
@@ -196,3 +201,47 @@ def stamp_header(
             doc_lines = doc_lines[:closing] + inserted + doc_lines[closing:]
 
     return "".join(lines[:start] + doc_lines + lines[end:])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The write side: the tuned ``Params`` defaults
+# ─────────────────────────────────────────────────────────────────────────────
+def write_params(source: str, name: str, params: dict) -> str:
+    """Return ``source`` with the ``Params`` dataclass defaults replaced by ``params``.
+
+    The other half of the research record: the header's ``tuned:`` date says *when* these
+    defaults were fitted, so ``noctis backtest <name>`` with no arguments replays exactly what
+    shipped. Indentation is the block boundary — a same-named field in a later method or class is
+    not this ``Params``'s — and a value is written as its ``repr``, with any trailing comment on
+    the line preserved. A file with no ``class Params``, or a param the block does not declare,
+    is a :class:`HeaderError` naming the file and the offending names.
+    """
+    lines = source.splitlines(keepends=True)
+    class_idx = None
+    class_indent = 0
+    for i, line in enumerate(lines):
+        match = re.match(r"^(\s*)class\s+Params\b", line)
+        if match:
+            class_idx, class_indent = i, len(match.group(1))
+            break
+    if class_idx is None:
+        raise HeaderError(f"{name}: no `class Params` block found for write-back")
+
+    remaining = dict(params)
+    for i in range(class_idx + 1, len(lines)):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped and (len(line) - len(line.lstrip())) <= class_indent:
+            break  # left the Params block
+        match = re.match(r"^(\s*)(\w+)(\s*:\s*[^=#\n]+=\s*)([^#\n]*?)([ \t]*)(#.*)?(\n?)$", line)
+        if match and match.group(2) in remaining:
+            value = remaining.pop(match.group(2))
+            comment = f"{match.group(5)}{match.group(6)}" if match.group(6) else ""
+            lines[i] = (
+                f"{match.group(1)}{match.group(2)}{match.group(3)}{value!r}{comment}{match.group(7)}"
+            )
+    if remaining:
+        raise HeaderError(
+            f"{name}: params {sorted(remaining)} not found as Params fields for write-back"
+        )
+    return "".join(lines)
