@@ -469,9 +469,13 @@ class FakeToolbox:
     def tool_evaluate_vs_champion(self, **kwargs):
         self.evaluations.append(kwargs)
         result = self._next_verdict()
-        if "error" not in result and result.get("promoted"):
-            self.promotions += 1
+        # Mirrors the real toolbox (#327): any ARBITRATED evaluate spends the verdict and
+        # settles the candidate, promoted or not; only a pre-arbitration error leaves it in
+        # play. The promotions counter alone is outcome-shaped.
+        if "error" not in result:
             self.undecided.discard(kwargs["name"])
+            if result.get("promoted"):
+                self.promotions += 1
         return result
 
     def _next_verdict(self):
@@ -1394,6 +1398,23 @@ def test_approve_routes_through_evaluate_vs_champion_with_best_params_and_holdou
     assert summary.promotions == 1
     verdicts = ledger.verdicts()
     assert verdicts[0].verdict == "approve" and verdicts[0].promoted is True
+
+
+def test_arbitrated_refusal_spends_the_verdict_and_leaves_nothing_undecided(tmp_path):
+    # An approve the champion gates arbitrated but refused is a SPENT verdict, exactly as the
+    # real toolbox settles it (#327): the strategy was judged, so it leaves the undecided set —
+    # only the promotions counter is outcome-shaped.
+    episodes = Episodes([formulate_ok()], [decide_ok("approve")])
+    box = FakeToolbox(verdict_results=[{"ok": True, "promoted": False}])
+    ledger = SessionLedger(tmp_path, "s10r")
+
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    assert len(box.evaluations) == 1
+    assert summary.promotions == 0
+    assert summary.undecided == []
+    verdicts = ledger.verdicts()
+    assert verdicts[0].verdict == "approve" and verdicts[0].promoted is False
 
 
 # ── 2b. deterministic MATCH: screening, holdout reservation, fallback (story #69) ───────────

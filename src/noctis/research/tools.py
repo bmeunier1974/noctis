@@ -421,6 +421,8 @@ class ResearchToolbox:
         self.promotions = 0
         self.rejections = 0
         self.strategies_touched: list[str] = []
+        # Names still in play: added by a successful write, removed by a SPENT verdict — a
+        # reject, or an evaluate the champion gates arbitrated, whichever way they ruled.
         self.undecided: set[str] = set()
         # Consecutive write-gate rejections (reset by any successful write) — feeds the
         # fixation backstop in tool_write_strategy.
@@ -2001,9 +2003,14 @@ class ResearchToolbox:
             symbols=sorted(bars),
             holdout_symbols=sorted(symbol_holdout) if symbol_holdout else [],
         )
+        # The verdict is SPENT the moment the gates arbitrate: a candidate they turned away was
+        # judged, not left in play, so it leaves the undecided set beside the journal line that
+        # records the judgment. Only an evaluate refused BEFORE arbitration (the exhaustion gate,
+        # an unreadable holdout, a failed promotion plan — every early return above) leaves the
+        # name undecided, because nothing judged it. The promotions counter stays outcome-shaped.
+        self.undecided.discard(name)
         if decision.promote:
             self.promotions += 1
-            self.undecided.discard(name)
             # The winning file lands in champions/ (moved out of the gitignored working
             # area, or copied out of the committed seed) with the tuned defaults and the
             # re-stamped header — pre-validated bytes, so the install cannot fail.
