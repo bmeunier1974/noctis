@@ -26,18 +26,33 @@ an entry leg always begins after warmup by construction: the "warmup exceeds the
 conflict the epic flags for the gate (#84) cannot arise at this layer — a ``warm`` so large it
 overruns the maximum tape length surfaces instead as a precise out-of-range compile error.
 
-Two dialects, one vocabulary
-----------------------------
-A spec reaches this module in two dialects and leaves as the same frozen objects.
-:func:`spec_from_payload` reads the *model's* FORMULATE emit — behavior by its wire value, shape
-params omitted rather than zeroed, and a precise refusal for every malformed shape, because that
-sentence becomes the corrective the model is re-prompted with. What the model was *asked* for is
-here too: :data:`SPEC_JSON_SCHEMA` is the JSON Schema the FORMULATE emit contract advertises, with
-its enums read off :data:`LEG_KINDS` and :class:`Behavior`, so the offer and the parse are the same
-vocabulary by construction rather than by two lists agreeing. :func:`spec_from_json` reads the
-*machine-exact* carrier :func:`spec_to_json` writes for the write gate's subprocess. Both are pure,
-and both hand :func:`compile_spec` the same :class:`SpecSuite`, so what a spec *is* is decided here
-rather than at either boundary.
+Three crossings, one vocabulary
+------------------------------
+Every crossing into the spec vocabulary is owned here, and each leaves as the same frozen
+:class:`SpecSuite`, so what a spec *is* is decided in this module rather than at either boundary:
+
+* **Model dialect** — :func:`spec_from_payload` reads the *model's* FORMULATE emit: behavior by its
+  wire value, shape params omitted rather than zeroed, an absent ``leg`` — and a precise refusal
+  for every other malformed shape, because that sentence becomes the corrective the model is
+  re-prompted with. :data:`PARSE_WARM` is the representative warmup that parse compiles at, a
+  structural check only; the write gate re-compiles at the candidate's real declared warmup. What
+  the model was *asked* for is here too: :data:`SPEC_JSON_SCHEMA` is the JSON Schema the FORMULATE
+  emit contract advertises, with its enums read off :data:`LEG_KINDS` and :class:`Behavior`, so the
+  offer and the parse are the same vocabulary by construction rather than by two lists agreeing.
+* **Carrier** — :func:`spec_to_json` writes the *machine-exact* text and :func:`spec_from_json`
+  reads it back: the pure round trip that crosses the write gate's subprocess and rides inside the
+  machine-stamped ``scenarios()`` block.
+* **Compile** — :func:`compile_spec`, the pure ``(spec, warm)`` function below.
+
+The research layer keeps only the boundary — read the emitted field, hand it over, translate the
+refusal into the episode runner's currency.
+
+What is **not** owned here: the suite-shape rules. 2-8 scenarios, unique names, at least one
+directional entry, at least one no-trade tape, 60-2000 bars each are the known-outcome contract's
+own, written once in :func:`~noctis.strategies.scenarios.check_suite_shape`, which
+:func:`compile_spec` runs on the compiled tuple — wrapping the
+:class:`~noctis.strategies.scenarios.ScenarioError` into this module's :class:`SpecError` — so a
+spec-path refusal and a hand-authored ``scenarios()`` refusal are the same sentence.
 
 Purity
 ------

@@ -61,7 +61,10 @@ into a FORMULATE corrective, which is why they are declared here rather than lef
 Nothing else the model is told moves: the per-stage system texts, the emit contracts and their
 field descriptions, the retry hint with its `_SCENARIO_SPEC_EXAMPLE`, and every other refusal
 sentence are verbatim, pinned by the driver's own tests and by the schema golden. The hash moves
-because the code that assembles those texts moved. This one entry declares the whole epic.
+because the code that assembles those texts moved. The module's own docstring was rewritten
+alongside (#324) to name the three crossings it owns — model dialect, carrier, compile — which
+moves the hash a second time without changing a word the model reads. This one entry declares the
+whole epic.
 
 ## 2026-08-22 — sites: author, briefings, conversation, episodic
 

@@ -139,7 +139,11 @@ authors the tape — the machine fixes the oracle, the model only reacts to it.
 
 **FORMULATE emits a structured `scenario_spec`, not prose.** The FORMULATE episode returns a
 `SpecSuite` (`src/noctis/strategies/scenario_spec.py`) in a small fixed vocabulary — the model
-reasons about tape *shape* and one behavior per tape and **never writes a bar index**:
+reasons about tape *shape* and one behavior per tape and **never writes a bar index**. The JSON
+Schema the emit contract advertises (`SPEC_JSON_SCHEMA`) is *derived* from that vocabulary rather
+than kept beside it — its `kind` enum is `LEG_KINDS`, read off the compiler's own segment builders,
+and its `behavior` enum is `Behavior` — so what the model is offered and what `spec_from_payload`
+accepts back cannot drift apart:
 
 - **Leg kinds** — the segment builders each tape is made of: `flat`, `trend`, `selloff`,
   `recovery`, `chop`, `vol_spike`, `gap`. A leg carries a `kind`, a decision-bar **length**
@@ -150,7 +154,10 @@ reasons about tape *shape* and one behavior per tape and **never writes a bar in
   `flat_by_end_of_leg`, `never_trade`. A directional tag names its target leg by index;
   `never_trade` targets none.
 - **Suite shape rules** — 2–8 scenarios, unique names, at least one directional entry and at least
-  one `never_trade` tape, each compiling to 60–2000 bars.
+  one `never_trade` tape, each compiling to 60–2000 bars. These are the known-outcome contract's
+  own rules, not the spec's: `check_suite_shape` (`src/noctis/strategies/scenarios.py`) is their
+  single arbiter, so a spec that breaks one earns the same sentence a hand-authored `scenarios()`
+  block would.
 
 The pure, warmup-parametric compiler (`compile_spec`) derives every assertion window from the leg
 lengths and the strategy's declared warmup — the model authors none of that arithmetic.

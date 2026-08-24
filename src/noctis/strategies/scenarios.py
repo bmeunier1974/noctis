@@ -13,6 +13,15 @@ before ``write_strategy``: the expectations are reasoning-derived from the thesi
 copied from the code's output. Builders contain **no randomness**, so every failure message
 is exactly reproducible. Expectations are windows, not per-bar series — off-by-a-bar
 indicator arithmetic passes; backwards logic does not.
+
+The suite's own shape rules are this module's too, and they live in **one** function:
+:func:`check_suite_shape` — 2-8 scenarios, unique names, at least one directional entry, at
+least one no-trade tape, plus each tape's own shape — is the single arbiter both dialects of
+the oracle are judged by. :func:`check_scenario_contract` runs it on what a strategy file
+declares; :func:`noctis.strategies.scenario_spec.compile_spec` runs it on what a
+FORMULATE-authored scenario spec compiles to, wrapping the :class:`ScenarioError` into its own
+``SpecError``. One spelling serves both, which is why the directional and no-trade refusals
+name the DSL's expectation builders *and* the spec's behavior tags.
 """
 
 from __future__ import annotations

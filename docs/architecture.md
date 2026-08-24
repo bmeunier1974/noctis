@@ -159,9 +159,19 @@ compiled oracle at that warmup, **rejects** any coder-authored `scenarios()` blo
 success — machine-stamps a warmup-parametric `scenarios()` into the installed file. Either way one
 validated file lands; the spec path just moves who authors the tape from the coder to the machine.
 
-**Where the compiler sits.** The scenario spec vocabulary and the pure compiler
+**Where the spec lives.** The scenario spec vocabulary and the pure compiler
 (`src/noctis/strategies/scenario_spec.py`: `LegSpec` / `Behavior` / `ScenarioSpec` / `SpecSuite`,
-`compile_spec`, `describe_spec`) live in the **strategy layer**, not the research layer.
+`compile_spec`, `describe_spec`) live in the **strategy layer**, not the research layer — and so
+does every **crossing** into that vocabulary, three of them: the *model dialect*
+(`spec_from_payload`, plus the `SPEC_JSON_SCHEMA` the FORMULATE emit contract advertises, whose
+`kind` enum is `LEG_KINDS` read off the compiler's own segment builders), the *carrier*
+(`spec_to_json` / `spec_from_json`, the machine-exact round trip the write gate's subprocess
+crosses), and *compile* itself. Each hands back the same frozen `SpecSuite`, so what a spec is is
+decided in one module; the research layer keeps only the boundary — read the emitted field, hand it
+over, translate the refusal into the episode runner's currency. The suite-shape rules are not the
+spec's at all: `check_suite_shape` (`src/noctis/strategies/scenarios.py`) is their one arbiter, run
+by `compile_spec` on the compiled tuple and by the contract check on what a strategy file declares,
+so a spec-path refusal and a hand-authored `scenarios()` refusal are the same sentence.
 Compilation is a pure, deterministic function of `(spec, warm)` — no LLM, no I/O, no clock, no
 randomness — and the module imports nothing from `noctis.research`, so the same spec always
 compiles to the same `Scenario` objects and the gate owns the oracle independently of who proposed
