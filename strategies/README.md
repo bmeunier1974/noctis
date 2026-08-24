@@ -77,6 +77,14 @@ tuned: 2026-07-04            # date the current Params defaults were fitted
 winning parameters are written back as the `Params` defaults and the header is updated, so
 diffing the file shows exactly what shipped. `reject_strategy` stamps `status: rejected`.
 
+One module reads and writes that record — `noctis.strategies.header`: `StrategyHeader.parse`
+reads it (tolerantly — a file with no docstring reads as `draft`), `stamp_header` writes the
+header fields back, and `write_params` writes the tuned `Params` defaults the `tuned:` date
+refers to. A header value is **legal by construction**: `StrategyHeader` refuses a `status`
+outside `draft | candidate | champion | rejected` in its constructor, so an illegal status can
+neither be parsed out of a hand-edited file nor stamped into one — the write gate's status check
+*is* the parse.
+
 ## Known-outcome scenarios (`noctis.strategies.scenarios`)
 
 The scenarios are the file's own oracle: deterministic synthetic tapes plus the behavior

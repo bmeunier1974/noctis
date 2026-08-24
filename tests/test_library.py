@@ -15,6 +15,7 @@ from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.library import (
     NAME_RE,
     VALID_STATUSES,
+    HeaderError,
     StrategyValidationError,
     _find_strategy_class,
     _load_module,
@@ -126,6 +127,23 @@ def test_seed_library_registers_and_evaluates(families):
     )
     assert card.stage == "validated"
     assert card.symbols["AAA"].splits
+
+
+def test_list_strategies_lists_an_unreadable_header_with_an_error(tmp_path):
+    """A hand-edited illegal status is one broken file in the index, not a blank index."""
+    (tmp_path / "probe.py").write_text(GOOD_SOURCE, encoding="utf-8")
+    shipped = GOOD_SOURCE.replace("status: draft", "status: shipped").replace(
+        'name = "probe"', 'name = "shipped_probe"'
+    )
+    (tmp_path / "shipped_probe.py").write_text(shipped, encoding="utf-8")
+
+    infos = {i["name"]: i for i in list_strategies(tmp_path)}
+
+    assert set(infos) == {"probe", "shipped_probe"}
+    assert "header status 'shipped' invalid" in infos["shipped_probe"]["error"]
+    assert "error" not in infos["probe"]  # the readable file beside it is listed in full
+    assert infos["probe"]["status"] == "draft"
+    assert infos["probe"]["params"] == {"lookback": 12, "edge": 1.0}
 
 
 def test_default_signals_equals_hand_computed_series():
@@ -585,6 +603,27 @@ def test_promotion_plan_that_breaks_scenarios_is_refused(tmp_path, families, fas
     assert not list(tmp_path.rglob(".promote*")), "promotion temp file left behind"
 
 
+def test_promotion_plan_with_a_param_the_file_does_not_declare_is_refused(
+    tmp_path, families, fast_gate
+):
+    """A failed ``Params`` write-back reaches the caller in the gate's own currency: the header
+    module refuses in :class:`HeaderError`, ``plan_promotion`` wraps it, and the toolbox's
+    ``except StrategyValidationError`` around the plan is what turns it into a refused verdict."""
+    write_strategy(tmp_path, "probe", GOOD_SOURCE, families)
+
+    with pytest.raises(StrategyValidationError) as excinfo:
+        plan_promotion(
+            tmp_path, "probe", {"lookback": 20, "windwo": 5}, symbols=["AAA"], tuned="2026-07-04"
+        )
+
+    assert str(excinfo.value) == (
+        "probe: params ['windwo'] not found as Params fields for write-back"
+    )
+    assert isinstance(excinfo.value.__cause__, HeaderError)
+    assert not (tmp_path / "champions" / "probe.py").exists()
+    assert not list(tmp_path.rglob(".promote*")), "promotion temp file left behind"
+
+
 def test_promotion_tolerates_legacy_scenario_less_file(tmp_path, families, fast_gate):
     legacy = GOOD_SOURCE.replace("def scenarios(", "def _scenarios(")
     (tmp_path / "probe.py").write_text(legacy, encoding="utf-8")  # pre-gate artifact
@@ -601,10 +640,19 @@ def test_set_header_tolerates_legacy_scenario_less_file(tmp_path, families, fast
     assert parse_header(strategy_source(tmp_path, "probe")).status == "rejected"
 
 
-def test_set_header_rejects_bad_status(tmp_path, families, fast_gate):
+def test_set_header_refuses_an_unknown_field_and_an_illegal_status(tmp_path, families, fast_gate):
+    """The typed stamp is the gate: a mistyped field is a ``TypeError``, a bad status a
+    ``HeaderError`` (a ``ValueError``) raised as-is — never wrapped, never written."""
     write_strategy(tmp_path, "probe", GOOD_SOURCE, families)
-    with pytest.raises(ValueError):
+
+    with pytest.raises(TypeError):
+        set_header(tmp_path, "probe", families=families, statuses="rejected")  # type: ignore[call-arg]
+    with pytest.raises(HeaderError) as excinfo:
         set_header(tmp_path, "probe", families=families, status="shipped")
+
+    assert isinstance(excinfo.value, ValueError)
+    assert not isinstance(excinfo.value, StrategyValidationError)
+    assert parse_header(strategy_source(tmp_path, "probe")).status == "draft"  # file untouched
 
 
 def _promote(paths, families, name="probe", params=None, symbols=("AAA",), tuned="2026-07-04"):
@@ -993,6 +1041,19 @@ def test_prune_spares_rejected_and_champion_status(tmp_path):
     assert (work / "old_reject.py").is_file()
     assert (work / "old_champ.py").is_file()
     assert not (work / "archive").exists()  # nothing archived ⇒ area never materializes
+
+
+def test_prune_spares_a_file_whose_header_will_not_parse(tmp_path):
+    """Housekeeping never judges a file it cannot read — and keeps sweeping the ones it can."""
+    work = tmp_path / "__tmp"
+    unreadable = _draft_file(work, "old_shipped", status="shipped", age_hours=9)
+    stale = _draft_file(work, "old_draft", status="draft", age_hours=9)
+
+    assert prune_stale_drafts(work, ttl_hours=1) == ["old_draft"]
+
+    assert unreadable.is_file()  # left exactly where it was: not archived, not reported
+    assert not stale.exists()
+    assert (work / "archive" / "000001-old_draft.py").is_file()
 
 
 def test_prune_never_scans_subdirectories(tmp_path):

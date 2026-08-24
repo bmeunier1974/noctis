@@ -25,7 +25,7 @@ import pandas as pd
 
 from noctis.strategies.base import replay_targets
 
-_NS_PER_MINUTE = 60 * 1_000_000_000
+NS_PER_MINUTE = 60 * 1_000_000_000
 _SPREAD_PCT = 0.002  # high/low bracket relative to close (open == close, repo convention)
 
 MIN_SCENARIOS, MAX_SCENARIOS = 2, 8
@@ -36,8 +36,13 @@ class ScenarioError(Exception):
     """A scenario declaration or replay violated the known-outcome contract."""
 
 
-def _one_line(text: object) -> str:
-    """Flatten to a single line — the gate subprocess surfaces only the last stderr line."""
+def one_line(text: object) -> str:
+    """Flatten ``text`` to a single line, collapsing every run of whitespace to one space.
+
+    The write gate validates in a fresh subprocess and surfaces only the **last** stderr line,
+    so a refusal message spread over several lines would reach the caller truncated. Every
+    message this package (and the library gate beside it) hands back is flattened through here.
+    """
     return " ".join(str(text).split())
 
 
@@ -358,7 +363,7 @@ class Scenario:
         n = close.size
         return pd.DataFrame(
             {
-                "ts_event": np.arange(n, dtype="int64") * _NS_PER_MINUTE,
+                "ts_event": np.arange(n, dtype="int64") * NS_PER_MINUTE,
                 "open": close,
                 "high": close * (1.0 + _SPREAD_PCT),
                 "low": close * (1.0 - _SPREAD_PCT),
@@ -429,7 +434,7 @@ def _check_warmup_honesty(cls, scenario: Scenario, params, targets: list[int]) -
     except Exception as exc:  # noqa: BLE001 — a broken declaration is a contract failure
         return (
             f"scenario {scenario.name!r}: warmup_bars() raised "
-            f"{type(exc).__name__}: {_one_line(exc)}"
+            f"{type(exc).__name__}: {one_line(exc)}"
         )
     if warmup <= 0:
         return None
@@ -556,11 +561,11 @@ def run_scenario(cls, scenario: Scenario) -> str | None:
     try:
         params = cls.params_cls(**(scenario.params or {}))
     except Exception as exc:  # noqa: BLE001 — surfaced verbatim to the author
-        return f"scenario {scenario.name!r}: params override rejected: {_one_line(exc)}"
+        return f"scenario {scenario.name!r}: params override rejected: {one_line(exc)}"
     try:
         targets = replay_targets(cls(params), scenario.frame())
     except Exception as exc:  # noqa: BLE001 — surfaced verbatim to the author
-        return f"scenario {scenario.name!r}: replay raised {type(exc).__name__}: {_one_line(exc)}"
+        return f"scenario {scenario.name!r}: replay raised {type(exc).__name__}: {one_line(exc)}"
     for j, t in enumerate(targets):
         if t not in (-1, 0, 1):
             return (
@@ -587,7 +592,7 @@ def check_scenario_contract(cls, *, require: bool = True) -> None:
     try:
         declared = cls.scenarios()
     except Exception as exc:  # noqa: BLE001 — a broken declaration is a contract failure
-        raise ScenarioError(f"scenarios() raised {type(exc).__name__}: {_one_line(exc)}") from exc
+        raise ScenarioError(f"scenarios() raised {type(exc).__name__}: {one_line(exc)}") from exc
     if not declared:
         if require:
             raise ScenarioError(

@@ -11,7 +11,11 @@ subclass and carries its research record in a structured module-docstring header
     tuned: 2026-07-04            # date the current Params defaults were fitted
     \"\"\"
 
-The header is convention plus the tiny parser here, not a new format. The loader mirrors
+The header is convention plus the tiny module :mod:`noctis.strategies.header` — which owns the
+value (a frozen :class:`~noctis.strategies.header.StrategyHeader`, illegal by construction if its
+``status`` is), the parse, the stamp that writes header fields back and the ``Params`` default
+write-back that is the other half of the same record, all re-exported here so no caller's import
+moved. The loader mirrors
 ``noctis/strategies/spec/strategy.py``'s ``load_and_register``; :func:`write_strategy` is the
 validation gate — a structural lint on the raw source (``noctis.strategies.structure``), then
 import in a **fresh interpreter** (via the swappable :data:`validator` seam), a smoke replay on
@@ -38,9 +42,10 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
@@ -48,6 +53,16 @@ import pandas as pd
 from noctis.strategies import scenarios as scenarios_mod
 from noctis.strategies.base import TraderStrategy, params_to_dict, replay_targets
 from noctis.strategies.families import FamilyRegistry
+from noctis.strategies.header import (  # noqa: F401 — re-exported: no caller's import moves
+    FIELD_RE,
+    HEADER_FIELDS,
+    VALID_STATUSES,
+    HeaderError,
+    StrategyHeader,
+    parse_header,
+    stamp_header,
+    write_params,
+)
 from noctis.strategies.scenario_spec import (
     SpecError,
     SpecSuite,
@@ -77,14 +92,11 @@ ARCHIVE_SUBDIR = "archive"
 UNDECIDED_STATUSES = ("draft", "candidate")
 # Keep roughly the last N archived drafts on disk, oldest evicted (mirrors failed_store).
 ARCHIVE_CAP = 50
-HEADER_FIELDS = ("status", "style", "symbols", "tuned")
-VALID_STATUSES = ("draft", "candidate", "champion", "rejected")
 # The one strategy-name rule: lower_snake_case starting with a letter. Exported so the research
 # driver derives names to satisfy exactly the rule the write gate enforces (:func:`write_strategy`)
 # — one definition, so the two can never drift (story #92).
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _ARCHIVE_SEQ_RE = re.compile(r"^(\d+)-")
-_NS_PER_MINUTE = 60 * 1_000_000_000
 _VALIDATE_TIMEOUT_S = 120
 # Project ruff line-length: the machine-stamped scenarios() block renders its embedded-spec call
 # inline below this width and wraps above it, so the stamp is byte-stable under ``ruff format``.
@@ -168,7 +180,7 @@ def fixture_frame(n: int = 180, seed: int = 7) -> pd.DataFrame:
     close = 100.0 + rng.normal(0.0, 1.0, n).cumsum() + 5.0 * np.sin(np.linspace(0, 6 * np.pi, n))
     return pd.DataFrame(
         {
-            "ts_event": [i * _NS_PER_MINUTE for i in range(n)],
+            "ts_event": [i * scenarios_mod.NS_PER_MINUTE for i in range(n)],
             "open": close,
             "high": close + 0.5,
             "low": close - 0.5,
@@ -176,152 +188,6 @@ def fixture_frame(n: int = 180, seed: int = 7) -> pd.DataFrame:
             "volume": [1000] * n,
         }
     )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Header parse / write-back
-# ─────────────────────────────────────────────────────────────────────────────
-@dataclass
-class StrategyHeader:
-    thesis: str = ""
-    status: str = "draft"
-    style: str = ""
-    symbols: list[str] = field(default_factory=list)
-    tuned: str | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "thesis": self.thesis,
-            "status": self.status,
-            "style": self.style,
-            "symbols": list(self.symbols),
-            "tuned": self.tuned,
-        }
-
-
-_FIELD_RE = re.compile(rf"^({'|'.join(HEADER_FIELDS)})\s*:\s*(.*)$")
-
-
-def parse_header(source: str) -> StrategyHeader:
-    """Parse the docstring header (thesis first paragraph + ``field: value`` lines)."""
-    header = StrategyHeader()
-    try:
-        doc = ast.get_docstring(ast.parse(source)) or ""
-    except SyntaxError:
-        return header
-    thesis_lines: list[str] = []
-    in_thesis = True
-    for line in doc.splitlines():
-        stripped = line.strip()
-        match = _FIELD_RE.match(stripped)
-        if match:
-            in_thesis = False
-            value = match.group(2).split("#", 1)[0].strip()
-            if match.group(1) == "symbols":
-                header.symbols = [
-                    s.strip().upper() for s in re.split(r"[,\s]+", value) if s.strip()
-                ]
-            elif match.group(1) == "tuned":
-                header.tuned = value or None
-            else:
-                setattr(header, match.group(1), value)
-            continue
-        if in_thesis:
-            if not stripped and thesis_lines:
-                in_thesis = False
-                continue
-            if stripped:
-                thesis_lines.append(stripped)
-    header.thesis = " ".join(thesis_lines)
-    return header
-
-
-def _docstring_span(source: str) -> tuple[int, int]:
-    """(start, end) line indexes (0-based, end exclusive) of the module docstring."""
-    tree = ast.parse(source)
-    node = tree.body[0] if tree.body else None
-    if (
-        node is None
-        or not isinstance(node, ast.Expr)
-        or not isinstance(node.value, ast.Constant)
-        or not isinstance(node.value.value, str)
-    ):
-        raise StrategyValidationError("strategy file has no module docstring header")
-    return node.lineno - 1, cast(int, node.end_lineno)
-
-
-def _render_header_fields(source: str, **fields) -> str:
-    """Return ``source`` with docstring header fields updated (or inserted before close)."""
-    start, end = _docstring_span(source)
-    lines = source.splitlines(keepends=True)
-    doc_lines = lines[start:end]
-    pending = {k: v for k, v in fields.items() if v is not None and k in HEADER_FIELDS}
-
-    def render(name: str, value) -> str:
-        if name == "symbols" and isinstance(value, (list, tuple)):
-            value = " ".join(value)
-        return f"{name}: {value}\n"
-
-    for i, line in enumerate(doc_lines):
-        match = _FIELD_RE.match(line.strip())
-        if match and match.group(1) in pending:
-            name = match.group(1)
-            indent = line[: len(line) - len(line.lstrip())]
-            newline = "\n" if line.endswith("\n") else ""
-            doc_lines[i] = f"{indent}{render(name, pending.pop(name)).rstrip()}{newline}"
-
-    if pending:
-        inserted = [render(name, pending[name]) for name in HEADER_FIELDS if name in pending]
-        if len(doc_lines) == 1:
-            # Single-line docstring: split it open so the fields live inside it.
-            match = re.match(r"^(\s*)(\"\"\"|''')(.*?)(\2)\s*$", doc_lines[0].rstrip("\n"))
-            if match is None:
-                raise StrategyValidationError("cannot rewrite docstring header (unusual quoting)")
-            indent, quote, body = match.group(1), match.group(2), match.group(3)
-            doc_lines = [f"{indent}{quote}{body}\n", "\n", *inserted, f"{indent}{quote}\n"]
-        else:
-            # Insert just before the closing quotes, blank-separated from a thesis
-            # paragraph above (but packed together with existing header fields).
-            closing = len(doc_lines) - 1
-            above = doc_lines[closing - 1].strip()
-            if above and not _FIELD_RE.match(above):
-                inserted = ["\n", *inserted]
-            doc_lines = doc_lines[:closing] + inserted + doc_lines[closing:]
-
-    return "".join(lines[:start] + doc_lines + lines[end:])
-
-
-def _render_param_defaults(source: str, name: str, params: dict) -> str:
-    """Return ``source`` with the ``Params`` dataclass defaults replaced by ``params``."""
-    lines = source.splitlines(keepends=True)
-    class_idx = None
-    class_indent = 0
-    for i, line in enumerate(lines):
-        match = re.match(r"^(\s*)class\s+Params\b", line)
-        if match:
-            class_idx, class_indent = i, len(match.group(1))
-            break
-    if class_idx is None:
-        raise StrategyValidationError(f"{name}: no `class Params` block found for write-back")
-
-    remaining = dict(params)
-    for i in range(class_idx + 1, len(lines)):
-        line = lines[i]
-        stripped = line.strip()
-        if stripped and (len(line) - len(line.lstrip())) <= class_indent:
-            break  # left the Params block
-        match = re.match(r"^(\s*)(\w+)(\s*:\s*[^=#\n]+=\s*)([^#\n]*?)([ \t]*)(#.*)?(\n?)$", line)
-        if match and match.group(2) in remaining:
-            value = remaining.pop(match.group(2))
-            comment = f"{match.group(5)}{match.group(6)}" if match.group(6) else ""
-            lines[i] = (
-                f"{match.group(1)}{match.group(2)}{match.group(3)}{value!r}{comment}{match.group(7)}"
-            )
-    if remaining:
-        raise StrategyValidationError(
-            f"{name}: params {sorted(remaining)} not found as Params fields for write-back"
-        )
-    return "".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -543,7 +409,12 @@ def prune_stale_drafts(
             continue
         if path.stat().st_mtime >= cutoff:
             continue
-        header = parse_header(path.read_text(encoding="utf-8"))
+        try:
+            header = parse_header(path.read_text(encoding="utf-8"))
+        except HeaderError:
+            # Housekeeping never judges a file it cannot read: an unparseable header is
+            # "not undecided", so the file stays put — unarchived and unreported.
+            continue
         if header.status not in UNDECIDED_STATUSES:
             continue
         _archive_draft(archive_dir, path)
@@ -611,12 +482,19 @@ def load_and_register(strategies_dir: LibrarySpec, families: FamilyRegistry) -> 
 
 
 def list_strategies(strategies_dir: LibrarySpec) -> list[dict]:
-    """Library index: header fields + current Params defaults + param space per file."""
+    """Library index: header fields + current Params defaults + param space per file.
+
+    Every read of the file happens inside the one ``try``, the header included: a hand-edited
+    file whose header will not parse (an illegal ``status`` — the write gate forbids it) is
+    listed as a broken file, with its ``name`` and the ``error``, exactly like a file whose
+    class will not import. One unreadable file costs its own entry, never the whole index.
+    """
     out: list[dict] = []
     for path in _strategy_files(strategies_dir):
         source = path.read_text(encoding="utf-8")
-        info: dict = {"name": path.stem, **parse_header(source).to_dict()}
+        info: dict = {"name": path.stem}
         try:
+            info.update(parse_header(source).to_dict())
             module = _load_module(path)
             cls = _find_strategy_class(module)
             info["timeframe"] = cls.timeframe
@@ -848,17 +726,24 @@ def _rewrite(
 
 
 def set_header(
-    strategies_dir: LibrarySpec, name: str, *, families: FamilyRegistry, **fields
+    strategies_dir: LibrarySpec,
+    name: str,
+    *,
+    families: FamilyRegistry,
+    status: str | None = None,
+    style: str | None = None,
+    symbols: Sequence[str] | None = None,
+    tuned: str | None = None,
 ) -> None:
-    """Update docstring header fields (status/style/symbols/tuned) in place."""
-    bad = set(fields) - set(HEADER_FIELDS)
-    if bad:
-        raise ValueError(f"unknown header fields: {sorted(bad)}")
-    status = fields.get("status")
-    if status is not None and status not in VALID_STATUSES:
-        raise ValueError(f"invalid status {status!r}; want one of {VALID_STATUSES}")
+    """Update docstring header fields (status/style/symbols/tuned) in place.
+
+    The typed stamp owns the vocabulary and the status check: an unknown field is a
+    ``TypeError`` at the call, an illegal status a :class:`HeaderError` raised before a byte
+    is written — this function re-checks neither, so there is one spelling of both.
+    """
     source = strategy_source(strategies_dir, name)
-    _rewrite(strategies_dir, name, _render_header_fields(source, **fields), families)
+    stamped = stamp_header(source, status=status, style=style, symbols=symbols, tuned=tuned)
+    _rewrite(strategies_dir, name, stamped, families)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -909,8 +794,10 @@ def plan_promotion(
     defaults (so ``noctis backtest <name>`` with no arguments replays exactly what
     shipped) and the header is re-stamped ``status: champion`` with the fit ``symbols``
     and ``tuned`` date — then runs the write gate ONCE on the result. Raises
-    :class:`StrategyValidationError` (typically: tuned params that violate the file's
-    declared known-outcome scenarios) while the caller can still refuse the verdict;
+    :class:`StrategyValidationError` — the gate's one currency, so a rendering refusal
+    (a param the file's ``Params`` never declared) arrives wrapped into it, and tuned
+    params that violate the file's declared known-outcome scenarios arrive as
+    themselves — while the caller can still refuse the verdict;
     only a plan that survives here reaches :meth:`PromotionPlan.commit`, which the
     caller invokes after the registry crowns.
     """
@@ -919,12 +806,17 @@ def plan_promotion(
     if origin is None:
         raise FileNotFoundError(f"no strategy named {name!r} in {strategies_dir}")
     source = origin.read_text(encoding="utf-8")
-    rendered = _render_header_fields(
-        _render_param_defaults(source, name, params),
-        status="champion",
-        symbols=symbols,
-        tuned=tuned,
-    )
+    try:
+        rendered = stamp_header(
+            write_params(source, name, params),
+            status="champion",
+            symbols=symbols,
+            tuned=tuned,
+        )
+    except HeaderError as exc:
+        # The pure module refuses in its own currency; the gate's callers only know this one
+        # (``research/tools.py`` catches it around the plan to refuse the verdict).
+        raise StrategyValidationError(str(exc)) from exc
     paths.tmp.mkdir(parents=True, exist_ok=True)
     probe = paths.tmp / f".promote-{name}.py"  # dot-prefixed: invisible to discovery
     probe.write_text(rendered, encoding="utf-8")
@@ -938,11 +830,6 @@ def plan_promotion(
 # ─────────────────────────────────────────────────────────────────────────────
 # Subprocess validation entry point (``python -m noctis.strategies.library``)
 # ─────────────────────────────────────────────────────────────────────────────
-def _one_line(text: object) -> str:
-    """Flatten to a single line — the gate subprocess surfaces only the last stderr line."""
-    return " ".join(str(text).split())
-
-
 def _validate_against_spec(cls: type[TraderStrategy], spec: SpecSuite) -> None:
     """Replay the supplied scenario spec against the candidate — the gate owns the oracle (#84).
 
@@ -963,15 +850,15 @@ def _validate_against_spec(cls: type[TraderStrategy], spec: SpecSuite) -> None:
         warm = int(cls.warmup_bars(cls.params_cls()))
     except Exception as exc:  # noqa: BLE001 — a broken warmup declaration is a contract failure
         raise StrategyValidationError(
-            f"warmup_bars() raised {type(exc).__name__}: {_one_line(exc)}"
+            f"warmup_bars() raised {type(exc).__name__}: {scenarios_mod.one_line(exc)}"
         ) from exc
     try:
         compiled = compile_spec(spec, warm)
     except SpecError as exc:
         raise StrategyValidationError(
             f"declared warmup_bars={warm} is {WARMUP_TOO_LARGE_MARKER}: "
-            f"{_one_line(exc)}. Shrink the lookback defaults in Params so the strategy warms up "
-            f"faster — never enlarge the scenario tape to fit the warmup"
+            f"{scenarios_mod.one_line(exc)}. Shrink the lookback defaults in Params so the "
+            f"strategy warms up faster — never enlarge the scenario tape to fit the warmup"
         ) from exc
     for scenario in compiled:
         msg = scenarios_mod.run_scenario(cls, scenario)
@@ -1006,11 +893,13 @@ def _validate_file(
         raise StrategyValidationError(
             f"timeframe {cls.timeframe!r} unsupported; want one of {sorted(TIMEFRAMES)}"
         )
-    header = parse_header(source)
-    if header.status not in VALID_STATUSES:
-        raise StrategyValidationError(
-            f"header status {header.status!r} invalid; want one of {VALID_STATUSES}"
-        )
+    # ``StrategyHeader.parse`` raising *is* the status check: an illegal declared status cannot
+    # become a value, so the gate reads through the value and only says the refusal in its own
+    # currency (#316) — the message itself is spelled once, in the header's constructor.
+    try:
+        parse_header(source)
+    except HeaderError as exc:
+        raise StrategyValidationError(str(exc)) from exc
     space = cls.param_space()
     if not isinstance(space, list):
         raise StrategyValidationError("param_space() must return a list of ParamSpec")
