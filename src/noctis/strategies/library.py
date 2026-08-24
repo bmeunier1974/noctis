@@ -410,7 +410,12 @@ def prune_stale_drafts(
             continue
         if path.stat().st_mtime >= cutoff:
             continue
-        header = parse_header(path.read_text(encoding="utf-8"))
+        try:
+            header = parse_header(path.read_text(encoding="utf-8"))
+        except HeaderError:
+            # Housekeeping never judges a file it cannot read: an unparseable header is
+            # "not undecided", so the file stays put — unarchived and unreported.
+            continue
         if header.status not in UNDECIDED_STATUSES:
             continue
         _archive_draft(archive_dir, path)
@@ -478,12 +483,19 @@ def load_and_register(strategies_dir: LibrarySpec, families: FamilyRegistry) -> 
 
 
 def list_strategies(strategies_dir: LibrarySpec) -> list[dict]:
-    """Library index: header fields + current Params defaults + param space per file."""
+    """Library index: header fields + current Params defaults + param space per file.
+
+    Every read of the file happens inside the one ``try``, the header included: a hand-edited
+    file whose header will not parse (an illegal ``status`` — the write gate forbids it) is
+    listed as a broken file, with its ``name`` and the ``error``, exactly like a file whose
+    class will not import. One unreadable file costs its own entry, never the whole index.
+    """
     out: list[dict] = []
     for path in _strategy_files(strategies_dir):
         source = path.read_text(encoding="utf-8")
-        info: dict = {"name": path.stem, **parse_header(source).to_dict()}
+        info: dict = {"name": path.stem}
         try:
+            info.update(parse_header(source).to_dict())
             module = _load_module(path)
             cls = _find_strategy_class(module)
             info["timeframe"] = cls.timeframe
@@ -888,16 +900,12 @@ def _validate_file(
             f"timeframe {cls.timeframe!r} unsupported; want one of {sorted(TIMEFRAMES)}"
         )
     # ``StrategyHeader.parse`` raising *is* the status check: an illegal declared status cannot
-    # become a value, so the gate only has to say the refusal in its own currency (#312). The
-    # branch below is already dead for that reason; #316 is where it goes.
+    # become a value, so the gate reads through the value and only says the refusal in its own
+    # currency (#316) — the message itself is spelled once, in the header's constructor.
     try:
-        header = parse_header(source)
+        parse_header(source)
     except HeaderError as exc:
         raise StrategyValidationError(str(exc)) from exc
-    if header.status not in VALID_STATUSES:
-        raise StrategyValidationError(
-            f"header status {header.status!r} invalid; want one of {VALID_STATUSES}"
-        )
     space = cls.param_space()
     if not isinstance(space, list):
         raise StrategyValidationError("param_space() must return a list of ParamSpec")

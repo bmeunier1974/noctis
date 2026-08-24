@@ -129,6 +129,23 @@ def test_seed_library_registers_and_evaluates(families):
     assert card.symbols["AAA"].splits
 
 
+def test_list_strategies_lists_an_unreadable_header_with_an_error(tmp_path):
+    """A hand-edited illegal status is one broken file in the index, not a blank index."""
+    (tmp_path / "probe.py").write_text(GOOD_SOURCE, encoding="utf-8")
+    shipped = GOOD_SOURCE.replace("status: draft", "status: shipped").replace(
+        'name = "probe"', 'name = "shipped_probe"'
+    )
+    (tmp_path / "shipped_probe.py").write_text(shipped, encoding="utf-8")
+
+    infos = {i["name"]: i for i in list_strategies(tmp_path)}
+
+    assert set(infos) == {"probe", "shipped_probe"}
+    assert "header status 'shipped' invalid" in infos["shipped_probe"]["error"]
+    assert "error" not in infos["probe"]  # the readable file beside it is listed in full
+    assert infos["probe"]["status"] == "draft"
+    assert infos["probe"]["params"] == {"lookback": 12, "edge": 1.0}
+
+
 def test_default_signals_equals_hand_computed_series():
     class AboveFirst(TraderStrategy):
         name = "above_first"
@@ -1024,6 +1041,19 @@ def test_prune_spares_rejected_and_champion_status(tmp_path):
     assert (work / "old_reject.py").is_file()
     assert (work / "old_champ.py").is_file()
     assert not (work / "archive").exists()  # nothing archived ⇒ area never materializes
+
+
+def test_prune_spares_a_file_whose_header_will_not_parse(tmp_path):
+    """Housekeeping never judges a file it cannot read — and keeps sweeping the ones it can."""
+    work = tmp_path / "__tmp"
+    unreadable = _draft_file(work, "old_shipped", status="shipped", age_hours=9)
+    stale = _draft_file(work, "old_draft", status="draft", age_hours=9)
+
+    assert prune_stale_drafts(work, ttl_hours=1) == ["old_draft"]
+
+    assert unreadable.is_file()  # left exactly where it was: not archived, not reported
+    assert not stale.exists()
+    assert (work / "archive" / "000001-old_draft.py").is_file()
 
 
 def test_prune_never_scans_subdirectories(tmp_path):
