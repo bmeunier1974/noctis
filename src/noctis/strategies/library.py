@@ -97,7 +97,6 @@ ARCHIVE_CAP = 50
 # — one definition, so the two can never drift (story #92).
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _ARCHIVE_SEQ_RE = re.compile(r"^(\d+)-")
-_NS_PER_MINUTE = 60 * 1_000_000_000
 _VALIDATE_TIMEOUT_S = 120
 # Project ruff line-length: the machine-stamped scenarios() block renders its embedded-spec call
 # inline below this width and wraps above it, so the stamp is byte-stable under ``ruff format``.
@@ -181,7 +180,7 @@ def fixture_frame(n: int = 180, seed: int = 7) -> pd.DataFrame:
     close = 100.0 + rng.normal(0.0, 1.0, n).cumsum() + 5.0 * np.sin(np.linspace(0, 6 * np.pi, n))
     return pd.DataFrame(
         {
-            "ts_event": [i * _NS_PER_MINUTE for i in range(n)],
+            "ts_event": [i * scenarios_mod.NS_PER_MINUTE for i in range(n)],
             "open": close,
             "high": close + 0.5,
             "low": close - 0.5,
@@ -831,11 +830,6 @@ def plan_promotion(
 # ─────────────────────────────────────────────────────────────────────────────
 # Subprocess validation entry point (``python -m noctis.strategies.library``)
 # ─────────────────────────────────────────────────────────────────────────────
-def _one_line(text: object) -> str:
-    """Flatten to a single line — the gate subprocess surfaces only the last stderr line."""
-    return " ".join(str(text).split())
-
-
 def _validate_against_spec(cls: type[TraderStrategy], spec: SpecSuite) -> None:
     """Replay the supplied scenario spec against the candidate — the gate owns the oracle (#84).
 
@@ -856,15 +850,15 @@ def _validate_against_spec(cls: type[TraderStrategy], spec: SpecSuite) -> None:
         warm = int(cls.warmup_bars(cls.params_cls()))
     except Exception as exc:  # noqa: BLE001 — a broken warmup declaration is a contract failure
         raise StrategyValidationError(
-            f"warmup_bars() raised {type(exc).__name__}: {_one_line(exc)}"
+            f"warmup_bars() raised {type(exc).__name__}: {scenarios_mod.one_line(exc)}"
         ) from exc
     try:
         compiled = compile_spec(spec, warm)
     except SpecError as exc:
         raise StrategyValidationError(
             f"declared warmup_bars={warm} is {WARMUP_TOO_LARGE_MARKER}: "
-            f"{_one_line(exc)}. Shrink the lookback defaults in Params so the strategy warms up "
-            f"faster — never enlarge the scenario tape to fit the warmup"
+            f"{scenarios_mod.one_line(exc)}. Shrink the lookback defaults in Params so the "
+            f"strategy warms up faster — never enlarge the scenario tape to fit the warmup"
         ) from exc
     for scenario in compiled:
         msg = scenarios_mod.run_scenario(cls, scenario)

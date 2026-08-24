@@ -12,6 +12,7 @@ import pytest
 from noctis.strategies import indicators as ind
 from noctis.strategies.base import ParamSpec, TraderStrategy
 from noctis.strategies.scenarios import (
+    NS_PER_MINUTE,
     Scenario,
     ScenarioError,
     Segment,
@@ -27,6 +28,7 @@ from noctis.strategies.scenarios import (
     holds_short_through,
     long_within,
     observed_behavior,
+    one_line,
     recovery,
     run_scenario,
     selloff,
@@ -695,3 +697,19 @@ def test_scale_free_deterministic_causal_strategy_passes_every_invariant():
     # fires, so a legitimate strategy sails through the whole suite.
     for scen in (POSITIVE, NEGATIVE):
         assert run_scenario(_with_scenarios(POSITIVE, NEGATIVE), scen) is None
+
+
+# ── the shared helpers live here, and only here (#313) ────────────────────────────────────
+def test_one_line_flattens_every_run_of_whitespace_to_a_single_space():
+    assert one_line("a\n  b\t c") == "a b c"
+
+
+def test_ns_per_minute_is_one_minute_in_nanoseconds():
+    assert NS_PER_MINUTE == 60 * 1_000_000_000
+
+
+def test_the_library_twins_are_gone():
+    from noctis.strategies import library
+
+    assert not hasattr(library, "_one_line")
+    assert not hasattr(library, "_NS_PER_MINUTE")
