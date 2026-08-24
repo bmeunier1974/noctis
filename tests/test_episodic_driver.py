@@ -18,6 +18,7 @@ Two harnesses, one contract:
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ from types import SimpleNamespace
 import pytest
 
 from noctis.champions.promotion import PromotionRules
+from noctis.observability import NULL_SINK
 from noctis.research import Capabilities
 from noctis.research.driver import (
     _CHEAP_MAX_BARS,
@@ -1963,7 +1965,9 @@ def test_tool_line_carries_the_gate_facing_brief_and_error_flag(tmp_path):
 
 
 def test_narration_is_silent_without_a_sink(tmp_path):
-    # No on_event (a bare run) ⇒ no stage/tool emission and no crash — byte-identical to before.
+    # No on_event (a bare run) ⇒ the quiet null adapter, so the stage boundaries and tool lines
+    # are emitted unguarded (#339) and land nowhere: silence is an adapter, not an absence.
+    assert inspect.signature(run_episodic_research).parameters["on_event"].default is NULL_SINK
     episodes = Episodes([formulate_ok()], [decide_ok("reject")])
     box = FakeToolbox()
     summary = _drive(episodes, box, max_episodes=2, ledger=SessionLedger(tmp_path, "nv5"))

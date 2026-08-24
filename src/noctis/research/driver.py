@@ -197,7 +197,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from noctis.data.types import ns_to_date, t1_boundary_ns
 from noctis.engine.research import ResearchSummary, StopEvent
-from noctis.observability.events import Event, stage_event, tool_event
+from noctis.observability.events import NULL_SINK, EventSink, stage_event, tool_event
 from noctis.research import digests
 from noctis.research.briefings import decide_briefing, discover_briefing, formulate_briefing
 from noctis.research.episode import EmitContract, EpisodeResult
@@ -984,26 +984,29 @@ def _invoke(fn: Callable[..., Any], **kwargs: Any) -> dict[str, Any]:
 # (:func:`noctis.observability.events.tool_event`), so an episodic session's -v feed reads as one
 # continuous narrative — screens, backtests, sweeps, writes, and verdict submissions all as tool
 # lines, interleaved with the stage boundaries and the episode think/say/usage the runner tees.
-# ``ToolEmitter`` is ``(short_tool_name, args, result) -> None``; ``_NO_EMIT`` is the no-sink no-op
-# so a bare run stays byte-identical.
+# ``ToolEmitter`` is ``(short_tool_name, args, result) -> None``; ``_no_emit``/``_no_stage`` are
+# the *stage functions'* own defaults — a narrower seam than the session sink (#339), so that one
+# stage can be driven in isolation without narration. They are not a "no sink" case: the session
+# sink is always real, and a session nobody watches carries ``NULL_SINK``.
 ToolEmitter = Callable[[str, dict[str, Any], dict[str, Any]], None]
 
 
 def _no_emit(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+    """The un-narrated stage function's tool-line no-op."""
     return None
 
 
 def _no_stage(stage: str) -> None:
-    """The no-sink stage-boundary no-op, so a stage function can be driven without narration."""
+    """The un-narrated stage function's stage-boundary no-op."""
     return None
 
 
-def _tool_emitter(on_event: Callable[[Event | str], None] | None, toolbox: Toolbox) -> ToolEmitter:
-    """Build the driver's tool-line emitter, or the no-op when no sink is wired. Each line uses the
-    toolbox's own ``result_brief`` (the gate-facing slice) so the numbers a promotion/rejection
-    turns on print exactly as they do in the conversation loop's feed."""
-    if on_event is None:
-        return _no_emit
+def _tool_emitter(on_event: EventSink, toolbox: Toolbox) -> ToolEmitter:
+    """Build the driver's tool-line emitter over the session sink. Each line uses the toolbox's
+    own ``result_brief`` (the gate-facing slice) so the numbers a promotion/rejection turns on
+    print exactly as they do in the conversation loop's feed. There is no no-sink case to branch
+    on (#339): a session nobody watches carries the quiet
+    :data:`~noctis.observability.events.NULL_SINK`, and the lines land there."""
 
     def emit_tool(name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
         brief = toolbox.result_brief(result) if isinstance(result, dict) else {}
@@ -1725,7 +1728,7 @@ def run_episodic_research(
     models: dict[str, Any] | None = None,
     sweep_trials: int | None = None,
     market_digest: Callable[[], str] | None = None,
-    on_event: Callable[[Event | str], None] | None = None,
+    on_event: EventSink = NULL_SINK,
     price_table: PriceTable | None = None,
 ) -> ResearchSummary:
     """Run one episodic research session; returns the same summary shape as the conversation loop.
@@ -1763,7 +1766,10 @@ def run_episodic_research(
     have work), the driver's deterministic toolbox actions emit the
     same ``tool`` lines the loop does, and the injected episodes (via the episode runner's own
     ``on_event``) tee the think/say/usage the model returned — so the whole arc interleaves on one
-    sink. ``None`` (a bare run) ⇒ no emission, byte-identical to before.
+    sink. It is always a real
+    :class:`~noctis.observability.events.EventSink`: a bare run holds the quiet
+    :data:`~noctis.observability.events.NULL_SINK`, so the driver emits unguarded and silence is
+    the adapter's doing, not a check at every boundary.
 
     ``price_table`` prices the session's journaled tokens into ``summary.usd_estimate`` (story
     #140) — the run's own table, handed in as a value like everything else here, so a config price
@@ -1780,14 +1786,14 @@ def run_episodic_research(
     formulated = 0
 
     # Observability seam (#73): a `stage` boundary before each stage's work and a `tool` line per
-    # deterministic toolbox action, both no-ops without a sink so a bare run is unchanged.
+    # deterministic toolbox action, both emitted unguarded into whatever sink this session holds —
+    # the quiet null adapter on a bare run, so nothing surfaces and nothing branches.
     emit_tool = _tool_emitter(on_event, toolbox)
 
     def emit_stage(
         stage: str, strategy: str | None = None, *, oracle: list[str] | None = None
     ) -> None:
-        if on_event is not None:
-            on_event(stage_event(stage, strategy, oracle=oracle))
+        on_event(stage_event(stage, strategy, oracle=oracle))
 
     ledger.record_session_start(
         mandate=mandate_source,
