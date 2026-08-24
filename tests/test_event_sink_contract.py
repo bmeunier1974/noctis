@@ -6,11 +6,12 @@ string), ``delta``/``hint``/``activity``, and the ``verbose``/``show_reasoning``
 reads the agent loop and the CLI make. :class:`~noctis.observability.events.EventSink` is that
 surface as a type, and :class:`~noctis.observability.events.NullSink` is its safe-default adapter.
 
-These tests are the contract. The conformance test is **parametrized over adapters** — it starts
-with the two that exist and already conform (``Console`` and ``NullSink``), and later stories of
-the epic add the tee and the debug recorder to :data:`ADAPTERS` rather than writing a second
-by-name test each. Everything asserted here is what a caller observes: what the sink accepts, what
-it returns, that ``activity`` brackets a block, and what the three flags read as.
+These tests are the contract. The conformance test is **parametrized over adapters** — the
+renderer (``Console``), the quiet default (``NullSink``) and the splitter (``EventTee``, #335),
+with the debug recorder joining :data:`ADAPTERS` in a later story of the epic rather than bringing
+a second set of by-name tests with it. Everything asserted here is what a caller observes: what
+the sink accepts, what it returns, that ``activity`` brackets a block, and what the three flags
+read as.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from noctis.observability import NULL_SINK, Console, Event, EventSink, NullSink
+from noctis.observability import NULL_SINK, Console, Event, EventSink, EventTee, NullSink
 from noctis.observability import events as events_module
 
 # The seam's whole surface, named once. Every adapter serves all seven; dropping any one of them
@@ -44,9 +45,15 @@ def _console() -> Console:
     return Console(2, color=False, sink=[].append, tty=False)
 
 
-# The adapters that declare the seam. Story #335 adds ``EventTee(NULL_SINK)`` and story #336 the
-# debug ``Recorder``; each is one entry here, not a new set of by-name tests.
-ADAPTERS = {"console": _console, "null-sink": NullSink}
+def _tee() -> EventTee:
+    """A tee fronting the quiet null sink — the shape a ``--debug`` run with no ``-v`` builds. It
+    is a sink because it delegates every read to the real primary it holds (#335)."""
+    return EventTee(NULL_SINK, [].append)
+
+
+# The adapters that declare the seam. Story #336 adds the debug ``Recorder``; each is one entry
+# here, not a new set of by-name tests.
+ADAPTERS = {"console": _console, "null-sink": NullSink, "event-tee": _tee}
 
 
 # ── the conformance test: every adapter serves all seven members ─────────────────────────────

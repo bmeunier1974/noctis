@@ -1112,15 +1112,16 @@ def build_event_sink(
     ``-v``/``-vv``/``--show-reasoning`` asks for one, else ``None`` so the loops fall back to their
     own logger sinks. With a ``secondary`` (a recorder-style event sink) it returns an
     :class:`~noctis.observability.EventTee` that renders on the console *and* feeds the recorder —
-    **even when the console is absent**, so a quiet ``--debug`` run (no ``-v``, primary ``None``)
-    still records every event. The secondary is typed generically as any event callable, so no
-    recorder needs to exist yet."""
+    **even when the console is absent**, so a quiet ``--debug`` run (no ``-v``) still records every
+    event: with no console to render on, the tee's primary is the quiet
+    :data:`~noctis.observability.NULL_SINK` rather than nothing at all. The secondary is typed
+    generically as any event callable, so no recorder needs to exist yet."""
     console = _build_console(verbose, show_reasoning=show_reasoning)
     if secondary is None:
         return console
-    from noctis.observability import EventTee
+    from noctis.observability import NULL_SINK, EventTee
 
-    return EventTee(console, secondary)
+    return EventTee(console if console is not None else NULL_SINK, secondary)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
