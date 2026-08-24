@@ -11,9 +11,10 @@ subclass and carries its research record in a structured module-docstring header
     tuned: 2026-07-04            # date the current Params defaults were fitted
     \"\"\"
 
-The header is convention plus the tiny parser in :mod:`noctis.strategies.header` — which owns
-the value (a frozen :class:`~noctis.strategies.header.StrategyHeader`, illegal by construction if
-its ``status`` is) and is re-exported here, so no caller's import moved. The loader mirrors
+The header is convention plus the tiny module :mod:`noctis.strategies.header` — which owns the
+value (a frozen :class:`~noctis.strategies.header.StrategyHeader`, illegal by construction if its
+``status`` is), the parse and the stamp that writes fields back, all re-exported here so no
+caller's import moved. The loader mirrors
 ``noctis/strategies/spec/strategy.py``'s ``load_and_register``; :func:`write_strategy` is the
 validation gate — a structural lint on the raw source (``noctis.strategies.structure``), then
 import in a **fresh interpreter** (via the swappable :data:`validator` seam), a smoke replay on
@@ -40,9 +41,10 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
@@ -57,6 +59,7 @@ from noctis.strategies.header import (  # noqa: F401 — re-exported: no caller'
     HeaderError,
     StrategyHeader,
     parse_header,
+    stamp_header,
 )
 from noctis.strategies.scenario_spec import (
     SpecError,
@@ -187,63 +190,9 @@ def fixture_frame(n: int = 180, seed: int = 7) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Header write-back  (the value and the parse live in ``noctis.strategies.header``)
+# Params write-back  (the header value, its parse and its stamp all live in
+# ``noctis.strategies.header``; only the ``Params`` defaults are rewritten here)
 # ─────────────────────────────────────────────────────────────────────────────
-def _docstring_span(source: str) -> tuple[int, int]:
-    """(start, end) line indexes (0-based, end exclusive) of the module docstring."""
-    tree = ast.parse(source)
-    node = tree.body[0] if tree.body else None
-    if (
-        node is None
-        or not isinstance(node, ast.Expr)
-        or not isinstance(node.value, ast.Constant)
-        or not isinstance(node.value.value, str)
-    ):
-        raise StrategyValidationError("strategy file has no module docstring header")
-    return node.lineno - 1, cast(int, node.end_lineno)
-
-
-def _render_header_fields(source: str, **fields) -> str:
-    """Return ``source`` with docstring header fields updated (or inserted before close)."""
-    start, end = _docstring_span(source)
-    lines = source.splitlines(keepends=True)
-    doc_lines = lines[start:end]
-    pending = {k: v for k, v in fields.items() if v is not None and k in HEADER_FIELDS}
-
-    def render(name: str, value) -> str:
-        if name == "symbols" and isinstance(value, (list, tuple)):
-            value = " ".join(value)
-        return f"{name}: {value}\n"
-
-    for i, line in enumerate(doc_lines):
-        match = FIELD_RE.match(line.strip())
-        if match and match.group(1) in pending:
-            name = match.group(1)
-            indent = line[: len(line) - len(line.lstrip())]
-            newline = "\n" if line.endswith("\n") else ""
-            doc_lines[i] = f"{indent}{render(name, pending.pop(name)).rstrip()}{newline}"
-
-    if pending:
-        inserted = [render(name, pending[name]) for name in HEADER_FIELDS if name in pending]
-        if len(doc_lines) == 1:
-            # Single-line docstring: split it open so the fields live inside it.
-            match = re.match(r"^(\s*)(\"\"\"|''')(.*?)(\2)\s*$", doc_lines[0].rstrip("\n"))
-            if match is None:
-                raise StrategyValidationError("cannot rewrite docstring header (unusual quoting)")
-            indent, quote, body = match.group(1), match.group(2), match.group(3)
-            doc_lines = [f"{indent}{quote}{body}\n", "\n", *inserted, f"{indent}{quote}\n"]
-        else:
-            # Insert just before the closing quotes, blank-separated from a thesis
-            # paragraph above (but packed together with existing header fields).
-            closing = len(doc_lines) - 1
-            above = doc_lines[closing - 1].strip()
-            if above and not FIELD_RE.match(above):
-                inserted = ["\n", *inserted]
-            doc_lines = doc_lines[:closing] + inserted + doc_lines[closing:]
-
-    return "".join(lines[:start] + doc_lines + lines[end:])
-
-
 def _render_param_defaults(source: str, name: str, params: dict) -> str:
     """Return ``source`` with the ``Params`` dataclass defaults replaced by ``params``."""
     lines = source.splitlines(keepends=True)
@@ -801,17 +750,24 @@ def _rewrite(
 
 
 def set_header(
-    strategies_dir: LibrarySpec, name: str, *, families: FamilyRegistry, **fields
+    strategies_dir: LibrarySpec,
+    name: str,
+    *,
+    families: FamilyRegistry,
+    status: str | None = None,
+    style: str | None = None,
+    symbols: Sequence[str] | None = None,
+    tuned: str | None = None,
 ) -> None:
-    """Update docstring header fields (status/style/symbols/tuned) in place."""
-    bad = set(fields) - set(HEADER_FIELDS)
-    if bad:
-        raise ValueError(f"unknown header fields: {sorted(bad)}")
-    status = fields.get("status")
-    if status is not None and status not in VALID_STATUSES:
-        raise ValueError(f"invalid status {status!r}; want one of {VALID_STATUSES}")
+    """Update docstring header fields (status/style/symbols/tuned) in place.
+
+    The typed stamp owns the vocabulary and the status check: an unknown field is a
+    ``TypeError`` at the call, an illegal status a :class:`HeaderError` raised before a byte
+    is written — this function re-checks neither, so there is one spelling of both.
+    """
     source = strategy_source(strategies_dir, name)
-    _rewrite(strategies_dir, name, _render_header_fields(source, **fields), families)
+    stamped = stamp_header(source, status=status, style=style, symbols=symbols, tuned=tuned)
+    _rewrite(strategies_dir, name, stamped, families)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -872,7 +828,7 @@ def plan_promotion(
     if origin is None:
         raise FileNotFoundError(f"no strategy named {name!r} in {strategies_dir}")
     source = origin.read_text(encoding="utf-8")
-    rendered = _render_header_fields(
+    rendered = stamp_header(
         _render_param_defaults(source, name, params),
         status="champion",
         symbols=symbols,

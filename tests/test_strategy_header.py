@@ -1,8 +1,13 @@
-"""The strategy file's research record as a value: ``StrategyHeader`` and its parse (#312).
+"""The strategy file's research record as text: ``StrategyHeader``, its parse (#312) and the
+``stamp_header`` write side (#314).
 
-String in, value out — no ``tmp_path``, no gate, no I/O. The module under test is pure by rule
-(``noctis.strategies.header`` imports the standard library and nothing else), and the last two
-tests here are what pins that rule, the way ``tests/test_eval_boundary.py`` pins the eval one.
+String in, string (or value) out — no ``tmp_path``, no gate, no I/O in the module under test. It
+is pure by rule (``noctis.strategies.header`` imports the standard library and nothing else), and
+the last two tests here are what pins that rule, the way ``tests/test_eval_boundary.py`` pins the
+eval one. The characterization section reads the committed seeds and their goldens as *text
+inputs* to that same pure function: the goldens were rendered by the private
+``library._render_header_fields`` at pre-epic commit ``1ab6da8``, so a byte of drift there means
+the stamp was re-typeset, not moved.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from noctis.strategies.header import (
     HeaderError,
     StrategyHeader,
     parse_header,
+    stamp_header,
 )
 
 HEADER_SOURCE = Path(__file__).resolve().parents[1] / "src" / "noctis" / "strategies" / "header.py"
@@ -237,7 +243,190 @@ def test_an_unknown_field_line_is_not_a_header_field() -> None:
     assert header == StrategyHeader(thesis="Toy probe.")
 
 
-# ── 3. The names the library still exports ───────────────────────────────────────────────
+# ── 3. The write side: the stamp ─────────────────────────────────────────────────────────
+
+
+def test_the_stamp_replaces_a_declared_field_in_place() -> None:
+    before = (
+        '"""Toy probe.\n'
+        "\n"
+        "    status: draft                # draft | candidate | champion | rejected\n"
+        "    style: momentum              # the family it belongs to\n"
+        '"""\n'
+        "x = 1\n"
+    )
+
+    after = stamp_header(before, status="champion")
+
+    assert after == (
+        '"""Toy probe.\n'
+        "\n"
+        "    status: champion\n"
+        "    style: momentum              # the family it belongs to\n"
+        '"""\n'
+        "x = 1\n"
+    )
+
+
+def test_a_field_left_none_is_not_touched_and_a_stamp_with_nothing_to_write_is_a_no_op() -> None:
+    before = source(
+        """
+        Toy probe.
+
+        status: candidate            # draft | candidate | champion | rejected
+        style: mean-reversion
+        symbols: AAPL MSFT
+        tuned: 2026-07-04
+        """
+    )
+
+    assert stamp_header(before) == before
+    assert stamp_header(before, tuned="2026-01-01") == before.replace(
+        "tuned: 2026-07-04", "tuned: 2026-01-01"
+    )
+
+
+def test_missing_fields_are_inserted_in_header_field_order_before_the_closing_quotes() -> None:
+    before = source("Toy probe.")
+
+    after = stamp_header(before, tuned="2026-01-01", symbols=["AAPL", "MSFT"], status="champion")
+
+    assert after == source(
+        """
+        Toy probe.
+
+        status: champion
+        symbols: AAPL MSFT
+        tuned: 2026-01-01
+        """
+    )
+
+
+def test_an_inserted_field_packs_against_the_fields_already_declared() -> None:
+    before = source(
+        """
+        Toy probe.
+
+        status: candidate
+        style: momentum
+        """
+    )
+
+    after = stamp_header(before, tuned="2026-01-01")
+
+    assert after == source(
+        """
+        Toy probe.
+
+        status: candidate
+        style: momentum
+        tuned: 2026-01-01
+        """
+    )
+
+
+def test_a_one_line_docstring_is_split_open_to_hold_the_fields() -> None:
+    after = stamp_header('"""Toy probe."""\nx = 1\n', status="champion")
+
+    assert after == source(
+        """
+        Toy probe.
+
+        status: champion
+        """
+    )
+
+
+def test_symbols_render_space_joined_and_a_ready_made_string_passes_through() -> None:
+    before = source("Toy probe.")
+
+    assert "symbols: AAPL MSFT NVDA\n" in stamp_header(before, symbols=["AAPL", "MSFT", "NVDA"])
+    assert "symbols: AAPL MSFT NVDA\n" in stamp_header(before, symbols=("AAPL", "MSFT", "NVDA"))
+    assert "symbols: AAPL MSFT NVDA\n" in stamp_header(before, symbols="AAPL MSFT NVDA")
+
+
+def test_an_illegal_status_is_refused_before_any_edit() -> None:
+    before = source(
+        """
+        Toy probe.
+
+        status: draft
+        """
+    )
+
+    with pytest.raises(HeaderError) as excinfo:
+        stamp_header(before, status="shipped", tuned="2026-01-01")
+
+    assert str(excinfo.value) == (
+        "header status 'shipped' invalid; want one of "
+        "('draft', 'candidate', 'champion', 'rejected')"
+    )
+    assert before == '"""Toy probe.\n\nstatus: draft\n"""\nx = 1\n'  # nothing was written
+
+
+def test_the_status_is_checked_before_the_file_is_even_looked_at() -> None:
+    """Refusal order, pinned: a bad status loses to nothing — not even a missing docstring."""
+    with pytest.raises(HeaderError, match="header status 'shipped' invalid"):
+        stamp_header("x = 1\n", status="shipped")
+
+
+def test_a_source_with_no_module_docstring_cannot_be_stamped() -> None:
+    with pytest.raises(HeaderError) as excinfo:
+        stamp_header("x = 1\n", status="champion")
+
+    assert str(excinfo.value) == "strategy file has no module docstring header"
+
+
+def test_a_one_line_docstring_with_unusual_quoting_is_refused() -> None:
+    with pytest.raises(HeaderError) as excinfo:
+        stamp_header('r"""Toy probe."""\nx = 1\n', status="champion")
+
+    assert str(excinfo.value) == "cannot rewrite docstring header (unusual quoting)"
+
+
+def test_an_unknown_field_is_a_type_error_not_a_silent_drop() -> None:
+    with pytest.raises(TypeError):
+        stamp_header(source("Toy probe."), statuses="champion")  # type: ignore[call-arg]
+
+
+def test_what_the_stamp_writes_is_what_the_parse_reads_back() -> None:
+    stamped = stamp_header(
+        source("Toy probe."), status="rejected", style="momentum", symbols=["AAPL"], tuned="d"
+    )
+
+    assert parse_header(stamped) == StrategyHeader(
+        thesis="Toy probe.", status="rejected", style="momentum", symbols=["AAPL"], tuned="d"
+    )
+
+
+# ── 4. The move, pinned: the committed seeds stamp exactly as they always did ─────────────
+
+SEEDS = sorted((Path(__file__).resolve().parents[1] / "strategies").glob("*.py"))
+STAMP_GOLDENS = Path(__file__).resolve().parent / "fixtures" / "header_stamp"
+
+
+@pytest.mark.parametrize("seed", SEEDS, ids=lambda seed: seed.stem)
+def test_a_committed_seed_stamps_byte_for_byte_as_the_library_renderer_did(seed: Path) -> None:
+    """Characterization: the goldens were rendered by ``library._render_header_fields`` at
+    ``1ab6da8`` (pre-epic). #314 moved that code here; a byte of difference is a rewrite."""
+    stamped = stamp_header(
+        seed.read_text(encoding="utf-8"),
+        status="champion",
+        symbols=["AAPL", "MSFT"],
+        tuned="2026-01-01",
+    )
+
+    golden = STAMP_GOLDENS / f"{seed.stem}.stamped.py.txt"
+    assert stamped == golden.read_text(encoding="utf-8")
+
+
+def test_the_characterization_covers_every_committed_seed() -> None:
+    assert [seed.stem for seed in SEEDS] == sorted(
+        path.name.removesuffix(".stamped.py.txt") for path in STAMP_GOLDENS.glob("*.stamped.py.txt")
+    )
+
+
+# ── 5. The names the library still exports ───────────────────────────────────────────────
 
 
 def test_parse_header_is_the_bound_alias_of_the_one_parser() -> None:
@@ -254,7 +443,7 @@ def test_the_library_re_exports_the_header_names_it_always_exported() -> None:
     assert library.VALID_STATUSES is VALID_STATUSES
 
 
-# ── 4. The purity rule, pinned ───────────────────────────────────────────────────────────
+# ── 6. The purity rule, pinned ───────────────────────────────────────────────────────────
 
 
 def test_the_header_module_imports_only_the_standard_library() -> None:

@@ -15,6 +15,7 @@ from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.library import (
     NAME_RE,
     VALID_STATUSES,
+    HeaderError,
     StrategyValidationError,
     _find_strategy_class,
     _load_module,
@@ -601,10 +602,19 @@ def test_set_header_tolerates_legacy_scenario_less_file(tmp_path, families, fast
     assert parse_header(strategy_source(tmp_path, "probe")).status == "rejected"
 
 
-def test_set_header_rejects_bad_status(tmp_path, families, fast_gate):
+def test_set_header_refuses_an_unknown_field_and_an_illegal_status(tmp_path, families, fast_gate):
+    """The typed stamp is the gate: a mistyped field is a ``TypeError``, a bad status a
+    ``HeaderError`` (a ``ValueError``) raised as-is — never wrapped, never written."""
     write_strategy(tmp_path, "probe", GOOD_SOURCE, families)
-    with pytest.raises(ValueError):
+
+    with pytest.raises(TypeError):
+        set_header(tmp_path, "probe", families=families, statuses="rejected")  # type: ignore[call-arg]
+    with pytest.raises(HeaderError) as excinfo:
         set_header(tmp_path, "probe", families=families, status="shipped")
+
+    assert isinstance(excinfo.value, ValueError)
+    assert not isinstance(excinfo.value, StrategyValidationError)
+    assert parse_header(strategy_source(tmp_path, "probe")).status == "draft"  # file untouched
 
 
 def _promote(paths, families, name="probe", params=None, symbols=("AAA",), tuned="2026-07-04"):
