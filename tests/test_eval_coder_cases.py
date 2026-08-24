@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -441,8 +443,9 @@ def test_a_malformed_scenario_spec_is_refused_naming_the_file_and_the_defect(tmp
 
 
 def test_a_scenario_spec_that_could_never_compile_is_refused_before_a_benchmark_runs(tmp_path):
-    """The oracle is parsed by the driver's own emit parser, so a case is a job FORMULATE could
-    have emitted — a suite with no no-trade tape is refused here, not discovered at the gate."""
+    """The oracle takes the strategy layer's own parse and parse-time compile, so a case is a job
+    FORMULATE could have emitted — a suite with no no-trade tape is refused here, not at the gate.
+    """
     spec = {
         "scenarios": [
             {
@@ -587,3 +590,19 @@ def test_the_coder_case_schema_reaches_no_file_and_no_clock():
     text = SCHEMA_SOURCE.read_text(encoding="utf-8")
     for forbidden in ("open(", "Path(", "os.", "random", "datetime.now", "utcnow", "today("):
         assert forbidden not in text, forbidden
+
+
+def test_importing_the_coder_case_schema_never_loads_the_episodic_driver():
+    """A case's fixed oracle is validated through the strategy layer, never through the LLM
+    driver (#319 D6), so nothing behind this import reaches ``noctis.research.driver``.
+
+    A fresh interpreter, because this process has already imported the driver for other tests:
+    the question is what ``import noctis.eval.coder_case`` pulls in on its own.
+    """
+    probe = "import sys, noctis.eval.coder_case\nsys.exit('noctis.research.driver' in sys.modules)"
+
+    completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+
+    assert completed.returncode == 0, (
+        f"importing noctis.eval.coder_case loaded noctis.research.driver{completed.stderr}"
+    )
