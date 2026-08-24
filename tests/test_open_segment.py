@@ -19,17 +19,18 @@ by hand in two command bodies:
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from noctis.bootstrap import SessionInputs, open_segment
+from noctis.bootstrap import Segment, SessionInputs, open_segment
 from noctis.config import load_settings
 from noctis.engine.research import ResearchSummary
 from noctis.engine.runtime import RuntimeResult
-from noctis.observability import Console, EventTee
+from noctis.observability import NULL_SINK, Console, EventTee
 from noctis.reporting.run_record import RESEARCH_PHASE
 from noctis.reporting.run_tree import RUN_LOCK_NAME, RunLockedError
 
@@ -447,12 +448,20 @@ def test_a_recorder_that_refuses_to_build_still_closes_the_segment(tmp_path, mon
 # ── the event sink the runtime / session takes ────────────────────────────────────────────
 
 
-def test_on_event_is_none_on_a_quiet_run(tmp_path):
-    """No console and no recorder ⇒ ``None``, so the loops fall back to their own logger sinks."""
+def test_on_event_is_the_null_sink_on_a_quiet_run(tmp_path):
+    """No console and no recorder ⇒ the quiet null adapter itself (#337), so the work the segment
+    hands its sink to calls it unguarded and a bare run is silent rather than sink-less."""
     settings = _settings(tmp_path)
     with open_segment(_inputs(settings), command="run", argv=["run"], clock=FakeClock()) as seg:
-        assert seg.on_event is None
+        assert seg.on_event is NULL_SINK
         seg.finish("time_limit", outcome=_result())
+
+
+def test_a_segment_declares_the_null_sink_as_its_default():
+    """A segment built without a sink is quiet, not sink-less: ``on_event`` is a real
+    :class:`~noctis.observability.EventSink` whose default is the shared null adapter."""
+    default = next(f for f in dataclasses.fields(Segment) if f.name == "on_event").default
+    assert default is NULL_SINK
 
 
 def test_on_event_is_the_level_aware_console_under_v(tmp_path):
@@ -466,8 +475,8 @@ def test_on_event_is_the_level_aware_console_under_v(tmp_path):
 
 
 def test_on_event_tees_into_the_recorder_even_when_the_console_is_absent(tmp_path, monkeypatch):
-    """A quiet ``--debug`` run records every event silently, which is why the tee is built with a
-    ``None`` primary rather than skipped."""
+    """A quiet ``--debug`` run records every event silently, which is why the tee is built on the
+    quiet ``NULL_SINK`` primary rather than skipped."""
     _llm(monkeypatch, ok=True)
     settings = _settings(tmp_path)
 

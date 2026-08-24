@@ -1770,12 +1770,12 @@ def research(
                 typer.echo(f"QA run: {recorder.run_id}")
                 typer.echo(f"QA report: {recorder.run_dir}")
 
-            # The band's level-aware sink renders the loop's typed events, teed into the recorder
-            # under --debug. The command duck-types console.saw_think/hint off it — the EventTee
-            # proxies both to the primary (or a no-op stand-in when --debug runs without -v), so
-            # -v output stays byte-identical, and a quiet run (None) keeps the loop on its own
-            # logging default.
-            console = seg.on_event
+            # The band's sink is always a real one (#337): the level-aware console under
+            # -v/--show-reasoning, an EventTee that also feeds the recorder under --debug, and the
+            # quiet NULL_SINK when nobody is watching. So the command reads saw_think and calls
+            # hint straight off it — through the tee those proxy to its primary, and on a quiet
+            # run they are the null adapter's safe defaults.
+            sink = seg.on_event
             session = build_research_session(
                 settings=settings,
                 lake=build_lake(settings),
@@ -1783,7 +1783,7 @@ def research(
                 families=build_families(settings),  # champions may be minted spec-families
                 memory=build_memory(settings),
                 mandate=active_mandate,
-                on_event=console,
+                on_event=sink,
             )
             if session is None:
                 # No session ran, so nothing was measured — the reason is reported and the counters
@@ -1834,8 +1834,8 @@ def research(
             # API — the default OpenAI reasoning models are exactly this case. Say so once, so
             # silence reads as "expected for this provider", not "the feature is broken".
             # Narration (say) is unaffected.
-            if console is not None and (verbose >= 2 or show_reasoning) and not console.saw_think:
-                console.hint(
+            if (verbose >= 2 or show_reasoning) and not sink.saw_think:
+                sink.hint(
                     f"reasoning not surfaced by {provider_of(session.model)} — its reasoning "
                     f"models return no raw chain-of-thought over the API; narration still shows"
                 )

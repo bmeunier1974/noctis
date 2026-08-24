@@ -107,12 +107,25 @@ def test_the_tee_names_the_shared_sink_protocol():
 
 
 # ── the event-sink builder ────────────────────────────────────────────────────────────────────
-def test_build_event_sink_without_secondary_is_the_console_itself():
+def test_build_event_sink_is_the_null_sink_when_nothing_is_watching():
+    """The builder never returns ``None`` (#337). A quiet run with no recorder holds the one
+    shared null adapter *itself* — identity, so "this session is quiet" is a real sink a caller
+    calls unguarded, not an absence every caller re-derives."""
     from noctis.bootstrap import build_event_sink
 
-    assert build_event_sink(0) is None  # no secondary, quiet ⇒ exactly the old None
+    assert build_event_sink(0) is NULL_SINK
+
+
+def test_build_event_sink_is_the_console_a_view_asked_for():
+    from noctis.bootstrap import build_event_sink
+
     con = build_event_sink(1)
     assert isinstance(con, Console) and not isinstance(con, EventTee)  # a bare console, no tee
+    assert con.verbose == 1
+    # --show-reasoning asks for a console on its own, with no -v at all: the folded-in console
+    # builder still answers both halves of that question.
+    reasoning = build_event_sink(0, show_reasoning=True)
+    assert isinstance(reasoning, Console) and reasoning.show_reasoning is True
 
 
 def test_build_event_sink_with_secondary_records_on_a_quiet_run():
@@ -121,7 +134,8 @@ def test_build_event_sink_with_secondary_records_on_a_quiet_run():
     recorded: list = []
     sink = build_event_sink(0, secondary=recorded.append)  # quiet --debug: no console, still record
     assert isinstance(sink, EventTee)
-    assert sink.verbose == 0  # no console ⇒ the null sink's quiet default reads through
+    assert sink._primary is NULL_SINK  # the quiet primary is the null adapter, never nothing
+    assert sink.verbose == 0  # …and its quiet default still reads through the tee
     ev = Event("tool", "x -> ok", level=1)
     sink(ev)
     assert recorded == [ev]  # the recorder gets the event even with no -v console
@@ -137,3 +151,11 @@ def test_build_event_sink_with_secondary_and_verbose_tees_to_both():
     ev = Event("tool", "x -> ok", level=1)
     sink(ev)
     assert recorded == [ev]  # the recorder still gets a copy alongside the console
+
+
+def test_one_builder_decides_a_sessions_sink():
+    """The private console-builder helper folded into :func:`build_event_sink` (#337): one
+    function decides what a session's sink is, and it has one return type."""
+    import noctis.bootstrap as bootstrap
+
+    assert not hasattr(bootstrap, "_build_console")

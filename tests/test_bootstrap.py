@@ -36,6 +36,7 @@ from noctis.champions.promotion import PromotionRules
 from noctis.config import SafetyGateError, load_settings, overlay
 from noctis.config.overlay import OverlayError, gate_snapshot
 from noctis.engine.research import ResearchSummary
+from noctis.observability import NULL_SINK
 from noctis.research import Capabilities, MandateError
 from noctis.strategies.families import FamilyRegistry
 
@@ -1041,6 +1042,23 @@ def test_build_research_session_none_without_client(tmp_path, monkeypatch):
         memory=object(),
     )
     assert session is None
+
+
+def test_a_session_built_with_no_sink_holds_the_quiet_one(tmp_path, monkeypatch):
+    """A session with nobody watching holds a sink, not an absence (#337): assembled without an
+    ``on_event``, it carries the shared null adapter — and hands the *same* one to the toolbox, so
+    both halves of the bundle are silent through one object instead of two ``None`` checks."""
+    monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
+    session = build_research_session(
+        settings=_session_settings(tmp_path),
+        lake=object(),
+        registry=object(),
+        families=object(),
+        memory=object(),
+    )
+    assert session is not None
+    assert session.on_event is NULL_SINK
+    assert session.toolbox.on_event is NULL_SINK
 
 
 def test_research_session_runs_the_same_loop_kwargs_as_the_cli_did(tmp_path, monkeypatch):

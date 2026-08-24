@@ -30,13 +30,18 @@ from typing import TYPE_CHECKING, Any, Literal
 from noctis.config import Settings, load_settings, resolve_execution_mode
 from noctis.config.settings import SECRET_FIELDS
 
+# The sink contract, not a collaborator: NULL_SINK is the default value every session object
+# below declares, so it imports at module load like the settings types do. Core-only — the
+# events module names no renderer and no heavy package.
+from noctis.observability.events import NULL_SINK, EventSink
+
 logger = logging.getLogger("noctis.bootstrap")
 
 if TYPE_CHECKING:
     from noctis.champions.promotion import PromotionRules
     from noctis.data.seam import MarketDataLake
     from noctis.engine.research import ResearchSummary
-    from noctis.observability import Console, Event, EventTee
+    from noctis.observability import Event
     from noctis.observability.debug import Recorder
     from noctis.reporting.run_tree import RunStore
     from noctis.research import CostProfile, Mandate, ResearchToolbox
@@ -1090,38 +1095,36 @@ class _ReadOnlyVendor:
         raise RuntimeError("read-only: no vendor configured")
 
 
-def _build_console(verbose: int, *, show_reasoning: bool = False) -> Console | None:
-    """The level-aware console for ``-v``/``-vv``/``--show-reasoning``, or ``None`` on a
-    quiet run — so downstream ``on_event=None`` keeps the loops on their own logger sinks."""
-    if not verbose and not show_reasoning:
-        return None
-    from noctis.observability import Console
-
-    return Console(verbose, show_reasoning=show_reasoning)
-
-
 def build_event_sink(
     verbose: int,
     *,
     show_reasoning: bool = False,
     secondary: Callable[[Event | str], None] | None = None,
-) -> Console | EventTee | None:
-    """The session's ``on_event`` sink: the level-aware console, optionally teed to a recorder.
+) -> EventSink:
+    """The session's ``on_event`` sink — **always a real sink**, never ``None`` (#337).
 
-    With no ``secondary`` this is exactly the old console builder — a :class:`Console` when
-    ``-v``/``-vv``/``--show-reasoning`` asks for one, else ``None`` so the loops fall back to their
-    own logger sinks. With a ``secondary`` (a recorder-style event sink) it returns an
-    :class:`~noctis.observability.EventTee` that renders on the console *and* feeds the recorder —
-    **even when the console is absent**, so a quiet ``--debug`` run (no ``-v``) still records every
-    event: with no console to render on, the tee's primary is the quiet
-    :data:`~noctis.observability.NULL_SINK` rather than nothing at all. The secondary is typed
-    generically as any event callable, so no recorder needs to exist yet."""
-    console = _build_console(verbose, show_reasoning=show_reasoning)
+    One builder, one return type, three shapes of the same seam: a level-aware
+    :class:`~noctis.observability.Console` when ``-v``/``-vv``/``--show-reasoning`` asks for a
+    view, an :class:`~noctis.observability.EventTee` when a ``secondary`` rides along, and
+    otherwise the quiet :data:`~noctis.observability.NULL_SINK` — whose every member is a safe
+    default, so a session with nobody watching is *silent* rather than sink-less and no holder
+    downstream re-derives what "no sink" means.
+
+    The ``secondary`` (a recorder-style event callable) rides even when nothing is watching: a
+    quiet ``--debug`` run tees onto the null primary, so it records every event silently rather
+    than not at all. It is typed generically as any event callable, because a secondary is only
+    ever *called* — nothing about riding the tee asks it to be a whole sink."""
+    if verbose or show_reasoning:
+        from noctis.observability import Console
+
+        primary: EventSink = Console(verbose, show_reasoning=show_reasoning)
+    else:
+        primary = NULL_SINK
     if secondary is None:
-        return console
-    from noctis.observability import NULL_SINK, EventTee
+        return primary
+    from noctis.observability import EventTee
 
-    return EventTee(console if console is not None else NULL_SINK, secondary)
+    return EventTee(primary, secondary)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1622,7 +1625,8 @@ class Segment:
 
     The handle :func:`open_segment` yields. It carries what the work needs — the run's store, the
     ``--debug`` recorder (or ``None``), the ``on_event`` sink the runtime and the research session
-    take — plus read-through conveniences for the four things a command echoes (:attr:`run_id`,
+    take (always a real sink: the quiet :data:`~noctis.observability.NULL_SINK` when nobody is
+    watching) — plus read-through conveniences for the four things a command echoes (:attr:`run_id`,
     :attr:`record_path`, :attr:`resumed`, :attr:`prior_runtime_s`), so a command body never reaches
     through to the store for them.
 
@@ -1636,7 +1640,7 @@ class Segment:
     command: Literal["run", "research"]
     store: RunStore
     recorder: Recorder | None
-    on_event: Console | EventTee | None
+    on_event: EventSink = NULL_SINK
     # What ``finish`` reported, held until the band closes the segment. ``None`` means "nothing was
     # reported": the sentinel reason, and — separately, for each measurement — nothing measured.
     _reason: str | None = field(default=None, init=False, repr=False)
@@ -1828,9 +1832,10 @@ def open_segment(
             command=command,
             store=store,
             recorder=recorder,
-            # One level-aware sink renders the loop's typed events and, under --debug, tees them
-            # into the recorder even when the console is absent — a quiet --debug run records
-            # silently rather than not at all.
+            # One sink the work emits through, whatever this session asked for: a level-aware
+            # console under -v, the quiet null adapter without one, and under --debug a tee that
+            # also feeds the recorder — so a quiet --debug run records silently rather than not
+            # at all.
             on_event=build_event_sink(verbose, show_reasoning=show_reasoning, secondary=recorder),
         )
         yield segment
@@ -1947,7 +1952,10 @@ class ResearchSession:
     client: Any
     budgets: CostProfile
     mandate: Mandate | None
-    on_event: Callable | None
+    #: Where this session's observable moments go — always a real sink, defaulting to the quiet
+    #: :data:`~noctis.observability.NULL_SINK`, so both loops emit without asking whether one is
+    #: attached.
+    on_event: EventSink = NULL_SINK
 
     @property
     def price_table(self):
@@ -2161,11 +2169,15 @@ def build_research_session(
     memory,
     mandate: Mandate | None = None,
     rules: PromotionRules | None = None,
-    on_event: Callable | None = None,
+    on_event: EventSink = NULL_SINK,
 ) -> ResearchSession | None:
     """Assemble one agent research session, or ``None`` when no LLM client is buildable
     (no key for the configured provider / the ``[llm]`` extra missing) — the caller decides
-    whether that means an error (CLI) or the legacy-loop fallback (runtime)."""
+    whether that means an error (CLI) or the legacy-loop fallback (runtime).
+
+    ``on_event`` is the session's one output seam, handed to the toolbox and to the session
+    alike; a caller with nobody watching passes nothing and gets the quiet
+    :data:`~noctis.observability.NULL_SINK` — silence is an adapter here, never an absence."""
     from noctis.champions.promotion import PromotionRules
     from noctis.research import ResearchToolbox, build_llm_client, resolve_budgets
     from noctis.strategies.library import LibraryPaths, prune_stale_drafts

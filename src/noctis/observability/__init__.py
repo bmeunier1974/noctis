@@ -3,7 +3,7 @@
 One import surface for a session's output layer. Loops emit ``Event``s to an ``on_event`` sink;
 the CLI builds a ``Console``, the runtime and tests can pass a plain callable, and the logging
 fallback renders via :func:`render_plain`. When a recorder needs to ride alongside the console on
-that single sink, :class:`EventTee` splits each event to both while delegating the console's
+that single sink, :class:`EventTee` splits each event to both while delegating its primary's
 duck-typed surface. Core only — no provider SDKs.
 
 What every one of those adapters *is* — the seven members a caller reads off the seam — is
