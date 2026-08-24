@@ -249,3 +249,30 @@ absence, `n/a` and never a plausible zero), the shared words (`answers: fresh` /
 headline keys, `strata`), `fold_by_case` / `strict_majority`, the one generic `strata` loop, and
 the two `PairManifest`s. A pair is **whole or refused** — the flagship figure (agreement, the
 retry-informed pass rate) is never published or printed without the figures that qualify it.
+
+## Strategy header
+
+A strategy file's **research record, as text**: the docstring header fields `status` / `style` /
+`symbols` / `tuned`, plus the tuned `Params` defaults the `tuned:` date refers to — the other half
+of the same record and the same kind of thing, a pure text edit of one file. One module reads and
+writes both, `noctis.strategies.header` (decided 2026-08-23, epic #311), and it is pure and
+stdlib-only *by rule*: every reader of a strategy file depends on it, so it may drag nothing behind
+it. It edits strings — no path, no tier, no gate, no I/O.
+
+A header value is **legal by construction**: `StrategyHeader` is frozen and its constructor refuses
+a status outside `VALID_STATUSES`, so "is this a legal header?" is asked in one place with one
+spelling, and the write gate's status check *is* the parse. Parse is **tolerant of the file and
+strict on the value** — no docstring, or a file that will not parse as Python at all, reads as the
+default `draft`; a status the file *does* declare must be legal or `HeaderError` is raised. The
+write side is typed and partial: `stamp_header` takes its fields keyword-only, `None` leaves a line
+byte-identical (comments included), and an illegal status is refused before a byte is edited, while
+`write_params` rewrites the tuned defaults. The promotion stamp goes through the same function
+`set_header` does, so the crowning path cannot route around that validation.
+
+`HeaderError` is the module's one exception; the library wraps it into the write gate's own
+`StrategyValidationError` at the two places a header error reaches that gate's callers
+(`_validate_file`, `plan_promotion`), exactly as it already wraps `ScenarioError` — so the pure
+module never has to know the gate exists. The two **tolerant** readers say what they do with a
+header they cannot read: the library index lists that file with its `error` beside its name, like a
+file whose class will not import, and the housekeeping sweep leaves it alone (unreadable is "not
+undecided", so the file is neither archived nor reported).
