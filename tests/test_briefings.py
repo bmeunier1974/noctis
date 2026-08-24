@@ -10,7 +10,11 @@ fully-trimmed briefing still does not fit. These tests lock:
 * the fit assertion at an 8k window, with the trim order exercised block-by-block;
 * gate-facing numbers surviving every trim level (silent truncation is structurally impossible);
 * a loud failure when the un-trimmable core alone overflows the window;
-* the ~1.5-3k token target band on realistic fixture state.
+* the ~1.5-3k token target band on realistic fixture state;
+* which store each briefing reads (epic #326 / story #330) — the session ledger owns the
+  session narrative the ALREADY-TRIED tail renders, the experiment journal owns the durable
+  per-strategy evidence a DECIDE verdict is earned against — so each test primes ONLY the
+  store its briefing reads, and two pins state that boundary from the reading side.
 """
 
 from __future__ import annotations
@@ -38,6 +42,10 @@ _MEMORY_SENTINEL = "MEMSENTINEL-finding-do-not-repeat"
 _LIBRARY_SENTINEL = "libsentinel"
 _BREADTH_KEY = "trend_efficiency"  # a per-symbol character field, only in the digest-breadth block
 _LEDGER_SENTINEL = "LEDGERSENTINEL"
+# The ownership pins' sentinels (epic #326): a thesis text written to exactly ONE store, so a
+# block that renders it is naming the store it read.
+_JOURNAL_ONLY_THESIS = "JOURNALONLYSENTINEL journaled for the candidate, never told the ledger"
+_LEDGER_ONLY_THESIS = "LEDGERONLYSENTINEL told to the ledger, never journaled"
 _EXHAUSTED_LABEL = "minute rsi mean reversion"
 
 # The one-slot-per-family steering (story #163): the rule itself and the crowned names it
@@ -89,10 +97,14 @@ def _named(source_name: str, new_name: str, marker: str) -> str:
     )
 
 
-def _populate(tmp_path):
-    """A realistic session: a populated market digest, several champions, a memory file with
-    findings and dead ends, a handful of library strategies (one rejected), an exhausted class,
-    a journal of ranked trials for ``probe``, and a session ledger with theses and a verdict."""
+def _session(tmp_path):
+    """One session's shape with NEITHER research store primed: a populated market digest, several
+    champions, a memory file with findings and dead ends, a handful of library strategies (one
+    rejected) and an exhausted class — beside an empty experiment journal and an empty session
+    ledger.
+
+    The two stores are primed separately, by :func:`_prime_journal` and :func:`_prime_ledger`, so
+    each test states which store its briefing actually reads (epic #326)."""
     box = _make_toolbox(tmp_path)  # universe AAA..DDD with bars; ships a 'probe' strategy
 
     # Library: two live strategies + one rejected corpse (collapsed to a stub by the index).
@@ -129,7 +141,23 @@ def _populate(tmp_path):
         example="corpse",
     )
 
-    # Journal evidence for the decide subject 'probe': thesis + class tag + ranked trials.
+    mandate = Mandate(
+        text="Pursue liquid-name momentum that clears cost at 1h.",
+        source="profile:aggressive",
+        summary="aggressive: liquid-name momentum, tune on Sharpe",
+        references=[],
+        config_overrides={},
+        symbols=["AAA", "BBB"],
+    )
+    return box, SessionLedger(box.state_dir, session_id="sess-1"), mandate
+
+
+def _prime_journal(box):
+    """The gate-facing evidence the DECIDE briefing reads for ``probe``: its thesis, its class tag
+    and its ranked trials, all in the experiment journal.
+
+    None of it is written to the session ledger — the journal owns the durable per-strategy facts,
+    so this is what a decide-evidence test primes, and all it primes."""
     box.journal.record_thesis("probe", "Long above own moving average while the trend is up.")
     box.journal.record_class_tag("probe", "intraday momentum")
     box.journal.record_trial(
@@ -156,8 +184,15 @@ def _populate(tmp_path):
         window={"train": 200, "test": 100},
         card=make_scorecard("probe", test_metric=0.55, train_metric=0.80, lookback=30),
     )
+    return box
 
-    ledger = SessionLedger(box.state_dir, session_id="sess-1")
+
+def _prime_ledger(ledger):
+    """The session narrative the ALREADY-TRIED tail reads: the theses this session spent and the
+    verdict one of them earned, all in the session ledger.
+
+    None of it is journaled — the ledger owns the narrative, so this is what a formulate-tail (or
+    discover) test primes, and all it primes."""
     ledger.record_session_start(mandate="profile:aggressive", budgets={}, models={})
     ledger.record_thesis("probe", f"{_LEDGER_SENTINEL} momentum long above own MA at 1h")
     ledger.record_thesis("corpse", "Minute RSI mean reversion buys oversold dips.")
@@ -167,21 +202,37 @@ def _populate(tmp_path):
         lesson="minute RSI mean reversion nets negative after the 4bp round trip",
         promoted=False,
     )
+    return ledger
 
-    mandate = Mandate(
-        text="Pursue liquid-name momentum that clears cost at 1h.",
-        source="profile:aggressive",
-        summary="aggressive: liquid-name momentum, tune on Sharpe",
-        references=[],
-        config_overrides={},
-        symbols=["AAA", "BBB"],
-    )
+
+def _populate(tmp_path):
+    """A realistic mid-session state with BOTH stores primed — the whole-session fixture the
+    cross-module readers (the prompt goldens, the digest, surface and episodic-site suites) render
+    off. The briefing tests below compose the pieces instead, one store at a time."""
+    box, ledger, mandate = _session(tmp_path)
+    _prime_journal(box)
+    _prime_ledger(ledger)
     return box, ledger, mandate
+
+
+# Reading ONE labeled block is how a test says which store it means: the ledger's narrative tail
+# and the journal's evidence are different sections of the same rendered briefing.
+_TAIL_LABEL = "ALREADY TRIED THIS SESSION"
+_EVIDENCE_LABEL = "EVIDENCE FOR probe (gate-facing)"
+
+
+def _block(brief: str, label: str) -> str:
+    """The body rendered under ``label`` — every body a test reads here is single-line JSON, so
+    the block ends at the blank line before the next label."""
+    start = brief.index(f"{label}:\n") + len(label) + 2
+    end = brief.find("\n\n", start)
+    return brief[start:] if end < 0 else brief[start:end]
 
 
 # ── statelessness: rebuilt fresh from disk, no state carried between calls ──────────────────
 def test_formulate_briefing_is_deterministic_and_rebuilt_fresh_from_disk(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_ledger(ledger)  # a formulate tail reads the session ledger, and only that
 
     before = formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE)
     # Same inputs, same bytes — no hidden per-call state.
@@ -202,7 +253,8 @@ def test_formulate_briefing_is_deterministic_and_rebuilt_fresh_from_disk(tmp_pat
 
 
 def test_decide_briefing_rebuilt_fresh_from_disk(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_journal(box)  # a decide evidence block reads the journal, and only that
     before = decide_briefing(box, ledger, "probe", mandate=mandate, context_window=_HUGE)
 
     box.journal.record_trial(
@@ -220,7 +272,8 @@ def test_decide_briefing_rebuilt_fresh_from_disk(tmp_path):
 
 # ── the trim order, exercised advisory-block by advisory-block ──────────────────────────────
 def test_formulate_trim_order_drops_memory_then_library_then_breadth(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_ledger(ledger)  # a formulate tail reads the session ledger, and only that
 
     full = formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE)
     assert _MEMORY_SENTINEL in full and _LIBRARY_SENTINEL in full and _BREADTH_KEY in full
@@ -249,7 +302,8 @@ def test_formulate_trim_order_drops_memory_then_library_then_breadth(tmp_path):
 
 
 def test_formulate_fit_assertion_at_8k_window_trims_and_keeps_gate_numbers(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_ledger(ledger)  # a formulate tail reads the session ledger, and only that
     _bloat_memory(box)  # push the advisory memory tail past an 8k window
     assert _tokens(formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE)) > 8000
 
@@ -261,7 +315,8 @@ def test_formulate_fit_assertion_at_8k_window_trims_and_keeps_gate_numbers(tmp_p
 
 
 def test_formulate_raises_loudly_when_core_exceeds_window(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_ledger(ledger)  # a formulate tail reads the session ledger, and only that
     # A window smaller than the un-trimmable core is a loud failure, never a silent truncation.
     with pytest.raises(BriefingTooLargeError):
         formulate_briefing(box, ledger, mandate=mandate, context_window=10)
@@ -269,17 +324,29 @@ def test_formulate_raises_loudly_when_core_exceeds_window(tmp_path):
 
 # ── decide briefing: gate-facing candidate evidence, never trimmed ─────────────────────────
 def test_decide_briefing_carries_ranked_journal_evidence(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
-    brief = decide_briefing(box, ledger, "probe", mandate=mandate, context_window=_HUGE)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_journal(box)  # a decide evidence block reads the journal, and only that
+    # A verdict already spent on this candidate is a durable per-strategy fact, so it is
+    # journaled: the session ledger's verdicts are narrative and render in the tail, not here.
+    box.journal.record_rejection(
+        "probe",
+        reason="an earlier cut of this space never cleared the round trip",
+        best_params={"lookback": 30},
+    )
+    evidence = _block(
+        decide_briefing(box, ledger, "probe", mandate=mandate, context_window=_HUGE),
+        _EVIDENCE_LABEL,
+    )
 
-    assert "min_trials_gate" in brief  # the exhaustion floor the verdict is judged against
-    assert '"n_distinct_params": 3' in brief
-    assert "top_trials" in brief and '"lookback": 12' in brief  # ranked trials + params
-    assert '"verdict": "reject"' in brief  # journaled verdicts surfaced
+    assert "min_trials_gate" in evidence  # the exhaustion floor the verdict is judged against
+    assert '"n_distinct_params": 3' in evidence
+    assert "top_trials" in evidence and '"lookback": 12' in evidence  # ranked trials + params
+    assert '"verdict": "reject"' in evidence  # journaled verdicts surfaced
 
 
 def test_decide_gate_numbers_survive_trim_at_8k(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_journal(box)  # a decide evidence block reads the journal, and only that
     _bloat_memory(box)
 
     fitted = decide_briefing(box, ledger, "probe", mandate=mandate, context_window=8000)
@@ -291,6 +358,44 @@ def test_decide_gate_numbers_survive_trim_at_8k(tmp_path):
     assert '"lookback": 12' in fitted
 
 
+# ── one owner per fact: the ledger owns the narrative, the journal owns the evidence (#330) ──
+def test_a_journal_only_thesis_never_reaches_the_formulate_tail(tmp_path):
+    """ALREADY TRIED THIS SESSION is the *session ledger's* story. A thesis only the experiment
+    journal knows about is not part of it — the tail stays empty and says so — and the very same
+    text does reach the tail once the ledger is what knows it."""
+    box, ledger, mandate = _session(tmp_path)
+    box.journal.record_thesis("probe", _JOURNAL_ONLY_THESIS)
+
+    brief = formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE)
+    assert _block(brief, _TAIL_LABEL) == "[]"
+    assert _JOURNAL_ONLY_THESIS not in brief
+
+    ledger.record_thesis("probe", _JOURNAL_ONLY_THESIS)
+    tail = _block(
+        formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE), _TAIL_LABEL
+    )
+    assert _JOURNAL_ONLY_THESIS in tail
+
+
+def test_a_ledger_only_thesis_never_reaches_the_decide_evidence(tmp_path):
+    """EVIDENCE FOR <name> is the *experiment journal's* case for one candidate. A thesis only the
+    session ledger knows about is narrative: the evidence answers ``null`` for it (while the
+    narrative still reaches the briefing through its own tail), and the block carries a thesis
+    only once the journal is what knows it."""
+    box, ledger, mandate = _session(tmp_path)
+    ledger.record_thesis("probe", _LEDGER_ONLY_THESIS)
+
+    brief = decide_briefing(box, ledger, "probe", mandate=mandate, context_window=_HUGE)
+    evidence = _block(brief, _EVIDENCE_LABEL)
+    assert _LEDGER_ONLY_THESIS not in evidence
+    assert '"thesis": null' in evidence  # the journal knows of no thesis for probe
+    assert _LEDGER_ONLY_THESIS in _block(brief, _TAIL_LABEL)  # ...the narrative tail still has it
+
+    box.journal.record_thesis("probe", _JOURNAL_ONLY_THESIS)
+    after = decide_briefing(box, ledger, "probe", mandate=mandate, context_window=_HUGE)
+    assert _JOURNAL_ONLY_THESIS in _block(after, _EVIDENCE_LABEL)
+
+
 # ── one slot per family: the board steers, it does not merely score (story #163) ────────────
 def _family_slot_rationale() -> str:
     """The live ``family_slot`` rejection message — the one dialect the steering must speak."""
@@ -300,7 +405,9 @@ def _family_slot_rationale() -> str:
 
 
 def test_briefings_name_the_crowned_families_and_state_the_one_slot_rule(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    # The steering comes off the champion board — neither research store primed, because
+    # neither is what says a family already holds a slot.
+    box, ledger, mandate = _session(tmp_path)
     for brief in (
         formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE),
         decide_briefing(box, ledger, "probe", mandate=mandate, context_window=_HUGE),
@@ -311,7 +418,7 @@ def test_briefings_name_the_crowned_families_and_state_the_one_slot_rule(tmp_pat
 
 
 def test_one_slot_steering_speaks_the_family_slot_gate_dialect(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)  # board steering again: neither store
     brief = formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE)
     rationale = _family_slot_rationale()
     for phrase in _FAMILY_SLOT_PHRASES:
@@ -353,7 +460,8 @@ def _discover(box, ledger, mandate, *, context_window):
 
 
 def test_discover_briefing_carries_the_mandate_thesis_profile_inventory_and_budget(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_ledger(ledger)  # discover tails the same session narrative formulate does
     brief = _discover(box, ledger, mandate, context_window=_HUGE)
 
     assert "aggressive: liquid-name momentum" in brief  # the mandate body...
@@ -369,7 +477,7 @@ def test_discover_briefing_surfaces_the_configured_data_budget_when_the_seam_exp
     # refusal would be judged against; absent (a fake lake with no cost preflight) ⇒ omitted,
     # never invented. The preflight is the real one a lake with a vendor is built with, so the
     # briefing is shown the same object production shows it.
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)  # the spend context reads neither store
     assert "budget_usd" not in _discover(box, ledger, mandate, context_window=_HUGE)
 
     box.lake.preflight = CostPreflight(125.0)
@@ -377,7 +485,8 @@ def test_discover_briefing_surfaces_the_configured_data_budget_when_the_seam_exp
 
 
 def test_discover_trim_order_drops_advisory_blocks_and_keeps_the_ask_intact(tmp_path):
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_ledger(ledger)  # the narrative is core here too — it survives every trim
 
     full = _discover(box, ledger, mandate, context_window=_HUGE)
     assert _MEMORY_SENTINEL in full and _BREADTH_KEY in full
@@ -399,7 +508,8 @@ def test_discover_trim_order_drops_advisory_blocks_and_keeps_the_ask_intact(tmp_
 
 def test_discover_briefing_fits_a_small_window_on_realistic_state(tmp_path):
     # The whole point of the episode: a small-context backend must be able to answer it.
-    box, ledger, mandate = _populate(tmp_path)
+    box, ledger, mandate = _session(tmp_path)
+    _prime_ledger(ledger)
     _bloat_memory(box)
     fitted = _discover(box, ledger, mandate, context_window=8000)
     assert _tokens(fitted) <= 8000
@@ -409,6 +519,9 @@ def test_discover_briefing_fits_a_small_window_on_realistic_state(tmp_path):
 
 # ── the ~1.5-3k token target band on realistic (un-bloated) state ───────────────────────────
 def test_briefings_land_in_target_token_band_on_realistic_state(tmp_path):
+    # The one test that primes BOTH stores, because the size of a real mid-session briefing
+    # is the sum of two reads: the ledger's ALREADY-TRIED tail (in all three briefings) and
+    # the journal's evidence block (in decide). Either alone understates the band.
     box, ledger, mandate = _populate(tmp_path)
     formulate = _tokens(formulate_briefing(box, ledger, mandate=mandate, context_window=_HUGE))
     decide = _tokens(decide_briefing(box, ledger, "probe", mandate=mandate, context_window=_HUGE))
