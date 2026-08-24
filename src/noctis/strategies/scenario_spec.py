@@ -31,7 +31,10 @@ Two dialects, one vocabulary
 A spec reaches this module in two dialects and leaves as the same frozen objects.
 :func:`spec_from_payload` reads the *model's* FORMULATE emit — behavior by its wire value, shape
 params omitted rather than zeroed, and a precise refusal for every malformed shape, because that
-sentence becomes the corrective the model is re-prompted with. :func:`spec_from_json` reads the
+sentence becomes the corrective the model is re-prompted with. What the model was *asked* for is
+here too: :data:`SPEC_JSON_SCHEMA` is the JSON Schema the FORMULATE emit contract advertises, with
+its enums read off :data:`LEG_KINDS` and :class:`Behavior`, so the offer and the parse are the same
+vocabulary by construction rather than by two lists agreeing. :func:`spec_from_json` reads the
 *machine-exact* carrier :func:`spec_to_json` writes for the write gate's subprocess. Both are pure,
 and both hand :func:`compile_spec` the same :class:`SpecSuite`, so what a spec *is* is decided here
 rather than at either boundary.
@@ -161,7 +164,12 @@ _BUILDERS = {
     "vol_spike": lambda leg: vol_spike(leg.bars, leg.amplitude or 0.05),
     "gap": lambda leg: gap(leg.pct),
 }
-_KNOWN_KINDS = "flat/trend/selloff/recovery/chop/vol_spike/gap"
+
+# The leg kinds, in one place: the builders' own keys. Everything that names the vocabulary reads
+# it from here — the enum :data:`SPEC_JSON_SCHEMA` advertises to the model and the unknown-kind
+# refusal below — so a builder added to the table is offered and refused by the same edit.
+LEG_KINDS: tuple[str, ...] = tuple(_BUILDERS)
+_KNOWN_KINDS = "/".join(LEG_KINDS)
 
 
 def _segment(spec: ScenarioSpec, index: int) -> Segment:
@@ -384,8 +392,78 @@ def spec_from_json(text: str) -> SpecSuite:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model dialect — the tolerant parse of the FORMULATE emit (#83)
+# Model dialect — the schema FORMULATE asks for, and the tolerant parse of what comes back (#83)
 # ─────────────────────────────────────────────────────────────────────────────
+# The structured scenario_spec the model emits — a 1:1 mapping onto the #82 vocabulary. The model
+# reasons about tape SHAPE (legs) and ONE behavior tag per scenario; it NEVER writes a bar index —
+# the compiler derives every window from the leg boundaries and the strategy's declared warmup.
+# The schema lives beside the vocabulary it describes and takes its enums from it, so what the
+# model is *offered* and what the parse *accepts* are the same list by construction (#322). The
+# episodic driver composes this object into its FORMULATE emit contract under the field name.
+_LEG_SPEC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": list(LEG_KINDS),
+            "description": "The segment shape of this leg.",
+        },
+        "bars": {
+            "type": "integer",
+            "description": "The leg's LENGTH in decision bars (never a bar index); 0 for a gap.",
+        },
+        "pct": {
+            "type": "number",
+            "description": "Signed total move for trend/selloff/recovery/gap (0.05 = +5%).",
+        },
+        "amplitude": {
+            "type": "number",
+            "description": "Oscillation amplitude for chop / vol_spike (e.g. 0.03).",
+        },
+        "period": {"type": "integer", "description": "Wave length in bars for chop (default 8)."},
+    },
+    "required": ["kind", "bars"],
+}
+
+_SCENARIO_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "A unique name for this scenario tape."},
+        "legs": {
+            "type": "array",
+            "items": _LEG_SPEC_SCHEMA,
+            "description": "The ordered legs of the tape, in decision-bar lengths.",
+        },
+        "behavior": {
+            "type": "string",
+            "enum": [b.value for b in Behavior],
+            "description": "The ONE behavior this tape must prove (the thesis's contribution).",
+        },
+        "leg": {
+            "type": "integer",
+            "description": "0-based index into 'legs' the behavior targets; omit for never_trade.",
+        },
+    },
+    "required": ["name", "legs", "behavior"],
+}
+
+SPEC_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "scenarios": {
+            "type": "array",
+            "items": _SCENARIO_ITEM_SCHEMA,
+            "description": (
+                "2-8 known-outcome tapes: at least one directional entry (enter/hold "
+                "long/short) and at least one never_trade tape. You author tape SHAPE and "
+                "behavior only — never a bar index."
+            ),
+        },
+    },
+    "required": ["scenarios"],
+}
+
+
 # The other dialect (see the module docstring): what a model emitted, read one level at a time —
 # leg, then behavior, then scenario. Every refusal here is a sentence the model is re-prompted
 # with, so the wording is contract rather than diagnostics, and it is checked as such.

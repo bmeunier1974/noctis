@@ -1,0 +1,84 @@
+{
+  "properties": {
+    "scenarios": {
+      "description": "2-8 known-outcome tapes: at least one directional entry (enter/hold long/short) and at least one never_trade tape. You author tape SHAPE and behavior only \u2014 never a bar index.",
+      "items": {
+        "properties": {
+          "behavior": {
+            "description": "The ONE behavior this tape must prove (the thesis's contribution).",
+            "enum": [
+              "enter_long_during_leg",
+              "enter_short_during_leg",
+              "hold_long_through_leg",
+              "hold_short_through_leg",
+              "flat_by_end_of_leg",
+              "never_trade"
+            ],
+            "type": "string"
+          },
+          "leg": {
+            "description": "0-based index into 'legs' the behavior targets; omit for never_trade.",
+            "type": "integer"
+          },
+          "legs": {
+            "description": "The ordered legs of the tape, in decision-bar lengths.",
+            "items": {
+              "properties": {
+                "amplitude": {
+                  "description": "Oscillation amplitude for chop / vol_spike (e.g. 0.03).",
+                  "type": "number"
+                },
+                "bars": {
+                  "description": "The leg's LENGTH in decision bars (never a bar index); 0 for a gap.",
+                  "type": "integer"
+                },
+                "kind": {
+                  "description": "The segment shape of this leg.",
+                  "enum": [
+                    "flat",
+                    "trend",
+                    "selloff",
+                    "recovery",
+                    "chop",
+                    "vol_spike",
+                    "gap"
+                  ],
+                  "type": "string"
+                },
+                "pct": {
+                  "description": "Signed total move for trend/selloff/recovery/gap (0.05 = +5%).",
+                  "type": "number"
+                },
+                "period": {
+                  "description": "Wave length in bars for chop (default 8).",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "bars"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "A unique name for this scenario tape.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "legs",
+          "behavior"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "scenarios"
+  ],
+  "type": "object"
+}

@@ -197,7 +197,7 @@ from noctis.research.pricing import PriceTable, default_table
 from noctis.strategies import library
 from noctis.strategies.scenario_spec import (
     PARSE_WARM,
-    Behavior,
+    SPEC_JSON_SCHEMA,
     SpecError,
     SpecSuite,
     compile_spec,
@@ -483,10 +483,6 @@ def _opt(payload: dict[str, Any], key: str) -> str | None:
     return str(value) if value else None
 
 
-# The allowed leg kinds (the #82 segment builders) the FORMULATE schema advertises to the model.
-_LEG_KINDS = ("flat", "trend", "selloff", "recovery", "chop", "vol_spike", "gap")
-
-
 def _parse_scenario_spec(payload: dict[str, Any]) -> tuple[SpecSuite, tuple[Scenario, ...]]:
     """Read the emitted ``scenario_spec`` field, parse it into a :class:`SpecSuite` and compile it
     at :data:`~noctis.strategies.scenario_spec.PARSE_WARM` as a structural validity check.
@@ -567,72 +563,6 @@ def parse_decide(payload: dict[str, Any]) -> DecideOutput:
     )
 
 
-# The structured scenario_spec the model emits — a 1:1 mapping onto the #82 vocabulary. The model
-# reasons about tape SHAPE (legs) and ONE behavior tag per scenario; it NEVER writes a bar index —
-# the compiler derives every window from the leg boundaries and the strategy's declared warmup.
-_LEG_SPEC_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "kind": {
-            "type": "string",
-            "enum": list(_LEG_KINDS),
-            "description": "The segment shape of this leg.",
-        },
-        "bars": {
-            "type": "integer",
-            "description": "The leg's LENGTH in decision bars (never a bar index); 0 for a gap.",
-        },
-        "pct": {
-            "type": "number",
-            "description": "Signed total move for trend/selloff/recovery/gap (0.05 = +5%).",
-        },
-        "amplitude": {
-            "type": "number",
-            "description": "Oscillation amplitude for chop / vol_spike (e.g. 0.03).",
-        },
-        "period": {"type": "integer", "description": "Wave length in bars for chop (default 8)."},
-    },
-    "required": ["kind", "bars"],
-}
-
-_SCENARIO_SPEC_ITEM_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "description": "A unique name for this scenario tape."},
-        "legs": {
-            "type": "array",
-            "items": _LEG_SPEC_SCHEMA,
-            "description": "The ordered legs of the tape, in decision-bar lengths.",
-        },
-        "behavior": {
-            "type": "string",
-            "enum": [b.value for b in Behavior],
-            "description": "The ONE behavior this tape must prove (the thesis's contribution).",
-        },
-        "leg": {
-            "type": "integer",
-            "description": "0-based index into 'legs' the behavior targets; omit for never_trade.",
-        },
-    },
-    "required": ["name", "legs", "behavior"],
-}
-
-_SCENARIO_SPEC_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "scenarios": {
-            "type": "array",
-            "items": _SCENARIO_SPEC_ITEM_SCHEMA,
-            "description": (
-                "2-8 known-outcome tapes: at least one directional entry (enter/hold "
-                "long/short) and at least one never_trade tape. You author tape SHAPE and "
-                "behavior only — never a bar index."
-            ),
-        },
-    },
-    "required": ["scenarios"],
-}
-
 _FORMULATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -645,7 +575,7 @@ _FORMULATE_SCHEMA: dict[str, Any] = {
             "description": "Captured move per trade vs the round-trip cost (aim >= 3x).",
         },
         "symbol_character": {"type": "string", "description": "The KIND of symbol it needs."},
-        "scenario_spec": _SCENARIO_SPEC_SCHEMA,
+        "scenario_spec": SPEC_JSON_SCHEMA,
         "param_space_sketch": {"type": "string", "description": "Tunable knobs + ranges."},
         "parent_thesis": {"type": "string", "description": "Optional: the thesis this pivots off."},
         "pivot_rationale": {"type": "string", "description": "Optional: why it pivots."},

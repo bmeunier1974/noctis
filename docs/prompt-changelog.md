@@ -24,7 +24,7 @@ The sites, and the assets each one's hash covers:
 | `briefings` | the rendered briefings that are the episodic stages' user turns | `research/briefings.py`, `research/digests.py` |
 | `conversation` | the conversation loop's system prompt | `research/prompt.py`, `research/digests.py` |
 | `distill` | the memory distiller's one summarization prompt | `research/distill.py` |
-| `episodic` | the episodic driver's per-stage system texts and emit contracts | `research/driver.py`, `research/digests.py` |
+| `episodic` | the episodic driver's per-stage system texts and emit contracts | `research/driver.py`, `strategies/scenario_spec.py`, `research/digests.py` |
 | `ideation` | the seeded-idea prompt, web search included | `research/ideation.py` |
 
 `research/digests.py` renders the facts (market digest, library index, champion board, memory
@@ -43,8 +43,11 @@ JSON Schema the FORMULATE emit contract advertises for `scenario_spec` move out 
 `research/driver.py` into the strategy-layer module that owns the vocabulary they describe. The
 driver keeps the boundary and nothing else: read the emitted field, parse, compile, translate the
 strategy layer's `SpecError` into the schema-misfire currency the episode runner already reads. The
-schema the model receives is **dict-equal** across the move — the schema story lands a golden
-captured from the pre-epic commit `262034f` that pins it — and `scenario_spec.py` joins this
+schema the model receives is **dict-equal** across the move: the golden
+`tests/fixtures/scenario_spec/formulate_scenario_spec_schema.json`, captured from the pre-epic
+commit `262034f`, is the checked claim (#322), and the `kind`/`behavior` enums it advertises are
+now read off the vocabulary itself (`LEG_KINDS`, taken from the compiler's own builders, and
+`Behavior`) instead of a second list kept beside it in the driver. `scenario_spec.py` joins this
 site's assets, so the description strings the model reads about legs and behaviors can never
 drift un-ratcheted again.
 

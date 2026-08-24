@@ -136,6 +136,17 @@ def test_a_shared_asset_moves_every_site_that_assembles_it(tmp_path):
     assert len(moved) > 1
 
 
+def test_editing_the_scenario_spec_vocabulary_moves_the_episodic_site(tmp_path):
+    """The FORMULATE emit schema — its leg/behavior enums and every description string the model
+    reads about them — lives in the strategy-layer vocabulary module it describes (#322). Rewording
+    a description there is rewording the episodic prompt, so it has to move that site's hash."""
+    root = _build_tree(tmp_path)
+    before = fingerprint(root)
+    _edit(root, "src/noctis/strategies/scenario_spec.py")
+
+    assert compare(before.digests(), fingerprint(root).digests()) == {"episodic"}
+
+
 # ── the pure per-site function ────────────────────────────────────────────────────────────
 
 

@@ -178,7 +178,7 @@ threshold change must not read as "the model was told something new".
 | `briefings` — the rendered briefings that are the episodic stages' user turns | `research/briefings.py`, `research/digests.py` |
 | `conversation` — the conversation loop's system prompt | `research/prompt.py`, `research/digests.py` |
 | `distill` — the memory distiller's summarization prompt | `research/distill.py` |
-| `episodic` — the driver's per-stage system texts and emit contracts | `research/driver.py`, `research/digests.py` |
+| `episodic` — the driver's per-stage system texts and emit contracts | `research/driver.py`, `strategies/scenario_spec.py`, `research/digests.py` |
 | `ideation` — the seeded-idea prompt | `research/ideation.py` |
 
 `research/digests.py` renders facts four of those prompts embed, so it is listed under each of

@@ -11,16 +11,20 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import json
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from noctis.strategies import indicators as ind
 from noctis.strategies.base import ParamSpec, TraderStrategy
 from noctis.strategies.scenario_spec import (
+    LEG_KINDS,
     PARSE_WARM,
     SETUP_PAD,
+    SPEC_JSON_SCHEMA,
     Behavior,
     LegSpec,
     ScenarioSpec,
@@ -670,6 +674,54 @@ def test_true_is_not_an_integer_length_or_leg_reference(field, message):
     with pytest.raises(SpecError) as exc:
         spec_from_payload({"scenarios": [scenario]})
     assert str(exc.value) == message
+
+
+# ── the emit schema: the JSON Schema the model is handed, derived from this vocabulary (#322) ─
+# The golden was captured from the driver's `_SCENARIO_SPEC_SCHEMA` at the pre-epic commit
+# 262034f, before the schema moved beside the vocabulary it describes. It is the checked claim
+# that the FORMULATE tool contract — every enum, every description string the model reads about
+# legs and behaviors — is byte-identical across the move.
+SCHEMA_GOLDEN = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "scenario_spec"
+    / "formulate_scenario_spec_schema.json"
+)
+
+
+def test_the_leg_kinds_are_the_compilers_own_builders():
+    """One list, written once: the schema's enum, the unknown-kind refusal and the compiler's
+    dispatch table cannot drift apart because there is nothing left to drift from."""
+    from noctis.strategies.scenario_spec import _BUILDERS, _KNOWN_KINDS
+
+    assert LEG_KINDS == tuple(_BUILDERS)
+    assert _KNOWN_KINDS == "/".join(LEG_KINDS)
+
+
+def test_the_schemas_enums_are_the_vocabulary_itself():
+    """The model is offered exactly the kinds the compiler builds and the tags it maps."""
+    scenario = SPEC_JSON_SCHEMA["properties"]["scenarios"]["items"]["properties"]
+
+    assert scenario["legs"]["items"]["properties"]["kind"]["enum"] == list(LEG_KINDS)
+    assert scenario["behavior"]["enum"] == [b.value for b in Behavior]
+
+
+def test_the_schema_is_the_one_the_driver_advertised_before_the_move():
+    assert SPEC_JSON_SCHEMA == json.loads(SCHEMA_GOLDEN.read_text())
+
+
+def test_the_driver_composes_this_schema_instead_of_holding_one_of_its_own():
+    """The crossing belongs to the vocabulary: the driver names the field and nothing else."""
+    from noctis.research import driver
+
+    assert driver._FORMULATE_SCHEMA["properties"]["scenario_spec"] is SPEC_JSON_SCHEMA
+    for gone in (
+        "_LEG_KINDS",
+        "_LEG_SPEC_SCHEMA",
+        "_SCENARIO_SPEC_ITEM_SCHEMA",
+        "_SCENARIO_SPEC_SCHEMA",
+    ):
+        assert not hasattr(driver, gone), f"driver still defines {gone}"
 
 
 # ── depth: a compiled suite passes the real scenario-contract end to end ─────────────────────
