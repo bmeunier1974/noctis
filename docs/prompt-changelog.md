@@ -36,7 +36,7 @@ never keep its old identity.
 
 ## 2026-08-24 — sites: episodic
 
-Epic #326 story #329: bookkeeping refactor in the episodic driver — `summary.undecided` now derives from the session ledger (`undecided_names()`), and `_record_verdict` states the write order (journal fact first, ledger narrative second). No wording change, no emit-contract change.
+Epic #326 story #329: bookkeeping refactor in the episodic driver — `summary.undecided` now derives from the session ledger (`undecided_names()`), and `_record_verdict` states the write order (journal fact first, ledger narrative second). No wording change, no emit-contract change. Story #331 adds one docstring paragraph to the same file: the driver states the epic's ownership rule — it is the session ledger's one writer, the toolbox is the experiment journal's, and the `thesis` double write is deliberate. Documentation only; no stage system text, briefing or emit contract moved.
 
 ## 2026-08-23 — sites: episodic
 

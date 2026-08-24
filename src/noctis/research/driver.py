@@ -173,6 +173,15 @@ existing semantics, so a session that never exhausts the budget is byte-identica
 loop returns, assembled from the toolbox's own counters, so the runtime, the ``research`` CLI, and
 the phase machine are untouched. Every episode output is persisted to the session ledger before the
 driver acts on it; stage transitions, verdicts, and a session-end rollup are ledgered too.
+
+**One store, one writer.** This driver is **the ledger's one writer**
+(:mod:`noctis.research.ledger`, epic #326): the session narrative — every thesis proposed (a failed
+AUTHOR's included), the stages, the episodes, and the model's own verdict with its lesson — is
+written here and nowhere else, which is what lets a reported number have one derivation
+(``undecided`` is the ledger's ``undecided_names()``, counted nowhere else). The per-strategy facts
+are the toolbox's, journaled through its gated methods (:mod:`noctis.research.journal`), and the
+two stores are not mirrors: the ``thesis`` double write is deliberate, and the store modules say
+why.
 """
 
 from __future__ import annotations

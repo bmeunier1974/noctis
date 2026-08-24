@@ -95,6 +95,11 @@ class SessionCounters:
     counters" by reference would silently re-read them later and report a different session than
     the one it was describing. ``strategies_touched`` and ``undecided`` freeze into a tuple and a
     frozenset for the same reason — the collections themselves keep growing on the toolbox.
+
+    ``undecided`` is the session's **names with no verdict spent yet**: a candidate joins it when
+    it is authored and leaves it the moment a verdict is arbitrated, whatever that verdict said —
+    a rejection, or an approve the promotion gates then refused. What leaves a name undecided is
+    that nothing judged it, not that nothing crowned it (epic #326).
     """
 
     backtests_run: int = 0

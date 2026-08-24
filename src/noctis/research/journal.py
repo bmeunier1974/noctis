@@ -14,6 +14,19 @@ journaled param sets, the symbol-holdout taint check scans journaled trial symbo
 record schema lives here and nowhere else: every writer is an explicit ``record_*`` method
 and every reader gets typed views, so no caller re-parses ``event`` strings by hand.
 
+**One writer, and the session ledger is not a mirror of it.** This journal is written by the
+research toolbox alone (:mod:`noctis.research.tools`), which is what gives a fact in here exactly
+one derivation. Its twin, the session ledger (:mod:`noctis.research.ledger`), is written by the
+episodic driver alone and owns the other half — one session's *narrative*: every thesis proposed,
+the stages, the episodes, and the model's own verdict with the lesson it drew. Neither store copies
+the other, and the one fact both hold, the ``thesis``, is a **deliberate double write** over two
+different populations: the ledger records every thesis *proposed* (an AUTHOR that failed the write
+gate included, which is exactly what the next formulate briefing's ALREADY-TRIED tail must show),
+while a journal file exists only for a name that was actually **authored**. Minting one for a
+never-authored name would put a phantom candidate on the run record's candidate join, so
+"deduplicating" the two stores is a regression, not a cleanup (epic #326, and
+``tests/test_store_writers.py`` pins the rule).
+
 The schema is *extended, never changed*: one writer per kind, tolerant reads. A malformed
 line is skipped (a corrupt record can't confirm anything) and an unknown record kind an
 older reader never learned is ignored by the typed views rather than being fatal, so an

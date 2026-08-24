@@ -73,7 +73,26 @@ discipline reads: the exhaustion gate counts its distinct param sets, the symbol
 taint check scans its trial symbols, `reject_strategy` recovers its best-observed params.
 `ExperimentJournal` (`noctis.research.journal`, decided 2026-07-11) owns the record schema
 end-to-end — explicit `record_*` writers, typed reads — so no caller re-parses `event`
-strings by hand.
+strings by hand. It has **one writer**, the research toolbox (`noctis.research.tools`): the
+journal holds per-strategy *facts*, and one session's *narrative* is the **session ledger**'s.
+
+## Session ledger
+
+The durable narrative of **one research session**: one JSONL file per session under
+`state/sessions/`, one line per session event (`session_start` / `thesis` / `stage` / `episode` /
+`verdict` / `session_end`). Where the experiment journal holds per-strategy facts, the ledger holds
+the cross-strategy story a conversation transcript used to carry — every thesis *proposed*, each
+stage transition, one line per model judgment, each spent verdict with its class-level lesson, and
+the closing rollup — so a small-context driver can drive the loop with the file, not a growing chat
+context, as its ground truth. `SessionLedger` (`noctis.research.ledger`) owns the record schema
+end-to-end, exactly as the journal does, and it is the one place derived session numbers come from:
+`undecided_names()` is *authored minus decided*, and the rollup counts that list rather than
+subtracting again. It has **one writer**, the episodic driver (`noctis.research.driver`); the
+formulate briefing's ALREADY-TRIED tail and the CLOSE report's Research rollup are readers
+(decided 2026-08-24, epic #326). The two stores are not mirrors: the `thesis` is written to both on
+purpose, because the populations differ — every thesis proposed here (an AUTHOR the write gate
+refused included), only *authored* names in the journal, where a file minted for a name no strategy
+file exists for would surface a phantom candidate in the run record.
 
 ## Trading day (the settle order)
 

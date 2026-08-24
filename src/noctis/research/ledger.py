@@ -17,6 +17,20 @@ formulate briefing tails and the CLOSE report renders. That is why the record sc
 in this module and nowhere else — every writer is an explicit ``record_*`` method and every
 reader gets typed views, so no caller re-parses ``event`` strings by hand.
 
+**One writer, and the experiment journal is not a mirror of it.** This ledger is written by the
+episodic driver alone (:mod:`noctis.research.driver`), which is what gives every number a session
+reports one derivation — ``undecided``, for one, is derived here
+(:meth:`SessionLedger.undecided_names`) and counted nowhere else. Its twin, the experiment journal
+(:mod:`noctis.research.journal`), is written by the research toolbox alone and owns the
+per-strategy *facts*: the trials, the class tag, the scorecard, and the verdict the promotion gates
+arbitrated. The one fact both stores hold, the ``thesis``, is a **deliberate double write** over
+two different populations — this ledger carries every thesis *proposed*, a failed AUTHOR's
+included, because the next formulate briefing's ALREADY-TRIED tail must show an idea that never
+survived the write gate, while the journal holds only names that were authored, since a journal
+file for a name no strategy file exists for would surface a phantom candidate in the run record.
+Collapsing the two into one store is a regression, not a cleanup (epic #326, and
+``tests/test_store_writers.py`` pins the rule).
+
 The schema is *extended, never changed*: one writer per kind, tolerant reads. A malformed
 line is skipped and an unknown record kind an older reader never learned is ignored by the
 typed views rather than being fatal, so an existing ledger keeps loading as new kinds land.
