@@ -1621,6 +1621,49 @@ def test_no_undecided_leaves_field_empty_and_logs_no_warning(tmp_path, caplog):
     assert not [r for r in caplog.records if "undecided" in r.getMessage()]
 
 
+def test_arbitrated_refusal_leaves_nothing_undecided(tmp_path):
+    """An evaluate the gates arbitrated SPENDS the verdict, promoted or not: the session ends
+    with an empty undecided list, because the candidate was judged — it just lost. (The stop
+    reason is still the zero-verdict stall: a refusal crowns and rejects nothing.)"""
+    from noctis.champions import PromotionRules
+
+    toolbox = _make_toolbox(tmp_path)
+    # An unreachable test-metric bar, so the arbitration refuses rather than crowns.
+    toolbox.rules = PromotionRules(
+        champion_count=3,
+        max_gap=1e9,
+        min_test_metric=1e9,
+        min_holdout_metric=-1e9,
+        min_symbol_holdout_metric=-1e9,
+    )
+    syms = ["AAA", "BBB"]
+    client = FakeLLM(
+        [
+            tool_turn(("write_strategy", {"name": "probe", "source": PROBE}, "tu_0")),
+            tool_turn(("run_sweep", {"name": "probe", "symbols": syms, "n_trials": 3}, "tu_1")),
+            tool_turn(
+                (
+                    "evaluate_vs_champion",
+                    {"name": "probe", "symbols": syms, "params": {"lookback": 18}},
+                    "tu_2",
+                )
+            ),
+            *prose_ending("The candidate did not clear the board."),
+        ],
+        capabilities=NO_CAPS,
+    )
+
+    summary = run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=10
+    )
+
+    assert summary.stopped_reason == "prose_stall"
+    assert summary.promotions == 0
+    assert toolbox.registry.is_empty()  # the gates really refused
+    assert summary.candidates == ["probe"]
+    assert summary.undecided == []
+
+
 def test_undecided_populated_organically_through_the_write_gate(tmp_path):
     """The field reads the toolbox's own set: a strategy authored but never decided during the
     session lands on ``summary.undecided`` without the test poking the set directly."""

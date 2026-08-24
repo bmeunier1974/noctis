@@ -431,6 +431,33 @@ model do exactly this for three straight sessions), so the summary carries the h
 name. The episodic driver needs no such guard — its episode contract forces a structured emission,
 so it cannot stall in prose by construction.
 
+### Two stores, one writer each
+
+An episodic session writes two durable stores, and they own different things — which is what keeps
+every reported number to **one** derivation (#326):
+
+- the **experiment journal** (`state/experiments/<name>.jsonl`) holds the per-strategy *facts*: an
+  authored strategy's thesis, its class tag, every trial, the scorecard, and the verdict the
+  promotion gates arbitrated. Its one writer is the research toolbox (`noctis.research.tools`);
+- the **session ledger** (`state/sessions/<session_id>.jsonl`) holds the session *narrative*: every
+  thesis proposed, the stage transitions, one line per model judgment, each spent verdict with its
+  class-level lesson, and the closing rollup. Its one writer is the episodic driver
+  (`noctis.research.driver`).
+
+Everyone else reads. Neither store mirrors the other, and the `thesis` both of them hold is a
+**deliberate** double write over two different populations: the ledger records every thesis
+*proposed* — including an AUTHOR the write gate refused, which is exactly what the next formulate
+briefing's ALREADY-TRIED tail must show — while a journal file exists only for a name that was
+actually authored, since one minted for a never-authored name would surface a phantom candidate in
+the run record's candidate join.
+
+**Undecided** is the ledger's derivation and nobody else's: a name is undecided when it was
+authored and has **no verdict spent** on it yet. A spent verdict settles the candidate whatever it
+said — a rejection, or an approve the promotion gates then refused — because what leaves a name
+undecided is that nothing judged it, not that nothing crowned it. `undecided_names()` is that list;
+the rollup counts it, the session summary reports it, and the CLOSE report lists it, so a session's
+undecided number and the names behind it cannot disagree.
+
 ## The legacy fallback
 
 No configured client (missing key or missing `[llm]` extra) → the legacy proposer/Optuna loop

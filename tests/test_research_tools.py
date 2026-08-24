@@ -473,6 +473,9 @@ def test_refused_arbitration_journals_its_scorecard_too(toolbox):
     written exactly as a winner's, so a refusal stays replayable (AGENTS.md rule 2)."""
     from noctis.backtest.scorecard import Scorecard
 
+    # Authored through the tool, so the name is in play (undecided) exactly as a session's is.
+    toolbox.dispatch("write_strategy", {"name": "probe", "source": PROBE})
+    assert "probe" in toolbox.undecided
     toolbox.dispatch("run_sweep", {"name": "probe", "symbols": ["AAA", "BBB"], "n_trials": 3})
     # An unreachable bar: the gates refuse, nothing is crowned.
     toolbox.rules = PromotionRules(
@@ -500,7 +503,31 @@ def test_refused_arbitration_journals_its_scorecard_too(toolbox):
     assert round(card.gap, 4) == out["gap"]
     assert card.symbol_holdout_metric is not None
     # The refusal's verdict line still sits beside its evidence.
-    assert _journal_lines(toolbox, "probe")[-1]["event"] == "verdict"
+    verdict = _journal_lines(toolbox, "probe")[-1]
+    assert verdict["event"] == "verdict"
+    assert verdict["promoted"] is False  # approve recorded, not promoted
+    # The verdict was SPENT: the gates arbitrated, so the candidate is settled either way. Only
+    # the promotions counter is outcome-shaped.
+    assert "probe" not in toolbox.undecided
+    assert toolbox.promotions == 0
+
+
+def test_evaluate_refused_before_arbitration_leaves_the_name_undecided(toolbox):
+    """A verdict the gates never got to spend settles nothing: an evaluate turned away BEFORE
+    arbitration (here the exhaustion gate) leaves the candidate in play, so the session-end
+    honesty list still names it."""
+    toolbox.dispatch("write_strategy", {"name": "probe", "source": PROBE})
+    assert "probe" in toolbox.undecided
+
+    out = toolbox.dispatch(
+        "evaluate_vs_champion",
+        {"name": "probe", "symbols": ["AAA", "BBB"], "params": {"lookback": 18}},
+    )
+
+    assert "error" in out and "exhaustion gate" in out["error"]
+    assert "probe" in toolbox.undecided  # nothing arbitrated, nothing settled
+    assert toolbox.promotions == 0
+    assert [r for r in _journal_lines(toolbox, "probe") if r.get("event") == "verdict"] == []
 
 
 def test_reject_strategy_journals_no_scorecard(toolbox):

@@ -17,6 +17,20 @@ formulate briefing tails and the CLOSE report renders. That is why the record sc
 in this module and nowhere else — every writer is an explicit ``record_*`` method and every
 reader gets typed views, so no caller re-parses ``event`` strings by hand.
 
+**One writer, and the experiment journal is not a mirror of it.** This ledger is written by the
+episodic driver alone (:mod:`noctis.research.driver`), which is what gives every number a session
+reports one derivation — ``undecided``, for one, is derived here
+(:meth:`SessionLedger.undecided_names`) and counted nowhere else. Its twin, the experiment journal
+(:mod:`noctis.research.journal`), is written by the research toolbox alone and owns the
+per-strategy *facts*: the trials, the class tag, the scorecard, and the verdict the promotion gates
+arbitrated. The one fact both stores hold, the ``thesis``, is a **deliberate double write** over
+two different populations — this ledger carries every thesis *proposed*, a failed AUTHOR's
+included, because the next formulate briefing's ALREADY-TRIED tail must show an idea that never
+survived the write gate, while the journal holds only names that were authored, since a journal
+file for a name no strategy file exists for would surface a phantom candidate in the run record.
+Collapsing the two into one store is a regression, not a cleanup (epic #326, and
+``tests/test_store_writers.py`` pins the rule).
+
 The schema is *extended, never changed*: one writer per kind, tolerant reads. A malformed
 line is skipped and an unknown record kind an older reader never learned is ignored by the
 typed views rather than being fatal, so an existing ledger keeps loading as new kinds land.
@@ -474,13 +488,30 @@ class SessionLedger:
         records = self._typed("session_end")
         return SessionEnd.from_record(records[-1]) if records else None
 
-    # ── derived views (story #74): the at-a-glance rollup + per-candidate trail ──────────────
+    # ── derived views: undecided names (#328), the rollup + per-candidate trail (#74) ───────
+    def undecided_names(self) -> list[str]:
+        """The names this session left undecided, sorted — authored minus decided.
+
+        One semantic, derived in one place (story #328): a name is *undecided* when it was
+        **authored** (it reached OPTIMIZE, so a file exists) and **no verdict was spent** on it.
+        A spent verdict settles the candidate whatever it said — a rejection, or an approve the
+        promotion gates then refused (``promoted=False``) — because what leaves a candidate
+        undecided is that nothing judged it, not that nothing crowned it. An author attempt that
+        never reached OPTIMIZE is a validation failure, not an undecided candidate: the write gate
+        refused the file, so there is nothing to decide about. :meth:`rollup` counts exactly this
+        list, so a session's ``undecided`` number and the names behind it cannot disagree.
+        Tolerant of an empty/absent ledger (an empty list).
+        """
+        authored = {s.strategy for s in self.stages() if s.stage == "optimize" and s.strategy}
+        decided = {v.strategy for v in self.verdicts() if v.strategy}
+        return sorted(authored - decided)
+
     def rollup(self) -> SessionRollup:
         """Derive the :class:`SessionRollup` from this session's typed records — the source of
         truth for the session-log rollup and the CLOSE report. A file authored is one that reached
-        OPTIMIZE (passed the write gate); an author stage that never did is a validation failure; a
-        strategy authored but never carried to a verdict is undecided. Tolerant of an empty/absent
-        ledger (all zeros)."""
+        OPTIMIZE (passed the write gate); an author stage that never did is a validation failure;
+        the undecided count is the length of :meth:`undecided_names`, never a second subtraction of
+        its own. Tolerant of an empty/absent ledger (all zeros)."""
         stages = self.stages()
         episodes = self.episodes()
         verdicts = self.verdicts()
@@ -494,8 +525,7 @@ class SessionLedger:
         for v in verdicts:
             verdict_counts[v.verdict] = verdict_counts.get(v.verdict, 0) + 1
 
-        authored_names = {s.strategy for s in optimized if s.strategy}
-        decided_names = {v.strategy for v in verdicts if v.strategy}
+        undecided = self.undecided_names()
 
         tokens_by_stage: dict[str, int] = {}
         tokens_by_model: dict[str, int] = {}
@@ -511,7 +541,7 @@ class SessionLedger:
             trials=trials,
             verdicts=verdict_counts,
             promoted=sum(1 for v in verdicts if v.promoted),
-            undecided=len(authored_names - decided_names),
+            undecided=len(undecided),
             escalations=sum(1 for e in episodes if e.stage == "author" and e.escalated),
             tokens_by_stage=tokens_by_stage,
             tokens_by_model=tokens_by_model,

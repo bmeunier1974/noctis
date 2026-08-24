@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from noctis.champions.promotion import PromotionRules
 from noctis.research import Capabilities
 from noctis.research.driver import (
     _CHEAP_MAX_BARS,
@@ -469,9 +470,13 @@ class FakeToolbox:
     def tool_evaluate_vs_champion(self, **kwargs):
         self.evaluations.append(kwargs)
         result = self._next_verdict()
-        if "error" not in result and result.get("promoted"):
-            self.promotions += 1
+        # Mirrors the real toolbox (#327): any ARBITRATED evaluate spends the verdict and
+        # settles the candidate, promoted or not; only a pre-arbitration error leaves it in
+        # play. The promotions counter alone is outcome-shaped.
+        if "error" not in result:
             self.undecided.discard(kwargs["name"])
+            if result.get("promoted"):
+                self.promotions += 1
         return result
 
     def _next_verdict(self):
@@ -1394,6 +1399,42 @@ def test_approve_routes_through_evaluate_vs_champion_with_best_params_and_holdou
     assert summary.promotions == 1
     verdicts = ledger.verdicts()
     assert verdicts[0].verdict == "approve" and verdicts[0].promoted is True
+
+
+def test_arbitrated_refusal_spends_the_verdict_and_leaves_nothing_undecided(tmp_path):
+    # An approve the champion gates arbitrated but refused is a SPENT verdict, exactly as the
+    # real toolbox settles it (#327): the strategy was judged, so it leaves the undecided set —
+    # only the promotions counter is outcome-shaped.
+    episodes = Episodes([formulate_ok()], [decide_ok("approve")])
+    box = FakeToolbox(verdict_results=[{"ok": True, "promoted": False}])
+    ledger = SessionLedger(tmp_path, "s10r")
+
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    assert len(box.evaluations) == 1
+    assert summary.promotions == 0
+    assert summary.undecided == []
+    verdicts = ledger.verdicts()
+    assert verdicts[0].verdict == "approve" and verdicts[0].promoted is False
+
+
+def test_summary_undecided_names_are_the_ledgers_not_the_toolbox_counters(tmp_path):
+    # One owner per fact (epic #326 / story #329): the names a session left undecided are the
+    # SESSION LEDGER's — authored minus decided — not the toolbox's live counter set. A counter
+    # set naming a strategy this session's ledger never authored therefore never leaks into the
+    # summary: the session reports the session, and the ledger is what the session did.
+    episodes = Episodes([formulate_ok()], [decide_ok("reject")])
+    box = FakeToolbox()
+    box.undecided.add("someone_elses_draft")
+    ledger = SessionLedger(tmp_path, "s11")
+
+    summary = _drive(episodes, box, max_episodes=2, ledger=ledger)
+
+    assert summary.rejections == 1
+    assert summary.undecided == []  # the ledger's list: this session authored one, and decided it
+    assert ledger.undecided_names() == []
+    # The counters still carry the stranger — the summary simply does not read them for this fact.
+    assert "someone_elses_draft" in box.session_counters().undecided
 
 
 # ── 2b. deterministic MATCH: screening, holdout reservation, fallback (story #69) ───────────
@@ -2696,6 +2737,13 @@ _REJECT_PAYLOAD = {
     "class_tag": "intraday momentum",
     "holdout_symbols": [],
 }
+_APPROVE_PAYLOAD = {
+    "verdict": "approve",
+    "reason": "the fit panel clears cost and the edge survives the holdout",
+    "class_exhausted": False,
+    "class_tag": "intraday momentum",
+    "holdout_symbols": [],
+}
 
 
 def test_production_discover_episode_emits_through_the_real_runner_and_briefing(tmp_path):
@@ -3114,6 +3162,76 @@ def test_end_to_end_below_floor_verdict_is_refused_by_the_real_gate(tmp_path):
     # The re-asked decide episode carried the real gate refusal as corrective context.
     assert "exhaustion gate" in client.calls[2][0]["content"]
     assert [e.stage for e in ledger.episodes()] == ["formulate", "decide", "decide"]
+
+
+def test_end_to_end_approve_the_gates_refuse_is_decided_in_both_stores(tmp_path):
+    """An approve the REAL promotion gates turn away, end to end: the candidate was judged, so
+    nothing is left undecided — and the two stores state the one fact once each, in one order.
+
+    The toolbox journals the gate's outcome INSIDE the evaluate call (the fact: approve, not
+    promoted); the driver ledgers the model's verdict AFTER that tool returns (the narrative).
+    Both then say the same pair, the ledger's derived undecided list is empty, and the candidate
+    trail reads ``not promoted`` — the honest label for "judged, not crowned" (AGENTS.md rule 2:
+    a refused candidate is a signal, never a gate to loosen)."""
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    # An unreachable bar: every arbitration refuses, so no file can be crowned.
+    box.rules = PromotionRules(
+        champion_count=3,
+        max_gap=1e9,
+        min_test_metric=1e9,
+        min_holdout_metric=-1e9,
+        min_symbol_holdout_metric=-1e9,
+    )
+    ledger = SessionLedger(box.state_dir, session_id="ep-refused-approve")
+    client = FakeEpisodeClient(
+        [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _APPROVE_PAYLOAD)]
+    )
+    runner = EpisodeRunner(client=client, retries=2)
+    formulate, decide, _discover = make_episodes(
+        runner=runner, toolbox=box, ledger=ledger, mandate=None, context_window=10_000_000
+    )
+
+    summary = run_episodic_research(
+        toolbox=box,
+        ledger=ledger,
+        formulate=formulate,
+        decide=decide,
+        fallback_panel_source=lambda: ["AAA", "BBB", "CCC"],
+        budget_minutes=60.0,
+        max_episodes=2,
+        completions=lambda: runner.completions,
+        sweep_trials=3,
+    )
+
+    name = "intraday_momentum_1"
+    # The gates really arbitrated and really refused: nothing crowned, no promotion counted.
+    assert summary.promotions == 0
+    assert box.registry.is_empty()
+    # Judged is decided: the ledger's derived list — and the summary that reads it — is empty.
+    assert summary.undecided == []
+    assert ledger.undecided_names() == []
+    assert ledger.rollup().undecided == 0
+
+    # The narrative half: the model's verdict, with what the gates did to it.
+    verdicts = ledger.verdicts()
+    assert len(verdicts) == 1
+    assert verdicts[0].strategy == name
+    assert verdicts[0].verdict == "approve" and verdicts[0].promoted is False
+
+    # The fact half: the journal's own verdict record, written inside the evaluate call.
+    journal_verdicts = [r for r in box.journal.records(name) if r["event"] == "verdict"]
+    assert len(journal_verdicts) == 1
+    assert journal_verdicts[-1]["verdict"] == "approve"
+    assert journal_verdicts[-1]["promoted"] is False
+    # One fact, two stores, no disagreement.
+    assert (journal_verdicts[-1]["verdict"], journal_verdicts[-1]["promoted"]) == (
+        verdicts[0].verdict,
+        verdicts[0].promoted,
+    )
+
+    # And the post-mortem label a reader sees for a judged-but-not-crowned candidate.
+    trail = next(t for t in ledger.candidate_trails() if t.strategy == name)
+    assert trail.outcome == "not promoted"
 
 
 # ── 5b. end to end: FORMULATE spec → author → gated write against the compiled oracle (#85) ──

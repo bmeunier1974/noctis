@@ -589,6 +589,84 @@ def test_rollup_on_an_empty_ledger_is_all_zeros(ledger):
     assert rollup.tokens_by_stage == {} and rollup.tokens_by_model == {}
 
 
+# ── undecided_names(): the one authored-minus-decided derivation (story #328) ─────────────────
+def test_undecided_names_lists_authored_minus_decided_sorted(tmp_path):
+    """Authored (reached OPTIMIZE) minus decided (spent a verdict), sorted — whatever order the
+    ledger happened to record them in."""
+    led = SessionLedger(tmp_path, "sorted")
+    for name in ("zeta_9", "alpha_1", "mid_5"):
+        led.record_thesis(name, "an idea")
+        led.record_stage("author", strategy=name)
+        led.record_stage("optimize", strategy=name, detail={"trials": 3})
+    led.record_verdict("mid_5", verdict="reject", lesson="thin", promoted=False)
+    assert led.undecided_names() == ["alpha_1", "zeta_9"]
+
+
+def test_undecided_names_lists_an_authored_file_that_spent_no_verdict(ledger):
+    """An authored name carried to no verdict is undecided. A write-gate failure (``dud_3``, which
+    never reached OPTIMIZE) was never authored, so it is not listed either."""
+    _full_arc(ledger)  # momo_1 rejected, rev_2 approved+promoted, dud_3 never optimized
+    ledger.record_thesis("pend_4", "an idea nobody judged")
+    ledger.record_stage("author", strategy="pend_4")
+    ledger.record_stage("optimize", strategy="pend_4", detail={"trials": 4})
+    ledger.record_stage("decide", strategy="pend_4")  # decide ran but spent no verdict
+    assert ledger.undecided_names() == ["pend_4"]
+
+
+def test_undecided_names_omits_an_approve_the_promotion_gates_refused(tmp_path):
+    """A spent verdict settles the candidate regardless of promotion: approve + ``promoted=False``
+    is decided, not undecided."""
+    led = SessionLedger(tmp_path, "gate-refused")
+    led.record_thesis("gated_1", "an idea the gates refused")
+    led.record_stage("author", strategy="gated_1")
+    led.record_stage("optimize", strategy="gated_1", detail={"trials": 6})
+    led.record_verdict("gated_1", verdict="approve", lesson="thin vs champion", promoted=False)
+    assert led.undecided_names() == []
+    assert led.rollup().undecided == 0
+
+
+def test_rollup_undecided_is_the_length_of_the_view(ledger, tmp_path):
+    """One derivation, not two: the rollup's count is exactly what the view lists — populated…"""
+    led = SessionLedger(tmp_path, "derived")
+    led.record_thesis("draft_1", "an idea")
+    led.record_stage("author", strategy="draft_1")
+    led.record_stage("optimize", strategy="draft_1", detail={"trials": 3})
+    led.record_thesis("draft_2", "another idea")
+    led.record_stage("author", strategy="draft_2")
+    led.record_stage("optimize", strategy="draft_2", detail={"trials": 2})
+    led.record_verdict("draft_2", verdict="reject", lesson="thin")
+    assert led.undecided_names() == ["draft_1"]
+    assert led.rollup().undecided == len(led.undecided_names()) == 1
+    # …and empty: the full arc carried every file it authored to a verdict.
+    _full_arc(ledger)
+    assert ledger.undecided_names() == []
+    assert ledger.rollup().undecided == len(ledger.undecided_names()) == 0
+
+
+def test_undecided_names_on_an_empty_ledger_is_empty(ledger):
+    """As tolerant as the rollup it feeds: nothing written ⇒ nothing undecided, never an error."""
+    assert ledger.undecided_names() == []
+
+
+def test_the_view_adds_no_key_to_the_serialized_rollup(ledger):
+    """The view is a reader's, not a record's: the report JSON keeps its exact shape."""
+    _full_arc(ledger)
+    assert set(ledger.rollup().to_dict()) == {
+        "session_id",
+        "theses",
+        "authored",
+        "validation_failures",
+        "trials",
+        "verdicts",
+        "promoted",
+        "undecided",
+        "escalations",
+        "tokens_by_stage",
+        "tokens_by_model",
+        "note",
+    }
+
+
 def test_rollup_log_line_names_every_field(ledger):
     _full_arc(ledger)
     line = ledger.rollup().log_line()

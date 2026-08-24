@@ -6,7 +6,12 @@ registry, memory); the registry is curated, not dumped. The loop's discipline is
 * **Experiment journal** — every ``run_backtest`` call and every ``run_sweep`` trial appends
   one JSON line to ``state/experiments/<strategy>.jsonl`` via :class:`ExperimentJournal`
   (:mod:`noctis.research.journal` owns the record schema); ``get_experiment_log`` reads it
-  back ranked (grid-mng's per-job leaderboard, reborn per-strategy).
+  back ranked (grid-mng's per-job leaderboard, reborn per-strategy). This toolbox is **the
+  journal's one writer** (epic #326): every per-strategy fact — an authored strategy's thesis,
+  its class tag, its trials, its scorecard, the gate's verdict — is recorded here and nowhere
+  else, while one session's *narrative* belongs to the episodic driver's session ledger
+  (:mod:`noctis.research.ledger`). The two stores are not mirrors of each other; the journal's
+  own docstring says why the ``thesis`` is written to both on purpose.
 * **Exhaustion gate** — the verdict tools (``evaluate_vs_champion`` / ``reject_strategy``)
   refuse until the journal shows ≥ ``research.min_trials`` distinct parameter sets or one
   completed sweep. ``write_strategy`` for a *new* name while another strategy sits undecided
@@ -421,6 +426,8 @@ class ResearchToolbox:
         self.promotions = 0
         self.rejections = 0
         self.strategies_touched: list[str] = []
+        # Names still in play: added by a successful write, removed by a SPENT verdict — a
+        # reject, or an evaluate the champion gates arbitrated, whichever way they ruled.
         self.undecided: set[str] = set()
         # Consecutive write-gate rejections (reset by any successful write) — feeds the
         # fixation backstop in tool_write_strategy.
@@ -2001,9 +2008,14 @@ class ResearchToolbox:
             symbols=sorted(bars),
             holdout_symbols=sorted(symbol_holdout) if symbol_holdout else [],
         )
+        # The verdict is SPENT the moment the gates arbitrate: a candidate they turned away was
+        # judged, not left in play, so it leaves the undecided set beside the journal line that
+        # records the judgment. Only an evaluate refused BEFORE arbitration (the exhaustion gate,
+        # an unreadable holdout, a failed promotion plan — every early return above) leaves the
+        # name undecided, because nothing judged it. The promotions counter stays outcome-shaped.
+        self.undecided.discard(name)
         if decision.promote:
             self.promotions += 1
-            self.undecided.discard(name)
             # The winning file lands in champions/ (moved out of the gitignored working
             # area, or copied out of the committed seed) with the tuned defaults and the
             # re-stamped header — pre-validated bytes, so the install cannot fail.
