@@ -11,12 +11,22 @@ no heavy deps, no provider imports — so the same event contract holds on every
 ``level`` is the minimum ``-v`` count at which an event shows (1 = ``-v``, 2 = ``-vv``); the
 sink decides. Zero new model calls, zero extra tokens ride on any of this — an event only ever
 surfaces what a completion *already returned*.
+
+What a *sink* is lives here too (#334): :class:`EventSink` is the seven-member surface callers
+duck-type off ``on_event`` — the call itself, ``delta``/``hint``/``activity``, and the
+``verbose``/``show_reasoning``/``saw_think`` reads — and :class:`NullSink` (singleton
+:data:`NULL_SINK`) is its safe-default adapter, the shape "no sink" takes. Both sit beside the
+:class:`Event` rather than beside a renderer, so a session declares the seam without importing
+one.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 # The kinds the seam knows. think/say/tool/usage are emitted by the research loop (P1);
 # author marks one coder completion in the strategy-authoring split (#9); trade/refuse/feed/
@@ -81,6 +91,87 @@ def render_plain(ev: Event) -> str:
     prefix = _PREFIX.get(ev.kind, "")
     body = " ".join(ev.text.split())  # collapse newlines/runs of whitespace to a single line
     return f"{prefix} {body}".strip() if prefix else body
+
+
+# ── the sink contract ────────────────────────────────────────────────────────────────────────
+@runtime_checkable
+class EventSink(Protocol):
+    """What a session's ``on_event`` seam *is* — the seven members its callers duck-type (#334).
+
+    A sink is far more than "a callable": the agent loop reads ``verbose`` to decide whether to
+    stream and hands its deltas to ``delta``, brackets each blocking model call in ``activity``,
+    and the CLI reads ``saw_think`` afterwards and prints a degradation ``hint``. Declaring all
+    seven in one place is what lets a caller *call* instead of probing with ``getattr``, and what
+    gives a new adapter — a file sink, a socket sink — something to implement against.
+
+    The call takes an :class:`Event` **or** a bare ``str``: a few legacy sites emit a
+    pre-formatted line (a misfire note, a web_search auto-disable), and every adapter renders or
+    files it as-is. Implementations conform structurally — nothing subclasses this — so
+    :class:`~noctis.observability.console.Console` satisfies it without knowing it exists;
+    ``runtime_checkable`` is here so the conformance test can ask an adapter directly.
+    """
+
+    verbose: int
+    show_reasoning: bool
+    saw_think: bool
+
+    def __call__(self, ev: Event | str) -> None:
+        """Surface one event (or one legacy pre-formatted line)."""
+        ...
+
+    def delta(self, kind: str, text: str) -> None:
+        """Surface one streaming ``think``/``say`` delta in place."""
+        ...
+
+    def hint(self, text: str) -> None:
+        """Surface one advisory line — a graceful-degradation note, not an event."""
+        ...
+
+    def activity(self, label: str) -> AbstractContextManager[None]:
+        """Bracket a blocking op (a model call, a tool sweep) with a live progress line."""
+        ...
+
+
+class NullSink:
+    """The sink that says nothing — the shape "no sink" takes, so no caller has to check for one.
+
+    Every member is a safe default: the call and ``delta``/``hint`` are inert, ``activity`` still
+    hands back a ``with``-usable context manager (callers enter it unconditionally), verbosity
+    reads as ``0`` — which parks the agent loop's ``verbose >= 2`` streaming gate — and the
+    reasoning/saw-think flags read ``False``. Any *other* attribute a future caller reaches for
+    resolves to a no-op callable: the point is that nothing a quiet run touches ever raises.
+
+    Stateless by design, so one module-level :data:`NULL_SINK` serves every session, and a
+    subclass (the ``--debug`` recorder) inherits the whole console-facing surface for free.
+    """
+
+    verbose = 0
+    show_reasoning = False
+    saw_think = False
+
+    def __call__(self, ev: Event | str) -> None:
+        """No-op: with no sink attached there is nothing to surface the event to."""
+
+    def delta(self, kind: str, text: str) -> None:
+        """No-op: with no sink attached there is nothing to stream in place."""
+
+    def hint(self, text: str) -> None:
+        """No-op: with no sink attached there is no advisory line to print."""
+
+    @contextmanager
+    def activity(self, label: str) -> Iterator[None]:
+        """A no-op context manager, so ``with sink.activity(...):`` still brackets a blocking
+        call for a caller that never asked whether a console was there."""
+        yield
+
+    def __getattr__(self, name: str) -> Callable[..., None]:
+        """Any other duck-typed attribute resolves to a harmless no-op callable."""
+        return lambda *args, **kwargs: None
+
+
+# One shared, stateless null adapter — it holds no per-session state, so a module singleton is
+# enough, and identity (`sink is NULL_SINK`) reads as "this session is quiet".
+NULL_SINK = NullSink()
 
 
 # ── shared event builders ────────────────────────────────────────────────────────────────────
