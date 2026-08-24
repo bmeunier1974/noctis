@@ -11,15 +11,20 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import json
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from noctis.strategies import indicators as ind
 from noctis.strategies.base import ParamSpec, TraderStrategy
 from noctis.strategies.scenario_spec import (
+    LEG_KINDS,
+    PARSE_WARM,
     SETUP_PAD,
+    SPEC_JSON_SCHEMA,
     Behavior,
     LegSpec,
     ScenarioSpec,
@@ -29,6 +34,7 @@ from noctis.strategies.scenario_spec import (
     compile_spec,
     describe_spec,
     spec_from_json,
+    spec_from_payload,
     spec_to_json,
 )
 from noctis.strategies.scenarios import (
@@ -42,8 +48,10 @@ from noctis.strategies.scenarios import (
     HoldsShortThrough,
     LongWithin,
     Scenario,
+    ScenarioError,
     Segment,
     ShortWithin,
+    check_suite_shape,
 )
 
 WARMS = [0, 1, 5, 20, 50]
@@ -384,6 +392,38 @@ def test_suite_shape_rules_are_enforced(scenarios, match):
         compile_spec(SpecSuite(scenarios), 5)
 
 
+def test_the_suite_shape_refusal_has_one_spelling_across_both_dialects():
+    # compile_spec compiles, then runs the contract's own check_suite_shape and wraps its
+    # ScenarioError — so a spec-path refusal and a DSL-path refusal are the same sentence (#320).
+    missing_no_trade = [
+        _directional_spec("trend", Behavior.ENTER_LONG, name="a"),
+        _directional_spec("trend", Behavior.ENTER_SHORT, name="b"),
+    ]
+    missing_directional = [_never_trade_spec(name="a"), _never_trade_spec(name="b")]
+    for specs in (missing_no_trade, missing_directional):
+        compiled = tuple(compile_scenario(s, 5) for s in specs)
+        with pytest.raises(ScenarioError) as from_shape:
+            check_suite_shape(compiled)
+        with pytest.raises(SpecError) as from_spec:
+            compile_spec(SpecSuite(specs), 5)
+        assert str(from_spec.value) == str(from_shape.value)
+
+
+def test_an_uncompilable_tape_is_reported_before_the_suite_is_counted():
+    # Named ordering change (#320): compile_spec compiles before it counts, so a 9-tape suite
+    # with one uncompilable tape reports that tape's compile error, not `want 2-8`.
+    tiny = ScenarioSpec(name="tiny", legs=[_leg("trend", 5)], behavior=Behavior.ENTER_LONG, leg=0)
+    suite = SpecSuite(
+        [tiny]
+        + [_directional_spec("trend", Behavior.ENTER_LONG, name=f"s{i}") for i in range(7)]
+        + [_never_trade_spec()]
+    )
+    with pytest.raises(SpecError) as excinfo:
+        compile_spec(suite, 0)
+    assert "compiles to" in str(excinfo.value)
+    assert "2-8" not in str(excinfo.value)
+
+
 def test_negative_warm_is_rejected():
     suite = SpecSuite([_directional_spec("trend", Behavior.ENTER_LONG), _never_trade_spec()])
     with pytest.raises(SpecError, match="non-negative"):
@@ -421,6 +461,267 @@ def test_round_tripped_suite_compiles_identically():
     suite = _mixed_suite()
     restored = spec_from_json(spec_to_json(suite))
     assert compile_spec(restored, 20) == compile_spec(suite, 20)
+
+
+# ── the model dialect: spec_from_payload, the tolerant parse of the FORMULATE emit (#83) ─────
+# One scenario the model could emit, and its never-trade partner — the two dialect fixtures.
+_RALLY_PAYLOAD = {
+    "name": "rally",
+    "legs": [{"kind": "trend", "bars": 60, "pct": 0.05}],
+    "behavior": "enter_long_during_leg",
+    "leg": 0,
+}
+_GRIND_PAYLOAD = {
+    "name": "grind",
+    "legs": [{"kind": "flat", "bars": 60}],
+    "behavior": "never_trade",
+}
+
+# Every refusal sentence, copied verbatim from the parse. These messages ride into the FORMULATE
+# corrective the model reads on a re-prompt, so the wording is contract, not diagnostics: pinning
+# it here is what makes "the parse moved without changing what the model is told" a checked claim.
+_REFUSALS = [
+    pytest.param(
+        {"scenarios": [{"name": "rally", "legs": ["nope"], "behavior": "never_trade"}]},
+        "scenario 'rally' leg 0: each leg must be an object",
+        id="leg-not-an-object",
+    ),
+    pytest.param(
+        {"scenarios": [{"name": "rally", "legs": [{"bars": 60}], "behavior": "never_trade"}]},
+        "scenario 'rally' leg 0: a leg 'kind' is required",
+        id="leg-kind-missing",
+    ),
+    pytest.param(
+        {
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [{"kind": "flat", "bars": "60"}],
+                    "behavior": "never_trade",
+                }
+            ]
+        },
+        "scenario 'rally' leg 0: 'bars' must be an integer length (0 for gap)",
+        id="bars-not-an-integer",
+    ),
+    pytest.param(
+        {"scenarios": [{"name": "rally", "legs": [{"kind": "flat", "bars": 60}]}]},
+        "scenario 'rally': a 'behavior' tag is required",
+        id="behavior-missing",
+    ),
+    pytest.param(
+        {
+            "scenarios": [
+                {"name": "rally", "legs": [{"kind": "flat", "bars": 60}], "behavior": "mystery"}
+            ]
+        },
+        "scenario 'rally': unknown behavior 'mystery'; use one of enter_long_during_leg, "
+        "enter_short_during_leg, hold_long_through_leg, hold_short_through_leg, "
+        "flat_by_end_of_leg, never_trade",
+        id="behavior-unknown",
+    ),
+    pytest.param(
+        {"scenarios": ["nope"]},
+        "scenario 0: each scenario must be an object",
+        id="scenario-not-an-object",
+    ),
+    pytest.param(
+        {"scenarios": [{"legs": [{"kind": "flat", "bars": 60}], "behavior": "never_trade"}]},
+        "scenario 0: a non-empty 'name' is required",
+        id="name-missing",
+    ),
+    pytest.param(
+        {"scenarios": [{"name": "rally", "behavior": "never_trade"}]},
+        "scenario 'rally': a non-empty 'legs' list is required",
+        id="legs-missing",
+    ),
+    pytest.param(
+        {"scenarios": [{"name": "rally", "legs": [], "behavior": "never_trade"}]},
+        "scenario 'rally': a non-empty 'legs' list is required",
+        id="legs-empty",
+    ),
+    pytest.param(
+        {
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [{"kind": "flat", "bars": 60}],
+                    "behavior": "never_trade",
+                    "leg": "0",
+                }
+            ]
+        },
+        "scenario 'rally': 'leg' must be an integer leg index or omitted",
+        id="leg-reference-not-an-integer",
+    ),
+    pytest.param(
+        ["scenarios"],
+        "scenario_spec must be an object with a 'scenarios' list",
+        id="spec-not-an-object",
+    ),
+    pytest.param(
+        {},
+        "scenario_spec.scenarios must be a non-empty list of scenarios",
+        id="scenarios-missing",
+    ),
+    pytest.param(
+        {"scenarios": []},
+        "scenario_spec.scenarios must be a non-empty list of scenarios",
+        id="scenarios-empty",
+    ),
+]
+
+
+def test_parse_warm_is_zero_so_a_parse_time_compile_checks_the_shape_only():
+    # FORMULATE compiles at parse time purely to prove the spec is structurally valid; the write
+    # gate re-compiles at the candidate's real declared warmup. Zero, so a directional entry leg
+    # begins right after the setup pad.
+    assert PARSE_WARM == 0
+
+
+def test_spec_from_payload_parses_the_model_dialect_into_the_frozen_suite():
+    suite = spec_from_payload({"scenarios": [_RALLY_PAYLOAD, _GRIND_PAYLOAD]})
+    assert suite == SpecSuite(
+        [
+            ScenarioSpec("rally", [LegSpec("trend", 60, pct=0.05)], Behavior.ENTER_LONG, leg=0),
+            ScenarioSpec("grind", [LegSpec("flat", 60)], Behavior.NEVER_TRADE),
+        ]
+    )
+
+
+def test_a_parsed_payload_compiles_at_the_parse_warmup():
+    # The two halves the FORMULATE boundary puts together: the tolerant parse, then the compile at
+    # PARSE_WARM that proves the emitted spec is structurally valid.
+    suite = spec_from_payload({"scenarios": [_RALLY_PAYLOAD, _GRIND_PAYLOAD]})
+    compiled = compile_spec(suite, PARSE_WARM)
+    assert [s.name for s in compiled] == ["rally", "grind"]
+
+
+def test_spec_from_payload_defaults_the_omitted_shape_params_to_zero():
+    # pct/amplitude/period are ignored per kind by the compiler, so a model that omits them is
+    # emitting a valid leg, not a malformed one.
+    suite = spec_from_payload({"scenarios": [_GRIND_PAYLOAD]})
+    leg = suite.scenarios[0].legs[0]
+    assert (leg.pct, leg.amplitude, leg.period) == (0.0, 0.0, 0)
+
+
+def test_spec_from_payload_reads_an_omitted_leg_reference_as_none():
+    suite = spec_from_payload({"scenarios": [_GRIND_PAYLOAD]})
+    assert suite.scenarios[0].leg is None
+
+
+@pytest.mark.parametrize("tag", list(Behavior))
+def test_spec_from_payload_reads_the_behavior_tag_by_value(tag):
+    # The model dialect speaks the tag's *value* ("enter_long_during_leg"), unlike the
+    # machine-exact JSON carrier, which speaks its name.
+    suite = spec_from_payload(
+        {
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [{"kind": "flat", "bars": 60}, {"kind": "flat", "bars": 60}],
+                    "behavior": tag.value,
+                    "leg": 0,
+                }
+            ]
+        }
+    )
+    assert suite.scenarios[0].behavior is tag
+
+
+def test_a_gap_leg_carries_zero_bars_and_parses():
+    suite = spec_from_payload(
+        {
+            "scenarios": [
+                {
+                    "name": "rally",
+                    "legs": [
+                        {"kind": "gap", "bars": 0, "pct": 0.05},
+                        {"kind": "trend", "bars": 60},
+                    ],
+                    "behavior": "enter_long_during_leg",
+                    "leg": 1,
+                }
+            ]
+        }
+    )
+    assert suite.scenarios[0].legs[0] == LegSpec("gap", 0, pct=0.05)
+
+
+@pytest.mark.parametrize(("raw", "message"), _REFUSALS)
+def test_a_malformed_payload_is_refused_with_its_exact_sentence(raw, message):
+    with pytest.raises(SpecError) as exc:
+        spec_from_payload(raw)
+    assert str(exc.value) == message
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("bars", "scenario 'rally' leg 0: 'bars' must be an integer length (0 for gap)"),
+        ("leg", "scenario 'rally': 'leg' must be an integer leg index or omitted"),
+    ],
+)
+def test_true_is_not_an_integer_length_or_leg_reference(field, message):
+    # bool is an int in Python; a model emitting `true` where a count belongs is a schema misfire,
+    # not a leg of length 1.
+    leg = {"kind": "flat", "bars": 60}
+    scenario = {"name": "rally", "legs": [leg], "behavior": "never_trade"}
+    if field == "bars":
+        leg["bars"] = True
+    else:
+        scenario["leg"] = True
+    with pytest.raises(SpecError) as exc:
+        spec_from_payload({"scenarios": [scenario]})
+    assert str(exc.value) == message
+
+
+# ── the emit schema: the JSON Schema the model is handed, derived from this vocabulary (#322) ─
+# The golden was captured from the driver's `_SCENARIO_SPEC_SCHEMA` at the pre-epic commit
+# 262034f, before the schema moved beside the vocabulary it describes. It is the checked claim
+# that the FORMULATE tool contract — every enum, every description string the model reads about
+# legs and behaviors — is byte-identical across the move.
+SCHEMA_GOLDEN = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "scenario_spec"
+    / "formulate_scenario_spec_schema.json"
+)
+
+
+def test_the_leg_kinds_are_the_compilers_own_builders():
+    """One list, written once: the schema's enum, the unknown-kind refusal and the compiler's
+    dispatch table cannot drift apart because there is nothing left to drift from."""
+    from noctis.strategies.scenario_spec import _BUILDERS, _KNOWN_KINDS
+
+    assert LEG_KINDS == tuple(_BUILDERS)
+    assert _KNOWN_KINDS == "/".join(LEG_KINDS)
+
+
+def test_the_schemas_enums_are_the_vocabulary_itself():
+    """The model is offered exactly the kinds the compiler builds and the tags it maps."""
+    scenario = SPEC_JSON_SCHEMA["properties"]["scenarios"]["items"]["properties"]
+
+    assert scenario["legs"]["items"]["properties"]["kind"]["enum"] == list(LEG_KINDS)
+    assert scenario["behavior"]["enum"] == [b.value for b in Behavior]
+
+
+def test_the_schema_is_the_one_the_driver_advertised_before_the_move():
+    assert SPEC_JSON_SCHEMA == json.loads(SCHEMA_GOLDEN.read_text())
+
+
+def test_the_driver_composes_this_schema_instead_of_holding_one_of_its_own():
+    """The crossing belongs to the vocabulary: the driver names the field and nothing else."""
+    from noctis.research import driver
+
+    assert driver._FORMULATE_SCHEMA["properties"]["scenario_spec"] is SPEC_JSON_SCHEMA
+    for gone in (
+        "_LEG_KINDS",
+        "_LEG_SPEC_SCHEMA",
+        "_SCENARIO_SPEC_ITEM_SCHEMA",
+        "_SCENARIO_SPEC_SCHEMA",
+    ):
+        assert not hasattr(driver, gone), f"driver still defines {gone}"
 
 
 # ── depth: a compiled suite passes the real scenario-contract end to end ─────────────────────

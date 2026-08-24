@@ -448,6 +448,22 @@ def test_every_site_is_named_on_the_changelog_page(site):
     assert site in (REPO_ROOT / CHANGELOG_PATH).read_text()
 
 
+@pytest.mark.parametrize("page", (CHANGELOG_PATH, "docs/development.md"))
+@pytest.mark.parametrize("site", sorted(SITE_ASSETS))
+def test_the_assets_table_names_every_file_a_sites_hash_covers(site, page):
+    """Reading back to an explanation means reading back to *what the hash covers*: an asset the
+    map hashes but the table omits reads to a contributor as "editing that file is not ratcheted".
+    """
+    row = next(
+        line
+        for line in (REPO_ROOT / page).read_text().splitlines()
+        if line.startswith(f"| `{site}`")
+    )
+
+    for rel in SITE_ASSETS[site]:
+        assert f"`{rel.removeprefix('src/noctis/')}`" in row, (page, site, rel)
+
+
 def test_the_script_is_a_shim_a_guard_and_one_main_import():
     """``scripts/prompt_fingerprint.py`` runs *before* the package is importable, which is the
     only reason it exists: it holds the ``sys.path`` shim, the ``ImportError`` guard and the one

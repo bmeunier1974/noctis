@@ -276,3 +276,40 @@ module never has to know the gate exists. The two **tolerant** readers say what 
 header they cannot read: the library index lists that file with its `error` beside its name, like a
 file whose class will not import, and the housekeeping sweep leaves it alone (unreadable is "not
 undecided", so the file is neither archived nor reported).
+
+## Scenario spec
+
+The FORMULATE-authored fixed oracle, as a value: a `SpecSuite` of known-outcome tapes in one small
+vocabulary — **legs** (a segment `kind` plus a decision-bar *length*) and exactly one **behavior**
+tag per tape. **The model never writes a bar index**; the pure, warmup-parametric compiler derives
+every assertion window from the leg boundaries and the strategy's own declared warmup, which is
+what closes the self-fulfilling-oracle trap. One strategy-layer module owns the vocabulary and
+every crossing into it — `noctis.strategies.scenario_spec` (decided 2026-08-23, epic #319) — and it
+imports nothing from `noctis.research`, so the write gate's subprocess can compile a spec without
+loading the research package that proposed it.
+
+**Three crossings, one vocabulary.** The **model dialect**: `spec_from_payload` reads the emit,
+tolerant exactly where the model's dialect legitimately differs (behavior by wire value, omitted
+shape params, an absent `leg`) and precise everywhere else, because its refusal *is* the corrective
+FORMULATE is re-prompted with — compiled at `PARSE_WARM`, a structural check only, since the gate
+re-compiles at the candidate's real warmup. The **carrier**: `spec_to_json` / `spec_from_json`, the
+machine-exact round trip that crosses the write gate's subprocess boundary and rides inside the
+machine-stamped `scenarios()` block. And **compile**: `compile_spec`, pure and deterministic in
+`(spec, warm)`. All three hand back the same frozen `SpecSuite`, so what a spec *is* is decided in
+one module rather than at either boundary; the research layer keeps only the boundary — read the
+field, hand it over, translate the refusal.
+
+**The suite-shape rules are the contract's, not the spec's.** 2–8 scenarios, unique names, at least
+one directional entry, at least one no-trade tape, 60–2000 bars each: written once in
+`noctis.strategies.scenarios.check_suite_shape`, which `check_scenario_contract` runs on what a
+strategy file declares and `compile_spec` runs on what a spec compiles to, wrapping the
+`ScenarioError` into its own `SpecError`. One check serves both dialects, which is why its
+directional and no-trade refusals name both — the DSL's expectation builders *and* the spec's
+behavior tags.
+
+**The schema is a prompt asset.** `SPEC_JSON_SCHEMA` — the JSON Schema the FORMULATE emit contract
+advertises — reads its enums off the vocabulary itself (`LEG_KINDS`, taken from the compiler's own
+segment builders, and `Behavior`), so the offer and the parse are the same words by construction
+rather than by two lists agreeing. It is model-facing text, so this strategy-layer module is an
+asset of the `episodic` prompt site: changing what a leg kind is described as moves that site's
+hash and needs a changelog entry, exactly like a prompt.

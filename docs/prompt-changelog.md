@@ -24,7 +24,7 @@ The sites, and the assets each one's hash covers:
 | `briefings` | the rendered briefings that are the episodic stages' user turns | `research/briefings.py`, `research/digests.py` |
 | `conversation` | the conversation loop's system prompt | `research/prompt.py`, `research/digests.py` |
 | `distill` | the memory distiller's one summarization prompt | `research/distill.py` |
-| `episodic` | the episodic driver's per-stage system texts and emit contracts | `research/driver.py`, `research/digests.py` |
+| `episodic` | the episodic driver's per-stage system texts and emit contracts | `research/driver.py`, `strategies/scenario_spec.py`, `research/digests.py` |
 | `ideation` | the seeded-idea prompt, web search included | `research/ideation.py` |
 
 `research/digests.py` renders the facts (market digest, library index, champion board, memory
@@ -33,6 +33,38 @@ four hashes at once. That over-partitions on purpose — a site whose assembled 
 never keep its old identity.
 
 ---
+
+## 2026-08-23 — sites: episodic
+
+Structural move, **one named wording change**: epic #319 gives `noctis.strategies.scenario_spec`
+every crossing of the FORMULATE scenario spec. The model-dialect parse — `spec_from_payload`, the
+`PARSE_WARM` it is compiled at, and every refusal sentence a malformed spec earns (#321) — and the
+JSON Schema the FORMULATE emit contract advertises for `scenario_spec` move out of
+`research/driver.py` into the strategy-layer module that owns the vocabulary they describe. The
+driver keeps the boundary and nothing else: read the emitted field, parse, compile, translate the
+strategy layer's `SpecError` into the schema-misfire currency the episode runner already reads. The
+schema the model receives is **dict-equal** across the move: the golden
+`tests/fixtures/scenario_spec/formulate_scenario_spec_schema.json`, captured from the pre-epic
+commit `262034f`, is the checked claim (#322), and the `kind`/`behavior` enums it advertises are
+now read off the vocabulary itself (`LEG_KINDS`, taken from the compiler's own builders, and
+`Behavior`) instead of a second list kept beside it in the driver. `scenario_spec.py` joins this
+site's assets, so the description strings the model reads about legs and behaviors can never
+drift un-ratcheted again.
+
+The one wording change is D5, and it is a *unification*, not a rewrite: the five suite-shape rules
+now have a single spelling in `scenarios.check_suite_shape`, which both the spec path and a
+hand-authored `scenarios()` are judged by, so the two refusals whose parentheticals differed
+between them now name both dialects — "at least one scenario must demand a directional entry
+(enter/hold long/short — long_within/holds_long_through/short_within/holds_short_through)" and "at
+least one scenario must be a no-trade tape (never_trade / always_flat())". Those sentences ride
+into a FORMULATE corrective, which is why they are declared here rather than left as diagnostics.
+Nothing else the model is told moves: the per-stage system texts, the emit contracts and their
+field descriptions, the retry hint with its `_SCENARIO_SPEC_EXAMPLE`, and every other refusal
+sentence are verbatim, pinned by the driver's own tests and by the schema golden. The hash moves
+because the code that assembles those texts moved. The module's own docstring was rewritten
+alongside (#324) to name the three crossings it owns — model dialect, carrier, compile — which
+moves the hash a second time without changing a word the model reads. This one entry declares the
+whole epic.
 
 ## 2026-08-22 — sites: author, briefings, conversation, episodic
 

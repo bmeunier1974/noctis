@@ -13,11 +13,21 @@ before ``write_strategy``: the expectations are reasoning-derived from the thesi
 copied from the code's output. Builders contain **no randomness**, so every failure message
 is exactly reproducible. Expectations are windows, not per-bar series — off-by-a-bar
 indicator arithmetic passes; backwards logic does not.
+
+The suite's own shape rules are this module's too, and they live in **one** function:
+:func:`check_suite_shape` — 2-8 scenarios, unique names, at least one directional entry, at
+least one no-trade tape, plus each tape's own shape — is the single arbiter both dialects of
+the oracle are judged by. :func:`check_scenario_contract` runs it on what a strategy file
+declares; :func:`noctis.strategies.scenario_spec.compile_spec` runs it on what a
+FORMULATE-authored scenario spec compiles to, wrapping the :class:`ScenarioError` into its own
+``SpecError``. One spelling serves both, which is why the directional and no-trade refusals
+name the DSL's expectation builders *and* the spec's behavior tags.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -583,24 +593,22 @@ def run_scenario(cls, scenario: Scenario) -> str | None:
     return None
 
 
-def check_scenario_contract(cls, *, require: bool = True) -> None:
-    """Enforce the known-outcome contract on ``cls`` (declaration shape, then replay).
+def check_suite_shape(declared: Sequence[Scenario]) -> None:
+    """Enforce the suite-shape rules on a declared (or compiled) list of scenarios.
 
-    With ``require=False`` (mechanical rewrites of legacy files) an empty declaration
-    passes silently, but anything declared is still fully evaluated.
+    The five rules — a list of :class:`Scenario` objects, 2-8 of them, unique names, at least one
+    directional entry, at least one no-trade tape — plus each tape's own shape (DSL segments, a
+    non-empty ``expect``, a 60-2000 bar length, no expectation window past the tape). This is the
+    **one** place they are written: :func:`check_scenario_contract` runs it on what a strategy
+    file declares, and :func:`noctis.strategies.scenario_spec.compile_spec` runs it on what a
+    FORMULATE-authored spec compiles to, wrapping the :class:`ScenarioError` into its own
+    ``SpecError``. Because one check serves both dialects, the directional and no-trade messages
+    name both — the spec's behavior tags and the DSL's expectation builders.
+
+    The bar-range rule has one **arbiter** (here) and one earlier **diagnosis**
+    (:func:`~noctis.strategies.scenario_spec.compile_scenario`, which knows the setup/legs
+    arithmetic this check cannot see and so refuses an out-of-range tape first).
     """
-    try:
-        declared = cls.scenarios()
-    except Exception as exc:  # noqa: BLE001 — a broken declaration is a contract failure
-        raise ScenarioError(f"scenarios() raised {type(exc).__name__}: {one_line(exc)}") from exc
-    if not declared:
-        if require:
-            raise ScenarioError(
-                "strategy must declare known-outcome scenarios: a scenarios() classmethod "
-                f"returning {MIN_SCENARIOS}-{MAX_SCENARIOS} Scenario objects built from the "
-                "noctis.strategies.scenarios DSL"
-            )
-        return
     if not isinstance(declared, (list, tuple)) or not all(
         isinstance(s, Scenario) for s in declared
     ):
@@ -639,11 +647,37 @@ def check_scenario_contract(cls, *, require: bool = True) -> None:
     if not has_directional:
         raise ScenarioError(
             "at least one scenario must demand a directional entry "
-            "(long_within/holds_long_through/short_within/holds_short_through)"
+            "(enter/hold long/short — long_within/holds_long_through/short_within/"
+            "holds_short_through)"
         )
     if not has_negative:
-        raise ScenarioError("at least one scenario must be a no-trade tape (always_flat())")
+        raise ScenarioError(
+            "at least one scenario must be a no-trade tape (never_trade / always_flat())"
+        )
 
+
+def check_scenario_contract(cls, *, require: bool = True) -> None:
+    """Enforce the known-outcome contract on ``cls`` (declaration shape, then replay).
+
+    The declaration prelude below, then :func:`check_suite_shape` (the shape rules, written
+    once), then the replay loop that runs every tape through ``on_bar``.
+
+    With ``require=False`` (mechanical rewrites of legacy files) an empty declaration
+    passes silently, but anything declared is still fully evaluated.
+    """
+    try:
+        declared = cls.scenarios()
+    except Exception as exc:  # noqa: BLE001 — a broken declaration is a contract failure
+        raise ScenarioError(f"scenarios() raised {type(exc).__name__}: {one_line(exc)}") from exc
+    if not declared:
+        if require:
+            raise ScenarioError(
+                "strategy must declare known-outcome scenarios: a scenarios() classmethod "
+                f"returning {MIN_SCENARIOS}-{MAX_SCENARIOS} Scenario objects built from the "
+                "noctis.strategies.scenarios DSL"
+            )
+        return
+    check_suite_shape(declared)
     for sc in declared:
         msg = run_scenario(cls, sc)
         if msg:

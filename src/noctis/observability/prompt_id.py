@@ -90,6 +90,9 @@ SITE_ASSETS: Mapping[str, tuple[str, ...]] = {
     # The episodic driver's per-stage system texts and emit contracts.
     "episodic": (
         "src/noctis/research/driver.py",
+        # The FORMULATE emit's scenario_spec schema: its leg/behavior enums and the description
+        # strings the model reads about them live beside the vocabulary they describe (#322).
+        "src/noctis/strategies/scenario_spec.py",
         _SHARED_DIGESTS,
     ),
     # The seeded-idea prompt, web search included.

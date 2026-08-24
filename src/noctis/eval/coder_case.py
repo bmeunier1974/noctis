@@ -7,8 +7,9 @@ production does not, or misses one production requires, the benchmark stops meas
 starts measuring a translation layer nobody reviews. So the payload's fields are
 :class:`~noctis.research.author.StrategyBrief`'s own (:data:`BRIEF_KEYS`, asserted field-for-field
 against the production dataclass in ``tests/test_eval_coder_cases.py``, so drift on either side
-breaks the build), and the optional fixed oracle is read by the episodic driver's *own* emit parser,
-so a case's ``scenario_spec`` is one a real FORMULATE could have emitted or it is refused here.
+breaks the build), and the optional fixed oracle is read by the strategy layer's own model-dialect
+parse, so a case's ``scenario_spec`` is one a real FORMULATE could have emitted or it is refused
+here.
 
 **No expected output, ever — and the coder's own spellings of that mistake are named.** The eval
 core refuses the generic shapes (``expected``, ``solution``, ``gold``, …) at the top level of a case
@@ -81,8 +82,13 @@ from noctis.eval.case import (
     parse_case,
 )
 from noctis.research.author import StrategyBrief
-from noctis.research.driver import _parse_scenario_spec
-from noctis.strategies.scenario_spec import SpecSuite
+from noctis.strategies.scenario_spec import (
+    PARSE_WARM,
+    SpecError,
+    SpecSuite,
+    compile_spec,
+    spec_from_payload,
+)
 
 __all__ = [
     "AXIS_LEVELS",
@@ -412,15 +418,20 @@ def _symbols(candidate: object) -> tuple[tuple[str, ...], str | None]:
 def _spec(payload: Mapping[Any, Any]) -> tuple[SpecSuite | None, str | None]:
     """The declared fixed oracle as a :class:`SpecSuite`, or the defect refusing its shape.
 
-    Parsed by the episodic driver's *own* FORMULATE parser — the same vocabulary check and the same
-    parse-time compilation a real emit passes — so a case's oracle is one production could have
-    produced. Full compilation at a candidate's real declared warmup stays the write gate's job.
+    Read by :func:`~noctis.strategies.scenario_spec.spec_from_payload` and compiled at
+    :data:`~noctis.strategies.scenario_spec.PARSE_WARM` — the strategy layer's own model-dialect
+    parse and the same parse-time structural compile a real FORMULATE emit passes — so a case's
+    oracle is one production could have produced. Straight to the layer that owns what a spec *is*,
+    never through the LLM driver, whose only business in an emit is which field carries the spec
+    (#319): a bench case is data already, so it needs the parse, not the transport. Full
+    compilation at a candidate's real declared warmup stays the write gate's job.
     """
     if SPEC_KEY not in payload:
         return None, None
     try:
-        suite, _ = _parse_scenario_spec({SPEC_KEY: _plain(payload[SPEC_KEY])})
-    except (ValueError, TypeError, KeyError) as refusal:
+        suite = spec_from_payload(_plain(payload[SPEC_KEY]))
+        compile_spec(suite, PARSE_WARM)
+    except (SpecError, ValueError, TypeError, KeyError) as refusal:
         return None, f"{SPEC_KEY} is malformed — {refusal}"
     return suite, None
 
@@ -511,7 +522,7 @@ def _undecorated(refusal: str, source: str) -> str:
 def _plain(value: Any) -> Any:
     """A deep-frozen payload value back as plain data — read-only maps and tuples undone.
 
-    A loaded case's payload is frozen all the way down, and the driver's emit parser reads the
+    A loaded case's payload is frozen all the way down, and the model-dialect parse reads the
     literal shapes a transport hands it (``dict``, ``list``), so the oracle is thawed on its way
     into the production parser rather than the parser being taught a second set of shapes.
     """
