@@ -34,6 +34,10 @@ never keep its old identity.
 
 ---
 
+## 2026-08-24 — sites: episodic
+
+Epic #326 story #329: bookkeeping refactor in the episodic driver — `summary.undecided` now derives from the session ledger (`undecided_names()`), and `_record_verdict` states the write order (journal fact first, ledger narrative second). No wording change, no emit-contract change.
+
 ## 2026-08-23 — sites: episodic
 
 Structural move, **one named wording change**: epic #319 gives `noctis.strategies.scenario_spec`
