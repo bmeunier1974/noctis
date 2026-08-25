@@ -28,7 +28,6 @@ from statistics import median
 
 import pandas as pd
 
-from noctis.backtest.candidate import Candidate
 from noctis.backtest.pool import (
     POOL_TEARDOWN_GRACE_S,
     PoolStalled,
@@ -46,6 +45,7 @@ from noctis.backtest.scorecard import (
 )
 from noctis.backtest.splits import walk_forward
 from noctis.backtest.validate import ValidationConfig, score_window, validate_candidate
+from noctis.strategies.candidate import Candidate
 from noctis.strategies.families import FamilyRegistry
 
 logger = logging.getLogger("noctis.pipeline")

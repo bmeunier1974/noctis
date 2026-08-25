@@ -7,7 +7,6 @@ test metric; the train − test gap is the overfit signal. Deterministic, no loo
 
 from __future__ import annotations
 
-from noctis.backtest.candidate import Candidate
 from noctis.backtest.pipeline import PipelineConfig, evaluate
 from noctis.backtest.prefilter import (
     PrefilterConfig,
@@ -34,6 +33,7 @@ from noctis.backtest.validate import (
     require_symbols_ready,
     validate_candidate,
 )
+from noctis.strategies.candidate import Candidate
 
 __all__ = [
     "Candidate",

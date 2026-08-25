@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from noctis.backtest.candidate import Candidate
 from noctis.backtest.scorecard import (
     DEFAULT_ANNUALIZATION_CAP,
     DEFAULT_MAX_PERIOD_RATIO,
@@ -25,6 +24,7 @@ from noctis.backtest.splits import Split
 from noctis.broker.paper import PaperBroker
 from noctis.broker.seam import FeeModel, SlippageModel
 from noctis.broker.simulator import simulate
+from noctis.strategies.candidate import Candidate
 from noctis.strategies.families import FamilyRegistry
 
 

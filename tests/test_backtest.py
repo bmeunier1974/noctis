@@ -1250,3 +1250,33 @@ def test_panel_pool_abort_never_joins_and_close_is_a_noop_after():
     while any(p.is_alive() for p in procs) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not any(p.is_alive() for p in procs)
+
+
+# ── one import path for the Candidate ─────────────────────────────────────────────────────
+
+
+def test_candidate_has_exactly_one_module_home():
+    """#342: the backtest package's re-export module is deleted. ``Candidate`` is defined with
+    the strategies it parameterizes, and every backtest module names *that* home — so a reader
+    chasing the concept lands in one file, and the shim stops riding the engine fingerprint."""
+    import importlib
+
+    import noctis.backtest as backtest_pkg
+    from noctis.strategies.candidate import Candidate as StrategiesCandidate
+
+    assert Candidate is StrategiesCandidate
+    assert Candidate.__module__ == "noctis.strategies.candidate"
+    assert not (Path(backtest_pkg.__file__).parent / "candidate.py").exists()
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("noctis.backtest.candidate")
+
+
+def test_the_engine_identity_never_fingerprints_a_deleted_shim():
+    """The behavioural component map names live files only: a path that no longer exists would
+    poison its component's digest with the missing-input rule instead of measuring behaviour."""
+    from noctis.observability.engine_id import COMPONENT_PATHS
+
+    repo_root = Path(__file__).resolve().parents[1]
+    listed = [rel for paths in COMPONENT_PATHS.values() for rel in paths]
+    assert "src/noctis/backtest/candidate.py" not in listed
+    assert [rel for rel in listed if not (repo_root / rel).exists()] == []
