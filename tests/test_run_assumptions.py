@@ -395,16 +395,37 @@ def test_the_validator_refuses_a_block_that_smuggled_a_gate_in():
 # ── the additive-only rule ─────────────────────────────────────────────────────────────────
 
 
-def test_a_record_carrying_unknown_keys_still_validates():
-    """Additive-only, from the reader's side: a record written by a *newer* Noctis carries keys
-    this one has never heard of, and must still be readable rather than rejected."""
+def test_a_record_may_grow_a_whole_new_section_and_still_validate():
+    """Additive-only, where the record's vocabulary is open: the *sections* are a floor, not a
+    ceiling (``REQUIRED_SECTIONS`` may grow, never shrink), so a record written by a newer Noctis
+    carrying a section this one has never heard of is readable rather than rejected."""
     record = build(_artifacts(inputs=_inputs()))
     record["some_future_section"] = {"whatever": 1}
+
+    assert schema.validate(record) == []
+
+
+def test_a_key_no_section_declares_is_refused_wherever_it_sits():
+    """The other half of the same contract (story #350): a *block's* keys are a closed vocabulary.
+
+    Additive-only is the writer's freedom to declare a new key, not a licence to emit an
+    undeclared one — the shape a typo takes, which presence-checking alone passes silently. Growing
+    a block stays one edit (declare the key in ``schema.py``); emitting one nobody declared is a
+    violation, named with the key and the section it sits in.
+    """
+    record = build(_artifacts(inputs=_inputs()))
     record["run"]["future_total_s"] = 12.0
     record["segments"][0]["future_measurement"] = None
     record["assumptions"]["future_assumption"] = "stated later"
 
-    assert schema.validate(record) == []
+    problems = schema.validate(record)
+
+    assert [problem.split(":")[0] for problem in problems] == [
+        "run.future_total_s",
+        "segments[0].future_measurement",
+        "assumptions.future_assumption",
+    ]
+    assert all("undeclared key" in problem for problem in problems)
 
 
 # ── schema versioning and the upgrade path ─────────────────────────────────────────────────

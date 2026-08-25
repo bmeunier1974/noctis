@@ -7,21 +7,30 @@ deliberately the smallest module in the epic, because it is also the one the eng
 tracks as the ``schema`` component (``observability/engine_id.py``): changing what is recorded
 should move a digest, and only that.
 
-**Versioning is additive-only.** :data:`SCHEMA_VERSION` is 1. New fields may be added at any time;
-an existing field never changes meaning or type, and a reader ignores keys it does not know (a
-record carrying keys this Noctis has never heard of validates — story #143 pins that). That is what
-lets a record written tonight still be read by the Noctis that resumes the run in a month. A
-breaking change bumps the version and :func:`upgrade` rewrites the record **in place** on the next
-open, recording what it did — a version is never silently repurposed and a key is never quietly
-reinterpreted.
+**Versioning is additive-only.** :data:`SCHEMA_VERSION` is 1. New fields may be added at any time
+and an existing field never changes meaning or type, which is what lets a record written tonight
+still be read by the Noctis that resumes the run in a month: the *read* path never rejects a
+document (:func:`upgrade` leaves a record from the future untouched, and a consumer ignores keys it
+does not know). A breaking change bumps the version and :func:`upgrade` rewrites the record **in
+place** on the next open, recording what it did — a version is never silently repurposed and a key
+is never quietly reinterpreted.
+
+**Additive means declared, though** (story #350). :func:`validate` is a *conformance* check against
+the schema this engine ships, not the read path, and its keys walker runs two ways: a block's
+declared keys are the whole of what it may carry, so a key nobody declared is a violation rather
+than a field silently published under a spelling no reader indexes. Growing a block stays one edit
+— declare the key in its tuple below — and the record's *sections* stay open
+(:data:`REQUIRED_SECTIONS` is a floor, never a ceiling), which is where a later story's whole new
+section lands.
 
 **Two conventions are part of the contract, not style.** Units are explicit in the field name
 (``_usd``, ``_pct``, ``_bps``, ``_s``, ``_bytes``, ``_bars``, ``_hours``), and a known-absent value
 is an explicit ``null`` rather than an omitted key — so a consumer can tell "not applicable" from
 "this schema version did not have it". :func:`validate` enforces both structurally: every section's
-keys must be *present* whatever their values, every dimensioned number must spell its unit the one
-canonical way (:data:`UNIT_ALIASES`), and every timestamp key anywhere in the document — not only
-in the sections with a hand-written rule — must be UTC ISO-8601 with a ``Z``.
+keys must be *present* whatever their values and *declared* whatever their spelling, every
+dimensioned number must spell its unit the one canonical way (:data:`UNIT_ALIASES`), and every
+timestamp key anywhere in the document — not only in the sections with a hand-written rule — must
+be UTC ISO-8601 with a ``Z``.
 
 **Caps are honest.** Bulky lists are bounded (:data:`TRADE_CAP`, :data:`EVENT_CAP`) and every cap
 that bites writes a ``truncated`` note carrying kept/total counts. Silent truncation is forbidden:
@@ -740,11 +749,33 @@ def validate(record: Mapping[str, object]) -> list[str]:
 
 
 def check_keys(label: str, section: Mapping[str, object], keys: Sequence[str]) -> list[str]:
-    """Presence, not truthiness: an absent value is an explicit ``null``, never a missing key."""
-    return [
+    """Both directions: every declared key present, and no key the schema never declared.
+
+    **Presence, not truthiness** — an absent value is an explicit ``null``, never a missing key, so
+    a consumer can tell "not applicable" from "this schema version did not have it".
+
+    **Vocabulary, not only presence** (story #350) — a block's declared keys are the whole of what
+    it may carry, so a key nobody declared is named rather than passed. The failure this catches is
+    an *emitter typo*: a builder writing ``cumulative_trails`` beside the ``cumulative_trials``
+    nobody filled in produces a record that satisfies every presence check and quietly publishes a
+    field no reader indexes. Presence alone cannot see it; the declared tuple is the only thing
+    that can. Growing the record is still one edit — declare the key here — which is what keeps
+    this a ratchet on drift rather than a tax on additions.
+
+    Both directions are reported in one pass, missing keys first, because one read of the refusal
+    should be enough to fix the document.
+    """
+    declared = set(keys)
+    problems = [
         f"{label}.{key}: key is missing (absent values are explicit nulls)"
         for key in keys
         if key not in section
+    ]
+    return problems + [
+        f"{label}.{key}: undeclared key (a block carries the keys the schema declares for it — "
+        "declare it here, or fix the emitter that spelled it)"
+        for key in section
+        if key not in declared
     ]
 
 

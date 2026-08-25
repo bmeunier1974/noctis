@@ -196,14 +196,26 @@ def test_build_then_validate_round_trips_with_no_problems():
     assert validate(build(_artifacts())) == []
 
 
-def test_a_reader_ignores_keys_it_has_never_heard_of():
-    """A reader's tolerance is the writer's freedom to add: additive-only versioning is only a
-    promise if an unknown key is not a violation."""
+def test_a_record_may_grow_a_whole_new_section_and_still_validate():
+    """Additive-only where the vocabulary is open: ``REQUIRED_SECTIONS`` is a floor, not a ceiling,
+    so a section a later story added is readable rather than rejected."""
     record = build(_artifacts())
     record["something_a_later_story_added"] = {"figure": 1}
-    record["bench"]["future_counter"] = 7
 
     assert validate(record) == []
+
+
+def test_a_key_no_section_declares_is_refused():
+    """The bench record inherits the run record's two-way keys walker (story #350): a block's
+    declared keys are the whole of what it may carry, so an emitter typo is named rather than
+    published as a field no reader indexes."""
+    record = build(_artifacts())
+    record["bench"]["future_counter"] = 7
+
+    problems = validate(record)
+
+    assert [problem.split(":")[0] for problem in problems] == ["bench.future_counter"]
+    assert "undeclared key" in problems[0]
 
 
 def test_the_validator_returns_every_problem_at_once_never_only_the_first():

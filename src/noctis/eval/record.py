@@ -20,9 +20,12 @@ walkers behind :func:`validate` are the run record's own, exported by ``reportin
   zero (nothing passed) is a finding; a *missing* input (nobody classified the failures, the price
   table could not price a model) is ``null``, and it propagates: a figure whose input is unknown
   stays unknown all the way into the comparison;
-* :data:`SCHEMA_VERSION` is **additive-only**. New keys may arrive at any time, an existing key
-  never changes meaning, and :func:`validate` ignores keys it has never heard of — a reader's
-  tolerance is the writer's freedom to add.
+* :data:`SCHEMA_VERSION` is **additive-only**, and additive means *declared*. New keys may arrive
+  at any time and an existing key never changes meaning; the record's sections are a floor rather
+  than a ceiling, so a later story's whole new section is readable here. But a section's declared
+  keys are the whole of what it may carry, and :func:`validate` — the run record's two-way keys
+  walker, story #350 — names a key nobody declared rather than publishing an emitter typo as a
+  field no reader indexes.
 
 **The key is the point of the record.** :func:`comparable_key` composes one greppable label out of
 the seven things that have to have been equal before two bench numbers may be subtracted — the
@@ -795,11 +798,11 @@ _VERBATIM_SUBTREES = ("harness.dials", "provenance.client_stack")
 def validate(record: Mapping[str, object]) -> list[str]:
     """Check one bench record against the schema; return **every** problem, one line each.
 
-    A list, not an exception, for the run record's reason: the operator asking "is this record
-    readable?" wants the whole list at once, not one problem per attempt. Unknown keys are ignored
-    — additive-only versioning is a promise a strict reader would break on the first record written
-    by a later Noctis. Nothing here reads a file or a clock, so a record checks the same in memory
-    as it does on disk.
+    A list, not an exception, for the run record's reason: the operator asking "does this record
+    conform?" wants the whole list at once, not one problem per attempt. An undeclared key is one
+    of the answers — the walkers are the run record's own, and they check a block's vocabulary as
+    well as its presence. Nothing here reads a file or a clock, so a record checks the same in
+    memory as it does on disk.
     """
     problems: list[str] = []
     if record.get("schema_version") != SCHEMA_VERSION:
@@ -907,7 +910,7 @@ def _check_provenance(provenance: object) -> list[str]:
 
 
 def _check_section(label: str, section: object, keys: Sequence[str]) -> list[str]:
-    """One section: ``null``, or an object carrying every key the contract names."""
+    """One section: ``null``, or an object carrying every key the contract names and no other."""
     if section is None:
         return []
     if not isinstance(section, Mapping):

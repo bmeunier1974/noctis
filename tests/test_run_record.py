@@ -1041,6 +1041,16 @@ def test_validate_names_a_timestamp_without_a_z_suffix():
     assert any("created_utc" in p for p in schema.validate(record))
 
 
+def test_validate_names_an_undeclared_key_and_the_section_it_sits_in():
+    """An emitter typo is a schema violation, not a silently-accepted new field (story #350)."""
+    record = build(_artifacts())
+    record["run"]["cumulative_trails"] = 7
+
+    problems = schema.validate(record)
+
+    assert any("run.cumulative_trails" in p and "undeclared" in p for p in problems)
+
+
 def test_validate_names_an_out_of_order_segment_index():
     record = build(_artifacts())
     record["segments"][1]["index"] = 7
@@ -1062,6 +1072,27 @@ def test_check_keys_asks_for_presence_not_truthiness():
 
     assert len(problems) == 1
     assert "block.stopped_utc" in problems[0]
+
+
+def test_check_keys_names_a_key_the_schema_never_declared():
+    """The walker's second direction (story #350): vocabulary, not only presence."""
+    problems = schema.check_keys(
+        "block", {"stopped_utc": None, "stoped_utc": None}, ("stopped_utc",)
+    )
+
+    assert len(problems) == 1
+    assert "block.stoped_utc" in problems[0]
+    assert "undeclared" in problems[0]
+
+
+def test_check_keys_reports_both_directions_in_one_pass():
+    """A block that dropped a key *and* grew a typo says both — one read is enough to fix it."""
+    problems = schema.check_keys("block", {"stoped_utc": None}, ("stopped_utc",))
+
+    assert [problem.split(":")[0] for problem in problems] == [
+        "block.stopped_utc",
+        "block.stoped_utc",
+    ]
 
 
 def test_check_stamp_accepts_a_utc_stamp_or_a_null_and_names_anything_else():
