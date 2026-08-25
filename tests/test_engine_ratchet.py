@@ -14,23 +14,35 @@ one file, and recording it again — the same shape ``tests/test_engine_id.py`` 
 The tier split is the contract: an edit to ``gates`` or ``backtest`` (the arbiter — what passes,
 what a number means) **fails**; an edit to a searcher component **warns and passes**, because a
 ratchet that blocks on a docstring edit gets disabled, and a disabled ratchet asserts nothing.
+
+An arbiter move may be declared two ways, and the second one (#355) is the rest of this file: an
+``ENGINE_VERSION`` bump says "these numbers are no longer comparable", and a dated entry at the top
+of ``docs/engine-changelog.md`` naming the component under ``behaviour: unchanged`` says "this edit
+was mechanical". Both still fail until the record catches up; what the declaration decides is
+whether ``--write`` may be the thing that catches it up. How an entry is *read* is the shared
+reader's, tested once in ``tests/test_changelog.py``; what is asserted here is what naming a
+component there permits.
 """
 
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 import pytest
 
 from noctis.observability import engine_change, engine_id, engine_ratchet, ratchet
-from noctis.observability.engine_id import COMPONENT_PATHS, ENGINE_VERSION, fingerprint
+from noctis.observability.changelog import newest_entry
+from noctis.observability.engine_id import COMPONENT_PATHS, ENGINE_VERSION, fingerprint, tier_of
 from noctis.observability.engine_ratchet import (
+    CHANGELOG_PATH,
     RECORD_PATH,
     REGENERATE_COMMAND,
     build_record,
     check,
     compare_records,
+    load_record,
     main,
     write_record,
 )
@@ -88,6 +100,38 @@ def _edit(root: Path, rel: str) -> None:
 def _tagged(result, tag: str) -> list[str]:
     """The names this verdict filed under one tier, in the order the report prints them."""
     return [drift.name for drift in result.drifts if drift.tag == tag]
+
+
+# The page's own header, without entries — the shape ``docs/engine-changelog.md`` ships with.
+CHANGELOG_HEADER = "# Engine changelog\n\nHow to read this file.\n\n"
+
+
+def _write_changelog(root: Path, text: str) -> None:
+    page = root / CHANGELOG_PATH
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(text, encoding="utf-8")
+
+
+def _declare(root: Path, heading: str, note: str = "Mechanical only.") -> None:
+    """Push one entry onto the front of the engine changelog, with the heading as given."""
+    page = root / CHANGELOG_PATH
+    existing = page.read_text(encoding="utf-8") if page.is_file() else CHANGELOG_HEADER
+    older = existing.split("\n## ", 1)
+    tail = "\n## " + older[1] if len(older) > 1 else ""
+    _write_changelog(root, f"{CHANGELOG_HEADER}## {heading}\n\n{note}\n{tail}")
+
+
+def _declare_no_op(root: Path, components: str) -> None:
+    """The declaration itself: a dated entry naming the components under the no-op marker."""
+    _declare(root, f"2026-02-02 — components: {components} — behaviour: unchanged")
+
+
+def _stamp_committed_version(root: Path, version: int) -> None:
+    """Rewrite the committed record's declared version — "this file predates the bump"."""
+    path = root / RECORD_PATH
+    record = json.loads(path.read_text())
+    record["engine_version"] = version
+    path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 
 
 # ── the policy module holds the rule and borrows the mechanics ────────────────────────────
@@ -281,6 +325,259 @@ def test_an_arbiter_move_whose_bump_is_declared_is_not_refused(tmp_path):
     assert not result.refuse_write
 
 
+# ── the declaration: a no-op entry names the component on the engine changelog ────────────
+
+
+def test_a_record_declares_the_changelog_entry_it_was_written_against(tmp_path):
+    """The engine record carries the prompt record's block, key for key: "arrived *after* the
+    record" is checkable only because the record states the entry it was regenerated against."""
+    root = _build_tree(tmp_path)
+    _declare_no_op(root, "gates")
+
+    block = build_record(root)["changelog"]
+
+    assert set(block) == {"path", "heading", "digest", "declares"}
+    assert block["path"] == CHANGELOG_PATH
+    assert block["heading"] == "2026-02-02 — components: gates — behaviour: unchanged"
+    assert block["declares"] == ["gates"]
+
+
+def test_a_tree_with_no_engine_changelog_records_a_head_of_nulls(tmp_path):
+    """A missing page is a tree with nothing declared, never an error."""
+    assert build_record(_build_tree(tmp_path))["changelog"] == {
+        "path": CHANGELOG_PATH,
+        "heading": None,
+        "digest": None,
+        "declares": [],
+    }
+
+
+def test_a_no_op_entry_naming_the_drifted_component_is_declared_but_still_fails(tmp_path):
+    """The bump-declared precedent: the arbiter tier fails until the record catches up. What the
+    declaration changes is only whether ``--write`` may be what catches it up."""
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _edit(root, GATES_FILE)
+    _declare_no_op(root, "gates")
+
+    result = check(root)
+
+    assert result.status == "fail"
+    assert _tagged(result, "arbiter, declared no-op") == ["gates"]
+    assert result.drifts[0].files == (GATES_FILE,)
+    assert not result.refuse_write
+    report = result.report()
+    assert "declared no-op arbiter drift: gates" in report
+    assert "the record was not regenerated with it" in report
+    assert REGENERATE_COMMAND in report
+
+
+def test_regenerating_a_declared_no_op_writes_the_record_the_check_then_accepts(tmp_path):
+    root = _build_tree(tmp_path)
+    main(["--write", "--root", str(root)])
+    _edit(root, GATES_FILE)
+    _declare_no_op(root, "gates")
+    assert main(["--check", "--root", str(root)]) == 1
+
+    assert main(["--write", "--root", str(root)]) == 0
+
+    assert main(["--check", "--root", str(root)]) == 0
+    written = load_record(root)
+    assert written["components"]["gates"]["digest"] == fingerprint(root).digest("gates")
+    assert written["engine_version"] == ENGINE_VERSION  # the declaration is not a bump
+    assert written["changelog"]["declares"] == ["gates"]
+
+
+def test_the_undeclared_refusal_names_the_bump_the_no_op_entry_and_restoring(tmp_path, capsys):
+    """Three outs, one copy-paste away: bump, declare a no-op with the heading spelled out, or
+    restore the behaviour. And ``--write`` still refuses the move nobody declared."""
+    root = _build_tree(tmp_path)
+    main(["--write", "--root", str(root)])
+    _edit(root, GATES_FILE)
+    capsys.readouterr()
+
+    code = main(["--write", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "arbiter drift with no ENGINE_VERSION bump: gates" in out
+    assert "bump ENGINE_VERSION" in out
+    assert CHANGELOG_PATH in out
+    assert '"## ' in out
+    assert "components: gates — behaviour: unchanged" in out
+    assert "restore the behaviour" in out
+    assert "refusing to regenerate" in out
+
+
+# ── two halves, both needed: name the component, and be new since the record ──────────────
+
+
+def test_an_entry_that_was_already_the_head_when_the_record_was_written_declares_nothing(tmp_path):
+    """Yesterday's no-op cannot license today's behaviour change to the same component."""
+    root = _build_tree(tmp_path)
+    _declare_no_op(root, "gates")
+    write_record(root)  # the record now names that entry as the head it was written against
+    _edit(root, GATES_FILE)
+
+    result = check(root)
+
+    assert result.status == "fail"
+    assert result.refuse_write
+    assert _tagged(result, "arbiter") == ["gates"]
+
+
+def test_an_entry_naming_the_other_arbiter_component_declares_nothing(tmp_path):
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _edit(root, GATES_FILE)
+    _declare_no_op(root, "backtest")
+
+    result = check(root)
+
+    assert result.refuse_write
+    assert _tagged(result, "arbiter") == ["gates"]
+
+
+def test_an_entry_that_omits_the_no_op_marker_declares_nothing(tmp_path):
+    """The page may narrate a bump; only ``behaviour: unchanged`` declares one to this check."""
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _edit(root, GATES_FILE)
+    _declare(root, "2026-02-02 — components: gates")
+
+    result = check(root)
+
+    assert result.refuse_write
+    assert _tagged(result, "arbiter") == ["gates"]
+
+
+def test_a_fenced_heading_declares_nothing_and_a_real_entry_beneath_it_does(tmp_path):
+    """The page documents its own heading in a fence, so the reader that skips fences is the
+    shared one — a template is not a declaration."""
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _edit(root, GATES_FILE)
+    _write_changelog(
+        root,
+        CHANGELOG_HEADER
+        + "```text\n## <YYYY-MM-DD> — components: gates — behaviour: unchanged\n```\n",
+    )
+    assert check(root).refuse_write
+
+    _declare_no_op(root, "gates")
+
+    assert not check(root).refuse_write
+
+
+def test_a_no_op_entry_naming_a_searcher_component_is_inert(tmp_path):
+    """Searcher drift never blocked, so there is nothing there for a declaration to lift."""
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _edit(root, SEARCHER_EDITS["prompts"])
+    _declare_no_op(root, "prompts")
+
+    result = check(root)
+
+    assert result.status == "warn"
+    assert result.ok
+    assert _tagged(result, "searcher") == ["prompts"]
+    assert "declared no-op" not in result.report()
+
+
+def test_a_declared_no_op_beside_an_undeclared_move_is_still_refused(tmp_path):
+    """The strictest drift wins the verdict, and the report ranks what it prints: the undeclared
+    arbiter move first, then the declared one, then the advisory tier."""
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _edit(root, GATES_FILE)
+    _edit(root, BACKTEST_FILE)
+    _edit(root, SEARCHER_EDITS["prompts"])
+    _declare_no_op(root, "backtest")
+
+    result = check(root)
+
+    assert result.refuse_write
+    assert [drift.name for drift in result.drifts] == ["gates", "backtest", "prompts"]
+    assert _tagged(result, "arbiter, declared no-op") == ["backtest"]
+    assert main(["--write", "--root", str(root)]) == 1
+
+
+def test_a_declared_no_op_beside_a_version_bump_prints_the_older_version_line_and_writes(tmp_path):
+    """Both may have happened in one PR, so a no-op entry beside a bump is not a contradiction —
+    and with the versions in disagreement the declaration decides nothing anyway."""
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _stamp_committed_version(root, ENGINE_VERSION - 1)
+    _edit(root, GATES_FILE)
+    _declare_no_op(root, "gates")
+
+    result = check(root)
+
+    assert result.status == "fail"
+    assert "arbiter drift recorded under an older ENGINE_VERSION: gates" in result.report()
+    assert _tagged(result, "arbiter") == ["gates"]
+    assert not result.refuse_write
+    assert main(["--write", "--root", str(root)]) == 0
+
+
+# ── the report names the entry the check actually read ────────────────────────────────────
+
+
+def test_the_report_names_the_changelog_entry_it_read_on_arbiter_drift(tmp_path):
+    """ "I wrote one and it still fails" needs the entry the check actually saw."""
+    root = _build_tree(tmp_path)
+    _declare_no_op(root, "backtest")
+    write_record(root)
+    _edit(root, GATES_FILE)
+
+    report = check(root).report()
+
+    assert f"newest {CHANGELOG_PATH} entry: 2026-02-02 — components: backtest" in report
+
+
+def test_the_report_says_so_when_the_engine_changelog_has_no_entry_at_all(tmp_path):
+    root = _build_tree(tmp_path)
+    _write_changelog(root, CHANGELOG_HEADER)
+    write_record(root)
+    _edit(root, GATES_FILE)
+
+    assert f"newest {CHANGELOG_PATH} entry: none" in check(root).report()
+
+
+def test_a_missing_record_still_names_the_changelog_entry_it_read(tmp_path):
+    """The baseline is missing, so no drift is named — but "which entry did it read" is exactly
+    as much the question here, and the answer must not depend on drift to hang it on."""
+    root = _build_tree(tmp_path)
+    _declare_no_op(root, "backtest")
+
+    report = check(root).report()
+
+    assert load_record(root) is None
+    assert f"newest {CHANGELOG_PATH} entry: 2026-02-02 — components: backtest" in report
+
+
+def test_searcher_only_drift_never_names_a_changelog_entry(tmp_path):
+    """There is nothing to declare, and a check that always says something is one people skip."""
+    root = _build_tree(tmp_path)
+    write_record(root)
+    _edit(root, SEARCHER_EDITS["prompts"])
+
+    result = check(root)
+
+    assert result.status == "warn"
+    assert result.footer == ()
+    assert CHANGELOG_PATH not in result.report()
+
+
+def test_the_policy_re_exports_none_of_the_shared_reader():
+    """One parser for both ratchets, reached at one name. A convenience alias here would be a
+    second name for the same reading, and the next contributor would have to work out which of
+    the two this policy binds."""
+    moved = ("ChangelogEntry", "newest_entry", "read_entry", "header", "declared_since", "footer")
+
+    assert [name for name in moved if hasattr(engine_ratchet, name)] == []
+
+
 # ── the exit code each tier gives CI ──────────────────────────────────────────────────────
 
 
@@ -433,3 +730,67 @@ def test_the_script_docstring_names_what_write_refuses():
     assert "refuses" in docstring
     assert "--write" in docstring
     assert "arbiter" in docstring and "ENGINE_VERSION" in docstring
+
+
+# ── the page a declaration is written on ──────────────────────────────────────────────────
+
+
+CHANGELOG_PAGE = REPO_ROOT / CHANGELOG_PATH
+
+
+def test_the_engine_changelog_page_carries_its_grammar_and_no_entries_yet():
+    """The page ships with its header alone: the grammar lives in a fence the reader skips, so
+    the template that documents a declaration is not itself one."""
+    text = CHANGELOG_PAGE.read_text(encoding="utf-8")
+
+    assert newest_entry(text) is None
+    assert "components: <component>[, <component>…] — behaviour: unchanged" in text
+
+
+@pytest.mark.parametrize("component", sorted(COMPONENT_PATHS))
+def test_the_page_names_every_component_with_its_tier_and_the_files_its_digest_covers(component):
+    """A declaration a machine reads has to be one a human can write: the page spells each
+    component as the map does, says which tier it is on, and names what its digest covers."""
+    row = next(
+        line
+        for line in CHANGELOG_PAGE.read_text(encoding="utf-8").splitlines()
+        if line.startswith(f"| `{component}`")
+    )
+
+    assert tier_of(component) in row
+    for rel in COMPONENT_PATHS[component]:
+        assert f"`{rel}`" in row, (component, rel)
+
+
+def test_the_page_states_what_qualifies_as_a_no_op_what_never_does_and_the_reviewers_bar():
+    """The claim is a human's word, so the bar it is judged against is on the page beside it."""
+    text = CHANGELOG_PAGE.read_text(encoding="utf-8").lower()
+
+    for mechanical in ("rename", "import path", "docstring", "type annotation", "pass-through"):
+        assert mechanical in text
+    for behavioural in ("branch", "constant", "default", "formula", "threshold"):
+        assert behavioural in text
+    assert "golden" in text and "fixture" in text
+
+
+def test_the_committed_records_changelog_head_is_what_this_tree_reads():
+    """The drift check compares *components* only, so the record's changelog block — the second
+    half of the rule — is unpinned by it: a parser that read this page differently would leave
+    the committed head stale and nothing would say so. This is that pin, field by field."""
+    committed = json.loads((REPO_ROOT / RECORD_PATH).read_text())["changelog"]
+    read_now = build_record(REPO_ROOT)["changelog"]
+
+    assert committed["path"] == read_now["path"] == CHANGELOG_PATH
+    assert committed["heading"] == read_now["heading"]
+    assert committed["digest"] == read_now["digest"]
+    assert committed["declares"] == read_now["declares"]
+
+
+def test_the_declared_no_op_case_is_documented_in_the_module_docstring():
+    """The second way to declare an arbiter move is written where the next reader of the code
+    will be, beside the bump it is an alternative to."""
+    docstring = RATCHET_SOURCE.read_text().split('"""')[1].lower()
+
+    assert "no-op" in docstring
+    assert CHANGELOG_PATH in docstring
+    assert "declar" in docstring

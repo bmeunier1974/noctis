@@ -1,4 +1,10 @@
 {
+  "changelog": {
+    "declares": [],
+    "digest": null,
+    "heading": null,
+    "path": "docs/engine-changelog.md"
+  },
   "components": {
     "backtest": {
       "digest": "3ba3e0bf1c97134f",
