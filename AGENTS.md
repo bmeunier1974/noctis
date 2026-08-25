@@ -179,7 +179,7 @@ but the one-slot-per-family gate runs *before* that, so a stale champion is neve
 family's re-tune, only by a different strategy.
 
 **The run is an entity, and it writes one file.** Every `noctis run` mints a run id
-(`observability/debug/runid.py` — identity is minted, never derived from the config) and opens
+(`observability/runid.py` — identity is minted, never derived from the config) and opens
 `workspace/runs/<run_id>/`: `run.json` (the record) + `run.lock` (liveness). The I/O boundary is the
 design: the `reporting/run_tree/` package is the **only** code that touches that tree — five modules
 over one narrow read (`record ← {address, index, lock, evidence} ← store`, a layering
