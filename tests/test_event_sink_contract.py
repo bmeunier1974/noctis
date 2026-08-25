@@ -17,6 +17,7 @@ Everything asserted here is what a caller observes: what the sink accepts, what 
 from __future__ import annotations
 
 import ast
+import inspect
 import sys
 from contextlib import contextmanager
 from datetime import datetime
@@ -207,3 +208,17 @@ def test_the_events_module_imports_nothing_but_the_standard_library():
     no heavy package — so declaring a sink costs a renderer's import, and a core install nothing."""
     source = Path(events_module.__file__).read_text(encoding="utf-8")
     assert _import_roots(source) - set(sys.stdlib_module_names) == set()
+
+
+@pytest.mark.parametrize("build_adapter", list(ADAPTERS.values()), ids=list(ADAPTERS))
+def test_every_adapter_declares_the_surface_statically(build_adapter, tmp_path):
+    """Python 3.12's protocol ``isinstance`` resolves members with a *static* lookup
+    (``inspect.getattr_static``), which never consults ``__getattr__`` — so an adapter must
+    declare all seven members for real, not improvise them through a catch-all tail. Pinning the
+    static lookup here keeps the 3.11 suite red for a member only 3.12's check would refuse."""
+    sink = build_adapter(tmp_path)
+    for name in SINK_MEMBERS:
+        try:
+            inspect.getattr_static(sink, name)
+        except AttributeError:
+            pytest.fail(f"{type(sink).__name__} serves {name!r} only through __getattr__")

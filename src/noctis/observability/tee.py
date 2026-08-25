@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Any
 
 from noctis.observability.events import Event, EventSink
@@ -41,10 +42,12 @@ class EventTee:
     takes an ``Event | str`` (a recorder, a list's ``append``) rides along without conforming to
     the seven-member seam. Calling the tee renders on the primary, then hands the same event to
     every secondary — each inside a guard, so a raising recorder is logged once and skipped, never
-    breaking the primary path or a later secondary. Any attribute other than the call itself
-    delegates to the primary (its ``delta``/``activity``/``hint`` methods and its
-    ``verbose``/``show_reasoning``/``saw_think`` reads), which makes the tee itself an
-    :class:`~noctis.observability.events.EventSink` whatever it is teeing.
+    breaking the primary path or a later secondary. The six other seam members —
+    ``delta``/``hint``/``activity`` and the ``verbose``/``show_reasoning``/``saw_think`` reads —
+    are declared for real and hand straight to the primary: Python 3.12 resolves a protocol
+    ``isinstance`` with a *static* lookup, so a catch-all ``__getattr__`` alone would not make
+    the tee an :class:`~noctis.observability.events.EventSink`. ``__getattr__`` still delegates
+    any name beyond the seam, so a future duck-typed read keeps working.
     """
 
     def __init__(self, primary: EventSink, *secondaries: Callable[[Event | str], None]) -> None:
@@ -63,9 +66,33 @@ class EventTee:
                     "observability secondary sink raised; primary path unaffected", exc_info=True
                 )
 
+    # The six seam members beyond the call, declared for real: Python 3.12 resolves a protocol
+    # ``isinstance`` with a static lookup that never consults ``__getattr__``, so the tee names
+    # what it forwards. Each one hands straight to the primary; a secondary only ever sees whole
+    # events through the call itself.
+    @property
+    def verbose(self) -> int:
+        return self._primary.verbose
+
+    @property
+    def show_reasoning(self) -> bool:
+        return self._primary.show_reasoning
+
+    @property
+    def saw_think(self) -> bool:
+        return self._primary.saw_think
+
+    def delta(self, kind: str, text: str) -> None:
+        self._primary.delta(kind, text)
+
+    def hint(self, text: str) -> None:
+        self._primary.hint(text)
+
+    def activity(self, label: str) -> AbstractContextManager[None]:
+        return self._primary.activity(label)
+
     def __getattr__(self, name: str) -> Any:
-        # Reached only for attributes the tee does not define itself — i.e. the sink surface a
-        # caller duck-types (delta, hint, activity, verbose, show_reasoning, saw_think, …).
+        # Reached only for names beyond the declared seam — a future duck-typed read.
         # Delegation is unconditional: the primary is a real sink, so whatever it answers is the
         # answer — including a primary that reads as falsy. (The read goes through ``__dict__``
         # so a half-built tee cannot recurse back into this method.) The return is ``Any`` — the

@@ -111,9 +111,20 @@ class EventSink(Protocol):
     ``runtime_checkable`` is here so the conformance test can ask an adapter directly.
     """
 
-    verbose: int
-    show_reasoning: bool
-    saw_think: bool
+    @property
+    def verbose(self) -> int:
+        """How much a caller should surface (the agent loop's ``verbose >= 2`` streaming gate)."""
+        ...
+
+    @property
+    def show_reasoning(self) -> bool:
+        """Whether the operator asked for the model's reasoning to be surfaced."""
+        ...
+
+    @property
+    def saw_think(self) -> bool:
+        """Whether a think delta arrived — the CLI's post-session degradation read."""
+        ...
 
     def __call__(self, ev: Event | str) -> None:
         """Surface one event (or one legacy pre-formatted line)."""
