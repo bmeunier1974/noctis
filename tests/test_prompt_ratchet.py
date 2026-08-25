@@ -402,6 +402,19 @@ def test_the_newest_changelog_entry_names_only_sites_that_exist():
     assert set(entry.sites) <= set(SITE_ASSETS)
 
 
+def test_the_committed_records_changelog_head_is_what_this_tree_reads():
+    """The drift check compares *sites* only, so the record's changelog block — the second half
+    of the rule — is unpinned by it: a parser that read this page differently would leave the
+    committed head stale and nothing would say so. This is that pin, field by field."""
+    committed = json.loads((REPO_ROOT / RECORD_PATH).read_text())["changelog"]
+    read_now = build_record(REPO_ROOT)["changelog"]
+
+    assert committed["path"] == read_now["path"] == CHANGELOG_PATH
+    assert committed["heading"] == read_now["heading"]
+    assert committed["digest"] == read_now["digest"]
+    assert committed["declares"] == read_now["declares"]
+
+
 def test_the_prompt_record_is_separate_from_the_engine_record():
     """Prompts and arbiter behaviour drift on different clocks — two files, two clocks."""
     assert RECORD_PATH != "engine_fingerprint.json"
