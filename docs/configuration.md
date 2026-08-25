@@ -198,7 +198,7 @@ fill-cost floor, the promotion thresholds, the two-axis holdout geometry, the ou
 secrets). Every leaf setting is classified **exactly once** in `src/noctis/config/overlay.py` —
 the authoritative table, with a justification comment per group — and a completeness ratchet in
 the test suite fails until a newly added knob is classified deliberately, so nothing is allowed
-by accident of omission. Today: **39 allowed, 2 clamped, 53 refused**. The whole surface also
+by accident of omission. Today: **39 allowed, 2 clamped, 54 refused**. The whole surface also
 ships commented-out in `mandate/MANDATE.md.example`, so it is discoverable without reading
 source.
 
@@ -230,7 +230,7 @@ while the run does another. `null` — "no bound": an unlimited budget, no exhau
 — ranks as the least-disciplined end of *either* scale, so an overlay may replace it with a
 number and never the reverse.
 
-**Refused (53) — fatal at startup, with the reason printed.** A refused, unknown, or invalid
+**Refused (54) — fatal at startup, with the reason printed.** A refused, unknown, or invalid
 key stops the process before any work starts, listing **every** problem in one error so a bad
 mandate is one fix rather than a fix-one-rerun loop. (Refusals used to be warned about and
 silently skipped, which meant discovering three days into a run that a knob never applied.) The
