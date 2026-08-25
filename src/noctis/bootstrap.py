@@ -2078,91 +2078,141 @@ class ResearchSession:
         )
 
 
-def _build_coder_client(settings):
-    """The dedicated strategy-authoring ("coder") client for ``research.agent.coder_model``, or
-    ``None`` — inert in this story, threaded into the toolbox for a follow-up to consume.
+@dataclass(frozen=True)
+class _CoderRow:
+    """One row of the coder table: the dials a client is built from, and what its absence costs.
 
-    Unset (the default) ⇒ ``None``: the session driver authors full strategy source itself, and
-    session assembly is unchanged. Set ⇒ a second, stateless per-model client is built alongside
-    the driver via the shared :func:`~noctis.research.client_for` constructor. Thinking flips ON
-    here (``research.agent.coder_thinking``, default on) because authoring — the scenario-window
-    and warmup arithmetic — is the reasoning-heavy sub-task (#17); it is a *deliberate*, budgeted
-    decision (``deliberate=True``), so even a Sonnet coder reasons, while the driver loop's own
-    thinking pin is untouched (its cost stays bounded by the Class-B ``max_author_calls`` budget).
-    If that client can't be built (its provider's key or the ``[llm]`` extra is missing) the
-    degradation is loud, never silent: warn and fall back to ``None`` (driver-authored mode), so
-    the session still assembles — the same graceful-degradation contract as the rest of the LLM
-    seam, never a mid-session failure.
+    Everything that differs between the local coder and the paid fallback is a cell here — which
+    knob names the model, which thinking dial it rides, what a degraded session loses — so the
+    build itself, the sampling policy and the degradation warning exist exactly once below.
+    """
 
-    The coder's sampling knobs (#222) ride the same builder: unset (the default) they ask for
-    nothing, so the coder's request is today's; a set knob is only sent where the provider seam
-    declares the capability, so the same mandate pointed at an Anthropic coder drops levers that
-    provider has no parameter for instead of erroring."""
+    #: The ``research.agent`` knob (equivalently the bench's own knob set) that names this model.
+    model_knob: str
+    #: The thinking dial this row rides. The two are deliberately independent: authoring is the
+    #: reasoning-heavy sub-task so the local coder's defaults ON (#17), while the strong fallback's
+    #: defaults OFF (#98) — a thinking sonnet-5 timed out and thinking-truncated every file.
+    thinking_knob: str
+    #: What this client is called in the degradation warning.
+    noun: str
+    #: What a session assembles as when this client cannot be built.
+    degraded: str
+
+
+#: The coder table (#345): one row per client a session may author through. Row order is the
+#: escalation order — the local coder every brief goes to first, then the paid fallback a spent
+#: local author may escalate to.
+_CODER_TABLE: tuple[_CoderRow, _CoderRow] = (
+    _CoderRow(
+        model_knob="coder_model",
+        thinking_knob="coder_thinking",
+        noun="coder",
+        degraded=(
+            "assembling in driver-authored mode; the session driver will write full strategy "
+            "source itself"
+        ),
+    ),
+    _CoderRow(
+        model_knob="coder_fallback_model",
+        thinking_knob="coder_fallback_thinking",
+        noun="fallback",
+        degraded=(
+            "assembling with no escalation path; a failed local author will be skipped as today"
+        ),
+    ),
+)
+
+#: The one degradation line both rows say, filled from the row's own cells: a missing provider key
+#: (or the ``[llm]`` extra) costs a client at BUILD time, loudly, never a mid-session failure.
+_CODER_DEGRADED = (
+    "%s %r is configured but no %s client could be built (its provider's API key or the [llm] "
+    "extra is missing) — %s. See docs/configuration.md."
+)
+
+
+@dataclass(frozen=True)
+class CoderClients:
+    """The coder a session authors through, and the paid fallback it may escalate to.
+
+    Either half is ``None`` when its model is unconfigured or its provider key is missing, and the
+    model field beside a client names what that client was built for (``None`` when there is no
+    client to name) — so a caller reads what it *has*, never a model string with nothing behind it.
+    """
+
+    client: Any = None
+    model: str | None = None
+    fallback: Any = None
+    fallback_model: str | None = None
+
+
+def build_coder_clients(
+    settings,
+    *,
+    knobs: Any = None,
+    model: str | None = None,
+    escalations: int | None = None,
+) -> CoderClients:
+    """The dedicated strategy-authoring ("coder") clients for one session or one bench — the local
+    coder for ``research.agent.coder_model`` and the paid escalation target for
+    ``coder_fallback_model`` — built through the shared
+    :func:`~noctis.research.client_for` constructor from the :data:`_CODER_TABLE` rows.
+
+    **Unset is the default and costs nothing.** No coder model ⇒ no clients, no provider consulted:
+    the session driver authors full strategy source itself, exactly as before the knob existed.
+
+    **Degradation happens here, loudly, or not at all.** A configured model whose provider key (or
+    the ``[llm]`` extra) is missing yields ``None`` plus one warning naming the knob, the model and
+    what the session loses — the same graceful-degradation contract as the rest of the LLM seam,
+    never a mid-session failure. A model the *caller* named (``model``, a bench's own alias) is not
+    the operator's configuration, so its failure is left to that caller's verdict without a warning.
+
+    **Escalation is a fallback FROM local authoring**, so the fallback is built only when a coder
+    model was resolved too; either unset ⇒ no fallback, and no wasted client. ``escalations`` is
+    the caller's remaining escalation budget when the caller wants the fallback withheld at *build*
+    time (the coder bench, which has no session to count in); a caller that counts escalations at
+    *use* time against ``research.agent.max_escalations`` — the research toolbox does — names no
+    budget and gets the fallback whenever both models are configured.
+
+    ``knobs`` is the dial set to read (anything carrying the ``coder_*`` knob names), defaulting to
+    ``research.agent``; a bench passes its own resolved set so an override reaches the client. Both
+    clients are stateless and ride one sampling policy (#222): the escalated coder samples the way
+    the local one was told to, capability-gated per provider like every other lever.
+    """
+    dials = knobs if knobs is not None else settings.research.agent
+    coder_row, fallback_row = _CODER_TABLE
+    coder_model = model or getattr(dials, coder_row.model_knob)
+    budgeted = escalations is None or int(escalations) > 0
+    fallback_model = getattr(dials, fallback_row.model_knob) if coder_model and budgeted else None
+    client = _coder_client(settings, coder_row, dials, coder_model)
+    fallback = _coder_client(settings, fallback_row, dials, fallback_model)
+    return CoderClients(
+        client=client,
+        model=coder_model if client is not None else None,
+        fallback=fallback,
+        fallback_model=fallback_model if fallback is not None else None,
+    )
+
+
+def _coder_client(settings, row: _CoderRow, dials: Any, model: str | None):
+    """One table row's client, or ``None`` — with the row's own degradation warning when the model
+    it failed on is the one the operator configured."""
+    if not model:
+        return None
     from noctis.research import client_for
 
-    agent = settings.research.agent
-    coder_model = agent.coder_model
-    if not coder_model:
-        return None
-    coder = client_for(
+    client = client_for(
         settings,
-        coder_model,
-        thinking=agent.coder_thinking,
+        model,
+        thinking=getattr(dials, row.thinking_knob),
+        # The coder's thinking is a *deliberate*, budgeted decision (#17), so an opted-in Sonnet
+        # reasons instead of deferring to the cheap-path pin the watch dial obeys.
         deliberate=True,
-        temperature=agent.coder_temperature,
-        seed=agent.coder_seed,
+        temperature=dials.coder_temperature,
+        seed=dials.coder_seed,
     )
-    if coder is None:
-        logger.warning(
-            "coder_model %r is configured but no coder client could be built (its provider's "
-            "API key or the [llm] extra is missing) — assembling in driver-authored mode; the "
-            "session driver will write full strategy source itself. See docs/configuration.md.",
-            coder_model,
-        )
-    return coder
-
-
-def _build_coder_fallback_client(settings):
-    """The PAID coder-fallback client for ``research.agent.coder_fallback_model`` (story #72), or
-    ``None`` — the counted escalation target a spent local author falls back to.
-
-    Escalation is a fallback FROM local authoring, so this is built only when BOTH a local
-    ``coder_model`` and a ``coder_fallback_model`` are configured; either unset ⇒ ``None`` (no
-    escalation path, and no wasted client). Built stateless beside the local coder through the
-    shared :func:`~noctis.research.client_for` constructor, on its OWN thinking dial
-    (``coder_fallback_thinking``, default off — #98): the fallback is the strong model, and the
-    reasoning dial tuned for weak local coders broke the escalation insurance in the field (a
-    thinking sonnet-5 timed out and thinking-truncated every file), so by default the escalated
-    call spends its whole output ceiling on the file. ``deliberate=True`` still marks the opt-in
-    (``coder_fallback_thinking: on``) as the budgeted coder decision, so even a Sonnet fallback
-    then reasons. If that client can't be built (its provider's key or the ``[llm]`` extra is
-    missing) the degradation is loud, never silent: warn and fall back to ``None``, so the session
-    still assembles and a failed local author is simply skipped as today — the same
-    graceful-degradation contract as :func:`_build_coder_client`, never a mid-session failure.
-    Bounded per session by ``research.agent.max_escalations`` (0 = never escalate)."""
-    from noctis.research import client_for
-
-    agent = settings.research.agent
-    if not agent.coder_model or not agent.coder_fallback_model:
-        return None
-    fallback = client_for(
-        settings,
-        agent.coder_fallback_model,
-        thinking=agent.coder_fallback_thinking,
-        deliberate=True,
-        # One coder sampling policy per session (#222) — the escalated coder samples the way the
-        # local one was told to, capability-gated per provider like every other lever.
-        temperature=agent.coder_temperature,
-        seed=agent.coder_seed,
-    )
-    if fallback is None:
-        logger.warning(
-            "coder_fallback_model %r is configured but no fallback client could be built (its "
-            "provider's API key or the [llm] extra is missing) — assembling with no escalation "
-            "path; a failed local author will be skipped as today. See docs/configuration.md.",
-            agent.coder_fallback_model,
-        )
-    return fallback
+    if client is None and model == getattr(dials, row.model_knob):
+        logger.warning(_CODER_DEGRADED, row.model_knob, model, row.noun, row.degraded)
+    return client
 
 
 def build_research_session(
@@ -2208,6 +2258,9 @@ def build_research_session(
     client = build_llm_client(settings)
     if client is None:
         return None
+    # Both authoring clients from one table (#345). The session counts escalations at use time
+    # (the toolbox meters them against ``max_escalations``), so no build-time budget is named.
+    coders = build_coder_clients(settings)
     toolbox = ResearchToolbox(
         settings=settings,
         lake=lake,
@@ -2217,8 +2270,8 @@ def build_research_session(
         rules=rules if rules is not None else PromotionRules.from_settings(settings),
         mandate_source=mandate.source if mandate else None,
         mandate=mandate,
-        coder_client=_build_coder_client(settings),
-        coder_fallback_client=_build_coder_fallback_client(settings),
+        coder_client=coders.client,
+        coder_fallback_client=coders.fallback,
         on_event=on_event,
     )
     return ResearchSession(
