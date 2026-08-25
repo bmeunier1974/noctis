@@ -239,6 +239,14 @@ def test_the_validator_names_a_dimensioned_number_that_spells_its_unit_the_long_
     assert any("p50_seconds" in problem for problem in validate(record))
 
 
+def test_the_quoted_harness_dials_are_exempt_from_the_naming_conventions():
+    """The dials are *quoted* from whatever the harness was configured with, not authored here —
+    so an operator's own dial named the long way is not a bench-record schema violation."""
+    record = build(_artifacts(harness_dials={"timeout_seconds": 30, "budget_usd": 5.0}))
+
+    assert validate(record) == []
+
+
 # ── derived, never incremented ─────────────────────────────────────────────────────────────
 
 
@@ -689,6 +697,28 @@ def test_the_builder_and_the_validator_reach_no_io_no_clock_and_no_randomness():
     text = RECORD_SOURCE.read_text()
     for forbidden in ("datetime.now", "utcnow", "time(", "open(", "Path(", "random", "os."):
         assert forbidden not in text, forbidden
+
+
+def test_the_conventions_are_the_run_records_walkers_themselves_not_a_second_copy():
+    """Story #349: the unit, stamp, estimate and key-presence rules have **one** implementation.
+
+    A bench record and a run record read side by side must agree about what ``_s`` means and what
+    a dollar figure has to call itself; two copies of the walkers eventually disagree. The import
+    runs the legal way only — the eval layer reads the engine, never the reverse.
+    """
+    tree = ast.parse(RECORD_SOURCE.read_text())
+
+    defined = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    walkers = {"check_keys", "check_units", "check_stamps", "check_stamp", "check_estimate_labels"}
+    assert not defined & (walkers | {f"_{name}" for name in walkers})
+
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "noctis.reporting.schema"
+        for alias in node.names
+    }
+    assert {"check_keys", "check_units", "check_stamps", "check_estimate_labels"} <= imported
 
 
 def test_the_engine_modules_the_record_reaches_for_are_the_two_pure_ones():
