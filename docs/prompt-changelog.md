@@ -36,6 +36,20 @@ never keep its old identity.
 
 ## 2026-08-24 — sites: episodic
 
+Epic #333 story #339: the episodic driver's session sink parameter is retyped —
+`on_event: EventSink = NULL_SINK` in place of `Callable[[Event | str], None] | None = None` — so
+the driver emits its stage boundaries and deterministic tool lines unguarded, and its two
+no-sink branches (`_tool_emitter`'s `_no_emit` return and `emit_stage`'s `is not None` check)
+delete. A bare run now carries the quiet null adapter instead of nothing, which is the same
+silence by a different mechanism. **No wording change to any prompt text**: no stage system text,
+no emit contract, no briefing and no scenario-spec schema string moved — the hash moves only
+because a site's hash covers the whole of `research/driver.py`. The driver's *internal*
+`ToolEmitter`/`_no_emit`/`_no_stage` stage-function seam keeps its behaviour exactly; its comment
+now names it for what it is — the default for a stage function driven without narration, not a
+"no sink" case, since there is no longer any such case.
+
+## 2026-08-24 — sites: episodic
+
 Epic #326 story #329: bookkeeping refactor in the episodic driver — `summary.undecided` now derives from the session ledger (`undecided_names()`), and `_record_verdict` states the write order (journal fact first, ledger narrative second). No wording change, no emit-contract change. Story #331 adds one docstring paragraph to the same file: the driver states the epic's ownership rule — it is the session ledger's one writer, the toolbox is the experiment journal's, and the `thesis` double write is deliberate. Documentation only; no stage system text, briefing or emit contract moved.
 
 ## 2026-08-23 — sites: episodic

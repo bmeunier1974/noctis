@@ -932,6 +932,20 @@ def test_research_says_when_a_reasoning_view_surfaced_no_reasoning(tmp_path, mon
     assert "reasoning not surfaced" not in surfaced.output
 
 
+def test_the_reasoning_hint_still_reaches_an_operator_through_a_teed_sink(tmp_path, monkeypatch):
+    """The command reads ``saw_think`` and calls ``hint`` on whatever sink the band built, with no
+    existence check (#337): under ``--debug`` that sink is an ``EventTee``, which proxies both to
+    its console primary — so a reasoning view that came back empty is still named once."""
+    _patch_research_agent(monkeypatch)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"state_dir: {tmp_path}/state/\nqa_dir: {tmp_path}/qa\n")
+
+    result = runner.invoke(app, ["research", "--config", str(cfg), "--show-reasoning", "--debug"])
+
+    assert result.exit_code == 0, result.output
+    assert "reasoning not surfaced by anthropic" in result.output
+
+
 def test_a_research_minted_run_records_the_gates_verdict(tmp_path, monkeypatch):
     """Rule 1's verdict is measured on every verb that mints a run (#247): a run born from a
     research session says its orders were paper-only, instead of "nobody measured"."""

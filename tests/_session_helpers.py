@@ -1,7 +1,8 @@
-"""Shared harness for the TRADING-phase replay tests (session slicing + account
-continuity): synthetic exchange-local minute bars, a minimal in-memory lake/registry,
-a tmp-path runtime factory, and a driver for one TRADING entry through the phase's
-public interface (``runtime.trading.run`` → :class:`~noctis.engine.TradingOutcome`)."""
+"""Shared harness for the session tests: synthetic exchange-local minute bars, a minimal
+in-memory lake/registry, a tmp-path runtime factory, and a driver for one TRADING entry
+through the phase's public interface (``runtime.trading.run`` →
+:class:`~noctis.engine.TradingOutcome`) — plus :class:`CapturingSink`, the one conforming
+event sink every test that drives a session with somebody watching captures through."""
 
 from __future__ import annotations
 
@@ -15,8 +16,30 @@ from noctis.config import load_settings
 from noctis.data.types import NS_PER_SECOND, empty_bars
 from noctis.engine import build_runtime
 from noctis.memory import MemoryStore
+from noctis.observability import Event, NullSink
 
 ET = ZoneInfo("America/New_York")
+
+
+class CapturingSink(NullSink):
+    """A conforming :class:`~noctis.observability.EventSink` that keeps everything it is handed.
+
+    The shared capture for tests that drive a loop which *reads* its sink rather than only
+    calling it — the agent loop reads ``verbose`` to decide whether to stream, hands deltas to
+    ``delta`` and brackets blocking calls in ``activity`` (#339), so a bare ``events.append``
+    is no longer a sink there. Subclassing :class:`~noctis.observability.NullSink` inherits the
+    whole console-facing surface as safe defaults, so a test states only what it cares about:
+    ``verbose`` (the ``>= 2`` streaming gate) and the payloads, ``Event`` or legacy string
+    alike, that land in :attr:`events`.
+    """
+
+    def __init__(self, verbose: int = 0):
+        self.events: list[Event | str] = []
+        self.verbose = verbose
+
+    def __call__(self, ev: Event | str) -> None:
+        self.events.append(ev)
+
 
 TRADE_T = datetime(2026, 3, 9, 10, 0, tzinfo=ET)  # an open Monday; value unused by replay
 
@@ -81,7 +104,9 @@ class _FakeRegistry:
         return []
 
 
-def _make_runtime(tmp_path, lake, universe=("AAPL",), *, on_event=None):
+def _make_runtime(tmp_path, lake, universe=("AAPL",), **sink):
+    """A tmp-path runtime over ``lake``. Pass ``on_event=`` to wire a console; **omit** it for a
+    bare run, which holds the engine's own quiet :data:`~noctis.observability.NULL_SINK`."""
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
         "mode: paper\n"
@@ -96,7 +121,7 @@ def _make_runtime(tmp_path, lake, universe=("AAPL",), *, on_event=None):
         memory=MemoryStore(tmp_path / "MEMORY.md"),
         registry=_FakeRegistry(),
         reports_dir=str(tmp_path / "reports"),
-        on_event=on_event,
+        **sink,
     )
 
 

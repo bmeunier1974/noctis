@@ -15,7 +15,7 @@ from noctis.config.settings import Settings
 from noctis.data.ingest import IngestResult
 from noctis.data.types import empty_bars
 from noctis.memory import InMemoryMemory
-from noctis.observability import Event
+from noctis.observability import NULL_SINK, Event
 from noctis.research import Capabilities, Turn
 from noctis.research.tools import ResearchToolbox
 from noctis.strategies import library
@@ -156,7 +156,7 @@ def _make_toolbox(
     coder_fallback_client=None,
     coder_fallback_model: str | None = None,
     max_escalations: int | None = None,
-    on_event=None,
+    on_event=NULL_SINK,
     capture=None,
 ):
     strategies_dir = tmp_path / "strategies"
@@ -1345,7 +1345,7 @@ def _coder_box(
     coder_model: str = "fake/coder-1",
     coder_max_tokens: int | None = None,
     coder_retries: int | None = None,
-    on_event=None,
+    on_event=NULL_SINK,
 ):
     coder = _FakeCoder(replies)
     return (
@@ -1823,6 +1823,22 @@ def test_no_coder_configured_emits_no_author_events(tmp_path):
     assert _author_events(events) == []
 
 
+def test_a_toolbox_with_no_sink_authors_into_the_null_sink(tmp_path, caplog):
+    """#339: an unwired toolbox holds the quiet null adapter, not ``None`` — so ``_emit`` is one
+    plain call and the authoring telemetry lands in silence. The ``else: logger.info(...)`` branch
+    that used to render a second, divergent copy of every event into the log is gone."""
+    import logging
+
+    box, _ = _coder_box(tmp_path, [_fenced(_named("brief_probe"))], coder_model="fake/coder-1")
+
+    assert box.on_event is NULL_SINK
+    with caplog.at_level(logging.INFO, logger="noctis.research.tools"):
+        out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
+
+    assert out.get("ok") is True  # the authoring job genuinely ran
+    assert not [r for r in caplog.records if "author brief_probe" in r.getMessage()]
+
+
 # ── brief mode: rejected attempts persist to the capped failed/ area (#18) ──────────────────
 # The toolbox is the sole writer of the failed/ store; these tests assert only what lands on
 # disk under the working tier's failed/ area — never internal call structure.
@@ -1954,7 +1970,7 @@ def _escalation_box(
     *,
     max_escalations,
     max_author_calls: int | None = None,
-    on_event=None,
+    on_event=NULL_SINK,
 ):
     """A toolbox wired with BOTH a cheap local coder and a paid coder-fallback, each scripted."""
     local = _FakeCoder(local_replies)

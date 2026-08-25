@@ -46,7 +46,7 @@ from noctis.data.aggregate import (
 )
 from noctis.data.types import ns_to_date, ns_to_timestamp, to_ns, to_ns_end_inclusive
 from noctis.observability.capture import CAPTURE_DIRNAME, CaptureStore
-from noctis.observability.events import Event, render_plain
+from noctis.observability.events import NULL_SINK, Event, EventSink
 from noctis.research import digests, websearch
 from noctis.research.author import AuthoringError, StrategyAuthor, StrategyBrief
 from noctis.research.cost import resolve_budgets
@@ -272,7 +272,7 @@ class ResearchToolbox:
         mandate=None,
         coder_client=None,
         coder_fallback_client=None,
-        on_event=None,
+        on_event: EventSink = NULL_SINK,
         capture: CaptureStore | None = None,
     ):
         self.settings = settings
@@ -313,7 +313,8 @@ class ResearchToolbox:
         self.escalations = 0
         # The session event channel this toolbox emits authoring observability through (#9): the
         # SAME on_event sink the agent loop and console already use, threaded in at the composition
-        # root. None (tests, bare loops) falls back to the logger, like the agent's default sink.
+        # root. Always a real sink — a bare loop (tests, a direct API caller) holds the quiet
+        # NULL_SINK, so every emit below is a plain call and silence is the adapter's own doing.
         self.on_event = on_event
         # The three library tier roots (seeds committed, __tmp/champions under the
         # workspace); every library call takes it opaquely, incl. the sweep workers.
@@ -1739,12 +1740,11 @@ class ResearchToolbox:
         )
 
     def _emit(self, event: Event) -> None:
-        """Hand one event to the session channel, or the logger when no sink is wired — the same
-        Event-or-log contract the agent loop's default ``on_event`` sink uses."""
-        if self.on_event is not None:
-            self.on_event(event)
-        else:
-            logger.info("%s", render_plain(event))
+        """Hand one event to the session channel — one plain call, never a check (#339). A session
+        nobody is watching holds the quiet :data:`~noctis.observability.events.NULL_SINK`, so "no
+        sink" is silence the adapter owns rather than a branch, and never a second, divergent
+        rendering into the log."""
+        self.on_event(event)
 
     def tool_run_backtest(self, name: str, symbols: list[str], params: dict | None = None) -> dict:
         blocked = self._spend_backtests(1)

@@ -5,6 +5,7 @@ exhaustion gate and the iteration budget are exercised on the way."""
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from noctis.champions import ChampionRegistry
 from noctis.config.settings import Settings
 from noctis.memory import InMemoryMemory
+from noctis.observability import NULL_SINK, Event
 from noctis.research import (
     Capabilities,
     ResearchToolbox,
@@ -23,6 +25,7 @@ from noctis.research import (
 from noctis.research.surface import SessionCounters
 from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.library import parse_header, strategy_source
+from tests._session_helpers import CapturingSink
 from tests.test_research_tools import LENIENT, PROBE, FakeLake, _make_toolbox, make_bars
 
 # The Anthropic capability set (all provider-specific levers on); the no-lever set for
@@ -1070,7 +1073,7 @@ def test_local_backend_runs_full_protocol_with_gates_intact(tmp_path):
     as on the paid Anthropic path."""
     toolbox = _make_toolbox(tmp_path)
     client = FakeLLM(_script(), capabilities=NO_CAPS)  # local provider: every lever off
-    events: list = []
+    sink = CapturingSink()
 
     summary = run_agent_research(
         toolbox=toolbox,
@@ -1078,12 +1081,12 @@ def test_local_backend_runs_full_protocol_with_gates_intact(tmp_path):
         budget_minutes=60.0,
         max_iterations=20,
         web_search=True,
-        on_event=events.append,
+        on_event=sink,
     )
 
     # The substitution was announced (not silent), and the CLIENT web_search tool reached the
     # model — a local model can still ground via the sidecar. The notice is a legacy plain string.
-    str_events = [e for e in events if isinstance(e, str)]
+    str_events = [e for e in sink.events if isinstance(e, str)]
     assert any("local web_search sidecar" in e for e in str_events)
     assert any(
         t.get("name") == "web_search" and "input_schema" in t for t in client.calls[0]["tools"]
@@ -1108,18 +1111,59 @@ def test_local_backend_runs_full_protocol_with_gates_intact(tmp_path):
     assert "exhaustion gate" in _msg_text(client.calls[5]["messages"][-1])
 
 
-class _HeartbeatSink:
-    """A callable event sink that also exposes an ``activity()`` context manager, like the Console
-    — so the loop's P6 heartbeat wrapping (model calls + tool dispatch) is asserted without a
-    terminal. ``verbose=1`` is -v: no token stream, so model calls get a heartbeat too."""
+# ── the sink the loop reads: a real EventSink, quiet by default (#339) ───────────────────────
+def test_the_loop_declares_the_null_sink_as_its_default():
+    """The loop's ``on_event`` is a real :class:`~noctis.observability.EventSink`, never an
+    absence: a caller who wires nobody gets the shared quiet adapter, which is what lets the loop
+    read ``verbose``/``delta``/``activity`` off it instead of probing with ``getattr``."""
+    default = inspect.signature(run_agent_research).parameters["on_event"].default
+    assert default is NULL_SINK
+
+
+def test_a_bare_session_narrates_into_the_null_sink(tmp_path, caplog):
+    """A session with nobody watching says nothing (#339). The ``emit = on_event or (lambda …:
+    logger.info(…))`` fallback is gone — silence is the null adapter's behaviour now, not a
+    second renderer's — so the logger carries only the session's own end-of-run bookkeeping,
+    never the per-round think/usage/tool feed."""
+    toolbox = _make_toolbox(tmp_path)
+    client = FakeLLM(_script(), capabilities=NO_CAPS)
+
+    with caplog.at_level("INFO", logger="noctis.research.agent"):
+        summary = run_agent_research(
+            toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=20
+        )
+
+    assert summary.stopped_reason == "agent_done"  # the session genuinely ran the protocol
+    logged = [r.getMessage() for r in caplog.records]
+    assert not [line for line in logged if line.startswith(("→", "·", "🧠"))]  # no rendered events
+    assert not [line for line in logged if "tokens in=" in line]  # nor a per-round usage line
+    assert [line for line in logged if line.startswith("agent research session finished")]
+
+
+def test_a_conforming_sink_receives_the_whole_feed(tmp_path):
+    """The shared :class:`CapturingSink` is all a watcher has to be: the loop calls it with every
+    typed event and every legacy string, reading its ``verbose``/``activity`` as plain
+    attributes."""
+    toolbox = _make_toolbox(tmp_path)
+    client = FakeLLM(_script(), capabilities=NO_CAPS)
+    sink = CapturingSink()
+
+    run_agent_research(
+        toolbox=toolbox, client=client, budget_minutes=60.0, max_iterations=20, on_event=sink
+    )
+
+    kinds = {e.kind for e in sink.events if isinstance(e, Event)}
+    assert {"usage", "tool", "say"} <= kinds
+
+
+class _HeartbeatSink(CapturingSink):
+    """A capturing sink that also records what its ``activity()`` context manager brackets, like
+    the Console — so the loop's P6 heartbeat wrapping (model calls + tool dispatch) is asserted
+    without a terminal. ``verbose=1`` is -v: no token stream, so model calls get a heartbeat too."""
 
     def __init__(self):
-        self.events: list = []
+        super().__init__(verbose=1)
         self.labels: list[str] = []
-        self.verbose = 1
-
-    def __call__(self, ev):
-        self.events.append(ev)
 
     @contextlib.contextmanager
     def activity(self, label):
@@ -1130,8 +1174,8 @@ class _HeartbeatSink:
 def test_heartbeat_wraps_model_calls_and_tool_dispatch(tmp_path):
     """P6: at -v the loop brackets every blocking model call and tool sweep in
     ``on_event.activity()``, so the console can render a live spinner instead of going silent for
-    minutes. A plain-callable sink has no ``activity()`` and is unaffected (the other tests, which
-    pass ``events.append``, assert the byte-identical path implicitly)."""
+    minutes. Every sink has an ``activity()`` (#339) — a quiet one's is the null adapter's inert
+    context manager, which is why the loop enters it without asking."""
     toolbox = _make_toolbox(tmp_path)
     client = FakeLLM(_script())
     sink = _HeartbeatSink()
@@ -1435,16 +1479,16 @@ def test_reasoning_narration_and_usage_are_teed_as_events(tmp_path):
         ],
         capabilities=NO_CAPS,
     )
-    events: list = []
+    sink = CapturingSink()
     run_agent_research(
         toolbox=toolbox,
         client=client,
         budget_minutes=60.0,
         max_iterations=5,
-        on_event=events.append,
+        on_event=sink,
     )
 
-    typed = [e for e in events if not isinstance(e, str)]
+    typed = [e for e in sink.events if not isinstance(e, str)]
     # Round-1 order: think → usage (both at the top of the round) → say (narration beside the
     # action) → tool (the dispatched call).
     assert [e.kind for e in typed][:4] == ["think", "usage", "say", "tool"]
@@ -1494,15 +1538,15 @@ def test_tool_event_surfaces_gate_facing_numbers(tmp_path):
         ],
         capabilities=NO_CAPS,
     )
-    events: list = []
+    sink = CapturingSink()
     run_agent_research(
         toolbox=toolbox,
         client=client,
         budget_minutes=60.0,
         max_iterations=5,
-        on_event=events.append,
+        on_event=sink,
     )
-    typed = [e for e in events if not isinstance(e, str)]
+    typed = [e for e in sink.events if not isinstance(e, str)]
 
     bt = next(
         e for e in typed if e.kind == "tool" and e.meta.get("ok") and "run_backtest" in e.text

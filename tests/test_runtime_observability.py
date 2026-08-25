@@ -2,9 +2,9 @@
 
 The day/night loop now narrates each research session the same way ``noctis research`` does:
 the runtime carries an ``on_event`` console, tees the research feed into it, and announces each
-phase transition inline through the machine's ``on_enter`` seam. A bare run (``on_event=None``)
-stays byte-identical to today — no feed, no banners. The two commands also resolve one shared
-verbosity ladder.
+phase transition inline through the machine's ``on_enter`` seam. A bare run carries the quiet
+:data:`~noctis.observability.NULL_SINK` and stays byte-identical to today — no feed, no banners.
+The two commands also resolve one shared verbosity ladder.
 """
 
 from __future__ import annotations
@@ -20,12 +20,14 @@ from noctis.config import load_settings
 from noctis.engine import Phase, build_runtime
 from noctis.engine.research import ResearchSummary
 from noctis.memory import MemoryStore
-from noctis.observability import Console, Event
+from noctis.observability import NULL_SINK, Console, Event, EventSink
 
 from ._session_helpers import _bars_local, _FakeLake, _FakeRegistry, _uptrend
 
 
-def _runtime(tmp_path, *, on_event=None):
+def _runtime(tmp_path, **sink):
+    """A tmp-path runtime. Pass ``on_event=`` to wire a console; **omit** it for a bare run, so
+    what the engine defaults its sink to is what the test sees."""
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
         "mode: paper\n"
@@ -41,7 +43,7 @@ def _runtime(tmp_path, *, on_event=None):
         memory=MemoryStore(tmp_path / "MEMORY.md"),
         registry=_FakeRegistry(),
         reports_dir=str(tmp_path / "reports"),
-        on_event=on_event,
+        **sink,
     )
 
 
@@ -117,10 +119,10 @@ def test_run_agent_session_logs_the_mandate_the_session_carries(
     assert lines == [f"agent research session: mandate={expected}, metric=sharpe"]
 
 
-def test_run_agent_session_without_a_console_passes_none(tmp_path, monkeypatch):
-    """A bare run (no ``-v``) carries ``on_event=None``, so the research loop falls back to its
-    own logger sink — the day/night loop stays silent by default."""
-    runtime = _runtime(tmp_path, on_event=None)
+def test_run_agent_session_without_a_console_hands_the_null_sink(tmp_path, monkeypatch):
+    """A bare run (no ``-v``) hands the research seam the quiet :data:`NULL_SINK` — silence is an
+    adapter, not an absence, so the loop emits into it without asking whether one is attached."""
+    runtime = _runtime(tmp_path)
 
     seen: dict = {}
     monkeypatch.setattr(research_mod, "build_llm_client", lambda settings: object())
@@ -132,7 +134,17 @@ def test_run_agent_session_without_a_console_passes_none(tmp_path, monkeypatch):
     monkeypatch.setattr(research_mod, "run_agent_research", fake_loop)
 
     runtime.research.run_agent_session()
-    assert seen["on_event"] is None
+    assert seen["on_event"] is NULL_SINK
+
+
+def test_a_bare_runtime_carries_a_real_sink_through_every_phase(tmp_path):
+    """No engine seam holds ``None``: a runtime built with no console hands the same quiet
+    :data:`NULL_SINK` to itself, to the RESEARCH phase and to the TRADING phase, so all three
+    call their sink unguarded."""
+    runtime = _runtime(tmp_path)
+    sinks = [runtime._on_event, runtime.research.on_event, runtime.trading._on_event]
+    assert all(sink is NULL_SINK for sink in sinks)
+    assert all(isinstance(sink, EventSink) for sink in sinks)
 
 
 # ── phase transitions: one banner per transition, silent by default ──────────────────────────
@@ -153,13 +165,14 @@ def test_phase_banner_emitted_once_per_transition(tmp_path):
     assert "RESEARCH" in banners[0].text and "cycle 0" in banners[0].text
 
 
-def test_phase_banner_stays_silent_on_a_bare_run(tmp_path):
-    """``on_event=None`` (a bare ``python -m noctis run``) emits nothing. Without the None-guard
-    the hook would call ``None`` and raise ``TypeError`` — so a clean run proves the guard."""
-    runtime = _runtime(tmp_path, on_event=None)
-    assert runtime._on_event is None
+def test_phase_banner_stays_silent_on_a_bare_run(tmp_path, capsys):
+    """A bare ``python -m noctis run`` emits nothing. The null adapter is what makes that true now:
+    the hook calls its sink unguarded every transition, and the sink swallows every banner."""
+    runtime = _runtime(tmp_path)
+    assert runtime._on_event is NULL_SINK
     for phase in (Phase.RESEARCH, Phase.TRADING, Phase.CLOSE):
-        runtime.machine.on_enter(phase)  # no-op, no output, no raise
+        runtime.machine.on_enter(phase)  # called, not skipped: no output, no raise
+    assert capsys.readouterr().out == ""
 
 
 # ── one ladder: run and research map -v identically ──────────────────────────────────────────

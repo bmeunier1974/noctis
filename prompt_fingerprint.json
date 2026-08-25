@@ -3,7 +3,7 @@
     "declares": [
       "episodic"
     ],
-    "digest": "4b71857d92794ce7",
+    "digest": "df409cb3ea343c86",
     "heading": "2026-08-24 \u2014 sites: episodic",
     "path": "docs/prompt-changelog.md"
   },
@@ -43,10 +43,10 @@
       "note": null
     },
     "episodic": {
-      "digest": "0ef268ade1b26295",
+      "digest": "088a778af9fab75d",
       "files": {
         "src/noctis/research/digests.py": "67476f972a6bbedf",
-        "src/noctis/research/driver.py": "84a47efaea573bce",
+        "src/noctis/research/driver.py": "95f5c92713c2f868",
         "src/noctis/strategies/scenario_spec.py": "a1142cf5ebb5992b"
       },
       "note": null

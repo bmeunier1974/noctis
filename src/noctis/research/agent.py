@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from noctis.engine.research import PROSE_STALL, ResearchSummary, StopEvent
-from noctis.observability.events import Event, render_plain, tool_event, usage_line
+from noctis.observability.events import NULL_SINK, Event, EventSink, tool_event, usage_line
 from noctis.research.llm import WEB_SEARCH_TOOL_TYPE, cached_system, effective_web_search
 from noctis.research.misfire import (
     PREMATURE_CONCLUSION,
@@ -351,7 +351,7 @@ def run_agent_research(
     web_search: bool = False,
     max_web_searches: int = 8,
     prefix_trim: bool = False,
-    on_event: Callable[[Event | str], None] | None = None,
+    on_event: EventSink = NULL_SINK,
     mandate: Mandate | None = None,
     price_table: PriceTable | None = None,
 ) -> ResearchSummary:
@@ -367,14 +367,17 @@ def run_agent_research(
     (``None`` ⇒ unlimited, byte-identical history) bounds the whole request the same way:
     per-result caps tier down, the oldest tool-result bodies evict to fixed pointer lines, and
     a decided strategy's optimization history collapses at its verdict — all re-fetchable
-    through the same tools, with the on-disk journal untouched. ``on_event`` receives typed
-    :class:`~noctis.observability.events.Event`s (the model's reasoning, its narration, one line
-    per tool call with the gate-facing numbers, per-round usage) plus the occasional legacy
-    pre-formatted string; the CLI renders them level-gated, the default sink logs them. It only
-    ever surfaces what a completion already returned — zero extra model calls or tokens. When that
-    sink is a level-2 :class:`~noctis.observability.console.Console` on a TTY (and the provider can
-    stream), its ``delta`` renderer receives reasoning/content deltas so the turn types out in
-    place (P5); every other sink runs the loop non-streaming and byte-identically.
+    through the same tools, with the on-disk journal untouched. ``on_event`` is this session's
+    :class:`~noctis.observability.events.EventSink` — always a real one, defaulting to the quiet
+    :data:`~noctis.observability.events.NULL_SINK`, so the loop calls and reads it unguarded. It
+    receives typed :class:`~noctis.observability.events.Event`s (the model's reasoning, its
+    narration, one line per tool call with the gate-facing numbers, per-round usage) plus the
+    occasional legacy pre-formatted string; the CLI renders them level-gated and a session nobody
+    is watching is silent. It only ever surfaces what a completion already returned — zero extra
+    model calls or tokens. When that sink is a level-2
+    :class:`~noctis.observability.console.Console` on a TTY (and the provider can stream), its
+    ``delta`` renderer receives reasoning/content deltas so the turn types out in place (P5);
+    every other sink runs the loop non-streaming and byte-identically.
     ``mandate`` is the optional resolved operator
     mandate embedded in the system prompt; its one-line ``summary`` (not the full body) is echoed
     into the kickoff turn. ``price_table`` prices this session's tokens into
@@ -394,19 +397,11 @@ def run_agent_research(
     # is sized so a whole write_strategy file fits, because a "length" truncation here doesn't
     # degrade — it breaks the tool-call JSON or reads as end_turn and kills the session.
     max_tokens = max_tokens or _MAX_TOKENS
-    # The default sink logs; an Event is flattened to one line, a legacy string logged as-is.
-    emit = on_event or (
-        lambda item: logger.info("%s", item if isinstance(item, str) else render_plain(item))
-    )
-    # P5 token streaming: when the sink is a level-2 Console it exposes a delta() renderer — tee
-    # reasoning/content deltas to it so they type out in place. Any other sink (logger, plain
-    # callable, a -v-only console) yields None and the loop runs non-streaming exactly as before;
-    # the client itself further gates on provider capability, so an unset path can't stream.
-    on_delta = getattr(on_event, "delta", None) if getattr(on_event, "verbose", 0) >= 2 else None
-    # P6 heartbeat: a live in-place activity line so -v isn't silent while a model call or a tool
-    # sweep blocks for minutes. Duck-typed like on_delta — a plain-callable sink (tests) has no
-    # activity() and the nullcontext keeps the loop byte-identical.
-    activity = getattr(on_event, "activity", None)
+    # P5 token streaming: at -vv the sink renders deltas in place, so tee reasoning/content deltas
+    # to it and the turn types out live. Every sink declares ``delta`` and ``verbose`` (#339), so
+    # this is a plain read: a quiet or -v-only sink reports verbosity below 2 and the loop runs
+    # non-streaming; the client itself further gates on provider capability.
+    on_delta = on_event.delta if on_event.verbose >= 2 else None
     start = now()
     budget_seconds = budget_minutes * 60.0
 
@@ -439,7 +434,7 @@ def run_agent_research(
     else:
         # Requested, but this provider has no server-side search — the client sidecar tool
         # (already in the toolbox spec) stands in; grounding depends on the sidecar being up.
-        emit(
+        on_event(
             "web_search: local backend — grounding via the local web_search sidecar on :11435 "
             "(noctis-ollama scripts/search.sh; degrades cleanly if it is down)"
         )
@@ -483,9 +478,9 @@ def run_agent_research(
         # Heartbeat the blocking model call — but only when tokens aren't already streaming
         # (on_delta is None): at -vv the live token stream is the life sign; at -v the spinner
         # stands in for it. The stop/join in activity() ends the thread even if complete() raises.
-        model_hb: AbstractContextManager[None] = nullcontext()
-        if activity is not None and on_delta is None:
-            model_hb = activity(_model_label(client))
+        model_hb: AbstractContextManager[None] = (
+            nullcontext() if on_delta is not None else on_event.activity(_model_label(client))
+        )
         try:
             with model_hb:
                 turn = client.complete(
@@ -502,7 +497,7 @@ def run_agent_research(
                 # completion still burns an iteration, so the ordinary max_iterations
                 # budget bounds this retry like every other misfire.
                 summary.iterations += 1
-                emit(f"[misfire] {stumble.note}")
+                on_event(f"[misfire] {stumble.note}")
                 messages = messages + [{"role": "user", "content": stumble.retry}]
                 continue
             logger.warning("agent research call failed (%s); ending session", exc)
@@ -520,8 +515,8 @@ def run_agent_research(
         # branch below so the final conclusion can stay level-1 without a duplicate. None of
         # this is ever written to memory or the journal (reasoning must not reach a decision).
         if turn.reasoning.strip():
-            emit(Event("think", turn.reasoning.strip(), level=2))
-        emit(Event("usage", _usage_line(turn.usage), meta=dict(turn.usage or {}), level=2))
+            on_event(Event("think", turn.reasoning.strip(), level=2))
+        on_event(Event("usage", _usage_line(turn.usage), meta=dict(turn.usage or {}), level=2))
 
         if turn.stop_reason == "pause_turn":
             # Server-tool loop (web search) paused mid-turn; resume it verbatim. A paused turn
@@ -542,7 +537,7 @@ def run_agent_research(
             # max_iterations budget bounds a persistent misfirer to a legitimate stop.
             stumble = classify_turn(turn)
             if stumble is not None:
-                emit(f"[misfire] {stumble.note}")
+                on_event(f"[misfire] {stumble.note}")
                 messages = messages + [{"role": "user", "content": stumble.retry}]
                 continue
             # One snapshot for both liveness reads below (#260): the toolbox's counters are live
@@ -557,9 +552,11 @@ def run_agent_research(
                 # model to act on. Each nudged round burned an iteration above, and the
                 # separate cap keeps a deliberate zero-verdict conclusion reachable.
                 prose_nudges += 1
-                emit(f"[misfire] {PREMATURE_CONCLUSION.note} ({prose_nudges}/{_MAX_PROSE_NUDGES})")
+                on_event(
+                    f"[misfire] {PREMATURE_CONCLUSION.note} ({prose_nudges}/{_MAX_PROSE_NUDGES})"
+                )
                 if turn.text.strip():
-                    emit(Event("say", turn.text.strip(), level=2))
+                    on_event(Event("say", turn.text.strip(), level=2))
                 messages = messages + [
                     turn.assistant_message,
                     {"role": "user", "content": PREMATURE_CONCLUSION.retry},
@@ -572,25 +569,22 @@ def run_agent_research(
             summary.stopped_reason = "agent_done" if concluded else PROSE_STALL
             # The agent's final prose — level-1 so it shows at -v like today; the
             # renderer wraps to width, so no more 500-char truncation special-case.
-            emit(Event("say", turn.text.strip(), level=1))
+            on_event(Event("say", turn.text.strip(), level=1))
             break
 
         messages = messages + [turn.assistant_message]
         # Narration that rides alongside an action is inter-round context — level-2 (the -vv /
         # --show-reasoning firehose), so -v keeps a clean tool feed.
         if turn.text.strip():
-            emit(Event("say", turn.text.strip(), level=2))
+            on_event(Event("say", turn.text.strip(), level=2))
         results = []
         for tc in tool_calls:
             args = tc.arguments if isinstance(tc.arguments, dict) else {}
             # Heartbeat the blocking tool sweep (an optimize sweep runs 8 workers for minutes);
             # the spinner erases and the level-1 result Event below prints in its place.
-            tool_hb: AbstractContextManager[None] = nullcontext()
-            if activity is not None:
-                tool_hb = activity(_tool_label(tc.name, args))
-            with tool_hb:
+            with on_event.activity(_tool_label(tc.name, args)):
                 result = toolbox.dispatch(tc.name, args)
-            emit(_tool_event(tc.name, args, result, toolbox.result_brief(result)))
+            on_event(_tool_event(tc.name, args, result, toolbox.result_brief(result)))
             results.append(budget.tool_result(tc.id, tc.name, args, result, messages))
         messages = messages + results
 
