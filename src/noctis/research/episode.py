@@ -58,6 +58,7 @@ from noctis.research.misfire import (
     classify_emit_failure,
     classify_turn,
 )
+from noctis.research.usage import USAGE_FIELDS, accumulate_usage
 
 T = TypeVar("T")
 
@@ -66,15 +67,6 @@ T = TypeVar("T")
 # reasoning backend headroom to think before it emits. Output is billed as generated, so unused
 # headroom costs nothing; the driver overrides this from research.agent.max_tokens when it needs.
 _DEFAULT_MAX_TOKENS = 2048
-
-# The neutral four-field usage dict on a Turn; every field read defensively so a fake/no-usage
-# client contributes 0 rather than raising (the token total is a measurement, never a gate).
-_USAGE_FIELDS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
 
 # The body of the first fenced code block in a reply (```json … ``` or a bare ``` … ```).
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
@@ -167,19 +159,6 @@ class EpisodeResult(Generic[T]):
 def _total(usage: Mapping[str, int]) -> int:
     """The episode's token total — always the sum of its own split, never a second count."""
     return sum(usage.values())
-
-
-def _accumulate_usage(totals: dict[str, int], usage: dict | None) -> None:
-    """Fold one completion's ``usage`` into the episode's four-field running split.
-
-    Every field is read defensively, so a provider that reports nothing (or nothing for one
-    field) contributes 0 rather than raising — the split is a measurement, never a gate. Keeping
-    the four fields apart is what makes the episode priceable later: they bill at four rates.
-    """
-    if not usage:
-        return
-    for field in _USAGE_FIELDS:
-        totals[field] += int(usage.get(field, 0) or 0)
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -312,7 +291,7 @@ class EpisodeRunner:
         # The episode's running token split — four fields, because they bill at four rates. The
         # total every caller already knows is derived from it (:func:`_total`), so the two can
         # never disagree about what this episode spent.
-        usage = dict.fromkeys(_USAGE_FIELDS, 0)
+        usage = dict.fromkeys(USAGE_FIELDS, 0)
         misfires = 0
         # The served model of the most recent completion that named one (#181) — on a successful
         # episode that is the completion whose payload is returned. Stays empty when no completion
@@ -366,7 +345,7 @@ class EpisodeRunner:
                 messages = messages + [{"role": "user", "content": stumble.retry}]
                 continue
 
-            _accumulate_usage(usage, turn.usage)
+            accumulate_usage(usage, turn.usage)
             served_model = turn.served_model or served_model
             self._emit_turn(turn)  # tee think/usage/say for the operator feed (#73)
             payload = _payload_from_turn(turn, contract.name)

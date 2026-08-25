@@ -48,6 +48,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# The four neutral usage fields a completion reports, in the order they are billed. The ledger is
+# what *persists* them, and reads them here under the public name every consumer uses; the list
+# itself is declared once, in :mod:`noctis.research.usage`, beside the accumulator that folds it.
+from noctis.research.usage import USAGE_FIELDS
+
 SESSIONS_DIRNAME = "sessions"
 
 
@@ -228,17 +233,6 @@ class Episode:
             contract=_carried_str(record.get("contract")),
             knobs_sha256=_carried_str(record.get("knobs_sha256")),
         )
-
-
-# The four neutral usage fields a completion reports, in the order they are billed. Named here
-# because the ledger is what *persists* them; the price table (:mod:`noctis.research.pricing`)
-# names the same four as the rates it bills at.
-USAGE_FIELDS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
 
 
 def _read_usage(value: Any) -> dict[str, int] | None:

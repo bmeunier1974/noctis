@@ -71,6 +71,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+# The engine's own coder-client table (#345): a bench builds the clients production builds,
+# through the composition root that owns them. Legal by the one-way rule — eval imports the
+# engine, never the reverse (:mod:`noctis.eval.guard`).
+from noctis.bootstrap import CoderClients, build_coder_clients
 from noctis.eval.case import Case
 from noctis.eval.coder_case import CoderPayload, coder_payload
 from noctis.eval.coder_detectors import DegenerateFinding, inspect_strategy
@@ -532,16 +536,6 @@ def _job_for(engine: StrategyAuthor, case_id: str, payload: CoderPayload) -> Aut
 # ── the clients a live coder bench asks through ───────────────────────────────────────────
 
 
-@dataclass(frozen=True)
-class CoderClients:
-    """The coder a bench asks, and the paid fallback it may escalate to — with their aliases."""
-
-    client: Any
-    model: str
-    fallback: Any = None
-    fallback_model: str | None = None
-
-
 def coder_clients(
     settings: Any,
     *,
@@ -551,48 +545,36 @@ def coder_clients(
 ) -> CoderClients:
     """The clients one live coder bench runs on — production's dials, the bench's model on top.
 
-    Built through the engine's own :func:`~noctis.research.llm.client_for` with the flags the
-    composition root uses for a coder (``deliberate=True``, the configured thinking dial, the
-    sampling levers), because a bench that asked the same model without the coder's own dials would
-    be measuring a configuration nobody ships. ``client`` is the seam a test injects; when it is
-    given nothing is built and no fallback is invented.
+    Built by the composition root's own :func:`~noctis.bootstrap.build_coder_clients`, from this
+    bench's resolved knob set: a bench that assembled its own clients would be measuring a
+    configuration nobody ships, and the coder's dials (``deliberate=True``, the two thinking dials,
+    the sampling levers) live in one table on the engine's side of the one-way boundary.
+
+    Two contracts of the bench's own sit on top of the engine's. **A bench refuses where a session
+    degrades**: a research session with no coder client assembles in driver-authored mode, but a
+    coder bench with no coder has nothing to measure, so an unbuildable model is
+    :class:`~noctis.eval.bootstrap.LiveModelUnavailable` rather than a quiet ``None``. And
+    **``client`` is the seam a test injects**: when it is given nothing is built and no fallback is
+    invented.
     """
     from noctis.eval.bootstrap import LiveModelUnavailable
-    from noctis.research.llm import client_for, resolved_research_model
+    from noctis.research.llm import resolved_research_model
 
     resolved = knobs if knobs is not None else resolve_coder_knobs(settings)
     alias = model or resolved.coder_model or resolved_research_model(settings)
     if client is not None:
         return CoderClients(client=client, model=alias)
-    built = client_for(
-        settings,
-        alias,
-        thinking=resolved.coder_thinking,
-        deliberate=True,
-        temperature=resolved.coder_temperature,
-        seed=resolved.coder_seed,
+    # The escalation cap is spent per *bench*, which has no session to count in, so it gates the
+    # paid client at build time: a bench that will never escalate never even resolves the provider.
+    built = build_coder_clients(
+        settings, knobs=resolved, model=alias, escalations=int(resolved.max_escalations or 0)
     )
-    if built is None:
+    if built.client is None:
         raise LiveModelUnavailable(
             f"no coder client for {alias!r} — the coder site authors through a real model client, "
             "so its provider key and the [llm] extra have to be present"
         )
-    fallback = None
-    if resolved.coder_fallback_model and int(resolved.max_escalations or 0) > 0:
-        fallback = client_for(
-            settings,
-            resolved.coder_fallback_model,
-            thinking=resolved.coder_fallback_thinking,
-            deliberate=True,
-            temperature=resolved.coder_temperature,
-            seed=resolved.coder_seed,
-        )
-    return CoderClients(
-        client=built,
-        model=alias,
-        fallback=fallback,
-        fallback_model=resolved.coder_fallback_model if fallback is not None else None,
-    )
+    return built
 
 
 # ── one authoring job ─────────────────────────────────────────────────────────────────────

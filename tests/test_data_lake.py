@@ -213,6 +213,31 @@ def test_t1_boundary_follows_the_et_trading_date():
     assert t1_boundary_ns(winter_evening) == day_start_ns(date(2026, 1, 15))
 
 
+def test_history_window_is_history_days_ending_at_the_t1_boundary():
+    """The one lookback window the run's auto-backfill and the research driver's fetches share:
+    ``history_days`` back from *now*'s T+1 boundary, half-open on that boundary. Anchored on the
+    ET trading date, so an overnight session whose UTC calendar has already rolled asks for the
+    very same window a midday one does — never a day past the vendor's license line."""
+    from noctis.data.types import NS_PER_DAY, day_start_ns, history_window, t1_boundary_ns
+
+    midday = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+    start_ns, end_ns = history_window(midday, 30)
+    assert end_ns == t1_boundary_ns(midday) == day_start_ns(date(2026, 7, 17))
+    assert start_ns == day_start_ns(date(2026, 6, 17))
+    assert end_ns - start_ns == 30 * NS_PER_DAY
+
+    # 11 PM EDT: the UTC calendar rolled to Jul 18, the ET trading date has not.
+    late_evening = datetime(2026, 7, 18, 3, 0, tzinfo=UTC)
+    assert history_window(late_evening, 30) == (start_ns, end_ns)
+
+    # Winter (EST, UTC-5): the rollover window widens to 05:00Z.
+    winter_evening = datetime(2026, 1, 16, 4, 30, tzinfo=UTC)  # 11:30 PM EST, Jan 15
+    assert history_window(winter_evening, 1) == (
+        day_start_ns(date(2026, 1, 14)),
+        day_start_ns(date(2026, 1, 15)),
+    )
+
+
 def test_sync_empty_vendor_response_leaves_registry_untouched(stack, monkeypatch):
     """(3b) An empty vendor response advances nothing."""
     a_start, a_end = _ns("2026-01-05"), _ns("2026-01-09T23:59:59")

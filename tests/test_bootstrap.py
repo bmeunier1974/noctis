@@ -24,6 +24,7 @@ from noctis.bootstrap import (
     MissingVendorKey,
     ResearchSession,
     UsageError,
+    build_coder_clients,
     build_lake,
     build_recorder,
     build_research_session,
@@ -734,7 +735,7 @@ def test_build_recorder_mints_run_tree_and_stamps_the_manifest(tmp_path):
 def test_build_recorder_prunes_the_qa_area_to_keep_last_runs(tmp_path):
     """Prune-on-start: building a recorder first evicts all but the newest ``keep_last_runs``
     existing run folders, then adds this run."""
-    from noctis.observability.debug import RUN_ID_RE
+    from noctis.observability.runid import RUN_ID_RE
 
     qa = tmp_path / "qa"
     qa.mkdir(parents=True)
@@ -1483,6 +1484,228 @@ def test_coder_fallback_not_built_without_a_local_coder(tmp_path, monkeypatch):
     assert calls == []  # no local coder ⇒ neither builder is consulted
 
 
+# ── build_coder_clients: one table builds the coder and its paid fallback (#345) ───────────
+def _client_for_recorder(monkeypatch, *, missing: tuple[str, ...] = ()) -> dict[str, dict]:
+    """Stand in for the shared client builder: record each model's dials, refuse ``missing``.
+
+    A model in ``missing`` is one whose provider key (or the ``[llm]`` extra) is absent — the
+    shared builder answers ``None`` there, which is the degradation this table has to survive.
+    """
+    asked: dict[str, dict] = {}
+
+    def fake_client_for(settings, model, **kwargs):
+        asked[model] = kwargs
+        return None if model in missing else _fake_coder()
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    return asked
+
+
+def test_no_configured_coder_builds_nothing_and_asks_no_provider(tmp_path, monkeypatch, caplog):
+    """The default: no ``coder_model`` ⇒ no clients, no provider consulted, nothing said."""
+    asked = _client_for_recorder(monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        clients = build_coder_clients(_session_settings(tmp_path))
+
+    assert clients.client is None and clients.model is None
+    assert clients.fallback is None and clients.fallback_model is None
+    assert asked == {}
+    assert not any("coder" in record.getMessage().lower() for record in caplog.records)
+
+
+def test_the_configured_coder_is_built_on_the_coder_dials(tmp_path, monkeypatch):
+    """A configured ``coder_model`` is built with thinking ON and the deliberate flag (#17), plus
+    whatever sampling the operator asked for (#222) — the dials the coder row names."""
+    asked = _client_for_recorder(monkeypatch)
+    settings = _session_settings(tmp_path, coder_model="ollama/qwen3-coder")
+    settings.research.agent.coder_temperature = 0.2
+    settings.research.agent.coder_seed = 7
+
+    clients = build_coder_clients(settings)
+
+    assert clients.client is not None and clients.model == "ollama/qwen3-coder"
+    dials = asked["ollama/qwen3-coder"]
+    assert dials["thinking"] == "on" and dials["deliberate"] is True
+    assert dials["temperature"] == 0.2 and dials["seed"] == 7
+
+
+def test_a_coder_whose_provider_has_no_key_degrades_to_no_client_loudly(
+    tmp_path, monkeypatch, caplog
+):
+    """Build-time degradation, never a mid-session failure: the client is ``None`` and the warning
+    names the knob, the model and what the session loses."""
+    _client_for_recorder(monkeypatch, missing=("anthropic/claude-sonnet-5",))
+
+    with caplog.at_level(logging.WARNING):
+        clients = build_coder_clients(
+            _session_settings(tmp_path, coder_model="anthropic/claude-sonnet-5")
+        )
+
+    assert clients.client is None and clients.model is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("coder_model" in msg and "claude-sonnet-5" in msg for msg in warnings)
+    assert any("driver-authored mode" in msg for msg in warnings)
+
+
+def test_the_paid_fallback_is_built_beside_the_coder_on_its_own_thinking_dial(
+    tmp_path, monkeypatch
+):
+    """Both rows in one call: the local coder reasons (its dial defaults ON), the paid fallback
+    spends its ceiling on the file (its own dial defaults OFF, #98), and both sample alike."""
+    asked = _client_for_recorder(monkeypatch)
+    settings = _session_settings(
+        tmp_path,
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+    )
+    settings.research.agent.coder_temperature = 0.4
+
+    clients = build_coder_clients(settings)
+
+    assert clients.client is not None and clients.model == "ollama/qwen3-coder"
+    assert clients.fallback is not None and clients.fallback_model == "anthropic/claude-opus-4-8"
+    assert asked["ollama/qwen3-coder"]["thinking"] == "on"
+    assert asked["anthropic/claude-opus-4-8"]["thinking"] == "off"
+    assert asked["anthropic/claude-opus-4-8"]["deliberate"] is True
+    assert asked["anthropic/claude-opus-4-8"]["temperature"] == 0.4
+
+
+def test_no_fallback_is_built_without_a_coder_to_escalate_from(tmp_path, monkeypatch):
+    """Escalation is a fallback FROM local authoring: a fallback model alone builds nothing."""
+    asked = _client_for_recorder(monkeypatch)
+
+    clients = build_coder_clients(
+        _session_settings(tmp_path, coder_fallback_model="anthropic/claude-opus-4-8")
+    )
+
+    assert clients.client is None and clients.fallback is None
+    assert asked == {}
+
+
+def test_a_fallback_whose_provider_has_no_key_degrades_to_no_client_loudly(
+    tmp_path, monkeypatch, caplog
+):
+    """The fallback row degrades exactly like the coder row: no escalation path, said out loud,
+    and the local coder it was built beside is untouched."""
+    _client_for_recorder(monkeypatch, missing=("anthropic/claude-opus-4-8",))
+    settings = _session_settings(
+        tmp_path,
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        clients = build_coder_clients(settings)
+
+    assert clients.client is not None
+    assert clients.fallback is None and clients.fallback_model is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("coder_fallback_model" in msg and "claude-opus-4-8" in msg for msg in warnings)
+    assert any("no escalation path" in msg for msg in warnings)
+
+
+def test_a_spent_escalation_budget_withholds_the_fallback(tmp_path, monkeypatch):
+    """A caller that bounds escalation at BUILD time (the coder bench does) and has no budget left
+    gets no fallback client, and the paid provider is never even consulted."""
+    asked = _client_for_recorder(monkeypatch)
+    settings = _session_settings(
+        tmp_path,
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+    )
+
+    clients = build_coder_clients(settings, escalations=0)
+
+    assert clients.client is not None
+    assert clients.fallback is None and clients.fallback_model is None
+    assert "anthropic/claude-opus-4-8" not in asked
+
+
+def test_an_escalation_budget_of_one_builds_the_fallback(tmp_path, monkeypatch):
+    """The same caller with a budget to spend gets the paid client it may escalate to."""
+    _client_for_recorder(monkeypatch)
+    settings = _session_settings(
+        tmp_path,
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+    )
+
+    clients = build_coder_clients(settings, escalations=1)
+
+    assert clients.fallback is not None
+    assert clients.fallback_model == "anthropic/claude-opus-4-8"
+
+
+def test_a_caller_that_counts_escalations_at_use_time_gets_the_fallback(tmp_path, monkeypatch):
+    """The composition root's contract: it names no budget (the toolbox counts escalations against
+    ``max_escalations`` at use time), so both configured models build — today's behaviour."""
+    _client_for_recorder(monkeypatch)
+    settings = _session_settings(
+        tmp_path,
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+    )
+    assert settings.research.agent.max_escalations == 0  # the shipped default, unspent
+
+    clients = build_coder_clients(settings)
+
+    assert clients.fallback is not None
+
+
+def test_a_model_override_names_the_coder_that_is_built(tmp_path, monkeypatch):
+    """A caller's own alias (a bench's ``--model``) is the coder that gets built, on the same
+    dials — the fallback row keeps reading the configured knob."""
+    asked = _client_for_recorder(monkeypatch)
+    settings = _session_settings(
+        tmp_path,
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+    )
+
+    clients = build_coder_clients(settings, model="anthropic/claude-sonnet-5")
+
+    assert clients.model == "anthropic/claude-sonnet-5"
+    assert clients.fallback_model == "anthropic/claude-opus-4-8"
+    assert "ollama/qwen3-coder" not in asked
+    assert asked["anthropic/claude-sonnet-5"]["thinking"] == "on"
+
+
+def test_an_unbuildable_model_override_leaves_the_verdict_to_its_caller(
+    tmp_path, monkeypatch, caplog
+):
+    """Nothing the operator configured failed, so there is nothing to warn about: a caller that
+    asked for its own model gets ``None`` and decides for itself (the coder bench refuses)."""
+    _client_for_recorder(monkeypatch, missing=("bench/coder",))
+
+    with caplog.at_level(logging.WARNING):
+        clients = build_coder_clients(_session_settings(tmp_path), model="bench/coder")
+
+    assert clients.client is None
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_a_callers_own_knob_set_drives_the_dials(tmp_path, monkeypatch):
+    """The dials are an argument, not a global read: a caller with its own resolved knob set (the
+    bench's site defaults → config → override layering) is built from that set, not from config."""
+    asked = _client_for_recorder(monkeypatch)
+    knobs = SimpleNamespace(
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+        coder_thinking="off",
+        coder_fallback_thinking="on",
+        coder_temperature=0.9,
+        coder_seed=3,
+    )
+
+    clients = build_coder_clients(_session_settings(tmp_path), knobs=knobs)
+
+    assert clients.model == "ollama/qwen3-coder"
+    assert asked["ollama/qwen3-coder"]["thinking"] == "off"
+    assert asked["ollama/qwen3-coder"]["seed"] == 3
+    assert asked["anthropic/claude-opus-4-8"]["thinking"] == "on"
+
+
 # ── prune-on-start: sweep stale working-tier drafts before the toolbox loads the library (#56) ─
 def _prune_settings(tmp_path, *, draft_ttl_hours: float | str | None = None):
     """Session settings with a fully-owned workspace, so the working tier is a clean tmp path."""
@@ -1704,14 +1927,13 @@ class _PanelLake:
 
     def __init__(self, ready, discovered=()):
         self.ready = set(ready)
-        self.coverage = SimpleNamespace(
-            all=lambda: [
-                SimpleNamespace(symbol=s, status="idle", row_count=100) for s in discovered
-            ]
-        )
+        self.discovered = list(discovered)
 
     def check_symbol_ready(self, symbol) -> bool:
         return symbol in self.ready
+
+    def coverage_records(self):
+        return [SimpleNamespace(symbol=s, status="idle", row_count=100) for s in self.discovered]
 
 
 def _episodic_session(

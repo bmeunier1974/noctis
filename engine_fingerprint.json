@@ -42,9 +42,9 @@
       "note": null
     },
     "prompts": {
-      "digest": "3d7931b43ae1abfb",
+      "digest": "8a3b03a66b27cc67",
       "files": {
-        "src/noctis/research/briefings.py": "65d039b72047a292",
+        "src/noctis/research/briefings.py": "03c01877735482bd",
         "src/noctis/research/contract_sheet.py": "a94270514c15a554",
         "src/noctis/research/digests.py": "67476f972a6bbedf",
         "src/noctis/research/ideation.py": "765299073e318ffb",
@@ -53,20 +53,21 @@
       "note": null
     },
     "research": {
-      "digest": "3ecc052459fae37a",
+      "digest": "5f71cba8dc09ff66",
       "files": {
-        "src/noctis/research/agent.py": "2f30eb79f7478ea2",
-        "src/noctis/research/driver.py": "95f5c92713c2f868",
-        "src/noctis/research/episode.py": "1a713e01decf20ef",
+        "src/noctis/research/agent.py": "26bdb1af0b80e7c0",
+        "src/noctis/research/driver.py": "d30e440f4b4f025e",
+        "src/noctis/research/episode.py": "d777201549639b3d",
         "src/noctis/research/sweep.py": "71c77c8174080c43",
-        "src/noctis/research/tools.py": "bdbfe09af9c7b976"
+        "src/noctis/research/tools.py": "2c0e5050906c908b",
+        "src/noctis/research/usage.py": "ba3f2c99c648d6f9"
       },
       "note": null
     },
     "schema": {
-      "digest": "8ff21a89b4298a42",
+      "digest": "076b173eb65ac0d9",
       "files": {
-        "src/noctis/reporting/schema.py": "2eb5ff78a5fc79c5"
+        "src/noctis/reporting/schema.py": "e69f1277c2eb2c02"
       },
       "note": null
     },

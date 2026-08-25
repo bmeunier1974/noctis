@@ -34,8 +34,8 @@ from typer.testing import CliRunner
 
 from noctis.bootstrap import capture_environment
 from noctis.cli import app
-from noctis.observability.debug import RUN_ID_RE
 from noctis.observability.engine_id import ENGINE_VERSION
+from noctis.observability.runid import RUN_ID_RE
 from noctis.reporting import schema
 from noctis.reporting.run_record import RunArtifacts
 from noctis.reporting.run_tree import (

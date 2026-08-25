@@ -1,10 +1,11 @@
 {
   "changelog": {
     "declares": [
+      "briefings",
       "episodic"
     ],
-    "digest": "df409cb3ea343c86",
-    "heading": "2026-08-24 \u2014 sites: episodic",
+    "digest": "ac36e7663d787ef7",
+    "heading": "2026-08-24 \u2014 sites: briefings, episodic",
     "path": "docs/prompt-changelog.md"
   },
   "kind": "noctis.prompt_fingerprint",
@@ -20,9 +21,9 @@
       "note": null
     },
     "briefings": {
-      "digest": "75457a5564601f8e",
+      "digest": "1dc8a7dbe82df916",
       "files": {
-        "src/noctis/research/briefings.py": "65d039b72047a292",
+        "src/noctis/research/briefings.py": "03c01877735482bd",
         "src/noctis/research/digests.py": "67476f972a6bbedf"
       },
       "note": null
@@ -43,10 +44,10 @@
       "note": null
     },
     "episodic": {
-      "digest": "088a778af9fab75d",
+      "digest": "663585add139e1d5",
       "files": {
         "src/noctis/research/digests.py": "67476f972a6bbedf",
-        "src/noctis/research/driver.py": "95f5c92713c2f868",
+        "src/noctis/research/driver.py": "d30e440f4b4f025e",
         "src/noctis/strategies/scenario_spec.py": "a1142cf5ebb5992b"
       },
       "note": null

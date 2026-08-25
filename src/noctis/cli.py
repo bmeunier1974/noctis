@@ -769,8 +769,9 @@ def run(
     import sys
 
     from noctis.bootstrap import UsageError, build_lake, build_memory
+    from noctis.data.universe import trading_roster
     from noctis.engine import MarketClock, build_runtime, initial_phase_for
-    from noctis.engine.runtime import RuntimeResult, trading_roster
+    from noctis.engine.runtime import RuntimeResult
 
     # Off by default (WARNING) so a bare run stays quiet; the -v feed rides the Console below,
     # -vv drops stdlib logging to DEBUG. One ladder shared with `noctis research`.
@@ -2109,15 +2110,15 @@ def _auto_backfill(settings, lake, missing: list[str]) -> None:
     ``$0`` no-ops). A preflight refusal is surfaced as a per-symbol ``refused`` result — it does
     not raise — so the run continues cleanly on to the readiness check either way.
     """
-    from noctis.data.types import NS_PER_DAY, t1_boundary_ns
+    from noctis.data.types import history_window
 
     schema = "ohlcv-1m"
-    # T+1 boundary (UTC midnight of the current ET trading date, i.e. through end of
-    # yesterday) — the same boundary the nightly sync uses. Vendor availability ends
-    # there; requesting past it is rejected outright (422 data_end_after_available_end,
-    # or a 403 license error once the end crosses into the current ET session).
-    end_ns = t1_boundary_ns(_utcnow())
-    start_ns = end_ns - settings.data.history_days * NS_PER_DAY
+    # The data layer's one lookback window, ending at the T+1 boundary (UTC midnight of the
+    # current ET trading date, i.e. through end of yesterday) — the same boundary the nightly
+    # sync uses and the same window the research driver fetches over. Vendor availability ends
+    # there; requesting past it is rejected outright (422 data_end_after_available_end, or a
+    # 403 license error once the end crosses into the current ET session).
+    start_ns, end_ns = history_window(_utcnow(), settings.data.history_days)
     typer.echo(
         f"Auto-backfilling {len(missing)} symbol(s) over {settings.data.history_days} days "
         f"(budget ${settings.data.budget_usd})…"

@@ -24,11 +24,16 @@ Like :class:`~noctis.research.failed_store.FailedAttemptStore`, the store is **s
 calls** — the next sequence and the eviction set are both re-read from disk — so a fresh instance
 over an existing tree evicts the tree's oldest, not merely its own.
 
-**The fail-safe latch**, the same posture as the debug recorder and the run store: capture is
-strictly secondary, so the *first* write failure is logged **exactly once**, latches the store off,
-and returns ``None``; every later call is a silent no-op, and nothing ever raises into a research
-session. A latched :meth:`store` returning ``None`` rather than a hash is the honest signal — the
-caller omits the field rather than recording a hash whose body was never written.
+**The fail-safe latch** is not this module's to invent: it composes
+:class:`~noctis.observability.failsafe.FailSafe` (story #348), the one trip/warn-once/latch-off
+contract the debug recorder rides too. Capture is strictly secondary, so the *first* write failure
+is logged **exactly once**, latches the store off, and returns ``None``; every later call is a
+silent no-op, and nothing ever raises into a research session. A latched :meth:`store` returning
+``None`` rather than a hash is the honest signal — the caller omits the field rather than recording
+a hash whose body was never written. :meth:`read` is deliberately outside the latch.
+
+The store writes through the latch's **writer seam**, so a test injects a failing disk at
+construction rather than patching the filesystem out from under the whole process.
 
 Sidecars land under the run's gitignored ``qa/`` area, so nothing captured ever reaches git
 (AGENTS.md rule 6), and the payloads a caller hands over inherit the run record's secrets
@@ -41,6 +46,8 @@ import hashlib
 import logging
 import re
 from pathlib import Path
+
+from noctis.observability.failsafe import FailSafe, Writer, write_text
 
 __all__ = ["CAPTURE_DIRNAME", "DEFAULT_CAP", "CaptureStore"]
 
@@ -69,13 +76,22 @@ class CaptureStore:
     ``<root>/<kind>/`` unless that exact content is already there, evicts the oldest over the cap,
     and returns the hash (``None`` if capture is latched off). :meth:`read` retrieves a payload by
     ``(kind, hash)`` for tests and post-mortems. Construct with the capture root — callers pass the
-    run's ``qa/`` area — and an optional cap.
+    run's ``qa/`` area — an optional cap, and an optional ``writer`` (the seam every sidecar is
+    written through; the default puts the payload's UTF-8 bytes on disk).
     """
 
-    def __init__(self, root: Path | str, *, cap: int = DEFAULT_CAP) -> None:
+    def __init__(
+        self, root: Path | str, *, cap: int = DEFAULT_CAP, writer: Writer = write_text
+    ) -> None:
         self._root = Path(root)
         self._cap = max(1, cap)
-        self._disabled = False
+        self._latch = FailSafe(
+            logger=logger,
+            subject=f"capture store {self._root}",
+            cause="a write failure",
+            consequence="no further inputs will be captured this session",
+            writer=writer,
+        )
 
     @property
     def root(self) -> Path:
@@ -84,7 +100,7 @@ class CaptureStore:
     @property
     def disabled(self) -> bool:
         """Whether the fail-safe latch has tripped. Once ``True`` it never clears."""
-        return self._disabled
+        return self._latch.tripped
 
     def store(self, kind: str, payload: str) -> str | None:
         """Capture ``payload`` under ``kind``; return its content hash, or ``None`` if latched off.
@@ -94,22 +110,18 @@ class CaptureStore:
         written (the store has latched off after a failure): the caller should omit the hash rather
         than record a name for a body that is not on disk.
         """
-        if self._disabled:
-            return None
-        try:
-            digest = _content_hash(payload)
-            folder = self._root / _safe_kind(kind)
-            if self._find(folder, digest) is not None:
-                return digest
-            folder.mkdir(parents=True, exist_ok=True)
-            (folder / f"{self._next_seq():06d}-{digest}{_SIDECAR_SUFFIX}").write_text(
-                payload, encoding="utf-8"
-            )
-            self._evict()
+        return self._latch.guard(self._store, kind, payload)
+
+    def _store(self, kind: str, payload: str) -> str:
+        """The capture itself, run behind the latch: any failure in here trips it, exactly once."""
+        digest = _content_hash(payload)
+        folder = self._root / _safe_kind(kind)
+        if self._find(folder, digest) is not None:
             return digest
-        except Exception as exc:
-            self._trip(exc)
-            return None
+        folder.mkdir(parents=True, exist_ok=True)
+        self._latch.write(folder / f"{self._next_seq():06d}-{digest}{_SIDECAR_SUFFIX}", payload)
+        self._evict()
+        return digest
 
     def read(self, kind: str, digest: str) -> str | None:
         """The payload stored under ``(kind, digest)``, or ``None`` if it was never stored or has
@@ -149,25 +161,6 @@ class CaptureStore:
         if not _HASH_RE.match(digest or "") or not folder.is_dir():
             return None
         return next(iter(sorted(folder.glob(f"*-{digest}{_SIDECAR_SUFFIX}"))), None)
-
-    # ── the fail-safe latch ──
-    def _trip(self, exc: BaseException) -> None:
-        """Disable capture for good on the first failure — a LATCH, not a retry.
-
-        Exactly one warning, then silence. Capture is observability: a body that cannot be written
-        must never take down the research session that produced it, and an intermittent disk must
-        not produce a half-captured session that reads as a whole one.
-        """
-        if self._disabled:
-            return
-        self._disabled = True
-        logger.warning(
-            "capture store %s self-disabled after a write failure (%s: %s); no further inputs "
-            "will be captured this session",
-            self._root,
-            type(exc).__name__,
-            exc,
-        )
 
 
 def _content_hash(payload: str) -> str:

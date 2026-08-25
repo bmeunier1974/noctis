@@ -67,6 +67,7 @@ from noctis.strategies.scenario_spec import (
     compile_spec,
 )
 from noctis.strategies.scenarios import Scenario
+from tests._capture_helpers import failing_capture_store
 from tests.test_research_tools import _make_toolbox
 
 _FORMULATE_TOOL = FORMULATE_CONTRACT.name
@@ -2507,6 +2508,9 @@ class _IngestingLake:
     def check_symbol_ready(self, symbol, dataset=None, schema=None):
         return self._inner.check_symbol_ready(symbol, dataset, schema)
 
+    def coverage_records(self):
+        return list(self.coverage.all())
+
     def get_bars(self, dataset, schema, symbols, start, end):
         return self._inner.get_bars(dataset, schema, symbols, start, end)
 
@@ -2949,11 +2953,11 @@ def test_end_to_end_episode_rows_record_the_served_model_beside_the_alias(tmp_pa
     ]
 
 
-def _capture_session(tmp_path, session_id: str):
+def _capture_session(tmp_path, session_id: str, *, capture=None):
     """One real end-to-end episodic session (formulate → … → decide) through the production
     ``make_episodes`` wiring, returning the toolbox, the ledger, the client, and the summary — the
     harness the episodic-site capture assertions (#185) read."""
-    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder(), capture=capture)
     ledger = SessionLedger(box.state_dir, session_id=session_id)
     client = FakeEpisodeClient(
         [_emit(_FORMULATE_TOOL, _FORMULATE_PAYLOAD), _emit(_DECIDE_TOOL, _REJECT_PAYLOAD)]
@@ -3013,20 +3017,14 @@ def test_end_to_end_episodes_under_identical_knobs_share_one_knob_sidecar(tmp_pa
     }
 
 
-def test_end_to_end_latched_capture_leaves_the_episodes_unharmed(tmp_path, monkeypatch):
+def test_end_to_end_latched_capture_leaves_the_episodes_unharmed(tmp_path):
     """Capture is strictly secondary: with the store latched off the session still formulates,
     authors, optimizes and reaches a gated verdict, and the rows simply omit the capture fields —
     never a name for a body that was never written."""
-    real = Path.write_text
     capture_root = tmp_path / "qa" / "capture"
-
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(capture_root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
-    box, ledger, _, summary = _capture_session(tmp_path, "ep-capture-off")
+    box, ledger, _, summary = _capture_session(
+        tmp_path, "ep-capture-off", capture=failing_capture_store(capture_root)
+    )
 
     assert box.capture.root == capture_root and box.capture.disabled
     rows = ledger.episodes()

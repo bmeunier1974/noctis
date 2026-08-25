@@ -114,7 +114,10 @@ EMBED_ALL_SOURCES_SETTING = "embed_all_sources"
 
 # The four neutral token fields every provider reports and every provider bills separately (story
 # #140). Spelled here as the record's own field names — with their unit, like every other number —
-# because the record must stay readable without the research package that produced them.
+# because the record must stay readable without the research package that produced them: this
+# module imports no research module, deliberately, so the record writer stays light. It is
+# therefore a mirror of :data:`noctis.research.usage.USAGE_FIELDS`, and the two are pinned equal by
+# ``tests/test_usage.py`` — the comparison stands in for the import.
 USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",

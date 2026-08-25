@@ -18,6 +18,7 @@ import pandas as pd
 
 from noctis.backtest import PipelineConfig
 from noctis.champions.promotion import PromotionRules
+from noctis.data.universe import trading_roster
 from noctis.engine.clock import MarketClock
 from noctis.engine.close import ClosePhase
 from noctis.engine.machine import Phase, TradingMachine
@@ -41,60 +42,6 @@ logger = logging.getLogger("noctis.runtime")
 # never paces them; it is purely a floor that stops a degenerate instant-returning session
 # from spinning the CPU / hammering the research API thousands of times a second.
 _CLOSED_RESEARCH_MIN_PERIOD = timedelta(seconds=30)
-
-
-def trading_roster(settings, lake) -> list[str]:
-    """The growing trading universe: the config seed plus every lake-tracked ready symbol.
-
-    The config list comes first, order preserved, so the research fit set (the first
-    ``fit_set_size`` ready names) stays stable as the agent's discoveries accumulate;
-    discovered symbols follow, sorted. The lake IS the persistent store — any symbol the
-    research agent ever fetched via ``ensure_data`` is tracked in the coverage registry,
-    so it joins the roster with no extra state. Lakes without a coverage registry
-    (test fakes) degrade to the config list.
-
-    This feeds the TRADING phase (``_load_bars``) and inventory views. It must never
-    shrink under a live champion — champions trade discovered symbols. The *prompt-facing*
-    enumeration is the separate, capped :func:`research_focus`.
-    """
-    seed = list(settings.universe)
-    coverage = getattr(lake, "coverage", None)
-    if coverage is None:
-        return seed
-    seen = {s.upper() for s in seed}
-    extras = sorted(
-        {
-            rec.symbol
-            for rec in coverage.all()
-            if rec.symbol.upper() not in seen and rec.status == "idle" and rec.row_count > 0
-        }
-    )
-    return seed + extras
-
-
-def research_focus(settings, lake, mandate=None) -> list[str]:
-    """What this session *intends* to research: fit set + symbol-holdout names +
-    mandate-declared symbols, capped at ``research.focus_size``.
-
-    Feeds the prompt-facing enumerations only (the MARKET REALITY digest and the
-    symbol-holdout candidate pool) — never the trading roster. Without a cap, every
-    ``ensure_data`` in every session grows every future prompt; discovered-but-unfocused
-    symbols stay tradeable (roster) and re-fetchable (``preview_bars``/``list_symbols``).
-
-    The first ``fit_set_size + symbol_holdout_size`` ready roster names come first —
-    exactly the runtime's fit-set/holdout window, so the digest describes the symbols
-    research actually tunes and gates on. Mandate-declared symbols follow (they may be
-    unready — consumers already filter on readiness), then the cap applies.
-    """
-    ready = [s for s in trading_roster(settings, lake) if lake.check_symbol_ready(s)]
-    cfg = settings.research
-    focus = ready[: cfg.fit_set_size + cfg.symbol_holdout_size]
-    seen = {s.upper() for s in focus}
-    for sym in getattr(mandate, "symbols", None) or []:
-        if sym.upper() not in seen:
-            focus.append(sym)
-            seen.add(sym.upper())
-    return focus[: cfg.focus_size]
 
 
 @dataclass

@@ -12,6 +12,7 @@ and the "empty input == today" parity.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -468,7 +469,7 @@ def test_symbols_steers_the_search_and_config_universe_sets_the_roster(tmp_path)
     """The two surfaces stay two different things when one mandate sets both: ``symbols:`` is a
     search prior that joins the session's focus set and never the roster; ``config: universe:``
     is the seed roster the readiness check and the panel are drawn from."""
-    from noctis.engine.runtime import research_focus, trading_roster
+    from noctis.data.universe import research_focus, trading_roster
 
     roster = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH"]
     mandate_dir = tmp_path / "mandate"
@@ -495,11 +496,14 @@ def test_symbols_steers_the_search_and_config_universe_sets_the_roster(tmp_path)
 
 
 class _AlwaysReadyLake:
-    """A lake whose every symbol is ready. No ``coverage`` attribute, so the trading roster is
-    exactly the config seed — which is the point here."""
+    """A lake whose every symbol is ready and which tracks no series of its own, so the trading
+    roster is exactly the config seed — which is the point here."""
 
     def check_symbol_ready(self, symbol) -> bool:
         return True
+
+    def coverage_records(self) -> list:
+        return []
 
 
 def test_a_mandate_setting_every_allowed_knob_leaves_the_gates_byte_identical(tmp_path):
@@ -868,6 +872,58 @@ def test_shipped_mandate_example_block_applies_as_written(tmp_path):
     settings = load_settings(config_path=tmp_path / "missing.yaml")
     applied = apply_patch(settings, _example_config_surface())
     assert len(applied) == len(ALLOWED) + len(CLAMPED)
+
+
+_CONFIG_DOC = _REPO_ROOT / "docs" / "configuration.md"
+
+
+def _documented_overlay_counts() -> dict[str, tuple[tuple[str, int], ...]]:
+    """Every count ``docs/configuration.md`` publishes for an overlay tier, keyed by tier.
+
+    Two kinds of site say the same thing and can drift apart: the summary sentence
+    ("**39 allowed, 2 clamped, 54 refused**") and each tier's own bold heading
+    ("**Allowed (39), in six groups.**"). ``\\s+`` rather than a literal space so prose reflow
+    across a line break still matches — the digits are what is pinned. A site that cannot be
+    found is a hard failure, never a skip: a ratchet that goes quiet when someone rewords the
+    page is no ratchet at all.
+    """
+    text = _CONFIG_DOC.read_text(encoding="utf-8")
+    summary = re.search(r"\*\*(\d+)\s+allowed,\s+(\d+)\s+clamped,\s+(\d+)\s+refused\*\*", text)
+    assert summary is not None, (
+        f"{_CONFIG_DOC.name}: no '**N allowed, N clamped, N refused**' sentence left to ratchet"
+    )
+    found: dict[str, tuple[tuple[str, int], ...]] = {}
+    for group, tier in enumerate(("ALLOWED", "CLAMPED", "REFUSED"), start=1):
+        heading = re.search(rf"\*\*{tier.capitalize()}\s*\((\d+)\)", text)
+        assert heading is not None, (
+            f"{_CONFIG_DOC.name}: no '**{tier.capitalize()} (N)' heading left to ratchet"
+        )
+        found[tier] = (
+            ("the summary sentence", int(summary.group(group))),
+            (f"the {tier.capitalize()} heading", int(heading.group(1))),
+        )
+    return found
+
+
+def test_configuration_doc_overlay_counts_match_the_classifier_tables():
+    """The page's tier sizes are ratcheted against the tables they describe.
+
+    ``docs/configuration.md`` tells an operator how big the bindable surface is before they read
+    ``config/overlay.py``, so a knob added to a table without touching the page turns that
+    sentence into a confidently wrong number — the same failure mode the MANDATE.md.example
+    completeness ratchet above closes, one page over. Both numbers go in the message, because
+    the fix is either the doc or the classification and the reader needs to see which drifted.
+    """
+    from noctis.config.overlay import ALLOWED, CLAMPED, REFUSED
+
+    live = {"ALLOWED": len(ALLOWED), "CLAMPED": len(CLAMPED), "REFUSED": len(REFUSED)}
+    for tier, sites in _documented_overlay_counts().items():
+        for where, documented in sites:
+            assert documented == live[tier], (
+                f"docs/configuration.md ({where}) says {documented} {tier.lower()} overlay "
+                f"keys, overlay.{tier} holds {live[tier]} — correct the page, or the "
+                f"classification it describes"
+            )
 
 
 def test_shipped_mandate_md_resolves_to_sortino(tmp_path):

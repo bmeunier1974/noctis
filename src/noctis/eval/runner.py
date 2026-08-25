@@ -91,8 +91,8 @@ from noctis.eval.record import (
 from noctis.eval.registry import site
 from noctis.eval.site import AgentSite, AnsweredCase
 from noctis.eval.taxonomy import FailureTaxonomy
-from noctis.observability.debug.runid import new_run_id
 from noctis.observability.engine_id import fingerprint
+from noctis.observability.runid import new_run_id
 from noctis.research.pricing import PriceTable, default_table
 
 __all__ = [
@@ -197,7 +197,7 @@ class ConflictingReading(ValueError):
 def new_bench_id(now: datetime | None = None) -> str:
     """Mint a fresh bench id — minted, never derived, in the run id's own shape.
 
-    The minter is :func:`~noctis.observability.debug.runid.new_run_id` by identity rather than by a
+    The minter is :func:`~noctis.observability.runid.new_run_id` by identity rather than by a
     second implementation: sortable by name, collision-free across concurrent benches, greppable.
     A bench id is not a run id and never addresses one — what tells them apart is the tree they
     live in, which is the whole point of the bench area hanging off the workspace root.

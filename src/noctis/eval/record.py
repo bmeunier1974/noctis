@@ -3,7 +3,9 @@
 A benchmark number is worthless without the conditions it was produced under, and *worse* than
 worthless when two numbers produced under different conditions are subtracted. This module is the
 run record's discipline applied to a bench run (``reporting/run_record.py`` beside
-``reporting/schema.py``, deliberately mirrored rather than reinvented):
+``reporting/schema.py``, deliberately mirrored rather than reinvented — and, for the conventions
+that are about a *document* rather than about a run, imported from it outright: the generic
+walkers behind :func:`validate` are the run record's own, exported by ``reporting/schema.py``):
 
 * the **runner collects**, the **builder builds**, the **validator checks** — three jobs, and only
   the first of them is allowed to touch a disk or a clock. :func:`build` is a pure function from a
@@ -18,9 +20,12 @@ run record's discipline applied to a bench run (``reporting/run_record.py`` besi
   zero (nothing passed) is a finding; a *missing* input (nobody classified the failures, the price
   table could not price a model) is ``null``, and it propagates: a figure whose input is unknown
   stays unknown all the way into the comparison;
-* :data:`SCHEMA_VERSION` is **additive-only**. New keys may arrive at any time, an existing key
-  never changes meaning, and :func:`validate` ignores keys it has never heard of — a reader's
-  tolerance is the writer's freedom to add.
+* :data:`SCHEMA_VERSION` is **additive-only**, and additive means *declared*. New keys may arrive
+  at any time and an existing key never changes meaning; the record's sections are a floor rather
+  than a ceiling, so a later story's whole new section is readable here. But a section's declared
+  keys are the whole of what it may carry, and :func:`validate` — the run record's two-way keys
+  walker, story #350 — names a key nobody declared rather than publishing an emitter typo as a
+  field no reader indexes.
 
 **The key is the point of the record.** :func:`comparable_key` composes one greppable label out of
 the seven things that have to have been equal before two bench numbers may be subtracted — the
@@ -56,7 +61,12 @@ from typing import NamedTuple, TypeAlias
 from noctis.eval.identity import SiteIdentity
 from noctis.eval.metrics import AttemptOutcome, BenchMetrics, CaseResult, compute_metrics
 from noctis.eval.taxonomy import UNCLASSIFIED, FailureTaxonomy, UnknownVocabulary
-from noctis.reporting.schema import ESTIMATE_MARKER, STAMP_KEYS, UNIT_ALIASES, USD_MARKER
+from noctis.reporting.schema import (
+    check_estimate_labels,
+    check_keys,
+    check_stamps,
+    check_units,
+)
 from noctis.research.pricing import USAGE_FIELDS, PriceTable, default_table
 
 __all__ = [
@@ -784,17 +794,15 @@ _CONFIG_KEYS = (
 # claims to quote — the run record draws exactly this line around its frozen settings.
 _VERBATIM_SUBTREES = ("harness.dials", "provenance.client_stack")
 
-_STAMP_SUFFIX = "_utc"
-
 
 def validate(record: Mapping[str, object]) -> list[str]:
     """Check one bench record against the schema; return **every** problem, one line each.
 
-    A list, not an exception, for the run record's reason: the operator asking "is this record
-    readable?" wants the whole list at once, not one problem per attempt. Unknown keys are ignored
-    — additive-only versioning is a promise a strict reader would break on the first record written
-    by a later Noctis. Nothing here reads a file or a clock, so a record checks the same in memory
-    as it does on disk.
+    A list, not an exception, for the run record's reason: the operator asking "does this record
+    conform?" wants the whole list at once, not one problem per attempt. An undeclared key is one
+    of the answers — the walkers are the run record's own, and they check a block's vocabulary as
+    well as its presence. Nothing here reads a file or a clock, so a record checks the same in
+    memory as it does on disk.
     """
     problems: list[str] = []
     if record.get("schema_version") != SCHEMA_VERSION:
@@ -817,11 +825,13 @@ def validate(record: Mapping[str, object]) -> list[str]:
     problems += _check_section("failures", record.get("failures"), _FAILURE_KEYS)
     problems += _check_results(record.get("results"))
     problems += _check_provenance(record.get("provenance"))
-    # The two document-wide conventions, checked over the whole record rather than section by
-    # section, so a section added tomorrow inherits both instead of needing its own rule.
-    problems += _check_units("", record)
-    problems += _check_stamps("", record)
-    problems += _check_estimate_labels("", record)
+    # The document-wide conventions, checked over the whole record rather than section by section
+    # (so a section added tomorrow inherits them) and by the run record's **own** walkers rather
+    # than by a second copy of them, so the two documents can never drift apart on what ``_s``
+    # means or on what a dollar figure has to call itself.
+    problems += check_units("", record, verbatim=_VERBATIM_SUBTREES)
+    problems += check_stamps("", record)
+    problems += check_estimate_labels("", record, verbatim=_VERBATIM_SUBTREES)
     return problems
 
 
@@ -862,7 +872,7 @@ def _check_results(results: object) -> list[str]:
         if not isinstance(result, Mapping):
             problems.append(f"{label}: must be an object")
             continue
-        problems += _check_keys(label, result, _RESULT_KEYS)
+        problems += check_keys(label, result, _RESULT_KEYS)
         attempts = result.get("attempts")
         if (
             attempts is None
@@ -876,7 +886,7 @@ def _check_results(results: object) -> list[str]:
             if not isinstance(attempt, Mapping):
                 problems.append(f"{entry}: must be an object")
                 continue
-            problems += _check_keys(entry, attempt, _ATTEMPT_KEYS)
+            problems += check_keys(entry, attempt, _ATTEMPT_KEYS)
     return problems
 
 
@@ -895,100 +905,14 @@ def _check_provenance(provenance: object) -> list[str]:
         if not isinstance(config, Mapping):
             problems.append(f"{label}: must be an object")
             continue
-        problems += _check_keys(label, config, _CONFIG_KEYS)
+        problems += check_keys(label, config, _CONFIG_KEYS)
     return problems
 
 
 def _check_section(label: str, section: object, keys: Sequence[str]) -> list[str]:
-    """One section: ``null``, or an object carrying every key the contract names."""
+    """One section: ``null``, or an object carrying every key the contract names and no other."""
     if section is None:
         return []
     if not isinstance(section, Mapping):
         return [f"{label}: section must be an object or null"]
-    return _check_keys(label, section, keys)
-
-
-def _check_keys(label: str, section: Mapping[str, object], keys: Sequence[str]) -> list[str]:
-    """Presence, not truthiness: an absent value is an explicit ``null``, never a missing key."""
-    return [
-        f"{label}.{key}: key is missing (absent values are explicit nulls)"
-        for key in keys
-        if key not in section
-    ]
-
-
-def _check_units(label: str, node: object) -> list[str]:
-    """Every dimensioned number spells its unit the record's one canonical way.
-
-    The vocabulary is the run record's, **by identity** rather than by a second copy
-    (:data:`~noctis.reporting.schema.UNIT_ALIASES`): two records an operator reads side by side
-    must not disagree about what ``_s`` means, and two tables of aliases eventually would.
-    """
-    if label in _VERBATIM_SUBTREES:
-        return []
-    problems: list[str] = []
-    if isinstance(node, Mapping):
-        for key, value in node.items():
-            name = str(key)
-            path = f"{label}.{name}" if label else name
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                canonical = UNIT_ALIASES.get(name.rsplit("_", 1)[-1].lower())
-                if canonical is not None:
-                    problems.append(
-                        f"{path}: a dimensioned number names its unit canonically — use the "
-                        f"{canonical!r} suffix, not {name.rsplit('_', 1)[-1]!r}"
-                    )
-            problems += _check_units(path, value)
-    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
-        for position, item in enumerate(node):
-            problems += _check_units(f"{label}[{position}]", item)
-    return problems
-
-
-def _check_stamps(label: str, node: object) -> list[str]:
-    """Every timestamp anywhere in the document is UTC ISO-8601 with a ``Z``."""
-    problems: list[str] = []
-    if isinstance(node, Mapping):
-        for key, value in node.items():
-            name = str(key)
-            path = f"{label}.{name}" if label else name
-            if isinstance(value, str) and (name.endswith(_STAMP_SUFFIX) or name in STAMP_KEYS):
-                problems += _check_stamp(path, value)
-            problems += _check_stamps(path, value)
-    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
-        for position, item in enumerate(node):
-            problems += _check_stamps(f"{label}[{position}]", item)
-    return problems
-
-
-def _check_stamp(label: str, value: str) -> list[str]:
-    if value.endswith("Z") and "T" in value:
-        return []
-    return [f"{label}: {value!r} is not a UTC ISO-8601 timestamp ending in 'Z'"]
-
-
-def _check_estimate_labels(label: str, node: object) -> list[str]:
-    """Every key naming dollars, at any depth, must also name itself an estimate.
-
-    The rule the run record already enforces, applied here for the same reason: these prices come
-    from a versioned table, not from an invoice, and a bench record is read by exactly the operator
-    who is comparing two prompt compositions on cost.
-    """
-    if label in _VERBATIM_SUBTREES:
-        return []
-    problems: list[str] = []
-    if isinstance(node, Mapping):
-        for key, value in node.items():
-            name = str(key)
-            path = f"{label}.{name}" if label else name
-            if USD_MARKER in name.lower() and ESTIMATE_MARKER not in name.lower():
-                problems.append(
-                    f"{path}: a cost field must name itself an estimate "
-                    f"(e.g. {name}_{ESTIMATE_MARKER}) — these prices come from a versioned table, "
-                    "not from an invoice"
-                )
-            problems += _check_estimate_labels(path, value)
-    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
-        for position, item in enumerate(node):
-            problems += _check_estimate_labels(f"{label}[{position}]", item)
-    return problems
+    return check_keys(label, section, keys)

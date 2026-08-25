@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 import yaml
 
+import noctis.research as research_mod
 from noctis.config.settings import Settings
 from noctis.eval.bootstrap import (
     BenchSeams,
@@ -616,6 +617,88 @@ def test_an_injected_client_is_the_coder_a_bench_asks_and_no_fallback_is_invente
 
     assert clients.client is injected and clients.model == "bench/coder"
     assert clients.fallback is None and clients.fallback_model is None
+
+
+def test_a_bench_asks_the_coder_production_builds_dials_and_all(tmp_path, monkeypatch):
+    """A live coder bench runs on the engine's own coder clients: the configured model on the
+    coder's dials (thinking, deliberate, sampling) and the paid fallback its budget allows —
+    a bench that asked the same model without them would measure a configuration nobody ships."""
+    asked: dict[str, dict] = {}
+
+    def fake_client_for(settings, model, **kwargs):
+        asked[model] = kwargs
+        return ScriptedCoder([GOOD])
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    settings = _settings(
+        tmp_path,
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+        max_escalations=1,
+    )
+
+    clients = coder_clients(settings)
+
+    assert clients.model == "ollama/qwen3-coder" and clients.client is not None
+    assert clients.fallback is not None
+    assert clients.fallback_model == "anthropic/claude-opus-4-8"
+    assert asked["ollama/qwen3-coder"]["thinking"] == "on"
+    assert asked["ollama/qwen3-coder"]["deliberate"] is True
+    assert asked["anthropic/claude-opus-4-8"]["thinking"] == "off"
+
+
+def test_a_bench_with_no_escalation_budget_builds_no_paid_fallback(tmp_path, monkeypatch):
+    """``max_escalations: 0`` (the shipped default) is a bench that will never escalate, so the
+    paid provider is never consulted — the escalation cap gates the client, not just the call."""
+    asked: dict[str, dict] = {}
+
+    def fake_client_for(settings, model, **kwargs):
+        asked[model] = kwargs
+        return ScriptedCoder([GOOD])
+
+    monkeypatch.setattr(research_mod, "client_for", fake_client_for)
+    settings = _settings(
+        tmp_path,
+        coder_model="ollama/qwen3-coder",
+        coder_fallback_model="anthropic/claude-opus-4-8",
+    )
+
+    clients = coder_clients(settings)
+
+    assert clients.fallback is None and clients.fallback_model is None
+    assert "anthropic/claude-opus-4-8" not in asked
+
+
+def test_a_bench_override_of_the_escalation_cap_buys_back_the_fallback(tmp_path, monkeypatch):
+    """The knob set a bench resolved (site defaults → config → harness override) is what the
+    clients are built from, so an override of the cap reaches the fallback client."""
+    monkeypatch.setattr(research_mod, "client_for", lambda *a, **k: ScriptedCoder([GOOD]))
+    settings = _settings(tmp_path, coder_model="ollama/qwen3-coder")
+    knobs = resolve_coder_knobs(
+        settings,
+        HarnessSpec(
+            knob_overrides={
+                "coder_fallback_model": "anthropic/claude-opus-4-8",
+                "max_escalations": 2,
+            }
+        ),
+    )
+
+    clients = coder_clients(settings, knobs=knobs)
+
+    assert clients.fallback is not None
+    assert clients.fallback_model == "anthropic/claude-opus-4-8"
+
+
+def test_a_coder_the_engine_cannot_build_refuses_instead_of_degrading(tmp_path, monkeypatch):
+    """The bench's stricter contract on top of the engine's graceful degradation: a session would
+    assemble in driver-authored mode, but a coder bench has nothing to measure without a model."""
+    monkeypatch.setattr(research_mod, "client_for", lambda *a, **k: None)
+
+    with pytest.raises(LiveModelUnavailable) as refusal:
+        coder_clients(_settings(tmp_path, coder_model="ollama/qwen3-coder"))
+
+    assert "no coder client for 'ollama/qwen3-coder'" in str(refusal.value)
 
 
 def test_a_job_record_reads_back_from_the_document_it_was_written_as(tmp_path, fast_gate):

@@ -184,7 +184,7 @@ def open_run(
     on the appending segment and nowhere else: earlier segments keep the machines they actually
     ran on, which is the entire reason the block is per segment.
     """
-    from noctis.observability.debug import new_run_id
+    from noctis.observability.runid import new_run_id
 
     now = clock()
     if resume:

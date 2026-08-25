@@ -62,8 +62,10 @@ These are the promises a consumer may build on. Each is enforced structurally, n
    constant, so no window exists in which a run is both.
 7. **Output is workspace-only.** Records live under the gitignored `workspace/`; no operator's
    run, champion or rejection ever reaches git.
-8. **The schema is additive.** New fields may appear at any time; an existing field never changes
-   meaning or type; a reader ignores keys it does not know.
+8. **The schema is additive, and additive means declared.** New fields may appear at any time and
+   an existing field never changes meaning or type; a *reader* ignores keys it does not know, so a
+   newer record is still readable. `validate()` is the stricter question — does this record conform
+   to the schema this engine ships? — and it refuses a key no section declared.
 
 Two more rules are about honesty rather than safety, and a consumer must respect both:
 
@@ -72,6 +74,11 @@ Two more rules are about honesty rather than safety, and a consumer must respect
   a process was killed, or the writer latched off.
 - **An absent value is an explicit `null`, never a dropped key.** That is what lets a consumer tell
   "not applicable" from "this schema version did not have it".
+- **An undeclared key is refused, never quietly published.** A section's keys are a closed
+  vocabulary, so `validate()` names a key no section declared (`run.cumulative_trails: undeclared
+  key`) exactly as it names a missing one. The failure this catches is an emitter typo: a field
+  spelled one way in the writer and another in every reader passes every presence check and is
+  indexed by nobody. Growing a section stays one edit — declare the key in `schema.py`.
 
 ---
 
@@ -119,9 +126,15 @@ invoice, and a key that said `usd` alone would read as a receipt. `validate()` e
 `SCHEMA_VERSION` is **1**.
 
 - **Additive-only.** New fields may be added at any time. An existing field never changes meaning
-  or type, and a **reader ignores keys it does not know** — a record carrying keys this Noctis has
-  never heard of validates. That is what lets a record written tonight still be read by the Noctis
-  that resumes the run in a month.
+  or type, and the **read path never rejects a document** — `read_artifacts()` and `upgrade()`
+  carry a record forward whatever it carries, and a consumer ignores keys it does not know. That is
+  what lets a record written tonight still be read by the Noctis that resumes the run in a month.
+- **Additive means declared.** `validate()` is a *conformance* check against the schema this engine
+  ships, not the read path, and its keys walker runs both ways: a section carries the keys the
+  schema declares for it and no others, so an **undeclared key is refused** rather than published
+  under a spelling no reader indexes. The record's *sections* stay open — `REQUIRED_SECTIONS` is a
+  floor, never a ceiling — which is where a later story's whole new section lands; a new key inside
+  an existing section is one line in `schema.py`.
 - **A breaking change bumps the version**, and `schema.upgrade()` rewrites the record **in place**
   on the next open: it walks a record up one version at a time through a reviewable registry
   (`schema.UPGRADES` — empty at version 1, because there is no earlier version to come from),

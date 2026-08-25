@@ -136,6 +136,20 @@ def t1_boundary_ns(now: datetime) -> int:
     return day_start_ns(now.astimezone(US_MARKET_TZ).date())
 
 
+def history_window(now: datetime, history_days: int) -> tuple[int, int]:
+    """The ``(start_ns, end_ns)`` lookback window a ``history_days`` fetch covers at *now*.
+
+    One window for every caller — the run entrypoint's auto-backfill and the research driver's
+    session-start and DISCOVER fetches — so a symbol arrives with exactly the same history no
+    matter which asked for it. The end is the :func:`t1_boundary_ns` T+1 boundary (vendor
+    availability ends there; an end past it is rejected outright), and the start is exactly
+    ``history_days`` earlier. Half-open on the boundary: the last bar in the window belongs to the
+    day *before* it, which is what a caller rendering inclusive dates subtracts a day for.
+    """
+    end_ns = t1_boundary_ns(now)
+    return end_ns - int(history_days) * NS_PER_DAY, end_ns
+
+
 def day_bounds_ns(d: date) -> tuple[int, int]:
     """[start, end] nanoseconds spanning a single UTC calendar day (end inclusive)."""
     start = day_start_ns(d)

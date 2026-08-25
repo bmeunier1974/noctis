@@ -73,13 +73,17 @@ COMPONENT_PATHS: Mapping[str, tuple[str, ...]] = {
         "src/noctis/broker/seam.py",
         "src/noctis/broker/paper.py",
     ),
-    # Decides how candidates are found (the tool registry lives in ``tools.py``).
+    # Decides how candidates are found (the tool registry lives in ``tools.py``; ``usage.py``
+    # holds the token estimate both the loop's context budget and the briefing builders size a
+    # prompt with, so what fits in a window — and therefore what the model sees — is decided
+    # there).
     "research": (
         "src/noctis/research/agent.py",
         "src/noctis/research/driver.py",
         "src/noctis/research/tools.py",
         "src/noctis/research/episode.py",
         "src/noctis/research/sweep.py",
+        "src/noctis/research/usage.py",
     ),
     # Decides what the model is told.
     "prompts": (

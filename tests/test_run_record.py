@@ -1041,11 +1041,110 @@ def test_validate_names_a_timestamp_without_a_z_suffix():
     assert any("created_utc" in p for p in schema.validate(record))
 
 
+def test_validate_names_an_undeclared_key_and_the_section_it_sits_in():
+    """An emitter typo is a schema violation, not a silently-accepted new field (story #350)."""
+    record = build(_artifacts())
+    record["run"]["cumulative_trails"] = 7
+
+    problems = schema.validate(record)
+
+    assert any("run.cumulative_trails" in p and "undeclared" in p for p in problems)
+
+
 def test_validate_names_an_out_of_order_segment_index():
     record = build(_artifacts())
     record["segments"][1]["index"] = 7
 
     assert any("index" in p for p in schema.validate(record))
+
+
+# ── the generic walkers, published (story #349) ─────────────────────────────────────────────
+#
+# The five walkers below know nothing about a *run* record: they enforce the contract-wide
+# conventions over whatever document they are handed, which is why they are public and why the
+# bench record (``noctis.eval.record``) imports them instead of carrying a second copy.
+
+
+def test_check_keys_asks_for_presence_not_truthiness():
+    assert schema.check_keys("block", {"stopped_utc": None}, ("stopped_utc",)) == []
+
+    problems = schema.check_keys("block", {}, ("stopped_utc",))
+
+    assert len(problems) == 1
+    assert "block.stopped_utc" in problems[0]
+
+
+def test_check_keys_names_a_key_the_schema_never_declared():
+    """The walker's second direction (story #350): vocabulary, not only presence."""
+    problems = schema.check_keys(
+        "block", {"stopped_utc": None, "stoped_utc": None}, ("stopped_utc",)
+    )
+
+    assert len(problems) == 1
+    assert "block.stoped_utc" in problems[0]
+    assert "undeclared" in problems[0]
+
+
+def test_check_keys_reports_both_directions_in_one_pass():
+    """A block that dropped a key *and* grew a typo says both — one read is enough to fix it."""
+    problems = schema.check_keys("block", {"stoped_utc": None}, ("stopped_utc",))
+
+    assert [problem.split(":")[0] for problem in problems] == [
+        "block.stopped_utc",
+        "block.stoped_utc",
+    ]
+
+
+def test_check_stamp_accepts_a_utc_stamp_or_a_null_and_names_anything_else():
+    assert schema.check_stamp("run.created_utc", "2026-07-27T14:22:33.000Z") == []
+    assert schema.check_stamp("run.created_utc", None) == []
+
+    assert any("created_utc" in problem for problem in schema.check_stamp("run.created_utc", "now"))
+
+
+def test_check_units_walks_a_document_of_any_shape_from_an_empty_label():
+    problems = schema.check_units("", {"latency": [{"p50_seconds": 1.5}]})
+
+    assert problems == [
+        "latency[0].p50_seconds: a dimensioned number names its unit canonically — use the "
+        "'_s' suffix, not 'seconds'"
+    ]
+
+
+def test_check_units_exempts_the_subtrees_the_caller_says_are_quoted_verbatim():
+    document = {"quoted": {"p50_seconds": 1.5}, "authored": {"p50_seconds": 1.5}}
+
+    problems = schema.check_units("", document, verbatim=("quoted",))
+
+    assert [problem.split(":")[0] for problem in problems] == ["authored.p50_seconds"]
+
+
+def test_check_stamps_finds_a_stamp_at_any_depth_of_the_document():
+    document = {"events": [{"at": "2026-07-27 14:22:33"}, {"at": "2026-07-27T14:22:33Z"}]}
+
+    problems = schema.check_stamps("", document)
+
+    assert [problem.split(":")[0] for problem in problems] == ["events[0].at"]
+
+
+def test_check_estimate_labels_names_a_dollar_key_at_any_depth_and_honours_verbatim():
+    document = {"cost": {"usd_total": 4.0}, "quoted": {"usd_total": 4.0}}
+
+    problems = schema.check_estimate_labels("", document, verbatim=("quoted",))
+
+    assert [problem.split(":")[0] for problem in problems] == ["cost.usd_total"]
+    assert schema.check_estimate_labels("", {"cost": {"usd_total_estimate": 4.0}}) == []
+
+
+def test_the_five_generic_walkers_are_named_on_the_modules_public_surface():
+    """A shared walker that is not exported is a private copy waiting to happen."""
+    assert {
+        "check_estimate_labels",
+        "check_keys",
+        "check_stamp",
+        "check_stamps",
+        "check_units",
+    } <= set(schema.__all__)
 
 
 # ── purity, structurally ───────────────────────────────────────────────────────────────────

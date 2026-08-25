@@ -7,21 +7,30 @@ deliberately the smallest module in the epic, because it is also the one the eng
 tracks as the ``schema`` component (``observability/engine_id.py``): changing what is recorded
 should move a digest, and only that.
 
-**Versioning is additive-only.** :data:`SCHEMA_VERSION` is 1. New fields may be added at any time;
-an existing field never changes meaning or type, and a reader ignores keys it does not know (a
-record carrying keys this Noctis has never heard of validates — story #143 pins that). That is what
-lets a record written tonight still be read by the Noctis that resumes the run in a month. A
-breaking change bumps the version and :func:`upgrade` rewrites the record **in place** on the next
-open, recording what it did — a version is never silently repurposed and a key is never quietly
-reinterpreted.
+**Versioning is additive-only.** :data:`SCHEMA_VERSION` is 1. New fields may be added at any time
+and an existing field never changes meaning or type, which is what lets a record written tonight
+still be read by the Noctis that resumes the run in a month: the *read* path never rejects a
+document (:func:`upgrade` leaves a record from the future untouched, and a consumer ignores keys it
+does not know). A breaking change bumps the version and :func:`upgrade` rewrites the record **in
+place** on the next open, recording what it did — a version is never silently repurposed and a key
+is never quietly reinterpreted.
+
+**Additive means declared, though** (story #350). :func:`validate` is a *conformance* check against
+the schema this engine ships, not the read path, and its keys walker runs two ways: a block's
+declared keys are the whole of what it may carry, so a key nobody declared is a violation rather
+than a field silently published under a spelling no reader indexes. Growing a block stays one edit
+— declare the key in its tuple below — and the record's *sections* stay open
+(:data:`REQUIRED_SECTIONS` is a floor, never a ceiling), which is where a later story's whole new
+section lands.
 
 **Two conventions are part of the contract, not style.** Units are explicit in the field name
 (``_usd``, ``_pct``, ``_bps``, ``_s``, ``_bytes``, ``_bars``, ``_hours``), and a known-absent value
 is an explicit ``null`` rather than an omitted key — so a consumer can tell "not applicable" from
 "this schema version did not have it". :func:`validate` enforces both structurally: every section's
-keys must be *present* whatever their values, every dimensioned number must spell its unit the one
-canonical way (:data:`UNIT_ALIASES`), and every timestamp key anywhere in the document — not only
-in the sections with a hand-written rule — must be UTC ISO-8601 with a ``Z``.
+keys must be *present* whatever their values and *declared* whatever their spelling, every
+dimensioned number must spell its unit the one canonical way (:data:`UNIT_ALIASES`), and every
+timestamp key anywhere in the document — not only in the sections with a hand-written rule — must
+be UTC ISO-8601 with a ``Z``.
 
 **Caps are honest.** Bulky lists are bounded (:data:`TRADE_CAP`, :data:`EVENT_CAP`) and every cap
 that bites writes a ``truncated`` note carrying kept/total counts. Silent truncation is forbidden:
@@ -56,6 +65,11 @@ __all__ = [
     "UNIT_ALIASES",
     "UPGRADES",
     "Upgrade",
+    "check_estimate_labels",
+    "check_keys",
+    "check_stamp",
+    "check_stamps",
+    "check_units",
     "upgrade",
     "validate",
 ]
@@ -688,7 +702,7 @@ def validate(record: Mapping[str, object]) -> list[str]:
 
     run = record.get("run")
     if isinstance(run, Mapping):
-        problems += _check_keys("run", run, _RUN_KEYS)
+        problems += check_keys("run", run, _RUN_KEYS)
         problems += _check_status("run.status", run.get("status"), RUN_STATUSES)
     elif "run" in record:
         problems.append("run: section must be an object")
@@ -698,7 +712,7 @@ def validate(record: Mapping[str, object]) -> list[str]:
 
     engine = record.get("engine")
     if isinstance(engine, Mapping):
-        problems += _check_keys("engine", engine, _ENGINE_KEYS)
+        problems += check_keys("engine", engine, _ENGINE_KEYS)
         problems += _check_changes(
             "engine.engine_changes", engine.get("engine_changes"), _ENGINE_CHANGE_KEYS
         )
@@ -716,8 +730,141 @@ def validate(record: Mapping[str, object]) -> list[str]:
         problems += _check_events(name, record.get(name))
     # The two contract-wide conventions, checked over the whole document rather than section by
     # section — so a section added tomorrow inherits both rules instead of needing its own line.
-    problems += _check_units("", record)
-    problems += _check_stamps("", record)
+    problems += check_units("", record, verbatim=_VERBATIM_SUBTREES)
+    problems += check_stamps("", record)
+    return problems
+
+
+# ── the generic walkers: the conventions, not this record's shape ──────────────────────────
+#
+# These five know nothing about a run record. They walk whatever document they are handed and
+# enforce the contract-wide conventions — every named key present, every dimensioned number
+# spelling its unit canonically, every timestamp UTC, every dollar figure calling itself an
+# estimate — which is why they are **public**. The bench record
+# (:mod:`noctis.eval.record`, the second document written under these conventions) imports them
+# from here rather than keeping a second copy: two tables of aliases, or two spellings of the
+# stamp rule, eventually disagree, and then two records an operator reads side by side disagree
+# with them. The import runs one way only — the eval layer reads the engine, never the reverse
+# (``docs/development.md``).
+
+
+def check_keys(label: str, section: Mapping[str, object], keys: Sequence[str]) -> list[str]:
+    """Both directions: every declared key present, and no key the schema never declared.
+
+    **Presence, not truthiness** — an absent value is an explicit ``null``, never a missing key, so
+    a consumer can tell "not applicable" from "this schema version did not have it".
+
+    **Vocabulary, not only presence** (story #350) — a block's declared keys are the whole of what
+    it may carry, so a key nobody declared is named rather than passed. The failure this catches is
+    an *emitter typo*: a builder writing ``cumulative_trails`` beside the ``cumulative_trials``
+    nobody filled in produces a record that satisfies every presence check and quietly publishes a
+    field no reader indexes. Presence alone cannot see it; the declared tuple is the only thing
+    that can. Growing the record is still one edit — declare the key here — which is what keeps
+    this a ratchet on drift rather than a tax on additions.
+
+    Both directions are reported in one pass, missing keys first, because one read of the refusal
+    should be enough to fix the document.
+    """
+    declared = set(keys)
+    problems = [
+        f"{label}.{key}: key is missing (absent values are explicit nulls)"
+        for key in keys
+        if key not in section
+    ]
+    return problems + [
+        f"{label}.{key}: undeclared key (a block carries the keys the schema declares for it — "
+        "declare it here, or fix the emitter that spelled it)"
+        for key in section
+        if key not in declared
+    ]
+
+
+def check_stamp(label: str, value: object) -> list[str]:
+    """UTC ISO-8601 with a ``Z`` marker, or ``null``. Anything else is ambiguous by timezone."""
+    if value is None:
+        return []
+    if isinstance(value, str) and value.endswith("Z") and "T" in value:
+        return []
+    return [f"{label}: {value!r} is not a UTC ISO-8601 timestamp ending in 'Z'"]
+
+
+def check_units(label: str, node: object, *, verbatim: Sequence[str] = ()) -> list[str]:
+    """Every dimensioned number in the document spells its unit the one canonical way.
+
+    Walks the whole document except the subtrees the caller names in ``verbatim`` — the ones the
+    document *quotes* rather than authors (this record's are :data:`_VERBATIM_SUBTREES`), whose
+    keys belong to whoever wrote them. A *number* whose key ends in a non-canonical spelling of a
+    unit (:data:`UNIT_ALIASES`) is a violation: a consumer indexing by key — a website's honesty
+    table, a diff between two runs, a ``jq`` filter — has to be able to rely on ``_s`` meaning
+    seconds everywhere, and one field spelled ``_seconds`` is exactly the drift that makes it stop.
+    """
+    if label in verbatim:
+        return []
+    problems: list[str] = []
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            name = str(key)
+            path = f"{label}.{name}" if label else name
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                canonical = UNIT_ALIASES.get(name.rsplit("_", 1)[-1].lower())
+                if canonical is not None:
+                    problems.append(
+                        f"{path}: a dimensioned number names its unit canonically — use the "
+                        f"{canonical!r} suffix, not {name.rsplit('_', 1)[-1]!r}"
+                    )
+            problems += check_units(path, value, verbatim=verbatim)
+    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
+        for position, item in enumerate(node):
+            problems += check_units(f"{label}[{position}]", item, verbatim=verbatim)
+    return problems
+
+
+def check_stamps(label: str, node: object) -> list[str]:
+    """Every timestamp anywhere in the document is UTC ISO-8601 with a ``Z``.
+
+    The structural twin of the per-section stamp checks, and the reason a new section needs no new
+    rule: a key named ``…_utc`` (or one of :data:`STAMP_KEYS`) carrying a string must carry a stamp
+    a reader can place on a timeline without guessing a timezone.
+    """
+    problems: list[str] = []
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            name = str(key)
+            path = f"{label}.{name}" if label else name
+            if isinstance(value, str) and (name.endswith(_STAMP_SUFFIX) or name in STAMP_KEYS):
+                problems += check_stamp(path, value)
+            problems += check_stamps(path, value)
+    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
+        for position, item in enumerate(node):
+            problems += check_stamps(f"{label}[{position}]", item)
+    return problems
+
+
+def check_estimate_labels(label: str, node: object, *, verbatim: Sequence[str] = ()) -> list[str]:
+    """Every key naming dollars, at any depth, must also name itself an estimate.
+
+    The failure this prevents is silent: a website rendering ``usd`` as a charge, when the number
+    came from a versioned list-price table that ignores discounts, batch tiers and mid-month
+    changes. So a dollar-bearing key that does not say ``estimate`` is a violation wherever it
+    appears — except inside a ``verbatim`` subtree, which the document quotes rather than authors.
+    """
+    if label in verbatim:
+        return []
+    problems: list[str] = []
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            name = str(key)
+            path = f"{label}.{name}" if label else name
+            if USD_MARKER in name.lower() and ESTIMATE_MARKER not in name.lower():
+                problems.append(
+                    f"{path}: a cost field must name itself an estimate "
+                    f"(e.g. {name}_{ESTIMATE_MARKER}) — these prices come from a versioned table, "
+                    "not from an invoice"
+                )
+            problems += check_estimate_labels(path, value, verbatim=verbatim)
+    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
+        for position, item in enumerate(node):
+            problems += check_estimate_labels(f"{label}[{position}]", item, verbatim=verbatim)
     return problems
 
 
@@ -733,7 +880,7 @@ def _check_assumptions(assumptions: object) -> list[str]:
         return ["assumptions: section must be an object — an arena is stated on every record"]
     if not isinstance(assumptions, Mapping):
         return ["assumptions: section must be an object"]
-    problems = _check_keys("assumptions", assumptions, _ASSUMPTIONS_KEYS)
+    problems = check_keys("assumptions", assumptions, _ASSUMPTIONS_KEYS)
     problems += _check_block("assumptions.live_gate", assumptions.get("live_gate"), _LIVE_GATE_KEYS)
     problems += _check_block(
         "assumptions.walk_forward", assumptions.get("walk_forward"), _WALK_FORWARD_KEYS
@@ -759,57 +906,6 @@ def _check_assumptions(assumptions: object) -> list[str]:
     ]
 
 
-def _check_units(label: str, node: object) -> list[str]:
-    """Every dimensioned number in the document spells its unit the one canonical way.
-
-    Walks the whole record except the subtrees it *quotes* (:data:`_VERBATIM_SUBTREES`). A
-    *number* whose key ends in a non-canonical spelling of a unit (:data:`UNIT_ALIASES`) is a
-    violation: a consumer indexing by key — a website's honesty table, a diff between two runs, a
-    ``jq`` filter — has to be able to rely on ``_s`` meaning seconds everywhere, and one field
-    spelled ``_seconds`` is exactly the drift that makes it stop.
-    """
-    if label in _VERBATIM_SUBTREES:
-        return []
-    problems: list[str] = []
-    if isinstance(node, Mapping):
-        for key, value in node.items():
-            name = str(key)
-            path = f"{label}.{name}" if label else name
-            if isinstance(value, int | float) and not isinstance(value, bool):
-                canonical = UNIT_ALIASES.get(name.rsplit("_", 1)[-1].lower())
-                if canonical is not None:
-                    problems.append(
-                        f"{path}: a dimensioned number names its unit canonically — use the "
-                        f"{canonical!r} suffix, not {name.rsplit('_', 1)[-1]!r}"
-                    )
-            problems += _check_units(path, value)
-    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
-        for position, item in enumerate(node):
-            problems += _check_units(f"{label}[{position}]", item)
-    return problems
-
-
-def _check_stamps(label: str, node: object) -> list[str]:
-    """Every timestamp anywhere in the document is UTC ISO-8601 with a ``Z``.
-
-    The structural twin of the per-section stamp checks above, and the reason a new section needs
-    no new rule: a key named ``…_utc`` (or one of :data:`STAMP_KEYS`) carrying a string must carry
-    a stamp a reader can place on a timeline without guessing a timezone.
-    """
-    problems: list[str] = []
-    if isinstance(node, Mapping):
-        for key, value in node.items():
-            name = str(key)
-            path = f"{label}.{name}" if label else name
-            if isinstance(value, str) and (name.endswith(_STAMP_SUFFIX) or name in STAMP_KEYS):
-                problems += _check_stamp(path, value)
-            problems += _check_stamps(path, value)
-    elif isinstance(node, Sequence) and not isinstance(node, str | bytes):
-        for position, item in enumerate(node):
-            problems += _check_stamps(f"{label}[{position}]", item)
-    return problems
-
-
 def _check_performance(performance: object, *, run: object) -> list[str]:
     """A run that never traded reports **no** performance — ``null``, never zeros (epic D10, §5.6).
 
@@ -829,7 +925,7 @@ def _check_performance(performance: object, *, run: object) -> list[str]:
             "performance: must be null when run.traded is false — a run that never traded has no "
             "realised performance, and zeros would render as a result it never produced"
         ]
-    problems = _check_keys("performance", performance, _PERFORMANCE_KEYS)
+    problems = check_keys("performance", performance, _PERFORMANCE_KEYS)
     if performance.get("source") != PERFORMANCE_SOURCE:
         problems.append(
             f"performance.source: expected {PERFORMANCE_SOURCE!r} — this section is the paper "
@@ -867,7 +963,7 @@ def _check_sessions(sessions: object) -> list[str]:
         if not isinstance(session, Mapping):
             problems.append(f"{label}: must be an object")
             continue
-        problems += _check_keys(label, session, _SESSION_KEYS)
+        problems += check_keys(label, session, _SESSION_KEYS)
         trades = session.get("trades")
         if trades is None or isinstance(trades, str | bytes) or not isinstance(trades, Sequence):
             problems.append(f"{label}.trades: must be a list")
@@ -877,7 +973,7 @@ def _check_sessions(sessions: object) -> list[str]:
             if not isinstance(trade, Mapping):
                 problems.append(f"{entry}: must be an object")
                 continue
-            problems += _check_keys(entry, trade, _TRADE_KEYS)
+            problems += check_keys(entry, trade, _TRADE_KEYS)
     return problems
 
 
@@ -903,7 +999,7 @@ def _check_strategies(strategies: object) -> list[str]:
         if not isinstance(strategy, Mapping):
             problems.append(f"{label}: must be an object")
             continue
-        problems += _check_keys(label, strategy, _STRATEGY_KEYS)
+        problems += check_keys(label, strategy, _STRATEGY_KEYS)
         problems += _check_status(f"{label}.outcome", strategy.get("outcome"), STRATEGY_OUTCOMES)
         tier = strategy.get("tier")
         if tier is not None:
@@ -929,7 +1025,7 @@ def _check_gates(label: str, gates: object) -> list[str]:
         if not isinstance(gate, Mapping):
             problems.append(f"{entry}: must be an object")
             continue
-        problems += _check_keys(entry, gate, GATE_KEYS)
+        problems += check_keys(entry, gate, GATE_KEYS)
     return problems
 
 
@@ -945,29 +1041,9 @@ def _check_spend(spend: object) -> list[str]:
         return []
     if not isinstance(spend, Mapping):
         return ["spend: section must be an object or null"]
-    problems = _check_keys("spend", spend, _SPEND_KEYS)
+    problems = check_keys("spend", spend, _SPEND_KEYS)
     problems += _check_block("spend.efficiency", spend.get("efficiency"), _EFFICIENCY_KEYS)
-    return problems + _check_estimate_labels("spend", spend)
-
-
-def _check_estimate_labels(label: str, section: Mapping[str, object]) -> list[str]:
-    """Every key naming dollars, at any depth, must also name itself an estimate."""
-    problems: list[str] = []
-    for key, value in section.items():
-        name = str(key)
-        if USD_MARKER in name.lower() and ESTIMATE_MARKER not in name.lower():
-            problems.append(
-                f"{label}.{name}: a cost field must name itself an estimate "
-                f"(e.g. {name}_{ESTIMATE_MARKER}) — these prices come from a versioned table, "
-                "not from an invoice"
-            )
-        if isinstance(value, Mapping):
-            problems += _check_estimate_labels(f"{label}.{name}", value)
-        elif isinstance(value, Sequence) and not isinstance(value, str | bytes):
-            for position, item in enumerate(value):
-                if isinstance(item, Mapping):
-                    problems += _check_estimate_labels(f"{label}.{name}[{position}]", item)
-    return problems
+    return problems + check_estimate_labels("spend", spend)
 
 
 def _check_inputs(inputs: object) -> list[str]:
@@ -976,14 +1052,14 @@ def _check_inputs(inputs: object) -> list[str]:
         return []
     if not isinstance(inputs, Mapping):
         return ["inputs: section must be an object or null"]
-    problems = _check_keys("inputs", inputs, _INPUTS_KEYS)
+    problems = check_keys("inputs", inputs, _INPUTS_KEYS)
     problems += _check_config_changes(inputs.get("config_changes"))
     problems += _check_block("inputs.models", inputs.get("models"), _INPUT_MODEL_KEYS)
     problems += _check_block("inputs.data", inputs.get("data"), _INPUT_DATA_KEYS)
     settings = inputs.get("settings")
     if not isinstance(settings, Mapping):
         return [*problems, "inputs.settings: must be an object"]
-    problems += _check_keys("inputs.settings", settings, _INPUT_SETTINGS_KEYS)
+    problems += check_keys("inputs.settings", settings, _INPUT_SETTINGS_KEYS)
     resolved = settings.get("resolved")
     if isinstance(resolved, Mapping):
         problems += [
@@ -1021,7 +1097,7 @@ def _check_changes(label: str, changes: object, keys: Sequence[str]) -> list[str
         if not isinstance(change, Mapping):
             problems.append(f"{entry}: must be an object")
             continue
-        problems += _check_keys(entry, change, keys)
+        problems += check_keys(entry, change, keys)
     return problems
 
 
@@ -1037,7 +1113,7 @@ def _check_segments(segments: object) -> list[str]:
         if not isinstance(segment, Mapping):
             problems.append(f"{label}: must be an object")
             continue
-        problems += _check_keys(label, segment, _SEGMENT_KEYS)
+        problems += check_keys(label, segment, _SEGMENT_KEYS)
         if segment.get("index") != position:
             problems.append(
                 f"{label}.index: expected {position}, found {segment.get('index')!r} "
@@ -1060,7 +1136,7 @@ def _check_block(label: str, block: object, keys: Sequence[str]) -> list[str]:
         return []
     if not isinstance(block, Mapping):
         return [f"{label}: must be an object or null"]
-    return _check_keys(label, block, keys)
+    return check_keys(label, block, keys)
 
 
 def _check_environment(label: str, environment: object) -> list[str]:
@@ -1086,29 +1162,11 @@ def _check_events(label: str, events: object) -> list[str]:
         if not isinstance(event, Mapping):
             problems.append(f"{label}[{position}]: must be an object")
             continue
-        problems += _check_keys(f"{label}[{position}]", event, _EVENT_KEYS)
+        problems += check_keys(f"{label}[{position}]", event, _EVENT_KEYS)
     return problems
-
-
-def _check_keys(label: str, section: Mapping[str, object], keys: Sequence[str]) -> list[str]:
-    """Presence, not truthiness: an absent value is an explicit ``null``, never a missing key."""
-    return [
-        f"{label}.{key}: key is missing (absent values are explicit nulls)"
-        for key in keys
-        if key not in section
-    ]
 
 
 def _check_status(label: str, value: object, allowed: Sequence[str]) -> list[str]:
     if value in allowed:
         return []
     return [f"{label}: {value!r} is not one of {', '.join(allowed)}"]
-
-
-def _check_stamp(label: str, value: object) -> list[str]:
-    """UTC ISO-8601 with a ``Z`` marker, or ``null``. Anything else is ambiguous by timezone."""
-    if value is None:
-        return []
-    if isinstance(value, str) and value.endswith("Z") and "T" in value:
-        return []
-    return [f"{label}: {value!r} is not a UTC ISO-8601 timestamp ending in 'Z'"]

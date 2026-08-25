@@ -34,6 +34,24 @@ never keep its old identity.
 
 ---
 
+## 2026-08-24 — sites: briefings, episodic
+
+Epic #341 story #346: the provider-neutral token estimate the briefing builders size a rendered
+prompt with moves out of the conversation loop into `noctis.research.usage`, the one home for
+usage accounting, and becomes the public `estimate_tokens`. `research/briefings.py` changes by
+exactly one import (and the docstring sentence that names where the estimate lives): it no longer
+reaches into `research/agent.py` for a `_`-prefixed name. **No wording change to any prompt
+text** — no header, no section label, no advisory-trim order and no rendered block moved; the
+estimate is the same arithmetic (~4 chars/token) on the same text, so every fit assertion decides
+exactly what it decided before. The hash moves only because this site's hash covers the whole of
+`research/briefings.py`.
+
+Story #347 moves the `episodic` site the same way: the driver's `_fetch_window` arithmetic moves to
+the data layer's `history_window` helper — an import-and-arithmetic edit only, with the driver
+keeping its own inclusive-date rendering of the result, so the fetch dates come out byte-identical
+and **no wording change reaches any prompt text**; the hash moves only because this site's hash
+covers the whole of `research/driver.py`.
+
 ## 2026-08-24 — sites: episodic
 
 Epic #333 story #339: the episodic driver's session sink parameter is retyped —

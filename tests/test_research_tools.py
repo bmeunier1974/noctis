@@ -21,6 +21,7 @@ from noctis.research.tools import ResearchToolbox
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.library import parse_header, strategy_source, write_strategy
+from tests._capture_helpers import failing_capture_store
 
 _NS_PER_MINUTE = 60 * 1_000_000_000
 
@@ -114,6 +115,9 @@ class FakeLake:
 
     def check_symbol_ready(self, symbol, dataset=None, schema=None):
         return symbol in self.bars
+
+    def coverage_records(self):
+        return []
 
     def get_bars(self, dataset, schema, symbols, start, end):
         out = {}
@@ -329,7 +333,7 @@ def test_trade_economics_round_trip_reflects_configured_costs(toolbox):
 def test_market_context_enumerates_the_capped_focus_set(tmp_path):
     """P2 (context plan): the digest enumerates the capped research focus set, so the prompt
     stops growing with every discovered symbol; unfocused names stay ready in the lake."""
-    from noctis.engine.runtime import trading_roster
+    from noctis.data.universe import trading_roster
 
     box = _make_toolbox(tmp_path)  # universe AAA..DDD, all ready
     box.settings.research.fit_set_size = 2
@@ -975,60 +979,6 @@ def test_nominated_holdout_refused_when_tainted_or_in_fit(toolbox):
     assert toolbox.registry.is_empty()  # every refusal happened before any election
 
 
-# ── the growing universe: trading roster vs research focus ──────────────────────────────
-def test_trading_roster_merges_lake_tracked_symbols():
-    from types import SimpleNamespace
-
-    from noctis.engine.runtime import trading_roster
-
-    settings = Settings(universe=["AAA", "BBB"])
-    lake = FakeLake({"AAA": make_bars(seed=1)})
-    # No coverage registry (fakes) → the config seed only.
-    assert trading_roster(settings, lake) == ["AAA", "BBB"]
-
-    class _Cov:
-        def all(self):
-            return [
-                SimpleNamespace(symbol="ZZZ", status="idle", row_count=100),  # discovered
-                SimpleNamespace(symbol="AAA", status="idle", row_count=100),  # already seeded
-                SimpleNamespace(symbol="ERR", status="error", row_count=100),  # not ready
-                SimpleNamespace(symbol="NIL", status="idle", row_count=0),  # no bars
-            ]
-
-    lake.coverage = _Cov()
-    # Config order first (stable fit set), ready discoveries appended sorted.
-    assert trading_roster(settings, lake) == ["AAA", "BBB", "ZZZ"]
-
-
-def test_research_focus_caps_and_orders_the_prompt_enumeration():
-    from noctis.engine.runtime import research_focus
-    from noctis.research import Mandate
-
-    settings = Settings(
-        universe=["AAA", "BBB", "CCC", "DDD", "EEE"],
-        research={"fit_set_size": 2, "symbol_holdout_size": 1, "focus_size": 4},
-    )
-    lake = FakeLake({s: make_bars(seed=i) for i, s in enumerate(["AAA", "BBB", "CCC", "DDD"])})
-    # Fit set (2) + symbol-holdout (1) ready names, in roster order; EEE is not ready.
-    assert research_focus(settings, lake) == ["AAA", "BBB", "CCC"]
-
-    # Mandate-declared symbols join after the fit/holdout window, deduped, then the cap.
-    mandate = Mandate(
-        text="x",
-        source="cli",
-        summary="x",
-        references=[],
-        config_overrides={},
-        symbols=["DDD", "AAA", "QQQ"],
-    )
-    assert research_focus(settings, lake, mandate) == ["AAA", "BBB", "CCC", "DDD"]
-
-    # The cap is the prompt-size lever: raising it admits the next mandate symbol (even a
-    # not-yet-ready discovery target — consumers filter on readiness themselves).
-    settings.research.focus_size = 5
-    assert research_focus(settings, lake, mandate) == ["AAA", "BBB", "CCC", "DDD", "QQQ"]
-
-
 def test_sweep_respects_agent_ranges(toolbox):
     out = toolbox.dispatch(
         "run_sweep",
@@ -1346,6 +1296,7 @@ def _coder_box(
     coder_max_tokens: int | None = None,
     coder_retries: int | None = None,
     on_event=NULL_SINK,
+    capture=None,
 ):
     coder = _FakeCoder(replies)
     return (
@@ -1357,6 +1308,7 @@ def _coder_box(
             coder_retries=coder_retries,
             max_author_calls=max_author_calls,
             on_event=on_event,
+            capture=capture,
         ),
         coder,
     )
@@ -2244,21 +2196,14 @@ def test_capture_brief_omits_the_spec_hash_when_no_oracle_was_stamped(toolbox):
     assert list(toolbox.capture.root.iterdir()) == [toolbox.capture.root / "author-brief"]
 
 
-def test_a_latched_capture_store_omits_the_hashes_and_never_raises(toolbox, caplog, monkeypatch):
+def test_a_latched_capture_store_omits_the_hashes_and_never_raises(tmp_path, caplog):
     """Capture is strictly secondary: with the store latched off (an injected write failure) the
     call returns no hashes at all — so the ledger omits the fields rather than naming bodies that
     were never written — warns exactly once, and never raises into the authoring path."""
     import logging
-    from pathlib import Path
 
-    real = Path.write_text
+    toolbox = _make_toolbox(tmp_path, capture=failing_capture_store(tmp_path / "qa" / "capture"))
 
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(toolbox.capture.root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
     with caplog.at_level(logging.WARNING, logger="noctis.observability.capture"):
         first = toolbox.capture_brief(BRIEF_ARGS, _oracle_suite())
         second = toolbox.capture_brief(BRIEF_ARGS, _oracle_suite())
@@ -2268,21 +2213,17 @@ def test_a_latched_capture_store_omits_the_hashes_and_never_raises(toolbox, capl
     assert len(warnings) == 1
 
 
-def test_a_brief_authored_under_a_latched_capture_store_still_lands(tmp_path, caplog, monkeypatch):
+def test_a_brief_authored_under_a_latched_capture_store_still_lands(tmp_path, caplog):
     """The write gate is untouched by capture: with capture latched off the coder still authors a
     validated file, and the session carries on."""
     import logging
-    from pathlib import Path
 
-    box, _ = _coder_box(tmp_path, [_fenced(_named("brief_probe"))])
-    real = Path.write_text
+    box, _ = _coder_box(
+        tmp_path,
+        [_fenced(_named("brief_probe"))],
+        capture=failing_capture_store(tmp_path / "qa" / "capture"),
+    )
 
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(box.capture.root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
     with caplog.at_level(logging.WARNING, logger="noctis.observability.capture"):
         captured = box.capture_brief(BRIEF_ARGS)
         out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
@@ -2341,18 +2282,9 @@ def test_identical_knobs_dedupe_to_one_sidecar(toolbox):
     assert first["input_sha256"] != second["input_sha256"]  # …while the briefings stay distinct
 
 
-def test_a_latched_store_omits_the_episode_capture_hashes_and_never_raises(toolbox, monkeypatch):
+def test_a_latched_store_omits_the_episode_capture_hashes_and_never_raises(tmp_path):
     """Capture is strictly secondary: a latched store returns no hashes at all, so the episode row
     omits the fields rather than naming bodies that were never written."""
-    from pathlib import Path
-
-    real = Path.write_text
-
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(toolbox.capture.root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
+    toolbox = _make_toolbox(tmp_path, capture=failing_capture_store(tmp_path / "qa" / "capture"))
 
     assert toolbox.capture_episode("a briefing", _KNOBS) == {}
