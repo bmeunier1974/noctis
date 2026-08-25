@@ -468,7 +468,7 @@ def test_symbols_steers_the_search_and_config_universe_sets_the_roster(tmp_path)
     """The two surfaces stay two different things when one mandate sets both: ``symbols:`` is a
     search prior that joins the session's focus set and never the roster; ``config: universe:``
     is the seed roster the readiness check and the panel are drawn from."""
-    from noctis.engine.runtime import research_focus, trading_roster
+    from noctis.data.universe import research_focus, trading_roster
 
     roster = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH"]
     mandate_dir = tmp_path / "mandate"
@@ -495,11 +495,14 @@ def test_symbols_steers_the_search_and_config_universe_sets_the_roster(tmp_path)
 
 
 class _AlwaysReadyLake:
-    """A lake whose every symbol is ready. No ``coverage`` attribute, so the trading roster is
-    exactly the config seed — which is the point here."""
+    """A lake whose every symbol is ready and which tracks no series of its own, so the trading
+    roster is exactly the config seed — which is the point here."""
 
     def check_symbol_ready(self, symbol) -> bool:
         return True
+
+    def coverage_records(self) -> list:
+        return []
 
 
 def test_a_mandate_setting_every_allowed_knob_leaves_the_gates_byte_identical(tmp_path):

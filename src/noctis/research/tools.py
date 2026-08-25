@@ -45,6 +45,7 @@ from noctis.data.aggregate import (
     validate_timeframe,
 )
 from noctis.data.types import ns_to_date, ns_to_timestamp, to_ns, to_ns_end_inclusive
+from noctis.data.universe import research_focus, trading_roster
 from noctis.observability.capture import CAPTURE_DIRNAME, CaptureStore
 from noctis.observability.events import NULL_SINK, Event, EventSink
 from noctis.research import digests, websearch
@@ -607,13 +608,11 @@ class ResearchToolbox:
         buy-and-hold did per research-focus symbol over the full lake. This is the context
         the formulating agent needs to do cost arithmetic BEFORE writing a strategy.
 
-        Enumerates the capped :func:`~noctis.engine.runtime.research_focus` set — not the
+        Enumerates the capped :func:`~noctis.data.universe.research_focus` set — not the
         whole growing trading roster — so the digest stays bounded as discoveries
         accumulate; any lake symbol remains inspectable via preview_bars/list_symbols.
         Per-symbol numbers stay neutral (no viability flags); ``cost_hurdle`` is one
         code-computed ratio the agent would otherwise redo by hand, never a verdict."""
-        from noctis.engine.runtime import research_focus
-
         backtest = self.settings.backtest
         round_trip_bp = _round_trip_cost_bp(backtest.fee_bps, backtest.slippage_bps)
         timeframes = sorted(TIMEFRAMES, key=lambda t: TIMEFRAMES[t])
@@ -1282,8 +1281,6 @@ class ResearchToolbox:
         liquidity: str = "any",
         symbols: list[str] | None = None,
     ) -> dict:
-        from noctis.engine.runtime import trading_roster
-
         profile = validate_profile(
             {"trend": trend, "volatility": volatility, "liquidity": liquidity}
         )
@@ -1889,8 +1886,6 @@ class ResearchToolbox:
         Candidates are drawn from the research focus set first (the session's own
         enumeration), then the full trading roster as a backstop — narrowing the prompt's
         focus must never leave the gate short of holdout names (rule 4)."""
-        from noctis.engine.runtime import research_focus, trading_roster
-
         size = self.settings.research.symbol_holdout_size
         if size <= 0:
             return None

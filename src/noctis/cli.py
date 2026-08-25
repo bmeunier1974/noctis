@@ -769,8 +769,9 @@ def run(
     import sys
 
     from noctis.bootstrap import UsageError, build_lake, build_memory
+    from noctis.data.universe import trading_roster
     from noctis.engine import MarketClock, build_runtime, initial_phase_for
-    from noctis.engine.runtime import RuntimeResult, trading_roster
+    from noctis.engine.runtime import RuntimeResult
 
     # Off by default (WARNING) so a bare run stays quiet; the -v feed rides the Console below,
     # -vv drops stdlib logging to DEBUG. One ladder shared with `noctis research`.

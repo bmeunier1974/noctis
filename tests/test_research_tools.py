@@ -115,6 +115,9 @@ class FakeLake:
     def check_symbol_ready(self, symbol, dataset=None, schema=None):
         return symbol in self.bars
 
+    def coverage_records(self):
+        return []
+
     def get_bars(self, dataset, schema, symbols, start, end):
         out = {}
         for s in symbols:
@@ -329,7 +332,7 @@ def test_trade_economics_round_trip_reflects_configured_costs(toolbox):
 def test_market_context_enumerates_the_capped_focus_set(tmp_path):
     """P2 (context plan): the digest enumerates the capped research focus set, so the prompt
     stops growing with every discovered symbol; unfocused names stay ready in the lake."""
-    from noctis.engine.runtime import trading_roster
+    from noctis.data.universe import trading_roster
 
     box = _make_toolbox(tmp_path)  # universe AAA..DDD, all ready
     box.settings.research.fit_set_size = 2
@@ -973,60 +976,6 @@ def test_nominated_holdout_refused_when_tainted_or_in_fit(toolbox):
     )
     assert "error" in out and "not ready" in out["error"]
     assert toolbox.registry.is_empty()  # every refusal happened before any election
-
-
-# ── the growing universe: trading roster vs research focus ──────────────────────────────
-def test_trading_roster_merges_lake_tracked_symbols():
-    from types import SimpleNamespace
-
-    from noctis.engine.runtime import trading_roster
-
-    settings = Settings(universe=["AAA", "BBB"])
-    lake = FakeLake({"AAA": make_bars(seed=1)})
-    # No coverage registry (fakes) → the config seed only.
-    assert trading_roster(settings, lake) == ["AAA", "BBB"]
-
-    class _Cov:
-        def all(self):
-            return [
-                SimpleNamespace(symbol="ZZZ", status="idle", row_count=100),  # discovered
-                SimpleNamespace(symbol="AAA", status="idle", row_count=100),  # already seeded
-                SimpleNamespace(symbol="ERR", status="error", row_count=100),  # not ready
-                SimpleNamespace(symbol="NIL", status="idle", row_count=0),  # no bars
-            ]
-
-    lake.coverage = _Cov()
-    # Config order first (stable fit set), ready discoveries appended sorted.
-    assert trading_roster(settings, lake) == ["AAA", "BBB", "ZZZ"]
-
-
-def test_research_focus_caps_and_orders_the_prompt_enumeration():
-    from noctis.engine.runtime import research_focus
-    from noctis.research import Mandate
-
-    settings = Settings(
-        universe=["AAA", "BBB", "CCC", "DDD", "EEE"],
-        research={"fit_set_size": 2, "symbol_holdout_size": 1, "focus_size": 4},
-    )
-    lake = FakeLake({s: make_bars(seed=i) for i, s in enumerate(["AAA", "BBB", "CCC", "DDD"])})
-    # Fit set (2) + symbol-holdout (1) ready names, in roster order; EEE is not ready.
-    assert research_focus(settings, lake) == ["AAA", "BBB", "CCC"]
-
-    # Mandate-declared symbols join after the fit/holdout window, deduped, then the cap.
-    mandate = Mandate(
-        text="x",
-        source="cli",
-        summary="x",
-        references=[],
-        config_overrides={},
-        symbols=["DDD", "AAA", "QQQ"],
-    )
-    assert research_focus(settings, lake, mandate) == ["AAA", "BBB", "CCC", "DDD"]
-
-    # The cap is the prompt-size lever: raising it admits the next mandate symbol (even a
-    # not-yet-ready discovery target — consumers filter on readiness themselves).
-    settings.research.focus_size = 5
-    assert research_focus(settings, lake, mandate) == ["AAA", "BBB", "CCC", "DDD", "QQQ"]
 
 
 def test_sweep_respects_agent_ranges(toolbox):

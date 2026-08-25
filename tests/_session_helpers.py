@@ -70,13 +70,16 @@ def _uptrend(n=30, start=100.0, step=2.0):
 
 
 class _FakeLake:
-    """In-memory lake: no coverage registry → the trading roster is the config universe."""
+    """In-memory lake: it tracks no series, so the trading roster is the config universe."""
 
     def __init__(self, bars: dict[str, pd.DataFrame]):
         self.bars = bars
 
     def check_symbol_ready(self, symbol, dataset=None, schema=None) -> bool:
         return symbol in self.bars and len(self.bars[symbol]) > 0
+
+    def coverage_records(self) -> list:
+        return []
 
     def get_bars(self, dataset, schema, symbols, start, end):
         return {s: self.bars.get(s, empty_bars()) for s in symbols}

@@ -1704,14 +1704,13 @@ class _PanelLake:
 
     def __init__(self, ready, discovered=()):
         self.ready = set(ready)
-        self.coverage = SimpleNamespace(
-            all=lambda: [
-                SimpleNamespace(symbol=s, status="idle", row_count=100) for s in discovered
-            ]
-        )
+        self.discovered = list(discovered)
 
     def check_symbol_ready(self, symbol) -> bool:
         return symbol in self.ready
+
+    def coverage_records(self):
+        return [SimpleNamespace(symbol=s, status="idle", row_count=100) for s in self.discovered]
 
 
 def _episodic_session(

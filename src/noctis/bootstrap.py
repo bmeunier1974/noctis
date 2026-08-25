@@ -30,6 +30,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from noctis.config import Settings, load_settings, resolve_execution_mode
 from noctis.config.settings import SECRET_FIELDS
 
+# The session's ticker surfaces, from the data layer that owns them (#344). The root wires the
+# roster into the episodic fallback panel, so it names the helper at module load like the
+# settings types — no deferred import, and no reach back into the engine to get one.
+from noctis.data.universe import trading_roster
+
 # The sink contract, not a collaborator: NULL_SINK is the default value every session object
 # below declares, so it imports at module load like the settings types do. Core-only — the
 # events module names no renderer and no heavy package.
@@ -1912,7 +1917,7 @@ def effective_memory_distill_every(settings) -> int:
 def build_fallback_panel_source(settings, lake) -> Callable[[], list[str]]:
     """The episodic MATCH *fallback* fit panel, as a zero-arg source resolved at each MATCH (#110).
 
-    The panel itself is unchanged — the ready :func:`~noctis.engine.runtime.trading_roster` names
+    The panel itself is unchanged — the ready :func:`~noctis.data.universe.trading_roster` names
     capped at ``research.fit_set_size``, exactly what this root used to precompute once and hand
     over as a frozen list. What changes is *when* it is computed: the driver calls this on the MATCH
     that needs it, so a symbol that joins the lake mid-session (a mandate preflight fetch, a later
@@ -1920,7 +1925,6 @@ def build_fallback_panel_source(settings, lake) -> Callable[[], list[str]]:
     and a session whose screens all match never pays the readiness I/O. Deterministic screening
     still owns the per-thesis fit set; this is only the no-lake-match floor.
     """
-    from noctis.engine.runtime import trading_roster
 
     def resolve() -> list[str]:
         ready = [s for s in trading_roster(settings, lake) if lake.check_symbol_ready(s)]

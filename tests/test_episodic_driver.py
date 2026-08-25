@@ -2507,6 +2507,9 @@ class _IngestingLake:
     def check_symbol_ready(self, symbol, dataset=None, schema=None):
         return self._inner.check_symbol_ready(symbol, dataset, schema)
 
+    def coverage_records(self):
+        return list(self.coverage.all())
+
     def get_bars(self, dataset, schema, symbols, start, end):
         return self._inner.get_bars(dataset, schema, symbols, start, end)
 
