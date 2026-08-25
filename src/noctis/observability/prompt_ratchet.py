@@ -8,7 +8,9 @@ root — still matches, and that whatever moved arrived with a human explanation
 This file holds the **rule** and nothing else: the record, the comparison, ``--write`` and the
 report are the shared mechanics in :mod:`noctis.observability.ratchet`, which every ratchet runs
 on, and the rule below is the :class:`~noctis.observability.ratchet.RatchetSpec` plus one judging
-function it is given — with the changelog reader the rule needs, which is policy and lives here.
+function it is given. How a changelog entry is *read* is shared too
+(:mod:`noctis.observability.changelog`: the newest entry, its digest, its heading's clauses); what
+this policy adds is the one clause it binds — ``sites:`` — and what naming a site there permits.
 What moved is decided by :func:`~noctis.observability.engine_id.compare`, the one null rule.
 
 It is the engine ratchet's twin (:mod:`noctis.observability.engine_ratchet`) with one deliberate
@@ -59,12 +61,10 @@ through a one-line binding.
 
 from __future__ import annotations
 
-import hashlib
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from noctis.observability import ratchet
+from noctis.observability import changelog, ratchet
 from noctis.observability.prompt_id import SITE_ASSETS, fingerprint
 from noctis.observability.ratchet import (
     Judgement,
@@ -91,86 +91,15 @@ REGENERATE_COMMAND = "uv run python scripts/prompt_fingerprint.py --write"
 
 RECORD_KIND = "noctis.prompt_fingerprint"
 
-# How an entry names what it explains, quoted in the failure so nobody has to go looking.
-_SITES_MARKER = "sites:"
-_ENTRY_PREFIX = "## "
-_FENCE = "```"
+# The one changelog clause this policy binds: how an entry names what it explains, quoted in the
+# failure so nobody has to go looking. Every other clause on a heading is somebody else's.
+_SITES_CLAUSE = "sites"
 
 # The one thing ``--write`` will not do. Printed under the ordinary declare-or-restore guidance, in
 # place of it, because "regenerate the record" is precisely the advice being refused here.
 _WRITE_REFUSAL = (
     "refusing to regenerate: --write cannot be the way an undeclared prompt change gets recorded"
 )
-
-_DIGEST_CHARS = 16
-
-
-@dataclass(frozen=True)
-class ChangelogEntry:
-    """One dated changelog entry: its heading, the sites it declares, and its identity.
-
-    ``digest`` covers the whole entry text, so *amending* the newest entry — the natural way a
-    second change in one PR gets declared — reads as a new declaration.
-    """
-
-    heading: str
-    sites: tuple[str, ...]
-    digest: str
-
-
-def newest_entry(text: str) -> ChangelogEntry | None:
-    """The changelog's newest entry — the first ``## `` section — or ``None`` when there is none.
-
-    Newest-first is how the file is written and how a human reads it, so "the newest entry" needs
-    no dates parsed and no ordering trusted: it is the first one. The sites it declares are read
-    from its **heading line** after ``sites:``, never from its prose — a declaration has to be
-    somewhere a machine can find it, and a paragraph mentioning a module name is not that.
-
-    Fenced code blocks are skipped, both when finding the entry and when finding where it ends:
-    the page documents its own heading format in a fence, and a template is not a declaration.
-    """
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    headings = _entry_headings(lines)
-    if not headings:
-        return None
-    start = headings[0]
-    end = next((index for index in headings if index > start), len(lines))
-    heading = lines[start][len(_ENTRY_PREFIX) :].strip()
-    body = "\n".join(lines[start:end]).strip()
-    return ChangelogEntry(
-        heading=heading,
-        sites=_sites_in(heading),
-        digest=hashlib.sha256(body.encode("utf-8")).hexdigest()[:_DIGEST_CHARS],
-    )
-
-
-def _entry_headings(lines: Sequence[str]) -> list[int]:
-    """The line numbers that open an entry: ``## `` lines outside any code fence."""
-    headings: list[int] = []
-    in_fence = False
-    for index, line in enumerate(lines):
-        if line.lstrip().startswith(_FENCE):
-            in_fence = not in_fence
-        elif not in_fence and line.startswith(_ENTRY_PREFIX):
-            headings.append(index)
-    return headings
-
-
-def _sites_in(heading: str) -> tuple[str, ...]:
-    """The site names a heading declares: everything after ``sites:``, comma-separated."""
-    lowered = heading.lower()
-    marker = lowered.find(_SITES_MARKER)
-    if marker < 0:
-        return ()
-    listed = heading[marker + len(_SITES_MARKER) :]
-    return tuple(name for name in (part.strip() for part in listed.split(",")) if name)
-
-
-def _changelog_text(root: Path) -> str:
-    path = root.joinpath(*CHANGELOG_PATH.split("/"))
-    if not path.is_file():
-        return ""
-    return path.read_text(encoding="utf-8")
 
 
 def _identity(root: Path) -> dict[str, tuple[str | None, str | None]]:
@@ -186,15 +115,17 @@ def _header(root: Path) -> dict[str, Any]:
     matching digest means the changelog gained nothing since, so the entry is yesterday's standing
     permission rather than today's declaration.
     """
-    entry = newest_entry(_changelog_text(root))
-    return {
-        "changelog": {
-            "path": CHANGELOG_PATH,
-            "heading": None if entry is None else entry.heading,
-            "digest": None if entry is None else entry.digest,
-            "declares": [] if entry is None else list(entry.sites),
-        }
-    }
+    entry = changelog.read_entry(root, CHANGELOG_PATH)
+    return changelog.header(CHANGELOG_PATH, entry, _sites_named_by(entry))
+
+
+def _sites_named_by(entry: changelog.ChangelogEntry | None) -> tuple[str, ...]:
+    """The sites one entry declares: the names on its ``sites:`` clause, and nothing else.
+
+    The whole of what this policy binds of the shared grammar — a heading's other clauses, and its
+    prose, declare nothing here.
+    """
+    return () if entry is None else entry.names(_SITES_CLAUSE)
 
 
 def _footer(record: Mapping[str, Any]) -> tuple[str, ...]:
@@ -204,15 +135,14 @@ def _footer(record: Mapping[str, Any]) -> tuple[str, ...]:
     mis-headed entry is invisible without this line — so it is printed for a missing baseline too,
     where there is no drift yet to hang it off.
     """
-    heading = _changelog_field(record, "heading") or "none"
-    return (f"newest {CHANGELOG_PATH} entry: {heading}",)
+    return changelog.footer(CHANGELOG_PATH, record)
 
 
 def _judge(
     computed: Mapping[str, Any], committed: Mapping[str, Any], moved: tuple[Moved, ...]
 ) -> Judgement:
     """The declared-change rule — the module docstring, as code."""
-    declared = _declared_sites(computed, committed)
+    declared = changelog.declared_since(computed, committed)
     drifts = tuple(
         move.tagged("declared" if move.name in declared else "UNDECLARED") for move in moved
     )
@@ -224,7 +154,7 @@ def _judge(
         problems.append(
             f"undeclared prompt drift: {', '.join(undeclared)}. A prompt change must arrive with "
             f"its explanation — add a dated entry to the top of {CHANGELOG_PATH} whose heading "
-            f'names the site(s), e.g. "## 2026-08-01 — {_SITES_MARKER} '
+            f'names the site(s), e.g. "## 2026-08-01 — {_SITES_CLAUSE}: '
             f'{", ".join(undeclared)}" — or restore the wording'
         )
     if remainder:
@@ -242,32 +172,6 @@ def _judge(
         refuse_write=bool(undeclared),
         footer=_footer(computed) if drifts else (),
     )
-
-
-def _declared_sites(computed: Mapping[str, Any], committed: Mapping[str, Any]) -> frozenset[str]:
-    """The sites the changelog declares *since* the committed record was written.
-
-    Both halves of the rule live here: the newest entry has to name the site, **and** it has to be
-    a different entry than the one the record was regenerated against. An entry that was already
-    the head is a standing permission, not a declaration.
-    """
-    head = _changelog_field(computed, "digest")
-    if head is None or head == _changelog_field(committed, "digest"):
-        return frozenset()
-    declares = _changelog_block(computed).get("declares")
-    if not isinstance(declares, list):
-        return frozenset()
-    return frozenset(name for name in declares if isinstance(name, str))
-
-
-def _changelog_block(record: Mapping[str, Any]) -> Mapping[str, Any]:
-    block = record.get("changelog")
-    return block if isinstance(block, dict) else {}
-
-
-def _changelog_field(record: Mapping[str, Any], field: str) -> str | None:
-    value = _changelog_block(record).get(field)
-    return value if isinstance(value, str) else None
 
 
 SPEC = RatchetSpec(

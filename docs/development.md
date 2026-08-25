@@ -163,9 +163,11 @@ gitignored mandate — move no digest and never fire the check.
 `prompt_fingerprint.json` (repo root) is the same idea for what the model is *told*: one content
 hash per LLM call site, plus a digest per allowlisted file under it. The hashes come from
 `src/noctis/observability/prompt_id.py` (`site_digest(site)` is the pure read a future benchmark
-record's key uses); the **rule** — the declared-change rule below, and the changelog reader it
-needs — lives in `src/noctis/observability/prompt_ratchet.py`, on the same shared mechanics
-(`src/noctis/observability/ratchet.py`) the engine ratchet runs on. It runs in **CI** and in
+record's key uses); the **rule** — the declared-change rule below — lives in
+`src/noctis/observability/prompt_ratchet.py`, on the same shared mechanics
+(`src/noctis/observability/ratchet.py`) the engine ratchet runs on. How an entry is *read* is
+shared too: `src/noctis/observability/changelog.py` parses a heading into ` — `-separated
+`key: value` clauses, and this policy binds one of them, `sites:`. It runs in **CI** and in
 **pre-commit**, exactly like the engine one.
 
 It is a **separate artifact on a separate clock**, and deliberately so: prompts and arbiter
