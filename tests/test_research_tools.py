@@ -21,6 +21,7 @@ from noctis.research.tools import ResearchToolbox
 from noctis.strategies import library
 from noctis.strategies.families import FamilyRegistry
 from noctis.strategies.library import parse_header, strategy_source, write_strategy
+from tests._capture_helpers import failing_capture_store
 
 _NS_PER_MINUTE = 60 * 1_000_000_000
 
@@ -1295,6 +1296,7 @@ def _coder_box(
     coder_max_tokens: int | None = None,
     coder_retries: int | None = None,
     on_event=NULL_SINK,
+    capture=None,
 ):
     coder = _FakeCoder(replies)
     return (
@@ -1306,6 +1308,7 @@ def _coder_box(
             coder_retries=coder_retries,
             max_author_calls=max_author_calls,
             on_event=on_event,
+            capture=capture,
         ),
         coder,
     )
@@ -2193,21 +2196,14 @@ def test_capture_brief_omits_the_spec_hash_when_no_oracle_was_stamped(toolbox):
     assert list(toolbox.capture.root.iterdir()) == [toolbox.capture.root / "author-brief"]
 
 
-def test_a_latched_capture_store_omits_the_hashes_and_never_raises(toolbox, caplog, monkeypatch):
+def test_a_latched_capture_store_omits_the_hashes_and_never_raises(tmp_path, caplog):
     """Capture is strictly secondary: with the store latched off (an injected write failure) the
     call returns no hashes at all — so the ledger omits the fields rather than naming bodies that
     were never written — warns exactly once, and never raises into the authoring path."""
     import logging
-    from pathlib import Path
 
-    real = Path.write_text
+    toolbox = _make_toolbox(tmp_path, capture=failing_capture_store(tmp_path / "qa" / "capture"))
 
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(toolbox.capture.root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
     with caplog.at_level(logging.WARNING, logger="noctis.observability.capture"):
         first = toolbox.capture_brief(BRIEF_ARGS, _oracle_suite())
         second = toolbox.capture_brief(BRIEF_ARGS, _oracle_suite())
@@ -2217,21 +2213,17 @@ def test_a_latched_capture_store_omits_the_hashes_and_never_raises(toolbox, capl
     assert len(warnings) == 1
 
 
-def test_a_brief_authored_under_a_latched_capture_store_still_lands(tmp_path, caplog, monkeypatch):
+def test_a_brief_authored_under_a_latched_capture_store_still_lands(tmp_path, caplog):
     """The write gate is untouched by capture: with capture latched off the coder still authors a
     validated file, and the session carries on."""
     import logging
-    from pathlib import Path
 
-    box, _ = _coder_box(tmp_path, [_fenced(_named("brief_probe"))])
-    real = Path.write_text
+    box, _ = _coder_box(
+        tmp_path,
+        [_fenced(_named("brief_probe"))],
+        capture=failing_capture_store(tmp_path / "qa" / "capture"),
+    )
 
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(box.capture.root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
     with caplog.at_level(logging.WARNING, logger="noctis.observability.capture"):
         captured = box.capture_brief(BRIEF_ARGS)
         out = box.dispatch("write_strategy", {"name": "brief_probe", "brief": BRIEF_ARGS})
@@ -2290,18 +2282,9 @@ def test_identical_knobs_dedupe_to_one_sidecar(toolbox):
     assert first["input_sha256"] != second["input_sha256"]  # …while the briefings stay distinct
 
 
-def test_a_latched_store_omits_the_episode_capture_hashes_and_never_raises(toolbox, monkeypatch):
+def test_a_latched_store_omits_the_episode_capture_hashes_and_never_raises(tmp_path):
     """Capture is strictly secondary: a latched store returns no hashes at all, so the episode row
     omits the fields rather than naming bodies that were never written."""
-    from pathlib import Path
-
-    real = Path.write_text
-
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(toolbox.capture.root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
+    toolbox = _make_toolbox(tmp_path, capture=failing_capture_store(tmp_path / "qa" / "capture"))
 
     assert toolbox.capture_episode("a briefing", _KNOBS) == {}

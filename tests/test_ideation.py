@@ -22,6 +22,7 @@ from noctis.research import Capabilities, IdeationContext, Ideator, build_ideato
 from noctis.research.llm import ToolCall, Turn
 from noctis.strategies import Candidate, CandidateProposer
 from noctis.strategies.families import SEED_FAMILIES, FamilyRegistry
+from tests._capture_helpers import failing_capture_store
 
 RULES = PromotionRules(champion_count=3, max_gap=1.0, min_test_metric=0.0)
 
@@ -472,18 +473,6 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _fail_writes_under(monkeypatch, root):
-    """Make every write beneath ``root`` fail, so the capture store latches off on first use."""
-    real = Path.write_text
-
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
-
-
 def test_ideation_captures_the_assembled_prompt_verbatim(tmp_path):
     """A seeded round's inputs survive the round: the prompt the model was actually shown lands
     as a sidecar BYTE FOR BYTE, so its content hash fetches exactly what was sent."""
@@ -577,11 +566,10 @@ def test_build_ideator_roots_capture_in_the_run_qa_area(tmp_path):
     assert ideator.capture.root == Path(settings.qa_dir) / "capture"
 
 
-def test_a_latched_capture_store_leaves_ideation_unharmed(tmp_path, families, monkeypatch):
+def test_a_latched_capture_store_leaves_ideation_unharmed(tmp_path, families):
     """Capture is strictly secondary: with the store latched off (an injected write failure) the
     round still mints its families and never raises."""
-    store = CaptureStore(tmp_path / "capture")
-    _fail_writes_under(monkeypatch, store.root)
+    store = failing_capture_store(tmp_path / "capture")
     ideator = Ideator(
         client=FakeClient([_valid_spec("minted_despite_latch")]),
         config=IdeationConfig(cadence=1, specs_per_round=1),

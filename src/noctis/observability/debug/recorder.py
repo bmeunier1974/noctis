@@ -22,6 +22,9 @@ tail; the manifest and every finalized segment are already on disk.
 it once for its arrival stamp, ``close()`` reads it once for ``stopped``. The manifest fields the
 recorder cannot know (argv, mode, config digest, versions) are injected too — the recorder owns
 only ``run_id`` and the ``started``/``stopped``/``duration_s`` stamps, and never computes a digest.
+**The writer is injected too** — every disk touch goes through the fail-safe latch below, whose
+seam a test replaces with a callable that refuses, so the failure path is exercised without
+patching the filesystem out from under the process.
 
 **The recorder declares the seam it rides** (#336, epic #333): it subclasses
 :class:`~noctis.observability.events.NullSink`, so it *is* an
@@ -59,6 +62,7 @@ from noctis.observability.debug.render import (
     render_summary_markdown,
 )
 from noctis.observability.events import Event, NullSink
+from noctis.observability.failsafe import FailSafe, Writer, write_text
 
 __all__ = ["Recorder"]
 
@@ -117,14 +121,16 @@ class Recorder(NullSink):
     ``stopped``/``duration_s`` null), so a crashed run still leaves an honest manifest.
 
     **The fail-safe latch (story #44) — a LATCH, not a retry.** Recording is strictly secondary:
-    a debug tool must never degrade or crash a run (AGENTS.md rule 2, in spirit). So every public
-    method body runs behind :meth:`_run_guarded`, and the *first* internal exception is caught,
-    logged **exactly once**, and latches the recorder off — every later call is a silent no-op
-    (no retry, no second warning), and nothing ever raises into the engine. A construction-time
-    write failure latches the same way: the object still constructs. On tripping, a best-effort
-    honesty note is stamped into ``summary.md`` naming the hour coverage stopped, so a truncated
-    report never masquerades as a complete one. Read the state via :attr:`disabled` (story #45
-    echoes it at stop).
+    a debug tool must never degrade or crash a run (AGENTS.md rule 2, in spirit). The contract is
+    not the recorder's to invent — it composes :class:`~noctis.observability.failsafe.FailSafe`
+    (story #348), the same latch the capture store rides: every public method body runs behind
+    ``self._latch.guard``, and the *first* internal exception is caught, logged **exactly once**,
+    and latches the recorder off — every later call is a silent no-op (no retry, no second
+    warning), and nothing ever raises into the engine. A construction-time write failure latches
+    the same way: the object still constructs. On tripping, the latch calls back into
+    :meth:`_write_disabled_summary`, a best-effort honesty note stamped into ``summary.md`` naming
+    the hour coverage stopped, so a truncated report never masquerades as a complete one. Read the
+    state via :attr:`disabled` (story #45 echoes it at stop).
     """
 
     def __init__(
@@ -134,15 +140,12 @@ class Recorder(NullSink):
         run_id: str,
         clock: Callable[[], datetime],
         manifest: dict | None = None,
+        writer: Writer = write_text,
     ) -> None:
         self._run_dir = Path(qa_dir) / run_id
         self._run_id = run_id
         self._clock = clock
         self._manifest = dict(manifest or {})
-
-        # The fail-safe latch flag. Set first, before any disk touch, so the guard and ``_trip``
-        # can rely on it even if the very first write (``run.json`` below) fails.
-        self._disabled = False
 
         self._started = clock()
         self._stopped: datetime | None = None
@@ -159,13 +162,19 @@ class Recorder(NullSink):
         self._hour_lines: list[str] = []
         self._all: list[StampedEvent] = []
 
-        # The one construction-time disk touch runs behind the same latch: a recorder that cannot
+        # The fail-safe latch, built before any disk touch — every field its honesty note reads
+        # is set above, so it can fire even on the very first write (``run.json``, below).
+        self._latch = FailSafe(
+            logger=logger,
+            subject=f"debug recorder {run_id}",
+            consequence="recording is off for the rest of this run",
+            writer=writer,
+            on_trip=self._write_disabled_summary,
+        )
+
+        # The one construction-time disk touch runs behind that latch: a recorder that cannot
         # write its manifest disables itself rather than raising into the engine.
-        try:
-            self._run_dir.mkdir(parents=True, exist_ok=True)
-            self._write_manifest()
-        except Exception as exc:
-            self._trip(exc)
+        self._latch.guard(self._open_tree)
 
     # ── the public surface — every body runs behind the fail-safe latch ─────────────────────────
 
@@ -176,7 +185,7 @@ class Recorder(NullSink):
         Story #45 echoes this at stop so a self-disabled recorder is reported honestly instead of
         a truncated run passing for a complete one.
         """
-        return self._disabled
+        return self._latch.tripped
 
     @property
     def run_id(self) -> str:
@@ -197,7 +206,7 @@ class Recorder(NullSink):
         somehow raised it degrades to the disabled note rather than crashing the run's stop path.
         """
         disabled_note = "recording disabled after an internal failure — funnel unavailable"
-        if self._disabled:
+        if self._latch.tripped:
             return disabled_note
         if not self._funnel_instrumented:
             return "legacy research loop — funnel not instrumented"
@@ -217,71 +226,34 @@ class Recorder(NullSink):
         Ignores events after :meth:`close`, and — per the fail-safe latch — is a no-op once the
         recorder has disabled itself on an earlier internal failure.
         """
-        self._run_guarded(self._record, ev)
+        self._latch.guard(self._record, ev)
 
     def flush(self) -> None:
         """Write the current segment's buffered ``events.jsonl`` to disk (a no-op if none open)."""
-        self._run_guarded(self._flush)
+        self._latch.guard(self._flush)
 
     def mark_legacy_research(self) -> None:
         """Render subsequent counts/summary as legacy (uninstrumented) — the honesty line, no
         zero-filled funnel. Set once when a session runs the legacy proposer/Optuna loop."""
-        self._run_guarded(self._mark_legacy_research)
+        self._latch.guard(self._mark_legacy_research)
 
     def close(self) -> None:
         """Finalize the open segment, rewrite ``summary.md``, stamp ``run.json``. Idempotent."""
-        self._run_guarded(self._close)
+        self._latch.guard(self._close)
 
-    # ── the fail-safe latch — disable on the first internal failure, never raise into the engine ─
-
-    def _run_guarded(self, work: Callable[..., None], *args: object) -> None:
-        """Run one public-method body behind the latch: no-op if already disabled, else on the
-        first internal exception funnel it into :meth:`_trip` (which swallows and latches).
-
-        WHY here and not per-method: a single choke point means a future public method cannot
-        forget the guard — it only has to delegate its body through this.
-        """
-        if self._disabled:
-            return
-        try:
-            work(*args)
-        except Exception as exc:
-            self._trip(exc)
-
-    def _trip(self, exc: BaseException) -> None:
-        """The LATCH: disable the recorder for good on the first internal failure.
-
-        WHY a latch and not a retry (and never a raise): recording is strictly secondary — a
-        debug tool must never degrade or crash a run (AGENTS.md rule 2, in spirit). So the first
-        internal exception is swallowed here — we log **exactly one** warning naming the run and
-        the error, set the disabled flag, and thereafter every public call short-circuits to a
-        no-op: no retry, no second warning, no exception into the engine.
-
-        Then, as honesty demands (AGENTS.md rule 2), a **best-effort** note is stamped into
-        ``summary.md`` saying the recorder disabled itself and naming the hour coverage stopped,
-        so a truncated report never passes for a complete one. That write is itself wrapped and
-        its failure swallowed silently — the latch is already set, and a second warning would be
-        noise on top of a recorder that is already off.
-        """
-        if self._disabled:
-            return
-        self._disabled = True
-        logger.warning(
-            "debug recorder %s self-disabled after an internal failure (%s: %s); "
-            "recording is off for the rest of this run",
-            self._run_id,
-            type(exc).__name__,
-            exc,
-        )
-        try:
-            self._write_disabled_summary()
-        except Exception:
-            pass  # best effort only: the latch is set; a failed note earns no second warning
+    # ── the fail-safe latch's honesty note (the latch itself is composed, see __init__) ────────
 
     def _write_disabled_summary(self) -> None:
-        """Best-effort honesty note into ``summary.md`` via the renderer's ``notes`` hook: state
-        the self-disablement and name the hour coverage stopped (the open segment, or the
-        pre-event boundary if the latch tripped before any segment opened)."""
+        """The latch's ``on_trip`` callback: a **best-effort** honesty note into ``summary.md`` via
+        the renderer's ``notes`` hook, stating the self-disablement and naming the hour coverage
+        stopped (the open segment, or the pre-event boundary if the latch tripped before any
+        segment opened), so a truncated report never passes for a complete one.
+
+        It writes *after* the latch is already set — which is exactly why
+        :meth:`~noctis.observability.failsafe.FailSafe.write` is not itself gated — and its own
+        failure is swallowed by the latch, because a second warning would be noise on top of a
+        recorder that is already off.
+        """
         if self._current_hour is None:
             where = "before the first event was recorded"
         else:
@@ -290,7 +262,8 @@ class Recorder(NullSink):
             f"recorder self-disabled after an internal failure {where}; "
             "coverage stops here — this report is truncated, not a complete run."
         )
-        (self._run_dir / "summary.md").write_text(
+        self._latch.write(
+            self._run_dir / "summary.md",
             render_summary_markdown(
                 self._all,
                 window_start=self._started,
@@ -298,10 +271,14 @@ class Recorder(NullSink):
                 funnel_instrumented=self._funnel_instrumented,
                 notes=[note],
             ),
-            encoding="utf-8",
         )
 
-    # ── the guarded bodies (workers behind the public surface) ──────────────────────────────────
+    # ── the guarded bodies (workers behind the public surface, and the construction one) ────────
+
+    def _open_tree(self) -> None:
+        """Create the run's report tree and stamp its first manifest — the construction write."""
+        self._run_dir.mkdir(parents=True, exist_ok=True)
+        self._write_manifest()
 
     def _record(self, ev: Event | str) -> None:
         if self._stopped is not None:
@@ -379,7 +356,8 @@ class Recorder(NullSink):
         events = self._hour_events
 
         self._write_jsonl(h, self._hour_lines)
-        (seg / "counts.md").write_text(
+        self._latch.write(
+            seg / "counts.md",
             render_counts_markdown(
                 events,
                 window_start=window_start,
@@ -387,7 +365,6 @@ class Recorder(NullSink):
                 funnel_instrumented=self._funnel_instrumented,
                 segment_label=label,
             ),
-            encoding="utf-8",
         )
         doc = render_counts_json(
             events,
@@ -396,35 +373,33 @@ class Recorder(NullSink):
             funnel_instrumented=self._funnel_instrumented,
             segment_label=label,
         )
-        (seg / "counts.json").write_text(
-            json.dumps(doc, indent=2, default=str) + "\n", encoding="utf-8"
-        )
-        (seg / "errors.md").write_text(
+        self._latch.write(seg / "counts.json", json.dumps(doc, indent=2, default=str) + "\n")
+        self._latch.write(
+            seg / "errors.md",
             render_errors_markdown(
                 events,
                 window_start=window_start,
                 window_end=window_end,
                 segment_label=label,
             ),
-            encoding="utf-8",
         )
 
     def _write_jsonl(self, h: int, lines: list[str]) -> None:
-        (self._run_dir / f"h{h:02d}" / "events.jsonl").write_text("".join(lines), encoding="utf-8")
+        self._latch.write(self._run_dir / f"h{h:02d}" / "events.jsonl", "".join(lines))
 
     # ── whole-run documents ────────────────────────────────────────────────────────────────────
 
     def _write_summary(self, now: datetime) -> None:
         """Rewrite ``summary.md`` — the cumulative rollup over every event so far, window
         ``[started, now]``."""
-        (self._run_dir / "summary.md").write_text(
+        self._latch.write(
+            self._run_dir / "summary.md",
             render_summary_markdown(
                 self._all,
                 window_start=self._started,
                 window_end=now,
                 funnel_instrumented=self._funnel_instrumented,
             ),
-            encoding="utf-8",
         )
 
     def _write_manifest(self) -> None:
@@ -438,9 +413,8 @@ class Recorder(NullSink):
         else:
             data["stopped"] = None
             data["duration_s"] = None
-        (self._run_dir / "run.json").write_text(
-            json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8"
-        )
+        body = json.dumps(data, indent=2, default=str) + "\n"
+        self._latch.write(self._run_dir / "run.json", body)
 
     # ── the jsonl line ─────────────────────────────────────────────────────────────────────────
 

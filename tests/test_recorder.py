@@ -25,6 +25,7 @@ from pathlib import Path
 
 from noctis.observability import Event
 from noctis.observability.debug import Recorder
+from noctis.observability.failsafe import write_text
 
 # ── the injected clock: a mutable holder the test advances ────────────────────────────────────
 
@@ -90,8 +91,8 @@ _RUN_ID = "20260720T140000Z-a3f9c1"
 _T_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
 
-def _make(tmp_path: Path, clock: FakeClock) -> Recorder:
-    return Recorder(tmp_path, run_id=_RUN_ID, clock=clock, manifest=dict(_MANIFEST))
+def _make(tmp_path: Path, clock: FakeClock, writer=write_text) -> Recorder:
+    return Recorder(tmp_path, run_id=_RUN_ID, clock=clock, manifest=dict(_MANIFEST), writer=writer)
 
 
 def _run_dir(tmp_path: Path) -> Path:
@@ -475,11 +476,9 @@ def test_funnel_line_says_legacy_when_marked(tmp_path):
     assert "written=" not in line  # no fake zero-filled funnel for an uninstrumented loop
 
 
-def test_funnel_line_is_honest_when_the_latch_has_tripped(tmp_path, monkeypatch):
-    run_dir = _run_dir(tmp_path)
-    _patch_write_raises_on(monkeypatch, run_dir, 1)  # trip on construction's run.json write
+def test_funnel_line_is_honest_when_the_latch_has_tripped(tmp_path):
     clock = FakeClock(START)
-    rec = _make(tmp_path, clock)
+    rec = _make(tmp_path, clock, Disk(raise_on=1))  # trip on construction's run.json write
     assert rec.disabled is True
     line = rec.funnel_line()
     assert "written=" not in line  # never a comforting all-zeros funnel after a failure
@@ -522,31 +521,33 @@ def test_idle_run_writes_manifest_and_summary_but_no_segments(tmp_path):
 # ── story #44: the fail-safe latch — disable on the first internal failure ────────────────────
 #
 # Every behaviour asserted here is still external: `caplog` records, the `disabled` property, and
-# the on-disk summary. The one seam these tests reach into is the *filesystem* — `Path.write_text`,
-# the exact call the recorder writes through — patched to raise on a chosen recorder write. That is
-# the narrowest honest way to inject an internal failure without asserting private state.
+# the on-disk summary. The seam these tests reach through is the recorder's own WRITER (story
+# #348) — the callable handed in at construction, standing exactly where the recorder writes — so
+# a failing disk is injected into this recorder alone, never patched over the whole process.
 
 RECORDER_LOGGER = "noctis.observability.debug.recorder"
 
 
-def _patch_write_raises_on(monkeypatch, run_dir: Path, n: int) -> dict:
-    """Make the recorder's own disk writes raise once, on the *n*-th write into its run tree.
+class Disk:
+    """The writer seam as a test double: real writes, with a chosen attempt refused.
 
-    Only writes under ``run_dir`` are counted — the recorder is the sole writer there, so pytest's
-    own I/O never perturbs the count. Every other write delegates to the real implementation.
+    Counting is exact by construction — every attempt that reaches here is a recorder write, so
+    pytest's own I/O can no longer perturb the count the way a patched ``Path.write_text`` did.
     """
-    real = Path.write_text
-    state = {"n": 0}
 
-    def counting(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(run_dir)):
-            state["n"] += 1
-            if state["n"] == n:
-                raise OSError("simulated disk failure on the recorder's write")
-        return real(self, *args, **kwargs)
+    def __init__(self, *, raise_on: int | None = None) -> None:
+        self.raise_on = raise_on
+        self.attempts = 0
 
-    monkeypatch.setattr(Path, "write_text", counting)
-    return state
+    def fail_next(self) -> None:
+        """Refuse the recorder's next write, whenever it comes."""
+        self.raise_on = self.attempts + 1
+
+    def __call__(self, path: Path, payload: str) -> None:
+        self.attempts += 1
+        if self.attempts == self.raise_on:
+            raise OSError("simulated disk failure on the recorder's write")
+        write_text(path, payload)
 
 
 def _recorder_warnings(caplog) -> list[logging.LogRecord]:
@@ -555,13 +556,12 @@ def _recorder_warnings(caplog) -> list[logging.LogRecord]:
 
 # AC1: writer raises on the 3rd call → the run completes, the recorder latches off, exactly one
 # warning is logged, and no exception escapes into the caller.
-def test_writer_raising_on_third_call_latches_without_escaping(tmp_path, monkeypatch, caplog):
+def test_writer_raising_on_third_call_latches_without_escaping(tmp_path, caplog):
     run_dir = _run_dir(tmp_path)
-    _patch_write_raises_on(monkeypatch, run_dir, 3)
     clock = FakeClock(START)
 
     with caplog.at_level(logging.WARNING, logger=RECORDER_LOGGER):
-        rec = _make(tmp_path, clock)  # write #1: run.json
+        rec = _make(tmp_path, clock, Disk(raise_on=3))  # write #1: run.json
 
         def drive(dt: datetime, ev: Event) -> None:
             clock.at(dt)
@@ -587,15 +587,14 @@ def test_writer_raising_on_third_call_latches_without_escaping(tmp_path, monkeyp
 
 # AC2: after the latch trips, every public method is a no-op — no retries, no further warnings,
 # no further disk writes, no exceptions.
-def test_every_public_method_is_a_noop_after_the_latch_trips(tmp_path, monkeypatch, caplog):
-    run_dir = _run_dir(tmp_path)
-    state = _patch_write_raises_on(monkeypatch, run_dir, 1)  # trip on construction's run.json
+def test_every_public_method_is_a_noop_after_the_latch_trips(tmp_path, caplog):
+    disk = Disk(raise_on=1)  # trip on construction's run.json
     clock = FakeClock(START)
 
     with caplog.at_level(logging.WARNING, logger=RECORDER_LOGGER):
-        rec = _make(tmp_path, clock)  # write #1 raises → latch; write #2 = best-effort summary
+        rec = _make(tmp_path, clock, disk)  # write #1 raises → latch; write #2 = the honesty note
         assert rec.disabled is True
-        writes_after_trip = state["n"]
+        writes_after_trip = disk.attempts
 
         # exercise the whole public surface — none may raise, write, or warn again
         clock.at(_at(14, 10))
@@ -607,21 +606,19 @@ def test_every_public_method_is_a_noop_after_the_latch_trips(tmp_path, monkeypat
         clock.at(_at(15, 0))
         rec.close()
 
-    assert state["n"] == writes_after_trip  # no method touched disk after the latch
+    assert disk.attempts == writes_after_trip  # no method touched disk after the latch
     assert len(_recorder_warnings(caplog)) == 1  # exactly one warning — no retries, no spam
 
 
 # The latch can trip before any segment opens (a construction-time write failure): the object
 # still constructs, and the honesty note names the pre-event coverage boundary.
-def test_trip_before_first_segment_still_constructs_and_notes_pre_event(
-    tmp_path, monkeypatch, caplog
-):
+def test_trip_before_first_segment_still_constructs_and_notes_pre_event(tmp_path, caplog):
     run_dir = _run_dir(tmp_path)
-    _patch_write_raises_on(monkeypatch, run_dir, 1)  # construction's run.json write raises
     clock = FakeClock(START)
 
     with caplog.at_level(logging.WARNING, logger=RECORDER_LOGGER):
-        rec = _make(tmp_path, clock)  # must NOT raise into the caller (the engine)
+        # construction's run.json write raises — and must NOT raise into the caller (the engine)
+        rec = _make(tmp_path, clock, Disk(raise_on=1))
 
     assert rec.disabled is True
     assert len(_recorder_warnings(caplog)) == 1
@@ -631,15 +628,16 @@ def test_trip_before_first_segment_still_constructs_and_notes_pre_event(
 
 
 # The latch can also trip inside close(): close must swallow it, latch, and still note the hour.
-def test_trip_during_close_latches_and_notes_the_hour(tmp_path, monkeypatch, caplog):
+def test_trip_during_close_latches_and_notes_the_hour(tmp_path, caplog):
     run_dir = _run_dir(tmp_path)
     clock = FakeClock(START)
+    disk = Disk()
 
     with caplog.at_level(logging.WARNING, logger=RECORDER_LOGGER):
-        rec = _make(tmp_path, clock)  # write: run.json (unpatched)
+        rec = _make(tmp_path, clock, disk)  # write: run.json (healthy)
         clock.at(_at(14, 10))
         rec(_tool("write_strategy", name="alpha"))  # buffered, no write yet
-        _patch_write_raises_on(monkeypatch, run_dir, 1)  # next recorder write fails
+        disk.fail_next()  # the recorder's next write fails
         clock.at(_at(14, 45))
         rec.close()  # _finalize_segment's first write raises → must not escape
 

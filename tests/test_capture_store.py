@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from noctis.observability.capture import DEFAULT_CAP, CaptureStore
+from noctis.observability.failsafe import write_text
 
 CAPTURE_LOGGER = "noctis.observability.capture"
 
@@ -175,33 +176,33 @@ def test_default_cap_is_generous_and_holds(tmp_path):
 
 # ── the fail-safe latch ───────────────────────────────────────────────────────────────────────
 #
-# The one seam these tests reach into is the *filesystem* — `Path.write_text`, the exact call the
-# store writes through — patched to raise under the capture root. That is the narrowest honest way
-# to inject a write failure without asserting private state.
+# The seam these tests reach through is the store's own WRITER (story #348) — the callable handed
+# in at construction, standing exactly where the store writes. A failing disk is injected there,
+# never monkeypatched process-wide, so nothing but the store under test is ever made to fail.
 
 
-def _patch_writes_raise_under(monkeypatch, root: Path) -> dict:
-    real = Path.write_text
-    state = {"n": 0}
+class Disk:
+    """The writer seam as a test double: writes for real until ``fail`` is set, then refuses."""
 
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(root)):
-            state["n"] += 1
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.attempts = 0
+
+    def __call__(self, path: Path, payload: str) -> None:
+        self.attempts += 1
+        if self.fail:
             raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
-    return state
+        write_text(path, payload)
 
 
 def _capture_warnings(caplog) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.name == CAPTURE_LOGGER and r.levelno == logging.WARNING]
 
 
-def test_a_write_failure_warns_once_and_latches_capture_off(tmp_path, monkeypatch, caplog):
+def test_a_write_failure_warns_once_and_latches_capture_off(tmp_path, caplog):
     root = tmp_path / "capture"
-    state = _patch_writes_raise_under(monkeypatch, root)
-    store = CaptureStore(root)
+    disk = Disk(fail=True)
+    store = CaptureStore(root, writer=disk)
 
     with caplog.at_level(logging.WARNING, logger=CAPTURE_LOGGER):
         first = store.store("briefing", "body one")  # fails → warns once, latches
@@ -211,13 +212,12 @@ def test_a_write_failure_warns_once_and_latches_capture_off(tmp_path, monkeypatc
     assert later == [None, None, None]
     assert store.disabled is True
     assert len(_capture_warnings(caplog)) == 1  # exactly one warning — no retries, no spam
-    assert state["n"] == 1  # no write was even attempted after the latch tripped
+    assert disk.attempts == 1  # no write was even attempted after the latch tripped
 
 
-def test_a_latched_store_never_raises_and_reads_back_nothing(tmp_path, monkeypatch, caplog):
+def test_a_latched_store_never_raises_and_reads_back_nothing(tmp_path, caplog):
     root = tmp_path / "capture"
-    _patch_writes_raise_under(monkeypatch, root)
-    store = CaptureStore(root)
+    store = CaptureStore(root, writer=Disk(fail=True))
 
     with caplog.at_level(logging.WARNING, logger=CAPTURE_LOGGER):
         store.store("briefing", "body one")
@@ -227,14 +227,15 @@ def test_a_latched_store_never_raises_and_reads_back_nothing(tmp_path, monkeypat
     assert _files(root) == []
 
 
-def test_sidecars_written_before_the_latch_stay_readable(tmp_path, monkeypatch, caplog):
+def test_sidecars_written_before_the_latch_stay_readable(tmp_path, caplog):
     # The latch stops writing, not reading: whatever was captured before the failure is exactly
     # what a post-mortem wants back.
     root = tmp_path / "capture"
-    store = CaptureStore(root)
+    disk = Disk()
+    store = CaptureStore(root, writer=disk)
     kept = store.store("briefing", "captured while the disk was healthy")
 
-    _patch_writes_raise_under(monkeypatch, root)
+    disk.fail = True
     with caplog.at_level(logging.WARNING, logger=CAPTURE_LOGGER):
         assert store.store("briefing", "never lands") is None
 
@@ -242,26 +243,16 @@ def test_sidecars_written_before_the_latch_stay_readable(tmp_path, monkeypatch, 
     assert store.read("briefing", kept) == "captured while the disk was healthy"
 
 
-def test_capture_survives_a_failure_by_staying_off_for_the_rest_of_the_session(
-    tmp_path, monkeypatch, caplog
-):
+def test_capture_survives_a_failure_by_staying_off_for_the_rest_of_the_session(tmp_path, caplog):
     # The latch never clears: once capture has failed it stays off even after the filesystem
     # recovers, so a session sees one warning and one behavior, not intermittent half-capture.
     root = tmp_path / "capture"
-    real = Path.write_text
-    fail = {"on": True}
-
-    def flaky(self: Path, *args: object, **kwargs: object):
-        if fail["on"] and str(self).startswith(str(root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", flaky)
-    store = CaptureStore(root)
+    disk = Disk(fail=True)
+    store = CaptureStore(root, writer=disk)
 
     with caplog.at_level(logging.WARNING, logger=CAPTURE_LOGGER):
         store.store("briefing", "body one")
-        fail["on"] = False  # the disk recovers
+        disk.fail = False  # the disk recovers
         assert store.store("briefing", "body two") is None
 
     assert _files(root) == []

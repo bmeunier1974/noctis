@@ -15,6 +15,7 @@ from noctis.research.distill import (
     maybe_distill,
 )
 from noctis.research.llm import Turn
+from tests._capture_helpers import failing_capture_store
 
 
 class FakeDistillClient:
@@ -236,18 +237,10 @@ def test_maybe_distill_captures_into_the_run_qa_area(tmp_path):
     assert [p.read_text(encoding="utf-8") for p in folder.iterdir()] == [sent]
 
 
-def test_a_latched_capture_store_leaves_distillation_unharmed(tmp_path, monkeypatch):
+def test_a_latched_capture_store_leaves_distillation_unharmed(tmp_path):
     """Capture is strictly secondary: with the store latched off (an injected write failure) the
     lessons are still distilled into memory and nothing raises into the close phase."""
-    store = CaptureStore(tmp_path / "capture")
-    real = Path.write_text
-
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(store.root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
+    store = failing_capture_store(tmp_path / "capture")
     memory = _memory()
 
     assert distill_findings(memory, FakeDistillClient("- a lesson"), capture=store) is True

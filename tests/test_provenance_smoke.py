@@ -54,6 +54,7 @@ from noctis.research.tools import (
 )
 from noctis.strategies import CandidateProposer
 from noctis.strategies.scenario_spec import spec_from_json
+from tests._capture_helpers import failing_capture_store
 from tests.test_distill import FakeDistillClient
 from tests.test_episodic_driver import (
     _FORMULATE_PAYLOAD,
@@ -91,7 +92,7 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _drive_session(tmp_path, session_id: str):
+def _drive_session(tmp_path, session_id: str, *, capture=None):
     """One whole stubbed research session — formulate → match → author → optimize → decide —
     through the production ``make_episodes`` wiring, a real :class:`EpisodeRunner`, a real
     :class:`~noctis.research.tools.ResearchToolbox` and the real write/promotion gates.
@@ -103,7 +104,7 @@ def _drive_session(tmp_path, session_id: str):
     Returns the toolbox, the episode client (the external record of what was actually *sent*), and
     the summary.
     """
-    box = _make_toolbox(tmp_path, coder_client=FakeCoder())
+    box = _make_toolbox(tmp_path, coder_client=FakeCoder(), capture=capture)
     ledger = SessionLedger(box.state_dir, session_id=session_id)
     client = FakeEpisodeClient(
         [
@@ -268,21 +269,15 @@ def test_ideation_and_distill_sidecars_land_in_the_runs_one_capture_tree(tmp_pat
 
 
 # ── 2. graceful degradation: a latched store, and records written before the epic ────────────
-def test_a_latched_capture_store_leaves_the_whole_session_unharmed(tmp_path, monkeypatch):
+def test_a_latched_capture_store_leaves_the_whole_session_unharmed(tmp_path):
     """Capture is strictly secondary at every site at once: with the store latched off by a disk
     failure, the same session still authors, optimizes and reaches a *promoted* verdict, the
     journal's evidence record is untouched (it is not capture), and every row simply OMITS its
     hash fields — never a name for a body that was never written, and never an exception."""
-    real = Path.write_text
     capture_root = tmp_path / "qa" / CAPTURE_DIRNAME
-
-    def failing(self: Path, *args: object, **kwargs: object):
-        if str(self).startswith(str(capture_root)):
-            raise OSError("simulated disk failure on the capture store's write")
-        return real(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", failing)
-    box, _client, summary = _drive_session(tmp_path, "smoke-latched")
+    box, _client, summary = _drive_session(
+        tmp_path, "smoke-latched", capture=failing_capture_store(capture_root)
+    )
     ledger, journal, _capture, board = _artifacts(tmp_path, "smoke-latched")
 
     assert box.capture.root == capture_root and box.capture.disabled
