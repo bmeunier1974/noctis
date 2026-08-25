@@ -97,8 +97,10 @@ class ModelPrice:
 
 
 # The neutral four-field usage dict every completion reports (``Turn.usage``), mapped onto the rate
-# that bills it. Stated once here, so a renamed usage field breaks in one place rather than pricing
-# silently at zero.
+# that bills it. The keys are :data:`noctis.research.usage.USAGE_FIELDS` and the values are this
+# module's own fact — which rate bills which field — so the mapping is spelled here rather than
+# built from the list. That it still *is* the list is pinned by ``tests/test_usage.py``, because a
+# renamed field that slipped past this mapping would price part of a session at zero in silence.
 USAGE_FIELDS: Mapping[str, str] = {
     "input_tokens": "input_usd_per_mtok",
     "output_tokens": "output_usd_per_mtok",

@@ -1,10 +1,10 @@
 {
   "changelog": {
     "declares": [
-      "episodic"
+      "briefings"
     ],
-    "digest": "df409cb3ea343c86",
-    "heading": "2026-08-24 \u2014 sites: episodic",
+    "digest": "577c5ae30ee6c187",
+    "heading": "2026-08-24 \u2014 sites: briefings",
     "path": "docs/prompt-changelog.md"
   },
   "kind": "noctis.prompt_fingerprint",
@@ -20,9 +20,9 @@
       "note": null
     },
     "briefings": {
-      "digest": "75457a5564601f8e",
+      "digest": "1dc8a7dbe82df916",
       "files": {
-        "src/noctis/research/briefings.py": "65d039b72047a292",
+        "src/noctis/research/briefings.py": "03c01877735482bd",
         "src/noctis/research/digests.py": "67476f972a6bbedf"
       },
       "note": null

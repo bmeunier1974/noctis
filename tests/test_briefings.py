@@ -24,7 +24,6 @@ import pytest
 from noctis.champions import PromotionRules, decide
 from noctis.data.preflight import CostPreflight
 from noctis.research import Mandate
-from noctis.research.agent import _estimate_tokens
 from noctis.research.briefings import (
     BriefingTooLargeError,
     decide_briefing,
@@ -33,6 +32,7 @@ from noctis.research.briefings import (
 )
 from noctis.research.ledger import SessionLedger
 from noctis.research.surface import ChampionBoard, ResearchFacts, ResearchLimits
+from noctis.research.usage import estimate_tokens
 from noctis.strategies.library import set_header, write_strategy
 from tests.test_champions import make_scorecard
 from tests.test_research_tools import LENIENT, PROBE, _make_toolbox
@@ -81,7 +81,7 @@ def _in_process_gate(fast_gate):
 
 
 def _tokens(text: str) -> int:
-    return _estimate_tokens(len(text), [])
+    return estimate_tokens(len(text), [])
 
 
 def _bloat_memory(box) -> None:

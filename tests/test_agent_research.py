@@ -666,7 +666,8 @@ def test_context_budget_calibrates_to_observed_usage():
     """The chars/4 estimate under-counts real tokenizers (worst on code-heavy history); the
     budget calibrates itself against the prompt size the backend reports, so eviction fires
     where the *backend* sees pressure, not where the heuristic guesses it."""
-    from noctis.research.agent import _ContextBudget, _estimate_tokens
+    from noctis.research.agent import _ContextBudget
+    from noctis.research.usage import estimate_tokens
 
     # max_tokens=0 → no output reserve: the test drives the prompt-side window directly.
     # The tool-semantics sets come from the toolbox in the loop (ResearchToolbox declares
@@ -685,7 +686,7 @@ def test_context_budget_calibrates_to_observed_usage():
         {"role": "tool", "tool_call_id": "c1", "content": "x" * 3_000},
         {"role": "assistant", "content": "acted on it"},
     ]
-    raw = _estimate_tokens(0, messages)
+    raw = estimate_tokens(0, messages)
     assert raw <= 1_000 * 0.9  # below the trigger on the raw heuristic…
 
     budget.evict_to_fit(messages)
@@ -745,10 +746,10 @@ def test_max_tokens_pin_reaches_every_completion(tmp_path):
 
 def _request_estimate(call) -> int:
     """The same provider-neutral estimate the loop uses, applied to one recorded request."""
-    from noctis.research.agent import _estimate_tokens
+    from noctis.research.usage import estimate_tokens
 
     base = len(_system_text(call)) + len(json.dumps(call["tools"], default=str))
-    return _estimate_tokens(base, call["messages"])
+    return estimate_tokens(base, call["messages"])
 
 
 def _pad_dispatch(toolbox, chars: int) -> None:

@@ -35,6 +35,12 @@ from noctis.research.misfire import (
 )
 from noctis.research.pricing import PriceTable, default_table
 from noctis.research.prompt import build_system_prompt
+from noctis.research.usage import (
+    APPROX_CHARS_PER_TOKEN,
+    USAGE_FIELDS,
+    accumulate_usage,
+    estimate_tokens,
+)
 
 if TYPE_CHECKING:
     from noctis.research.llm import LLMClient
@@ -54,40 +60,18 @@ _RESULT_CHAR_CAP = 20_000  # hard cap per tool result so one dump can't flood th
 # (#100 saw exactly this), so the summary carries the honest, countable name.
 _MAX_PROSE_NUDGES = 2
 
-# Context-budget levers (plan P5) — all inert unless research.agent.context_window is set.
-# The size estimate is provider-neutral (chars // 4 ≈ tokens): it must work on any backend,
-# including ones that report no usage at all.
-_APPROX_CHARS_PER_TOKEN = 4
+# Context-budget levers (plan P5) — all inert unless research.agent.context_window is set. The
+# size estimate itself is provider-neutral (chars // 4 ≈ tokens) and lives with the rest of the
+# usage accounting in :mod:`noctis.research.usage`: it must work on any backend, including ones
+# that report no usage at all, and the briefing builders size their prompts with the same one.
 _EVICT_AT_FRACTION = 0.9  # evict when the next request's estimate crosses this fraction…
 _EVICT_TO_FRACTION = 0.8  # …in one oldest-first batch down to this (no per-round cache thrash)
 _RESULT_CAP_FLOOR = 2_000  # the tiered per-result cap never drops below this (a scorecard fits)
 _RESULT_CAP_WINDOW_DIVISOR = 8  # tiered cap ≈ one eighth of the window, in chars
 
-# The token-usage fields we roll up per session. Cache fields are 0 until caching lands
-# (issues #5/#6); reading every field defensively keeps a fake/no-usage client from raising.
-_USAGE_FIELDS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
-
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
-
-
-def _accumulate_usage(totals: dict[str, int], usage: dict | None) -> None:
-    """Fold one completion's token ``usage`` (the neutral four-field dict on a :class:`Turn`)
-    into the running per-session totals.
-
-    Defensive by design: a fake client or a provider that omits a field contributes 0 rather
-    than raising — this is the measurement floor, it must never break the loop it measures.
-    """
-    if not usage:
-        return
-    for field in _USAGE_FIELDS:
-        totals[field] += int(usage.get(field, 0) or 0)
 
 
 def _with_moving_breakpoint(messages: list[dict], *, cache: bool = True) -> list[dict]:
@@ -152,15 +136,8 @@ def _tiered_result_cap(context_window: int | None) -> int:
     small window one result must not eat a large fraction of it."""
     if context_window is None:
         return _RESULT_CHAR_CAP
-    scaled = context_window * _APPROX_CHARS_PER_TOKEN // _RESULT_CAP_WINDOW_DIVISOR
+    scaled = context_window * APPROX_CHARS_PER_TOKEN // _RESULT_CAP_WINDOW_DIVISOR
     return min(_RESULT_CHAR_CAP, max(_RESULT_CAP_FLOOR, scaled))
-
-
-def _estimate_tokens(base_chars: int, messages: list[dict]) -> int:
-    """Provider-neutral size estimate of the next request: prefix chars + serialized history,
-    at ~4 chars/token. Deliberately independent of provider usage reports."""
-    chars = base_chars + sum(len(json.dumps(m, default=str)) for m in messages)
-    return chars // _APPROX_CHARS_PER_TOKEN
 
 
 class _ContextBudget:
@@ -228,7 +205,7 @@ class _ContextBudget:
             int(usage.get(f, 0) or 0)
             for f in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
         )
-        raw = _estimate_tokens(self.base_chars, messages)
+        raw = estimate_tokens(self.base_chars, messages)
         if actual <= 0 or raw <= 0:
             return
         self._scale = max(self._scale, actual / raw)
@@ -296,7 +273,7 @@ class _ContextBudget:
         are never evicted — the model has not acted on them yet."""
         if self.window is None:
             return
-        estimate = _estimate_tokens(self.base_chars, messages) * self._scale
+        estimate = estimate_tokens(self.base_chars, messages) * self._scale
         if estimate <= self.window * _EVICT_AT_FRACTION:
             return
         target = self.window * _EVICT_TO_FRACTION
@@ -328,7 +305,7 @@ class _ContextBudget:
                 continue
             messages[i] = {**msg, "content": pointer}
             meta["replaced"] = True
-            estimate -= saved / _APPROX_CHARS_PER_TOKEN * self._scale
+            estimate -= saved / APPROX_CHARS_PER_TOKEN * self._scale
         if estimate > self.window:
             logger.warning(
                 "context budget: history still ~%d tokens against a %d-token window after "
@@ -459,7 +436,7 @@ def run_agent_research(
         kickoff += f" Honor the OPERATOR MANDATE block (summary: {mandate.summary})."
     messages: list[dict] = [{"role": "user", "content": kickoff}]
 
-    usage_totals = dict.fromkeys(_USAGE_FIELDS, 0)
+    usage_totals = dict.fromkeys(USAGE_FIELDS, 0)
     prose_nudges = 0
 
     while True:
@@ -505,7 +482,7 @@ def run_agent_research(
             break
 
         summary.iterations += 1
-        _accumulate_usage(usage_totals, turn.usage)
+        accumulate_usage(usage_totals, turn.usage)
         # Calibrate the context budget's size estimate against the prompt size the backend
         # actually reported for this request (messages is still exactly what was sent).
         budget.observe(messages, turn.usage)

@@ -25,7 +25,7 @@ session *answers* (the champion board, the library index, the memory tail, the l
 the data budget, one candidate's journaled evidence), never from a collaborator reached through
 a toolbox, so a builder cannot read a half-fact or invent one a probe missed. Token size is
 estimated with the loop's own provider-neutral ~4-chars/token heuristic
-(:func:`noctis.research.agent._estimate_tokens`), so there is one token accounting across the
+(:func:`noctis.research.usage.estimate_tokens`), so there is one token accounting across the
 codebase, not two.
 """
 
@@ -37,10 +37,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from noctis.research import digests
-from noctis.research.agent import _estimate_tokens
 from noctis.research.ledger import SessionLedger
 from noctis.research.mandate import Mandate
 from noctis.research.surface import ResearchFacts
+from noctis.research.usage import estimate_tokens
 
 # The fixed advisory-trim priority order: memory tail first, then the library stubs, then the
 # per-symbol digest breadth. Everything NOT keyed here is core (gate-facing) and never trimmed.
@@ -114,7 +114,7 @@ def _json(obj: Any) -> str:
 
 def _tokens(text: str) -> int:
     """The loop's provider-neutral size estimate (~4 chars/token) — one shared accounting."""
-    return _estimate_tokens(len(text), [])
+    return estimate_tokens(len(text), [])
 
 
 def _mandate_body(mandate: Mandate | None) -> str:
