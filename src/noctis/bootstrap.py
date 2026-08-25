@@ -1593,7 +1593,8 @@ def build_recorder(settings, *, argv: list[str], mode: str | None, run_id: str |
     import platform
     from datetime import UTC, datetime
 
-    from noctis.observability.debug import Recorder, new_run_id, prune_qa_dir
+    from noctis.observability.debug import Recorder, prune_qa_dir
+    from noctis.observability.runid import new_run_id
 
     prune_qa_dir(settings.qa_dir, settings.qa.keep_last_runs)
 

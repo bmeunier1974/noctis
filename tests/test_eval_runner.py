@@ -68,7 +68,7 @@ from noctis.eval.runner import (
     replay,
 )
 from noctis.eval.site import AgentSite
-from noctis.observability.debug.runid import RUN_ID_RE
+from noctis.observability.runid import RUN_ID_RE
 from noctis.research.pricing import ModelPrice, PriceTable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

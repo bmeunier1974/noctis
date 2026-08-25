@@ -117,7 +117,7 @@ from noctis.eval.record import (
 )
 from noctis.eval.runner import WHOLE_CORPUS, engine_stamp, new_bench_id, publish
 from noctis.eval.site import AgentSite
-from noctis.observability.debug.runid import RUN_ID_RE
+from noctis.observability.runid import RUN_ID_RE
 from noctis.reporting.run_tree.record import read_record
 from noctis.research.driver import DECIDE
 from noctis.research.journal import ExperimentJournal

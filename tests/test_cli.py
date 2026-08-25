@@ -592,7 +592,7 @@ def _debug_run_config(tmp_path, *, keep_last_runs: int | None = None) -> str:
 
 def _one_qa_run(tmp_path) -> Path:
     """The single QA run folder minted under the tmp QA area."""
-    from noctis.observability.debug import RUN_ID_RE
+    from noctis.observability.runid import RUN_ID_RE
 
     qa = tmp_path / "qa"
     runs = [p for p in qa.iterdir() if p.is_dir() and RUN_ID_RE.match(p.name)]
@@ -663,7 +663,7 @@ def test_run_debug_v_output_is_byte_identical_to_v_alone(tmp_path):
 
 
 def test_run_debug_prunes_qa_area_on_start(tmp_path):
-    from noctis.observability.debug import RUN_ID_RE
+    from noctis.observability.runid import RUN_ID_RE
 
     qa = tmp_path / "qa"
     qa.mkdir(parents=True)

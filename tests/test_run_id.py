@@ -12,7 +12,8 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta, timezone
 
-from noctis.observability.debug.runid import new_run_id
+import noctis.observability.debug as debug_pkg
+from noctis.observability.runid import new_run_id
 
 # ``20260720T144233Z-a3f9c1``: UTC compact timestamp, a ``Z`` literal, dash, 6 lowercase hex.
 _SHAPE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{6}$")
@@ -60,7 +61,7 @@ def test_helper_pulls_no_heavy_optional_extras():
     """Dependency-free: importing + minting must not load an optional-extra package."""
     code = (
         "import sys\n"
-        "from noctis.observability.debug.runid import new_run_id\n"
+        "from noctis.observability.runid import new_run_id\n"
         "new_run_id()\n"
         "heavy = {"
         "'nautilus_trader', 'vectorbt', 'optuna', 'quantstats', "
@@ -71,3 +72,16 @@ def test_helper_pulls_no_heavy_optional_extras():
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_the_debug_package_keeps_no_re_export_of_the_minter():
+    """The minter lives at the observability root; ``debug`` is a consumer, not a doorway.
+
+    Story #343: the helper moved up because it is not debug-shaped — the run record and the eval
+    harness mint with it too. A convenience re-export would leave two import paths for one
+    module, so the debug package exports neither name.
+    """
+    assert not hasattr(debug_pkg, "new_run_id")
+    assert not hasattr(debug_pkg, "RUN_ID_RE")
+    assert "new_run_id" not in debug_pkg.__all__
+    assert "RUN_ID_RE" not in debug_pkg.__all__

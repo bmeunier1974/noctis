@@ -734,7 +734,7 @@ def test_build_recorder_mints_run_tree_and_stamps_the_manifest(tmp_path):
 def test_build_recorder_prunes_the_qa_area_to_keep_last_runs(tmp_path):
     """Prune-on-start: building a recorder first evicts all but the newest ``keep_last_runs``
     existing run folders, then adds this run."""
-    from noctis.observability.debug import RUN_ID_RE
+    from noctis.observability.runid import RUN_ID_RE
 
     qa = tmp_path / "qa"
     qa.mkdir(parents=True)

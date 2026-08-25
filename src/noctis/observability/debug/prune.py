@@ -4,7 +4,7 @@ The QA area (``workspace/qa/``) holds one folder per debug-recorded run, named b
 unbounded it grows without limit, so the only retention policy is prune-on-start: keep the newest
 ``qa.keep_last_runs`` run folders and delete the rest. Recency is *name order* — a run id leads
 with a UTC compact timestamp, so a plain descending sort recovers chronological order with no
-metadata read (see :mod:`noctis.observability.debug.runid`).
+metadata read (see :mod:`noctis.observability.runid`).
 
 The pruner is deliberately narrow: it recognizes run folders *only* by the exact run-id name
 shape (:data:`RUN_ID_RE`) and only when they are directories. Everything else in the area —
@@ -18,7 +18,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from noctis.observability.debug.runid import RUN_ID_RE
+from noctis.observability.runid import RUN_ID_RE
 
 __all__ = ["prune_qa_dir"]
 

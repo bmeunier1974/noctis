@@ -13,6 +13,11 @@ nothing more:
 It stays **stdlib-only on purpose**: future features may import it, and importing it must never
 pull an optional extra, so the helper could be lifted out of noctis wholesale. Keep it that way —
 do not reach into config, engine, or any heavy package from this module.
+
+Those future features arrived — the run record's store mints a run's identity here and the eval
+harness mints a case's — which is why the module sits at the observability package root rather
+than under ``debug/`` (story #343): minting a run id was never a debug concern, and there is one
+import path to it, not a re-export shim beside it.
 """
 
 from __future__ import annotations

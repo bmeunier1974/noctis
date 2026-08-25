@@ -24,7 +24,7 @@ that papers over an absence: a case that cannot be read as written never reaches
 number, because a number computed over a corpus somebody half-understood is worse than no number.
 
 **Provenance is exactly two forms.** ``mined:<run_id>`` (harvested from a real run, keyed by the id
-that run minted — matched against :data:`~noctis.observability.debug.runid.RUN_ID_RE` itself rather
+that run minted — matched against :data:`~noctis.observability.runid.RUN_ID_RE` itself rather
 than a lookalike pattern re-derived here) or ``authored:<YYYY-MM-DD>``. Between them a corpus can
 always answer where it came from and how old it is, which is the question asked the moment a
 benchmark number looks surprising.
@@ -47,7 +47,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from noctis.observability.debug.runid import RUN_ID_RE
+from noctis.observability.runid import RUN_ID_RE
 
 __all__ = [
     "CASE_KEYS",
