@@ -34,7 +34,7 @@ never keep its old identity.
 
 ---
 
-## 2026-08-24 — sites: briefings
+## 2026-08-24 — sites: briefings, episodic
 
 Epic #341 story #346: the provider-neutral token estimate the briefing builders size a rendered
 prompt with moves out of the conversation loop into `noctis.research.usage`, the one home for
@@ -45,6 +45,12 @@ text** — no header, no section label, no advisory-trim order and no rendered b
 estimate is the same arithmetic (~4 chars/token) on the same text, so every fit assertion decides
 exactly what it decided before. The hash moves only because this site's hash covers the whole of
 `research/briefings.py`.
+
+Story #347 moves the `episodic` site the same way: the driver's `_fetch_window` arithmetic moves to
+the data layer's `history_window` helper — an import-and-arithmetic edit only, with the driver
+keeping its own inclusive-date rendering of the result, so the fetch dates come out byte-identical
+and **no wording change reaches any prompt text**; the hash moves only because this site's hash
+covers the whole of `research/driver.py`.
 
 ## 2026-08-24 — sites: episodic
 

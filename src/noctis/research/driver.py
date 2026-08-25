@@ -195,7 +195,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from noctis.data.types import ns_to_date, t1_boundary_ns
+from noctis.data.types import history_window, ns_to_date
 from noctis.engine.research import ResearchSummary, StopEvent
 from noctis.observability.events import NULL_SINK, EventSink, stage_event, tool_event
 from noctis.research import digests
@@ -1034,18 +1034,18 @@ def _fetch_window(session_at: datetime, history_days: int) -> dict[str, Any]:
     One window for both fetching stages — the session-start mandate preflight (#111) and a DISCOVER
     fetch (#112) — so a discovered symbol arrives with exactly the history a declared one does.
 
-    The end is the **T+1 boundary** the run entrypoint's auto-backfill anchors on (UTC midnight of
-    the session's US-market date): vendor availability for US equities ends there and an end past it
-    is rejected outright, so the inclusive end date is the day before that boundary. That also makes
-    the window right for overnight research, when the UTC calendar has already rolled but the
-    vendor's trading day has not (22:00 ET = 02:00 UTC tomorrow).
+    The arithmetic is the data layer's :func:`~noctis.data.types.history_window` — the one helper
+    the run entrypoint's auto-backfill also calls, so the two can never disagree on what a symbol
+    is fetched over. Its end is the **T+1 boundary** (UTC midnight of the session's US-market
+    date): vendor availability for US equities ends there and an end past it is rejected outright,
+    so the inclusive end date rendered here is the day before that boundary. That also makes the
+    window right for overnight research, when the UTC calendar has already rolled but the vendor's
+    trading day has not (22:00 ET = 02:00 UTC tomorrow).
     """
-    boundary = ns_to_date(t1_boundary_ns(session_at))
-    start = boundary - timedelta(days=history_days)
-    end = boundary - timedelta(days=1)
+    start_ns, end_ns = history_window(session_at, history_days)
     return {
-        "start": start.isoformat(),
-        "end": end.isoformat(),
+        "start": ns_to_date(start_ns).isoformat(),
+        "end": (ns_to_date(end_ns) - timedelta(days=1)).isoformat(),
         "history_days": int(history_days),
     }
 
