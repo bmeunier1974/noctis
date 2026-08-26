@@ -27,6 +27,7 @@ import pytest
 from noctis.engine.close import ClosePhase
 from noctis.engine.research_phase import ResearchPhase
 from noctis.engine.trading_phase import TradingPhase
+from noctis.observability.changelog import newest_entry
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,9 +45,24 @@ DOTTED_PATH = re.compile(r"`(noctis(?:\.[a-z0-9_]+)+)`")
 # The phase objects the runtime holds, one per phase.
 PHASE_CLASSES = (ResearchPhase, TradingPhase, ClosePhase)
 
+# The two pages that are history rather than a map. A dated entry records what a change *did* —
+# and a change may have deleted a module (#342 deletes `src/noctis/backtest/candidate.py`), so
+# naming it there is the truth, not a dangling pointer. What still has to resolve on those pages
+# is their living prose: the header and the component/site table a declaration is written against.
+CHANGELOGS = ("docs/engine-changelog.md", "docs/prompt-changelog.md")
+
 
 def _read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def _living_prose(page: str, text: str) -> str:
+    """The half of a page that points at today's engine: all of it, or — for a changelog — the
+    prose above its newest dated entry, found by the reader the ratchets themselves parse with."""
+    if page not in CHANGELOGS:
+        return text
+    entry = newest_entry(text)
+    return text if entry is None else text.split(f"## {entry.heading}", 1)[0]
 
 
 def _resolves(dotted: str) -> bool:
@@ -71,15 +87,36 @@ def _glossary_entry(title: str) -> str:
 @pytest.mark.parametrize("page", PAGES)
 def test_every_module_path_a_page_spells_out_exists(page: str) -> None:
     """A page may not point at a module the engine no longer has."""
-    missing = [path for path in MODULE_PATH.findall(_read(page)) if not (ROOT / path).is_file()]
+    prose = _living_prose(page, _read(page))
+    missing = [path for path in MODULE_PATH.findall(prose) if not (ROOT / path).is_file()]
     assert not missing, f"{page} names module paths that do not exist: {missing}"
 
 
 @pytest.mark.parametrize("page", PAGES)
 def test_every_dotted_module_reference_resolves(page: str) -> None:
     """`noctis.engine.close` and friends resolve; a symbol resolves through its module."""
-    missing = [dotted for dotted in DOTTED_PATH.findall(_read(page)) if not _resolves(dotted)]
+    prose = _living_prose(page, _read(page))
+    missing = [dotted for dotted in DOTTED_PATH.findall(prose) if not _resolves(dotted)]
     assert not missing, f"{page} names dotted modules that do not exist: {missing}"
+
+
+def test_a_changelogs_dated_entries_are_history_and_its_header_is_still_a_map() -> None:
+    """The one page kind whose prose may name a deleted module: an entry declaring a deletion has
+    to spell the file it deleted, while everything above the newest entry — the header and the
+    component table the ratchet's declaration grammar is written against — still has to resolve."""
+    text = (
+        "# Engine changelog\n\n| `backtest` | `src/noctis/backtest/pipeline.py` |\n\n"
+        "## 2026-08-25 — components: backtest — behaviour: unchanged\n\n"
+        "`src/noctis/backtest/candidate.py` is deleted.\n"
+    )
+
+    assert MODULE_PATH.findall(_living_prose(CHANGELOGS[0], text)) == [
+        "src/noctis/backtest/pipeline.py"
+    ]
+    assert MODULE_PATH.findall(_living_prose("docs/architecture.md", text)) == [
+        "src/noctis/backtest/pipeline.py",
+        "src/noctis/backtest/candidate.py",
+    ]
 
 
 @pytest.mark.parametrize("phase", PHASE_CLASSES, ids=lambda cls: cls.__name__)
