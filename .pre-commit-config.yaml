@@ -32,15 +32,17 @@ repos:
   # The engine fingerprint ratchet, run locally for the same reason mypy is: catch it before the
   # push, not in CI. `language: system` — no isolated env to build, and the script puts `src/` on
   # sys.path itself, so a plain checkout works. Scoped to the files that can move a component
-  # digest (plus the record itself); a docs or test edit never triggers it.
+  # digest, plus the record and the changelog an arbiter move is declared on — a declaration is
+  # half the check's input, exactly as the prompt hook watches its own page; any other docs or
+  # test edit never triggers it.
   - repo: local
     hooks:
       - id: engine-fingerprint
-        name: engine fingerprint (arbiter drift needs an ENGINE_VERSION bump)
+        name: engine fingerprint (arbiter drift needs an ENGINE_VERSION bump or a no-op entry)
         entry: python scripts/engine_fingerprint.py --check
         language: system
         pass_filenames: false
-        files: ^(src/noctis/|strategies/|mandate/|MEMORY\.seed\.md|engine_fingerprint\.json)
+        files: ^(src/noctis/|strategies/|mandate/|MEMORY\.seed\.md|docs/engine-changelog\.md|engine_fingerprint\.json)
 
       # The prompt-asset ratchet, its twin on a different clock: a prompt change fails until the
       # newest docs/prompt-changelog.md entry names the site it moved. Scoped to the prompt-bearing
