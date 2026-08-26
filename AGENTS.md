@@ -75,7 +75,10 @@ mypy                       # type-check src/noctis (config in pyproject.toml)
 pre-commit run --all-files # every quality gate (install once: pre-commit install)
 python scripts/engine_fingerprint.py [--write]   # the engine fingerprint ratchet: check, or
                            # regenerate engine_fingerprint.json after moving a behavioural file
-                           # (--write refuses arbiter drift with no ENGINE_VERSION bump: declare it)
+                           # (--write refuses UNDECLARED arbiter drift; declare it either way:
+                           # an ENGINE_VERSION bump for a behaviour change, or a dated
+                           # 'behaviour: unchanged' entry atop docs/engine-changelog.md for a
+                           # mechanical one)
 python scripts/prompt_fingerprint.py [--write]   # the prompt-asset ratchet, its twin on its own
                            # clock: one content hash per LLM call site. --write refuses a prompt
                            # change the newest docs/prompt-changelog.md entry does not declare

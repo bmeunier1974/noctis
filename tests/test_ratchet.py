@@ -381,6 +381,16 @@ def test_the_glossary_defines_one_mechanism_two_policies_two_records_and_one_nul
     assert "engine_id.compare" in entry
 
 
+def test_the_glossary_names_the_declared_no_op_and_the_one_changelog_reader():
+    """The second way an arbiter move is declared is a term of the domain, so it is defined where
+    the terms are — beside the one module that reads a declaration for both policies."""
+    entry = _glossary_entry("Fingerprint ratchet")
+
+    assert "no-op" in entry
+    assert engine_ratchet.CHANGELOG_PATH in entry
+    assert "noctis.observability.changelog" in entry
+
+
 def test_the_page_a_contributor_reads_names_the_policy_module_and_the_shared_mechanics(policy):
     """Each ratchet's section says where its *rule* is and that the mechanics are shared, so a
     contributor edits the policy rather than a copy of the record machinery."""

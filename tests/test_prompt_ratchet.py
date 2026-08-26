@@ -2,8 +2,10 @@
 
 The mechanics — building, loading and writing the record, the four-case check, what ``--write``
 does with a verdict, the report — are shared by every ratchet and tested once in
-``tests/test_ratchet.py``. What is left here is the policy this module exists to state: the
-changelog reader, which entry declares what, and which drift ``--write`` refuses to record.
+``tests/test_ratchet.py``, and how a changelog entry is *read* is shared too, tested once in
+``tests/test_changelog.py``. What is left here is the policy this module exists to state: the one
+clause it binds (``sites:``), which entry declares what, and which drift ``--write`` refuses to
+record.
 
 Every assertion is external behaviour — the status a comparison returns, the site and file names it
 prints, the exit code the entrypoint gives CI. The comparison is pure over two records, so a
@@ -24,7 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from noctis.observability import prompt_ratchet, ratchet
+from noctis.observability import engine_ratchet, prompt_ratchet, ratchet
+from noctis.observability.changelog import newest_entry
 from noctis.observability.prompt_id import SITE_ASSETS, fingerprint
 from noctis.observability.prompt_ratchet import (
     CHANGELOG_PATH,
@@ -32,13 +35,11 @@ from noctis.observability.prompt_ratchet import (
     RECORD_PATH,
     REGENERATE_COMMAND,
     SPEC,
-    ChangelogEntry,
     build_record,
     check,
     compare_records,
     load_record,
     main,
-    newest_entry,
     regenerate,
     write_record,
 )
@@ -46,6 +47,9 @@ from noctis.observability.prompt_ratchet import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RATCHET_SOURCE = REPO_ROOT / "src" / "noctis" / "observability" / "prompt_ratchet.py"
 SCRIPT = REPO_ROOT / "scripts" / "prompt_fingerprint.py"
+
+# The one clause of the shared changelog grammar this policy binds.
+SITES_CLAUSE = "sites"
 
 AUTHOR_FILE = "src/noctis/research/author.py"
 AUTHOR_SIBLING = "src/noctis/research/contract_sheet.py"
@@ -130,6 +134,15 @@ def test_the_policy_module_runs_on_the_shared_mechanics(tmp_path):
     assert compare_records(build_record(root), load_record(root)).status == "ok"
 
 
+def test_the_policy_re_exports_none_of_the_shared_reader():
+    """One parser for both ratchets, reached at one name. A convenience alias here would be a
+    second name for the same reading, and the next contributor would have to work out which of
+    the two the other ratchet binds."""
+    moved = ("ChangelogEntry", "newest_entry", "read_entry", "header", "declared_since", "footer")
+
+    assert [name for name in moved if hasattr(prompt_ratchet, name)] == []
+
+
 def test_a_record_declares_the_changelog_entry_it_was_written_against(tmp_path):
     """The changelog head is this policy's own field in the shared record — the second half of
     the rule is checkable only because the record carries the entry it was regenerated against."""
@@ -139,76 +152,6 @@ def test_a_record_declares_the_changelog_entry_it_was_written_against(tmp_path):
     assert record["changelog"]["path"] == CHANGELOG_PATH
     assert "2026-01-01" in record["changelog"]["heading"]
     assert set(record["changelog"]["declares"]) == set(SITE_ASSETS)
-
-
-# ── the changelog reader, pure ────────────────────────────────────────────────────────────
-
-
-def test_the_newest_entry_is_the_first_one_and_names_its_sites():
-    text = _changelog(
-        "## 2026-02-02 — sites: author, ideation\n\nSharpened the brief.\n",
-        "## 2026-01-01 — sites: distill\n\nOlder.\n",
-    )
-
-    entry = newest_entry(text)
-
-    assert isinstance(entry, ChangelogEntry)
-    assert entry.sites == ("author", "ideation")
-    assert "2026-02-02" in entry.heading
-
-
-def test_an_entry_with_no_sites_marker_declares_nothing():
-    """Prose is not a declaration — the sites have to be named where a machine can read them."""
-    entry = newest_entry(_changelog("## 2026-02-02\n\nReworded the author prompt a bit.\n"))
-
-    assert entry is not None
-    assert entry.sites == ()
-
-
-def test_a_heading_inside_a_fenced_code_block_is_not_an_entry():
-    """The page documents its own format in a fence — that template must declare nothing."""
-    text = (
-        "# Prompt changelog\n\n"
-        "```text\n## <YYYY-MM-DD> — sites: <site>[, <site>…]\n```\n\n"
-        "## 2026-02-02 — sites: author\n\nThe real entry.\n"
-    )
-
-    entry = newest_entry(text)
-
-    assert entry is not None
-    assert entry.sites == ("author",)
-    assert "2026-02-02" in entry.heading
-
-
-def test_a_fenced_block_inside_an_entry_does_not_end_it():
-    """Prose after the fence still belongs to the entry, so amending it re-declares the change."""
-
-    def entry_for(note: str):
-        return newest_entry(
-            _changelog(
-                f"## 2026-02-02 — sites: author\n\n```text\n## not an entry\n```\n\n{note}\n",
-                "## 2026-01-01 — sites: distill\n\nOlder.\n",
-            )
-        )
-
-    before, after = entry_for("One change."), entry_for("One change, amended.")
-
-    assert before is not None and after is not None
-    assert before.sites == ("author",)
-    assert before.digest != after.digest
-
-
-def test_a_changelog_with_no_entries_at_all_reads_as_none():
-    assert newest_entry("# Prompt changelog\n\nNothing yet.\n") is None
-
-
-def test_editing_an_entrys_body_changes_its_identity():
-    """Amending the newest entry is how a second change in one PR gets declared."""
-    before = newest_entry(_changelog("## 2026-02-02 — sites: author\n\nOne change.\n"))
-    after = newest_entry(_changelog("## 2026-02-02 — sites: author\n\nOne change, and another.\n"))
-
-    assert before is not None and after is not None
-    assert before.digest != after.digest
 
 
 # ── undeclared drift fails, and is what --write refuses ───────────────────────────────────
@@ -376,12 +319,12 @@ def test_the_check_prints_the_site_and_the_file_that_moved(tmp_path, capsys):
 
 
 def _committed_entry_sites() -> set[str]:
-    """Every site any entry in the committed changelog names, read newest-first with the module's
-    own entry parser (each pass consumes the heading it just read)."""
+    """Every site any entry in the committed changelog names, read newest-first with the shared
+    entry parser (each pass consumes the heading it just read)."""
     text = (REPO_ROOT / CHANGELOG_PATH).read_text()
     sites: set[str] = set()
     while (entry := newest_entry(text)) is not None:
-        sites.update(entry.sites)
+        sites.update(entry.names(SITES_CLAUSE))
         heading = f"## {entry.heading}"
         text = text[text.index(heading) + len(heading) :]
     return sites
@@ -399,7 +342,20 @@ def test_the_newest_changelog_entry_names_only_sites_that_exist():
     entry = newest_entry((REPO_ROOT / CHANGELOG_PATH).read_text())
 
     assert entry is not None
-    assert set(entry.sites) <= set(SITE_ASSETS)
+    assert set(entry.names(SITES_CLAUSE)) <= set(SITE_ASSETS)
+
+
+def test_the_committed_records_changelog_head_is_what_this_tree_reads():
+    """The drift check compares *sites* only, so the record's changelog block — the second half
+    of the rule — is unpinned by it: a parser that read this page differently would leave the
+    committed head stale and nothing would say so. This is that pin, field by field."""
+    committed = json.loads((REPO_ROOT / RECORD_PATH).read_text())["changelog"]
+    read_now = build_record(REPO_ROOT)["changelog"]
+
+    assert committed["path"] == read_now["path"] == CHANGELOG_PATH
+    assert committed["heading"] == read_now["heading"]
+    assert committed["digest"] == read_now["digest"]
+    assert committed["declares"] == read_now["declares"]
 
 
 def test_the_prompt_record_is_separate_from_the_engine_record():
@@ -440,6 +396,20 @@ def test_the_declared_change_rule_is_documented_where_a_contributor_reads_it():
     assert "refuses" in script
     assert "changelog" in docstring and "declar" in docstring
     assert "--write" in docstring and "refus" in docstring
+
+
+def test_the_page_names_the_shared_reader_and_the_other_page_it_serves():
+    """One reader, two pages, one declared-change rule: this section says where an entry is
+    *parsed*, and that the engine ratchet declares the same way over its own changelog — so a
+    contributor who arrives at either half reads one story rather than two lookalikes."""
+    text = (REPO_ROOT / "docs" / "development.md").read_text(encoding="utf-8")
+    start = text.find("## The prompt fingerprint ratchet\n")
+    assert start >= 0, "docs/development.md: the prompt-ratchet section is gone — retarget this"
+    end = text.find("\n## ", start + 1)
+    section = text[start : end if end >= 0 else len(text)]
+
+    assert "src/noctis/observability/changelog.py" in section
+    assert engine_ratchet.CHANGELOG_PATH in section
 
 
 @pytest.mark.parametrize("site", sorted(SITE_ASSETS))

@@ -13,12 +13,12 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from noctis.backtest.candidate import Candidate
 from noctis.backtest.scorecard import (
     DEFAULT_ANNUALIZATION_CAP,
     DEFAULT_MAX_PERIOD_RATIO,
     Metric,
 )
+from noctis.strategies.candidate import Candidate
 from noctis.strategies.families import FamilyRegistry
 
 

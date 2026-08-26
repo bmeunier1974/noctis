@@ -86,11 +86,13 @@ uv run python scripts/prompt_fingerprint.py --write  # regenerate prompt_fingerp
 declared `ENGINE_VERSION` plus one digest per behavioural component — and, under each component,
 a digest per allowlisted file, so a drift report names the file that moved rather than every file
 the component covers. The digests come from `src/noctis/observability/engine_id.py`. The **rule** —
-the tier split below, and the `ENGINE_VERSION` agreement it needs — lives in
-`src/noctis/observability/engine_ratchet.py`; the mechanics every ratchet shares — the record, the
-check, `--write` and the report — live once in `src/noctis/observability/ratchet.py`, so a fix to
-them cannot land in one ratchet and be missed in the other. The check runs in **CI** and in
-**pre-commit**.
+the tier split below, the `ENGINE_VERSION` agreement it needs, and the declared no-op that is its
+second declaration — lives in `src/noctis/observability/engine_ratchet.py`; the mechanics every
+ratchet shares — the record, the check, `--write` and the report — live once in
+`src/noctis/observability/ratchet.py`, so a fix to them cannot land in one ratchet and be missed in
+the other. The check runs in **CI** and in **pre-commit**, where the hook watches
+[`docs/engine-changelog.md`](engine-changelog.md) as well as the code: a declaration is half of
+what the check reads.
 
 Why it exists: `ENGINE_VERSION` is the key two runs' numbers are compared on
 (`noctis engine` prints it), and a declared version nobody remembers to bump is worse than none —
@@ -99,7 +101,8 @@ it asserts a comparability that does not hold. The check is split on the arbiter
 
 | Component drift, no `ENGINE_VERSION` bump | Result |
 |---|---|
-| `gates`, `backtest` — the **arbiter**: what passes, and what a number means | **Fail.** Naming the component and the files that moved. This is the change that invalidates every stored champion comparison, so it can never land silently — and `--write` **refuses to regenerate** it (see below) |
+| `gates`, `backtest` — the **arbiter**: what passes, and what a number means | **Fail.** Naming the component and the files that moved. This is the change that invalidates every stored champion comparison, so it can never land silently — and while it is *undeclared*, `--write` **refuses to regenerate** it (see below) |
+| the same two, **declared a no-op** — a dated entry at the top of [`docs/engine-changelog.md`](engine-changelog.md) naming the component under `behaviour: unchanged` | **Fail, and regenerable.** The claim is "this edit was mechanical", so comparability did not move and the record is merely stale: the drift prints under its own tag, `(arbiter, declared no-op)`, and `--write` catches the record up in one command |
 | `research`, `prompts`, `profiles`, `seeds`, `memory_seed`, `schema` — the **searcher** | **Warn and pass.** Naming the component and the files. Improving the searcher must not invalidate an experiment whose arbiter held still, and a ratchet that fires on a docstring edit gets disabled |
 
 The **same line governs resuming a run** (`src/noctis/observability/engine_change.py`): arbiter
@@ -111,10 +114,12 @@ constant in `engine_id.py`, and a test binds them to each other component by com
 of that set would eventually disagree, and the disagreement would be silent.
 
 The rule in full, in evaluation order: a missing or unreadable record fails; a record declaring
-another `ENGINE_VERSION` than the tree fails as **stale**; arbiter drift fails (with the version
-unchanged that is undeclared drift, with it bumped the record simply was not regenerated); drift
-confined to the searcher tier warns and exits zero. Staleness is always reported and always names
-the regeneration command — which tier moved decides only whether it *blocks*.
+another `ENGINE_VERSION` than the tree fails as **stale**; arbiter drift fails, split on how it was
+declared (with the version unchanged and nothing on the changelog page that is undeclared drift;
+with the bump in the tree, or with a no-op entry naming the component, the record simply was not
+regenerated with it); drift confined to the searcher tier warns and exits zero. Staleness is always
+reported and always names the regeneration command — which tier moved decides only whether it
+*blocks*, and how the move was declared decides only whether `--write` may be what fixes it.
 
 A component **new to the map** is drift too, even when this checkout cannot identify it (an
 optional input, a file not landed yet): what moved is one rule, `engine_id.compare` — present on
@@ -122,11 +127,38 @@ one side only moved, two nulls did not — so a fingerprint surface *appearing* 
 prints as `null -> null` with no file lines under it, because the name is the news, and the tier
 then decides as usual: a searcher name warns, an arbiter name fails.
 
+**Two declarations, because a digest is a content hash and a version is a claim about results.**
+An `ENGINE_VERSION` bump says *these numbers are no longer comparable* — the declaration a
+behaviour change needs, and the only one that moves the key runs are compared on. A **no-op entry**
+at the top of [`docs/engine-changelog.md`](engine-changelog.md) says *this edit was mechanical*: a
+rename, an import path, a docstring, a type annotation, a deleted pass-through move the digest on
+every byte, while `ENGINE_VERSION` means *incomparable*, so bumping for one of those would assert a
+false incomparability. The entry's heading carries **both** clauses —
+`## 2026-08-25 — components: backtest — behaviour: unchanged` — because `components:` on its own
+narrates: the page is the arbiter's human history and an entry may describe a bump, while no entry
+is ever demanded for one. What qualifies as a no-op, what never does, and the reviewer's bar (the
+suite passes with its goldens and scorecard fixtures *unchanged*) are stated on that page.
+
+**The declared-change rule is the prompt ratchet's, verbatim** — the other page, the other clock,
+one rule: the newest entry must *name the component* **and** have arrived after the committed
+record was written (the record stores the digest of the entry it was regenerated against), or
+yesterday's no-op would be a standing permission to keep editing that component forever. How an
+entry is *read* is shared code, `src/noctis/observability/changelog.py`, and this policy binds two
+of the clauses it parses: `components:` and `behaviour:`.
+
+Note what declaring a no-op does **not** do. It lifts the `--write` refusal and nothing else: the
+digest moved, so the resume policy still refuses a run frozen under the old engine until
+`--allow-engine-upgrade` accepts it, and `comparable_key` still buckets this checkout separately.
+Over-partitioning is the accepted failure — a wrong claim here can cost a contributor a refusal
+they have to override, never pool two engines' numbers.
+
 So, when you move a component:
 
 ```bash
-# 1. arbiter component (gates/backtest)? bump ENGINE_VERSION in
-#    src/noctis/observability/engine_id.py — searcher-only changes need no bump
+# 1. arbiter component (gates/backtest)? DECLARE the move — bump ENGINE_VERSION in
+#    src/noctis/observability/engine_id.py for a behaviour change, or add a dated
+#    "components: <name> — behaviour: unchanged" entry at the top of docs/engine-changelog.md
+#    for a mechanical one. Searcher-only changes need neither.
 # 2. regenerate the record, and commit it in the SAME PR so the diff shows what moved
 uv run python scripts/engine_fingerprint.py --write
 ```
@@ -135,23 +167,43 @@ uv run python scripts/engine_fingerprint.py --write
 at once, so a PR that moves a searcher component (the common case) is told to run it — and if that
 also quietly absorbed a moved `gates` digest, the ratchet would hold only for contributors who read
 the failure before typing the command it printed. So `--write` runs the check first and **refuses to
-regenerate** on arbiter drift while the recorded and computed `ENGINE_VERSION` agree: it writes
-nothing, exits 1, and prints the bump-or-restore guidance plus its refusal.
+regenerate** *undeclared* arbiter drift while the recorded and computed `ENGINE_VERSION` agree: it
+writes nothing, exits 1, and prints all three outs plus its refusal — and, because "I wrote an entry
+and it still fails" is the question this tool gets asked, the changelog entry it actually read.
 
 ```text
 $ uv run python scripts/engine_fingerprint.py --write
 FAIL  engine fingerprint ratchet (engine_fingerprint.json)
   arbiter drift with no ENGINE_VERSION bump: gates. A change here invalidates every stored
   champion comparison — bump ENGINE_VERSION in src/noctis/observability/engine_id.py in this PR,
-  or restore the behaviour
+  or declare a no-op with a dated entry at the top of docs/engine-changelog.md whose heading names
+  the component(s), e.g. "## 2026-08-25 — components: gates — behaviour: unchanged" — or restore
+  the behaviour
   gates (arbiter): 4a9c1e0f8b21d735 -> 0d45608deb971291
       src/noctis/champions/promotion.py
+  newest docs/engine-changelog.md entry: none
   refusing to regenerate: --write cannot be the way an undeclared arbiter move gets recorded
 ```
 
-An arbiter move must therefore arrive **declared** — bump, then regenerate — and the two-step
-sequence above is the only one that lands it. Everything else stays a single command that leaves
-the tree checkable: searcher-only drift, an arbiter move whose bump *is* already in the tree (the
+Declared, the same move is an ordinary stale record. It still fails — the committed statement does
+not match the tree until it is regenerated — but it fails under its own tag, with regenerating as
+the advice, and `--write` obeys:
+
+```text
+$ uv run python scripts/engine_fingerprint.py
+FAIL  engine fingerprint ratchet (engine_fingerprint.json)
+  declared no-op arbiter drift: backtest. The changelog entry is there; the record was not
+  regenerated with it
+  backtest (arbiter, declared no-op): 84063234bcbf3395 -> aa2cfb19fd0300f3
+      src/noctis/backtest/pipeline.py
+  newest docs/engine-changelog.md entry: 2026-08-25 — components: backtest — behaviour: unchanged
+  regenerate the record: uv run python scripts/engine_fingerprint.py --write
+```
+
+An arbiter move must therefore arrive **declared** — declare, then regenerate — and that two-step
+sequence is the only one that lands it, whichever of the two declarations it is. Everything else
+stays a single command that leaves the tree checkable: searcher-only drift, an arbiter move whose
+bump *is* already in the tree, an arbiter move an entry already declares a no-op (in both, the
 record had simply not caught up), no drift at all, and a missing or unreadable record — there is
 nothing to compare against, and that is how the baseline is created in the first place.
 
@@ -163,10 +215,14 @@ gitignored mandate — move no digest and never fire the check.
 `prompt_fingerprint.json` (repo root) is the same idea for what the model is *told*: one content
 hash per LLM call site, plus a digest per allowlisted file under it. The hashes come from
 `src/noctis/observability/prompt_id.py` (`site_digest(site)` is the pure read a future benchmark
-record's key uses); the **rule** — the declared-change rule below, and the changelog reader it
-needs — lives in `src/noctis/observability/prompt_ratchet.py`, on the same shared mechanics
-(`src/noctis/observability/ratchet.py`) the engine ratchet runs on. It runs in **CI** and in
-**pre-commit**, exactly like the engine one.
+record's key uses); the **rule** — the declared-change rule below — lives in
+`src/noctis/observability/prompt_ratchet.py`, on the same shared mechanics
+(`src/noctis/observability/ratchet.py`) the engine ratchet runs on. How an entry is *read* is
+shared too: `src/noctis/observability/changelog.py` parses a heading into ` — `-separated
+`key: value` clauses, and this policy binds one of them, `sites:` — the engine ratchet declares
+through that same reader over [`docs/engine-changelog.md`](engine-changelog.md), binding
+`components:` and `behaviour:`, so the two declared-change rules are one sentence read twice. It
+runs in **CI** and in **pre-commit**, exactly like the engine one.
 
 It is a **separate artifact on a separate clock**, and deliberately so: prompts and arbiter
 behaviour drift independently, so a prompt rewrite must not read as "the judge moved" and a

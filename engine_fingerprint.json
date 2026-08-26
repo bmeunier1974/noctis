@@ -1,12 +1,19 @@
 {
+  "changelog": {
+    "declares": [
+      "backtest"
+    ],
+    "digest": "9f226f41bef5bf86",
+    "heading": "2026-08-25 \u2014 components: backtest \u2014 behaviour: unchanged",
+    "path": "docs/engine-changelog.md"
+  },
   "components": {
     "backtest": {
-      "digest": "3ba3e0bf1c97134f",
+      "digest": "42acf20342ecc393",
       "files": {
-        "src/noctis/backtest/candidate.py": "0d1caeeb448c084e",
-        "src/noctis/backtest/pipeline.py": "c3d24df4f19b181e",
-        "src/noctis/backtest/prefilter.py": "eb7cee74439b8f92",
-        "src/noctis/backtest/validate.py": "d8d50c9f22675597",
+        "src/noctis/backtest/pipeline.py": "8a2559af15005613",
+        "src/noctis/backtest/prefilter.py": "e46d506265ff8c34",
+        "src/noctis/backtest/validate.py": "c86d81574d86c2bf",
         "src/noctis/broker/paper.py": "91fc9955a359bb2b",
         "src/noctis/broker/seam.py": "7a7560204b21f563"
       },

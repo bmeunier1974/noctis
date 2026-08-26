@@ -68,7 +68,6 @@ COMPONENT_PATHS: Mapping[str, tuple[str, ...]] = {
     "backtest": (
         "src/noctis/backtest/pipeline.py",
         "src/noctis/backtest/validate.py",
-        "src/noctis/backtest/candidate.py",
         "src/noctis/backtest/prefilter.py",
         "src/noctis/broker/seam.py",
         "src/noctis/broker/paper.py",

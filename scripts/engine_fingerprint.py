@@ -4,9 +4,11 @@
     uv run python scripts/engine_fingerprint.py            # check (what CI and pre-commit run)
     uv run python scripts/engine_fingerprint.py --write     # regenerate, then commit the file
 
-Arbiter drift (``gates``, ``backtest``) with no ``ENGINE_VERSION`` bump fails the check — and
-``--write`` **refuses** to record it (writes nothing, exits 1), because regenerating rewrites every
-component at once and so cannot also be how an undeclared arbiter move gets committed (story #145).
+Arbiter drift (``gates``, ``backtest``) fails the check until it is declared — an ``ENGINE_VERSION``
+bump for a behaviour change, or a ``behaviour: unchanged`` entry in ``docs/engine-changelog.md`` for
+a mechanical one (story #355) — and ``--write`` **refuses** to record an *undeclared* one (writes
+nothing, exits 1), because regenerating rewrites every component at once and so cannot also be how
+an undeclared arbiter move gets committed (story #145).
 
 A shim, a guard and one import: the rule lives in :mod:`noctis.observability.engine_ratchet` and
 the mechanics it is judged by in :mod:`noctis.observability.ratchet` (both inside mypy's scope and

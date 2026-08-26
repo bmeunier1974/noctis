@@ -136,6 +136,17 @@ def test_page_names_every_engine_component(page: str) -> None:
         assert re.search(rf"`{component}`[^\n]*\*\*arbiter\*\*", page), component
 
 
+@pytest.mark.parametrize("component", sorted(engine_id.ARBITER_COMPONENTS))
+def test_the_arbiter_rows_cover_exactly_the_files_their_digest_does(page: str, component: str):
+    """The two rows a run's comparability hangs off name the files the map hashes and no other.
+    A row still listing a deleted module (`backtest/candidate.py`, #342) tells the reader the
+    digest covers a file that is not there — the one thing a contract page must never do."""
+    row = next(line for line in page.splitlines() if line.startswith(f"| `{component}`"))
+    named = [Path(rel).name for rel in re.findall(r"`([^`]+\.py)`", row)]
+
+    assert named == [Path(rel).name for rel in engine_id.COMPONENT_PATHS[component]]
+
+
 # ── the numbers the page pins are the constants ────────────────────────────────────────────
 
 
