@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from noctis.observability import prompt_ratchet, ratchet
+from noctis.observability import engine_ratchet, prompt_ratchet, ratchet
 from noctis.observability.changelog import newest_entry
 from noctis.observability.prompt_id import SITE_ASSETS, fingerprint
 from noctis.observability.prompt_ratchet import (
@@ -396,6 +396,20 @@ def test_the_declared_change_rule_is_documented_where_a_contributor_reads_it():
     assert "refuses" in script
     assert "changelog" in docstring and "declar" in docstring
     assert "--write" in docstring and "refus" in docstring
+
+
+def test_the_page_names_the_shared_reader_and_the_other_page_it_serves():
+    """One reader, two pages, one declared-change rule: this section says where an entry is
+    *parsed*, and that the engine ratchet declares the same way over its own changelog — so a
+    contributor who arrives at either half reads one story rather than two lookalikes."""
+    text = (REPO_ROOT / "docs" / "development.md").read_text(encoding="utf-8")
+    start = text.find("## The prompt fingerprint ratchet\n")
+    assert start >= 0, "docs/development.md: the prompt-ratchet section is gone — retarget this"
+    end = text.find("\n## ", start + 1)
+    section = text[start : end if end >= 0 else len(text)]
+
+    assert "src/noctis/observability/changelog.py" in section
+    assert engine_ratchet.CHANGELOG_PATH in section
 
 
 @pytest.mark.parametrize("site", sorted(SITE_ASSETS))

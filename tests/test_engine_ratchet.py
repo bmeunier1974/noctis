@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from noctis.observability import engine_change, engine_id, engine_ratchet, ratchet
 from noctis.observability.changelog import newest_entry
@@ -654,6 +656,34 @@ def test_the_ratchet_and_the_resume_policy_read_one_arbiter_components_constant(
 # ── wiring and documentation ──────────────────────────────────────────────────────────────
 
 
+def _development_section(title: str) -> str:
+    """One ``## <title>`` section of the page that explains this ratchet to a contributor."""
+    text = (REPO_ROOT / "docs" / "development.md").read_text(encoding="utf-8")
+    start = text.find(f"## {title}\n")
+    assert start >= 0, f"docs/development.md: the '{title}' section is gone — retarget this test"
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end >= 0 else len(text)]
+
+
+def _documented() -> str:
+    """That section, whitespace-collapsed, so a sentence the page wraps still reads as one."""
+    return " ".join(_development_section("The engine fingerprint ratchet").split())
+
+
+def _assert_transcribed(printed: str) -> None:
+    """Every line the tool printed appears in the page's transcript, bar the digest pair.
+
+    A transcript is only worth printing if a contributor can compare it with their terminal, so
+    it is quoted from the terminal. The one line that cannot be is the ``a -> b`` pair: those
+    digests are the miniature tree's, where the page's are an illustration.
+    """
+    documented = _documented()
+    for line in printed.splitlines():
+        if "->" in line:
+            continue
+        assert " ".join(line.split()) in documented, line
+
+
 def test_the_ratchet_runs_in_ci_and_in_pre_commit():
     workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
     hooks = (REPO_ROOT / ".pre-commit-config.yaml").read_text()
@@ -661,6 +691,31 @@ def test_the_ratchet_runs_in_ci_and_in_pre_commit():
     assert "scripts/engine_fingerprint.py" in workflow
     assert "--check" in workflow
     assert "scripts/engine_fingerprint.py" in hooks
+
+
+def test_the_pre_commit_hook_re_runs_the_check_when_the_engine_changelog_moves():
+    """The declaration is half the input, so editing it has to re-run the check — otherwise a
+    no-op entry lands in a commit the hook never looked at, exactly as the prompt hook watches
+    its own page. A docs edit that declares nothing still never triggers it."""
+    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    hooks = {hook["id"]: hook for repo in config["repos"] for hook in repo["hooks"]}
+    pattern = hooks["engine-fingerprint"]["files"]
+
+    assert re.search(pattern, CHANGELOG_PATH)
+    assert re.search(pattern, GATES_FILE)
+    assert re.search(pattern, RECORD_PATH)
+    assert not re.search(pattern, "docs/development.md")
+
+
+def test_the_operating_contract_names_both_ways_to_declare_an_arbiter_move():
+    """AGENTS.md is what an agent reads before it edits anything, and its one-line summary of
+    this command has to name both declarations — "declare it" is not a fix you can type."""
+    agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    after = agents.split("python scripts/engine_fingerprint.py", 1)[1]
+    comment = after.split("python scripts/prompt_fingerprint.py", 1)[0]
+
+    assert "ENGINE_VERSION" in comment
+    assert CHANGELOG_PATH in comment
 
 
 def test_the_regeneration_command_is_documented():
@@ -681,6 +736,57 @@ def test_the_write_refusal_is_documented_where_a_contributor_reads_the_rule():
     assert "refuses to regenerate" in development
     assert "declared" in development
     assert "refuses" in script
+
+
+def test_the_declared_no_op_path_is_documented_where_the_bump_path_is():
+    """A contributor who reads only this page must be able to reach *both* declarations from it:
+    a rule stated in half is the one people work around."""
+    section = _development_section("The engine fingerprint ratchet")
+
+    assert CHANGELOG_PATH in section
+    assert "no-op" in section
+    assert "declared" in section
+    assert "behaviour: unchanged" in section
+
+
+def test_the_documented_refusal_transcript_names_the_three_outs_in_the_tools_own_words(
+    tmp_path, capsys
+):
+    """The page's ``--write`` transcript is the terminal's: the refusal names three outs — bump,
+    declare a no-op, restore — and names the changelog entry the check actually read."""
+    root = _build_tree(tmp_path)
+    main(["--write", "--root", str(root)])
+    _edit(root, GATES_FILE)
+    capsys.readouterr()
+
+    assert main(["--write", "--root", str(root)]) == 1
+
+    _assert_transcribed(capsys.readouterr().out)
+
+
+def test_the_documented_declared_no_op_transcript_is_the_tools_own_words(tmp_path, capsys):
+    """And the page shows the other half of the same story: a declared move still fails until the
+    record catches up, filed under its own tag, with regenerating as the advice."""
+    root = _build_tree(tmp_path)
+    main(["--write", "--root", str(root)])
+    _edit(root, BACKTEST_FILE)
+    _declare(root, "2026-08-25 — components: backtest — behaviour: unchanged")
+    capsys.readouterr()
+
+    assert main(["--check", "--root", str(root)]) == 1
+
+    _assert_transcribed(capsys.readouterr().out)
+
+
+def test_the_page_says_what_declaring_a_no_op_does_not_lift():
+    """The declaration lifts the ``--write`` refusal and nothing else: the digest still moved, so
+    the resume policy and ``comparable_key`` keep partitioning on it. Over-partitioning is the
+    accepted failure, and a page that left that out would read as "a no-op costs nothing"."""
+    section = _development_section("The engine fingerprint ratchet")
+
+    assert "resume policy" in section
+    assert "comparable_key" in section
+    assert "over-partition" in section.lower()
 
 
 def test_the_tier_rule_is_documented_in_the_module_docstring():
@@ -736,6 +842,19 @@ def test_the_script_docstring_names_what_write_refuses():
 
 
 CHANGELOG_PAGE = REPO_ROOT / CHANGELOG_PATH
+
+# The clause of the shared changelog grammar this policy reads names off.
+COMPONENTS_CLAUSE = "components"
+
+
+def test_the_newest_changelog_entry_names_only_arbiter_components():
+    """A declaration a machine cannot resolve to a component declares nothing — a typo'd or
+    searcher name would leave real drift undeclared under a heading that reads as if it covered
+    it. Holds with no entry on the page at all, which is the state it ships in."""
+    entry = newest_entry(CHANGELOG_PAGE.read_text(encoding="utf-8"))
+    names = () if entry is None else entry.names(COMPONENTS_CLAUSE)
+
+    assert set(names) <= engine_id.ARBITER_COMPONENTS
 
 
 def test_the_engine_changelog_page_carries_its_grammar_and_no_entries_yet():
