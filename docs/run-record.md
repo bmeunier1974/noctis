@@ -279,7 +279,7 @@ A missing input yields a `null` component with a note, never a crash.
 | Component | Tier | Decides | Covers |
 |---|---|---|---|
 | `gates` | **arbiter** | what passes | `champions/promotion.py`, `backtest/scorecard.py`, `backtest/splits.py` |
-| `backtest` | **arbiter** | what a number *means* | `backtest/pipeline.py`, `validate.py`, `candidate.py`, `prefilter.py`, `broker/seam.py`, `broker/paper.py` |
+| `backtest` | **arbiter** | what a number *means* | `backtest/pipeline.py`, `validate.py`, `prefilter.py`, `broker/seam.py`, `broker/paper.py` |
 | `research` | searcher | how candidates are found | `research/agent.py`, `driver.py`, `tools.py`, `episode.py`, `sweep.py` |
 | `prompts` | searcher | what the model is told | `research/prompt.py`, `briefings.py`, `contract_sheet.py`, `digests.py`, `ideation.py` |
 | `profiles` | searcher | the shipped steering personalities | the committed `mandate/` scaffold (never the operator's own files) |

@@ -857,28 +857,69 @@ def test_the_newest_changelog_entry_names_only_arbiter_components():
     assert set(names) <= engine_id.ARBITER_COMPONENTS
 
 
-def test_the_engine_changelog_page_carries_its_grammar_and_no_entries_yet():
-    """The page ships with its header alone: the grammar lives in a fence the reader skips, so
-    the template that documents a declaration is not itself one."""
+def test_the_engine_changelog_page_carries_its_grammar_outside_its_entries():
+    """The grammar lives in a fence the reader skips, so the template that documents a
+    declaration is never itself read as one: the newest entry is a dated heading, not the
+    ``<component>`` placeholder the page teaches the shape with."""
     text = CHANGELOG_PAGE.read_text(encoding="utf-8")
+    entry = newest_entry(text)
 
-    assert newest_entry(text) is None
     assert "components: <component>[, <component>…] — behaviour: unchanged" in text
+    assert entry is not None
+    assert "<component>" not in entry.heading
+
+
+def test_the_candidate_pass_through_deletion_is_declared_a_no_op():
+    """#342: deleting ``src/noctis/backtest/candidate.py`` and repointing its importers moved an
+    *arbiter* digest without changing a number, so the page's newest entry is that declaration —
+    both clauses on the heading, the moved files and the unchanged goldens in the body."""
+    entry = newest_entry(CHANGELOG_PAGE.read_text(encoding="utf-8"))
+
+    assert entry is not None
+    assert entry.heading == "2026-08-25 — components: backtest — behaviour: unchanged"
+    assert entry.names(COMPONENTS_CLAUSE) == ("backtest",)
+    assert entry.names("behaviour") == ("unchanged",)
+
+
+def test_the_declaration_names_what_moved_and_what_did_not():
+    """A no-op claim is a human's word, so the entry names the deleted pass-through, every
+    importer repointed, and the evidence — goldens and fixtures untouched, the version held."""
+    body = _newest_entry_body(CHANGELOG_PAGE.read_text(encoding="utf-8"))
+
+    assert "src/noctis/backtest/candidate.py" in body
+    for importer in ("__init__.py", "pipeline.py", "prefilter.py", "validate.py"):
+        assert importer in body, importer
+    assert "golden" in body and "fixture" in body
+    assert f"ENGINE_VERSION stays {ENGINE_VERSION}" in body
+
+
+def _newest_entry_body(text: str) -> str:
+    """The newest entry's prose — under its own heading, up to the entry below it — with its
+    markdown emphasis dropped, because what is asserted is the claim, not whether a word of it is
+    bold or in backticks. Found by the heading the shared reader gives, so the fenced template
+    (whose heading is a placeholder) is skipped here exactly as it is there."""
+    entry = newest_entry(text)
+    assert entry is not None
+    below = text.split(f"## {entry.heading}", 1)[1]
+    return below.split("\n## ", 1)[0].replace("`", "").replace("*", "")
 
 
 @pytest.mark.parametrize("component", sorted(COMPONENT_PATHS))
 def test_the_page_names_every_component_with_its_tier_and_the_files_its_digest_covers(component):
     """A declaration a machine reads has to be one a human can write: the page spells each
-    component as the map does, says which tier it is on, and names what its digest covers."""
+    component as the map does, says which tier it is on, and names exactly what its digest
+    covers — a row listing a file the map dropped would send a reader looking for a deleted
+    surface, and one omitting a file would hide what a declaration is being made about."""
     row = next(
         line
         for line in CHANGELOG_PAGE.read_text(encoding="utf-8").splitlines()
         if line.startswith(f"| `{component}`")
     )
 
+    quoted = re.findall(r"`([^`]+)`", row)
+
     assert tier_of(component) in row
-    for rel in COMPONENT_PATHS[component]:
-        assert f"`{rel}`" in row, (component, rel)
+    assert quoted == [component, *COMPONENT_PATHS[component]]
 
 
 def test_the_page_states_what_qualifies_as_a_no_op_what_never_does_and_the_reviewers_bar():

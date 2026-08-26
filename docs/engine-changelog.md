@@ -27,7 +27,7 @@ The components, the tier each sits on, and the files its digest covers:
 | Component | Tier | What it decides | Files |
 |---|---|---|---|
 | `gates` | arbiter | what passes | `src/noctis/champions/promotion.py`, `src/noctis/backtest/scorecard.py`, `src/noctis/backtest/splits.py` |
-| `backtest` | arbiter | what a number means | `src/noctis/backtest/pipeline.py`, `src/noctis/backtest/validate.py`, `src/noctis/backtest/candidate.py`, `src/noctis/backtest/prefilter.py`, `src/noctis/broker/seam.py`, `src/noctis/broker/paper.py` |
+| `backtest` | arbiter | what a number means | `src/noctis/backtest/pipeline.py`, `src/noctis/backtest/validate.py`, `src/noctis/backtest/prefilter.py`, `src/noctis/broker/seam.py`, `src/noctis/broker/paper.py` |
 | `research` | searcher | how candidates are found | `src/noctis/research/agent.py`, `src/noctis/research/driver.py`, `src/noctis/research/tools.py`, `src/noctis/research/episode.py`, `src/noctis/research/sweep.py`, `src/noctis/research/usage.py` |
 | `prompts` | searcher | what the model is told | `src/noctis/research/prompt.py`, `src/noctis/research/briefings.py`, `src/noctis/research/contract_sheet.py`, `src/noctis/research/digests.py`, `src/noctis/research/ideation.py` |
 | `profiles` | searcher | the shipped steering personalities | `mandate/MANDATE.md.example`, `mandate/tune-first.md`, `mandate/profiles/aggressive.md`, `mandate/profiles/conservative.md`, `mandate/profiles/long-term.md`, `mandate/profiles/sector-specialist.md`, `mandate/profiles/short-term.md` |
@@ -65,4 +65,27 @@ contributor's time, never pool two engines' numbers.
 
 ---
 
-*No entries yet. The first declaration lands with the first mechanical arbiter move.*
+## 2026-08-25 — components: backtest — behaviour: unchanged
+
+Epic #353 story #342: `src/noctis/backtest/candidate.py` is deleted. It was a 7-line module with
+no logic in it — a re-export of `noctis.strategies.Candidate`, kept from when the type moved to the
+strategies package it parameterizes — and the four modules that imported through it now name that
+home directly: `backtest/__init__.py`, `backtest/pipeline.py`, `backtest/prefilter.py`,
+`backtest/validate.py`. Each change is one line, `from noctis.backtest.candidate import Candidate`
+becoming `from noctis.strategies.candidate import Candidate`; `Candidate` is the same class object
+either way (`tests/test_backtest.py` pins the identity, and that the shim is unimportable).
+
+Nothing a decision reads moved: no branch, no default, no threshold, no ordering, no formula, and
+not one line of `pipeline.py`, `prefilter.py` or `validate.py` outside its import block. Every
+number the engine produces is byte-identical — the full suite passes with its **goldens and
+scorecard fixtures unchanged**, which is the reviewer's bar above. So `ENGINE_VERSION` stays **3**:
+these numbers are still comparable with the ones this engine produced yesterday, and bumping would
+assert an incomparability that does not hold.
+
+The `backtest` digest still moves (`3ba3e0bf1c97134f` → `42acf20342ecc393`), because the component
+hashes the *files* its map lists and one of them is gone. That is this page's whole reason to
+exist, and the accepted cost stands: the resume policy still refuses a run frozen under the old
+digest until `--allow-engine-upgrade`, and `comparable_key` still buckets this checkout separately.
+The component map (`engine_id.COMPONENT_PATHS`) and both component tables lose the deleted path in
+the same PR — a map naming a missing file would null the whole component under the missing-input
+rule instead of measuring anything.
