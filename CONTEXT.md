@@ -231,7 +231,12 @@ the check, `--write`, the report — and a policy is a `RatchetSpec` plus the on
 that *is* its rule. `engine_ratchet` judges on the arbiter/searcher tier and the declared
 `ENGINE_VERSION` (arbiter drift fails, searcher drift warns and passes); `prompt_ratchet` judges on
 the declared-change rule over `docs/prompt-changelog.md` (the newest entry must name the drifted
-site **and** post-date the record; nothing here warns). **Two records on two clocks** —
+site **and** post-date the record; nothing here warns). An arbiter move is **declared** one of two
+ways — an `ENGINE_VERSION` bump for a behaviour change, or a dated no-op entry
+(`components: … — behaviour: unchanged`) atop `docs/engine-changelog.md` for a mechanical one,
+which lifts the `--write` refusal and nothing else — and **one reader**,
+`noctis.observability.changelog`, parses both pages: a heading is ` — `-separated `key: value`
+clauses, and which clauses count is the policy's word. **Two records on two clocks** —
 `engine_fingerprint.json` and `prompt_fingerprint.json`, one command each
 (`scripts/engine_fingerprint.py`, `scripts/prompt_fingerprint.py`) — because prompts and arbiter
 behaviour drift independently. `--write` regenerates every case except the one its policy exists to
